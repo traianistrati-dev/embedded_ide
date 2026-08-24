@@ -1139,6 +1139,33 @@ impl AppIde {
                             }
                         });
 
+                        // What this chip cannot do, BEFORE the button that acts
+                        // on it. Creating a project replaces the current one, so
+                        // learning it afterwards costs the project you had —
+                        // the System tab tells you the same thing one
+                        // irreversible click too late.
+                        let gaps = self.pending_chip_gaps().to_vec();
+                        if !gaps.is_empty() {
+                            ui.add_space(3.0);
+                            for g in &gaps {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "    {}  {g}",
+                                        ph::ARROW_ELBOW_DOWN_RIGHT
+                                    ))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(230, 190, 90)),
+                                );
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "    Not a block: the rest still generates; these parts come out as comments or TODOs.",
+                                )
+                                .size(10.5)
+                                .color(egui::Color32::GRAY),
+                            );
+                        }
+
                         // ── Search the vendor data on this machine ────────────
                         // The row above picks from what the IDE already knows; this
                         // reaches the ~2800 parts ST ships data for, by part number
@@ -1665,6 +1692,36 @@ impl AppIde {
             );
             *slot.lock().unwrap() = Some(feature_verdict(&feat, known.as_deref()));
         });
+    }
+
+    /// What the chip staged in the New Project dialog is missing.
+    ///
+    /// Only the two free halves — the HAL feature would mean a network lookup
+    /// per dropdown flick. The System tab asks that one, once, after the chip
+    /// is adopted.
+    pub(super) fn pending_chip_gaps(&mut self) -> &[String] {
+        let id = self.pending_mcu_id.clone().unwrap_or_default();
+        if self.new_project_gaps.as_ref().map(|(k, _)| k.as_str()) != Some(id.as_str()) {
+            let gaps = self
+                .mcu_registry
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| {
+                    local_chip_gaps(
+                        codegen::rcc::generates_clock_code_for(
+                            &d.family,
+                            &d.clock.to_config(&d.clock_limits),
+                        ),
+                        d.dma.as_ref().map_or(0, |x| x.channels.len()),
+                    )
+                })
+                .unwrap_or_default();
+            self.new_project_gaps = Some((id, gaps));
+        }
+        self.new_project_gaps
+            .as_ref()
+            .map(|(_, g)| g.as_slice())
+            .unwrap_or(&[])
     }
 
     /// The verdict, if it has landed AND belongs to the chip on screen.

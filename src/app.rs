@@ -1445,6 +1445,11 @@ pub struct AppIde {
     /// the `ui` function would do that on every repaint. Same shape as
     /// `ensure_version_fetch`, for the same reason.
     hal_check: Option<(String, std::sync::Arc<std::sync::Mutex<Option<dialogs::FeatureVerdict>>>)>,
+    /// `(chip id, its gaps)` for the chip staged in the New Project dialog.
+    ///
+    /// Cached on the id because working it out clones the chip's whole clock
+    /// graph, and the dialog redraws every frame it is open.
+    new_project_gaps: Option<(String, Vec<String>)>,
     /// The New Project chip-search field: its query, the catalogue of vendor
     /// chips on this machine, and the worker indexing it.
     chip_search: chip_search_ui::ChipSearchState,
@@ -1974,6 +1979,7 @@ impl AppIde {
             confirm_new_project: false,
             pending_mcu_id: None,
             hal_check: None,
+            new_project_gaps: None,
             chip_search: Default::default(),
             mcu_import_status: None,
             mcu_form: None,
