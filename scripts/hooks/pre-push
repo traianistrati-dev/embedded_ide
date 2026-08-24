@@ -68,8 +68,22 @@ done
 # Run outside a push (manual invocation, or a shell that gave us no stdin) and
 # for a brand-new branch: no reliable range, so do the safe thing rather than
 # the cheap one.
-if [ "$saw_ref" = "0" ] || [ "$changed" = "unknown" ]; then
-    echo "pre-push: no usable push range - running the matrix to be safe"
+if [ "$saw_ref" = "0" ]; then
+    # No refs at all. Two very different reasons, and one message for both used
+    # to cost thirteen minutes for nothing.
+    #
+    # Git ALWAYS gives the hook a pipe, even when it has nothing to send — so an
+    # empty pipe means the push is a no-op and there is nothing to verify.
+    # Running the matrix there is waste, not caution. A tty on stdin means a
+    # person ran this by hand, and then checking everything IS the useful answer.
+    if [ -t 0 ]; then
+        echo "pre-push: run by hand with no refs - running the matrix over the working tree"
+    else
+        echo "pre-push: git sent no refs - nothing is being pushed, matrix skipped"
+        exit 0
+    fi
+elif [ "$changed" = "unknown" ]; then
+    echo "pre-push: could not read the push range - running the matrix to be safe"
 elif ! printf '%s' "$changed" | grep -qE '^(src/panels/mcu_module/|scripts/verify-codegen)'; then
     echo "pre-push: no codegen changes in what is being pushed - matrix skipped"
     exit 0
