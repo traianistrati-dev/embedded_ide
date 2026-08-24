@@ -1487,6 +1487,10 @@ mod feature_verdict_tests {
                 "save_clock_to_definition",
                 "re-saves a chip already in the registry; the dep line is untouched",
             ),
+            (
+                "import_wl30_for_real",
+                "a test of the FILE half; the HAL check is the dialog's, and needs the network",
+            ),
             // `show_new_project_dialog` used to be exempt here, importing
             // someone else's `.ron` unchecked. It now checks like the rest —
             // an exemption is a decision, and that one did not survive being
