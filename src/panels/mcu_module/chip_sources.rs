@@ -306,7 +306,51 @@ fn has_chip_xml(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
-    entries.flatten().any(|e| is_chip_xml(&e.file_name()))
+    // The NAME is not enough. CubeMX keeps clock trees in `db/plugins/clock`
+    // and memory maps in `db/mcu/memory`, and those files are called
+    // `STM32*.xml` too — so a name-only test accepted both as chip catalogues,
+    // and 108 clock trees and memory maps were catalogued as parts. They then
+    // showed up in search, in the filters, and in the count of how many chips
+    // the IDE could offer.
+    //
+    // Only a handful of files are opened: `any` stops at the first that looks
+    // right, and the cap bounds the cost when a directory holds nothing but
+    // impostors.
+    entries
+        .flatten()
+        .filter(|e| is_chip_xml(&e.file_name()))
+        .take(8)
+        .any(|e| file_is_mcu(&e.path()))
+}
+
+/// Is this file a chip DEFINITION, or just a file whose name starts with STM32?
+///
+/// Reads the head only: these run to hundreds of kilobytes and the root element
+/// is in the first line or two.
+fn file_is_mcu(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 2048];
+    let n = f.read(&mut head).unwrap_or(0);
+    head_is_mcu(&String::from_utf8_lossy(&head[..n]))
+}
+
+/// The discriminator, split out so it can be tested against the real headers
+/// rather than against a directory that happens to exist on one machine.
+///
+/// `<Mcu` is the root element of a chip file. A clock tree opens with `<Clock`,
+/// a memory map with `<rzone`, and neither is a chip.
+///
+/// The tag may be followed by a space, a `>` or a `/` — requiring the space
+/// alone rejected `<Mcu/>`, which is a perfectly good root element and is what
+/// this module's own fixture writes. What must NOT match is a longer name that
+/// merely starts the same way.
+fn head_is_mcu(head: &str) -> bool {
+    head.match_indices("<Mcu").any(|(i, _)| {
+        !matches!(head[i + 4..].chars().next(), Some(c) if c.is_ascii_alphanumeric())
+    })
 }
 
 fn is_chip_xml(name: &std::ffi::OsStr) -> bool {
@@ -645,6 +689,29 @@ mod tests {
             assert_eq!(family_of(part), want, "for {part}");
         }
         assert_eq!(family_of("ESP32C3"), "", "not an STM32");
+    }
+
+    /// The heads are copied from the real files: a chip, a CubeMX clock tree,
+    /// and a CubeMX memory map. All three are named `STM32*.xml`, which is why
+    /// the name alone catalogued 108 clock trees and memory maps as parts.
+    #[test]
+    fn only_a_chip_file_looks_like_a_chip() {
+        assert!(head_is_mcu(
+            r#"<?xml version="1.0"?><Mcu ClockTree="STM32WL33" RefName="STM32WL30KBVx">"#
+        ));
+        assert!(head_is_mcu("<Mcu/>"), "a bare root element is still a chip");
+        assert!(head_is_mcu("<Mcu>"));
+
+        assert!(
+            !head_is_mcu(r#"<?xml version="1.0"?><Clock xmlns:xsi="..." savedConfig="false">"#),
+            "a clock tree is not a chip"
+        );
+        assert!(
+            !head_is_mcu(r#"<?xml version="1.0"?><rzone schemaVersion="0.2.0">"#),
+            "a memory map is not a chip"
+        );
+        assert!(!head_is_mcu("<McuList>"), "a longer tag is a different element");
+        assert!(!head_is_mcu(""));
     }
 
     /// A source is whichever of five plausible folders the user happened to
