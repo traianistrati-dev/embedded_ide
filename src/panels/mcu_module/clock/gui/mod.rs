@@ -2090,7 +2090,7 @@ fn clock_manual_note(ui: &mut egui::Ui, family: &str, gc: &GraphClock, manual: b
         ui.colored_label(
             egui::Color32::from_rgb(225, 185, 60),
             format!(
-                "{}  main.rs keeps its own clock block - the tree shows frequencies, but does                  not generate them.",
+                "{}  main.rs keeps its own clock block - the tree shows frequencies but does not generate them.",
                 ph::WARNING
             ),
         );
@@ -2099,7 +2099,7 @@ fn clock_manual_note(ui: &mut egui::Ui, family: &str, gc: &GraphClock, manual: b
     if !generated {
         ui.label(
             egui::RichText::new(format!(
-                "{}  {family} has no code generator for its clock yet",
+                "{}  {family} has no clock generator - the System tab lists what this chip is missing",
                 ph::WARNING
             ))
             .size(11.0)
@@ -2108,7 +2108,7 @@ fn clock_manual_note(ui: &mut egui::Ui, family: &str, gc: &GraphClock, manual: b
     } else if from_tree {
         ui.label(
             egui::RichText::new(format!(
-                "{}  generated from this tree with embassy's common RCC shape - check the                  field names in main.rs",
+                "{}  generated from this tree with embassy's common RCC shape - check the field names in main.rs",
                 ph::INFO
             ))
             .size(11.0)

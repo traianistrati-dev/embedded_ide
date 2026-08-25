@@ -438,7 +438,7 @@ impl super::AppIde {
             if found.unknown > 0 {
                 ui.label(
                     egui::RichText::new(format!(
-                        "{}  {} more hidden: their source has no index, so nothing is                          known about their memory or peripherals.",
+                        "{}  {} more hidden: their source has no index, so nothing is known about their memory or peripherals.",
                         ph::INFO,
                         found.unknown
                     ))

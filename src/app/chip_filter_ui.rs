@@ -321,7 +321,7 @@ pub(super) fn show_filters(
                 ui.add_space(6.0);
                 ui.label(dim("Package:"))
                     .on_hover_text(
-                        "The package TYPE - one tick covers every size of it.                          Narrow the size with the Package pins row above, which                          counts the FOOTPRINT, not the usable I/O.",
+                        "The package TYPE - one tick covers every size of it. Narrow the size with the Package pins row above, which counts the FOOTPRINT, not the usable I/O.",
                     );
                 chips(ui, &facets.packages, &mut f.packages, str::to_owned);
             }
