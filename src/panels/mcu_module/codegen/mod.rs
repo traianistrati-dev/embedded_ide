@@ -15,6 +15,7 @@ pub mod embassy_common;
 pub mod family;
 pub mod nvic;
 pub mod rcc;
+pub mod rcc_n6;
 pub mod rtic;
 pub mod stm32;
 pub mod watchdog_gen;

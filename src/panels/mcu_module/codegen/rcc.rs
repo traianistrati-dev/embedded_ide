@@ -203,6 +203,15 @@ pub fn graph_clock_block(family: &str, clock: &ClockConfig, manual: bool) -> Str
         _ => None,
     };
     let graph = graph.as_deref();
+    // N6 before either: it has its own emitter because four PLLs, twenty IC
+    // dividers and a separate CPU clock do not fit the single-PLL descriptor,
+    // and the generic recipe cannot read its tree at all (no `sw`, no `ahb`).
+    if family == "stm32n6"
+        && let Some(g) = graph
+        && let Some(block) = super::rcc_n6::block(g)
+    {
+        return wrap(block, manual);
+    }
     // The family's verified recipe first; the tree's own shape only as a
     // fallback, so no existing family's output can change.
     let (spec, desc, verified) = match rcc_recipe(family) {
@@ -323,6 +332,16 @@ pub fn generates_clock_code(family: &str) -> bool {
 ///
 /// So this is what the manual default and the tab's warning must ask.
 pub fn generates_clock_code_for(family: &str, clock: &ClockConfig) -> bool {
+    // Asked with the SAME condition `graph_clock_block` dispatches on. A family
+    // whose emitter runs while this says no would put "no clock code" in the
+    // preflight, the System tab and the Clock tab while `main.rs` quietly had
+    // some — and would default that chip to hand-written, preserving a block it
+    // was about to generate anyway.
+    if family == "stm32n6"
+        && matches!(clock, ClockConfig::Graph(gc) if super::rcc_n6::block(&gc.for_codegen()).is_some())
+    {
+        return true;
+    }
     generates_clock_code(family)
         || matches!(clock, ClockConfig::Graph(gc) if generic_recipe(&gc.for_codegen()).is_some())
 }

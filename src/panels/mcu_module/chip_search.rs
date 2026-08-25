@@ -938,12 +938,98 @@ KEEPS THE COMMENTED SKELETON ({}):",
                     gc.graph.nodes.len(),
                     missing.len()
                 );
-                let mut ids: Vec<&str> = gc.graph.nodes.iter().map(|n| n.id.as_str()).collect();
-                ids.sort_unstable();
-                println!("  {}", ids.join(" "));
+                // `EIDE_NODES=IC1,IC1Div` describes just those, with what feeds
+                // them — which is what a codegen recipe has to read.
+                let want: Vec<String> = std::env::var("EIDE_NODES")
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if want.is_empty() {
+                    let mut ids: Vec<&str> = gc.graph.nodes.iter().map(|n| n.id.as_str()).collect();
+                    ids.sort_unstable();
+                    println!("  {}", ids.join(" "));
+                } else {
+                    for id in &want {
+                        match gc.graph.nodes.iter().find(|n| n.id == *id) {
+                            None => println!("  {id}: NOT IN THIS TREE"),
+                            Some(n) => {
+                                let feeds: Vec<String> = gc
+                                    .graph
+                                    .edges
+                                    .iter()
+                                    .filter(|e| e.to == n.id)
+                                    .map(|e| format!("{}#{}", e.from, e.input))
+                                    .collect();
+                                println!("  {id}: {:?}
+      fed by: {}", n.kind, feeds.join(" "));
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => println!("{} ({want}): no tree - {e}", row.entry.ref_name),
         }
+    }
+
+    /// The N6 clock block, emitted from the vendor's own tree.
+    ///
+    /// `cargo test --bin embedded_ide_0 n6_clock_block -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs real vendor data on this machine"]
+    fn n6_clock_block_comes_out_of_the_real_tree() {
+        use super::super::chip_sources;
+        use super::super::clock::graph::cubemx::graph_for_chip_xml;
+        use super::super::clock::model::ClockConfig;
+        use super::super::codegen::rcc::{generates_clock_code_for, graph_clock_block};
+
+        let c = Catalogue::build(chip_sources::all_sources());
+        let Some(row) = c
+            .unified
+            .iter()
+            .map(|&ix| &c.rows[ix])
+            .find(|r| r.entry.family == "stm32n6" && c.sources[r.source].has_clock())
+        else {
+            println!("no stm32n6 part with a clock tree - skipped");
+            return;
+        };
+        let src = &c.sources[row.source];
+        let xml = std::fs::read_to_string(src.chip_file(&row.entry)).expect("read");
+        let (gc, _) = graph_for_chip_xml(src.db.as_deref().unwrap(), &xml, "stm32n6").expect("tree");
+        let clock = ClockConfig::Graph(gc);
+
+        assert!(
+            generates_clock_code_for("stm32n6", &clock),
+            "N6 must now count as generating clock code"
+        );
+        let block = graph_clock_block("stm32n6", &clock, false);
+        println!("--- {} ---
+{block}", row.entry.ref_name);
+
+        // The subset this emitter promises, and nothing silently missing from it.
+        for want in [
+            "config.rcc.pll1 = Some(Pll::Oscillator {",
+            "source: Pllsel::",
+            "divm: Plldivm::DIV",
+            "divp1: Pllpdiv::DIV",
+            "config.rcc.ic1 = Some(IcConfig {",
+            "config.rcc.ic2 = Some(IcConfig {",
+            "config.rcc.cpu = CpuClk::",
+            "config.rcc.sys = SysClk::",
+            "config.rcc.ahb = AhbPrescaler::DIV",
+            "config.rcc.apb5 = ApbPrescaler::DIV",
+            "embassy_stm32::init(config)",
+        ] {
+            assert!(block.contains(want), "missing `{want}` in:
+{block}");
+        }
+        // And NOT the commented skeleton it used to emit.
+        assert!(
+            !block.contains("has no generated RCC recipe"),
+            "still the skeleton:
+{block}"
+        );
     }
 
     /// Against every source this machine has. Ignored: needs real vendor data.
