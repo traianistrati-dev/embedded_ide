@@ -180,7 +180,22 @@ pub struct EspChip {
     pub adc: Vec<(String, u8)>,
     /// Every peripheral singleton the chip has, GPIOs excluded.
     pub peripherals: Vec<String>,
-    /// The PLL's output, in Hz, when the metadata states one.
+    /// Every output the PLL can be SET to, in Hz, lowest first.
+    ///
+    /// Two sources, because the vendor uses two shapes and they do not overlap:
+    ///
+    /// * `impl PllClkConfig { fn value() }` — a selectable PLL. The ESP32, S2,
+    ///   S3 and C3 run theirs at 320 **or** 480 MHz.
+    /// * a `pub fn pll*_frequency() -> u32 { 480000000 }` literal — a fixed one.
+    ///   The C2, C5, C6, C61 and H2 have no enum at all.
+    ///
+    /// The enum wins where both exist, and the difference is not cosmetic: the
+    /// Xtensa parts' only literal constants are TAPS (`pll_f160m_clk`), so
+    /// reading those gave 160 MHz for a PLL that runs at 480 — and 160 divides
+    /// into none of the 80/160/240 those chips offer, so they were refused a
+    /// clock tree entirely.
+    ///
+    /// The old, single-value shape.
     ///
     /// NOT in the clock-tree TYPES — those only name the nodes. The frequencies
     /// live in `implement_peripheral_clocks`, as generated functions whose whole
@@ -192,7 +207,7 @@ pub struct EspChip {
     ///
     /// The largest such `pll*` constant is the PLL proper — the others
     /// (`pll_f80m`, `pll_f160m`) are its taps.
-    pub pll_hz: Option<u32>,
+    pub pll_hz: Vec<u32>,
     /// The crystal frequencies this part accepts, in Hz.
     ///
     /// Usually one; an ESP32-C2 takes either 26 or 40 MHz. From
@@ -538,7 +553,26 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
     // definitions, and silently dropped every clock tree — which is exactly what
     // happened, and why `the_real_metadata_parses` now asserts a PLL is found.
     let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut pll_hz: Option<u32> = None;
+    let mut pll_hz: Vec<u32> = Vec::new();
+    // `impl PllClkConfig { pub fn value(&self) -> u32 { match self {
+    //  PllClkConfig::_320 => 320000000, PllClkConfig::_480 => 480000000, } } }`
+    if let Some(at) = flat.find("impl PllClkConfig { pub fn value(&self) -> u32 { match self {")
+        && let Some(end) = flat[at..].find("} }")
+    {
+        for arm in flat[at..at + end].split("PllClkConfig::_").skip(1) {
+            if let Some((_, hz)) = arm.split_once("=> ")
+                && let Ok(v) = hz
+                    .trim_end_matches(',')
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .parse()
+            {
+                pll_hz.push(v);
+            }
+        }
+    }
+    let mut fixed: Option<u32> = None;
     for chunk in flat.split("pub fn ").skip(1) {
         let Some((name, rest)) = chunk.split_once("_frequency(") else {
             continue;
@@ -550,9 +584,16 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
             continue;
         };
         if let Ok(hz) = body.split(' ').next().unwrap_or("").parse::<u32>() {
-            pll_hz = Some(pll_hz.map_or(hz, |cur| cur.max(hz)));
+            fixed = Some(fixed.map_or(hz, |cur: u32| cur.max(hz)));
         }
     }
+    // Only when the enum said nothing: a literal beside a selectable PLL is one
+    // of its taps, not the PLL.
+    if pll_hz.is_empty() {
+        pll_hz.extend(fixed);
+    }
+    pll_hz.sort_unstable();
+    pll_hz.dedup();
 
     // `impl XtalClkConfig { pub fn value(&self) -> u32 { match self {
     //  XtalClkConfig::_40 => 40000000, } } }`
@@ -881,11 +922,14 @@ macro_rules! for_each_peripheral {
             assert!(c.dram_bytes > 100_000, "{chip} SRAM looks wrong");
             // The PLL is what a CPU-clock graph divides down from, so a chip
             // without one gets no clock tree rather than a wrong one.
-            println!("          PLL {:?} MHz", c.pll_hz.map(|h| h / 1_000_000));
+            println!(
+                "          PLL {:?} MHz",
+                c.pll_hz.iter().map(|h| h / 1_000_000).collect::<Vec<_>>()
+            );
             // Asserted, not just printed: losing the PLL costs every generated
             // chip its clock tree, and nothing else about the definition looks
             // any different when it happens.
-            assert!(c.pll_hz.is_some(), "{chip}: no PLL frequency found");
+            assert!(!c.pll_hz.is_empty(), "{chip}: no PLL frequency found");
             assert!(!c.xtal_hz.is_empty(), "{chip}: no crystal frequency found");
             assert!(!c.uarts.is_empty(), "{chip} has no UART");
             assert!(!c.spi.is_empty(), "{chip} has no SPI master");

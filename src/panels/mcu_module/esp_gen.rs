@@ -842,24 +842,36 @@ fn logical_layout(chip: &EspChip, reserved: &[u8]) -> PinLayout {
 ///
 /// Every number comes from one of two checked sources: the PLL and crystal from
 /// Espressif's metadata, the CPU frequencies from `esp-hal`. The divisors are
-/// what reconciles them — and if a division is not exact, the two sources
-/// disagree about the chip and no graph is built at all.
+/// what reconciles them — and if no PLL setting divides into every CPU option
+/// exactly, the two sources disagree about the chip and no graph is built.
+///
+/// # Which PLL setting
+///
+/// Several parts can run their PLL at 320 **or** 480 MHz, and only one of those
+/// reaches every frequency the HAL offers: an ESP32's 240 MHz is 480/2, and 320
+/// divides into it not at all. So the setting is DERIVED — the fastest one under
+/// which every option comes out whole — rather than picked.
 fn clock_graph(chip: &EspChip) -> Option<ClockGraph> {
-    let pll = chip.pll_hz?;
     let xtal = *chip.xtal_hz.first()?;
     let opts = super::esp_clocks::cpu_options(&chip.id);
     if opts.is_empty() {
         return None;
     }
-    // Fastest first, so index 0 is the default a project boots at.
-    let mut divs: Vec<u32> = Vec::new();
-    for mhz in opts.iter().rev() {
-        let hz = mhz * 1_000_000;
-        if hz == 0 || pll % hz != 0 {
-            return None;
-        }
-        divs.push(pll / hz);
-    }
+    let divides_all = |pll: u32| -> Option<Vec<u32>> {
+        // Fastest first, so index 0 is the default a project boots at.
+        opts.iter()
+            .rev()
+            .map(|mhz| {
+                let hz = mhz * 1_000_000;
+                (hz != 0 && pll % hz == 0).then(|| pll / hz)
+            })
+            .collect()
+    };
+    let (pll, divs) = chip
+        .pll_hz
+        .iter()
+        .rev()
+        .find_map(|&p| divides_all(p).map(|d| (p, d)))?;
 
     let n = |id: &str, kind: NodeKind, state: NodeState| Node {
         id: id.to_owned(),
@@ -1227,12 +1239,12 @@ mod tests {
                 d.sram_kb,
             );
             assert!(!pads.is_empty(), "{id} has no usable pad");
-            // Their metadata states no PLL that divides into 240 MHz, so the
-            // graph refuses - and refusing is the designed answer.
-            assert_eq!(
-                d.clock,
-                super::super::mcu_def::ClockDef::None,
-                "{id} grew a clock tree — recheck `clock_graph`"
+            // They DO get a clock tree now — see `clock_graph`'s note on which
+            // PLL setting is derived. A `None` here would mean the PLL reading
+            // has regressed to the taps.
+            assert!(
+                matches!(d.clock, super::super::mcu_def::ClockDef::Graph(_)),
+                "{id} lost its clock tree"
             );
             // Selectable — and the generated project must carry the toolchain
             // pin, or every cargo the IDE launches would use stock rustc and
@@ -1424,12 +1436,12 @@ mod tests {
         let dir = esp_metadata::vendor_dir().expect("esp-metadata in the cargo registry");
         for id in GENERATED {
             let c = esp_metadata::load(&dir, id).unwrap();
-            // The Xtensa parts state no PLL that divides into 240 MHz, so they
-            // get no tree at all — asserted in `xtensa_chips_ship_…`, not here.
-            let Some(mut graph) = clock_graph(&c) else {
-                assert!(c.arch.needs_esp_toolchain(), "{id}: no clock graph");
-                continue;
-            };
+            // Every generated part gets one, Xtensa included. They did not,
+            // while the PLL was read from the frequency CONSTANTS: an ESP32's
+            // only literal is the 160 MHz tap, and 160 divides into none of the
+            // 80/160/240 it offers. `PllClkConfig` says 320 or 480, and 480
+            // divides into all three.
+            let mut graph = clock_graph(&c).unwrap_or_else(|| panic!("{id}: no clock graph"));
             let want = super::super::esp_clocks::cpu_options(id);
 
             let divs = graph
@@ -1456,9 +1468,9 @@ mod tests {
             }
             got.sort_unstable();
             println!(
-                "{id:<9} xtal {:?} MHz  PLL {} MHz  divisors {divs:?}  ->  CPU {got:?} MHz",
+                "{id:<9} xtal {:?} MHz  PLL {:?} MHz  divisors {divs:?}  ->  CPU {got:?} MHz",
                 c.xtal_hz.iter().map(|h| h / 1_000_000).collect::<Vec<_>>(),
-                c.pll_hz.unwrap() / 1_000_000,
+                c.pll_hz.iter().map(|h| h / 1_000_000).collect::<Vec<_>>(),
             );
             assert_eq!(got, want, "{id}: the graph and esp-hal disagree");
         }
@@ -1473,11 +1485,11 @@ mod tests {
             return;
         };
         assert!(clock_graph(&c).is_some(), "the real C6 should reconcile");
-        // A PLL that does not divide into 160 MHz cannot be this chip's.
-        c.pll_hz = Some(333_000_000);
+        // A PLL that divides into neither 80 nor 160 MHz cannot be this chip's.
+        c.pll_hz = vec![333_000_000];
         assert!(clock_graph(&c).is_none(), "built a tree from a bad PLL");
         // …and neither can no PLL at all.
-        c.pll_hz = None;
+        c.pll_hz.clear();
         assert!(clock_graph(&c).is_none());
     }
 
