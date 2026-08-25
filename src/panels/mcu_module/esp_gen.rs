@@ -426,13 +426,10 @@ mod tests {
         assert_eq!(instance_number("LEDC"), None);
     }
 
-    /// The Xtensa parts describe correctly; what stops them is the toolchain.
-    ///
-    /// Kept as a test rather than deleted, so the day `cargo +esp` can be
-    /// invoked the only thing left is to register them.
+    /// The Xtensa parts, and the one file that makes them buildable.
     #[test]
     #[ignore]
-    fn xtensa_chips_describe_but_are_not_shipped() {
+    fn xtensa_chips_ship_with_the_esp_toolchain_pinned() {
         let dir = esp_metadata::vendor_dir();
         let Some(dir) = dir else { return };
         for (id, target) in [
@@ -460,12 +457,34 @@ mod tests {
                 super::super::mcu_def::ClockDef::None,
                 "{id} grew a clock tree — recheck `clock_graph`"
             );
-            // And the one thing that must NOT happen: being offered for
-            // selection while no build path exists.
-            assert!(
-                super::super::builtins::builtin_for(id).is_none(),
-                "{id} is registered as a built-in, but nothing can `cargo +esp`"
+            // Selectable — and the generated project must carry the toolchain
+            // pin, or every cargo the IDE launches would use stock rustc and
+            // fail inside `core`.
+            let def = super::super::builtins::builtin_for(id)
+                .unwrap_or_else(|| panic!("{id} is not a built-in"));
+            let files = super::super::project_gen::build_project_files(
+                &def.project,
+                &def.toolchain,
+                "fn main() {}",
             );
+            assert!(
+                files.rust_toolchain.contains("channel = \"esp\""),
+                "{id} has no toolchain pin:
+{}",
+                files.rust_toolchain
+            );
+        }
+
+        // …and a RISC-V part must NOT get one: it builds on stable, and pinning
+        // it to a channel it does not need would break on the next upgrade.
+        for id in ["esp32c3", "esp32c6"] {
+            let def = super::super::builtins::builtin_for(id).unwrap();
+            let files = super::super::project_gen::build_project_files(
+                &def.project,
+                &def.toolchain,
+                "fn main() {}",
+            );
+            assert!(files.rust_toolchain.is_empty(), "{id} was pinned");
         }
     }
 
@@ -547,13 +566,20 @@ mod tests {
     /// the metadata knows. Regenerating it would be a downgrade — so instead it
     /// serves as the yardstick, in
     /// [`the_generator_agrees_with_the_hand_written_c3`].
-    /// Every RISC-V part except the C3, which keeps its hand-written definition.
+    /// Every Espressif part except the C3, which keeps its hand-written
+    /// definition.
     ///
     /// The C5 and C61 were held back for a while: the generated `Cargo.toml`
     /// pinned `esp-println = "0.13"`, which has no feature for either. That was
-    /// a pin of ours, not a gap upstream — `esp-println` 0.17 carries both, and
-    /// every other dependency already did at the version we ask for.
-    const GENERATED: [&str; 5] = ["esp32c2", "esp32c5", "esp32c6", "esp32c61", "esp32h2"];
+    /// a pin of ours, not a gap upstream — `esp-println` 0.17 carries both.
+    ///
+    /// The three Xtensa parts were held back for a better reason — nothing could
+    /// invoke Espressif's fork of rustc — until the generated project started
+    /// carrying a `rust-toolchain.toml`, which makes every `cargo` inside it
+    /// use that fork without the IDE knowing anything about it.
+    const GENERATED: [&str; 8] = [
+        "esp32", "esp32c2", "esp32c5", "esp32c6", "esp32c61", "esp32h2", "esp32s2", "esp32s3",
+    ];
 
     /// One-shot: write `assets/mcus/esp32*.ron` from the vendor metadata.
     ///

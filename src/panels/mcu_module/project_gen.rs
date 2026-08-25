@@ -47,6 +47,41 @@ pub struct ProjectFiles {
     pub memory_x: String, // empty for EspRust
     pub build_rs: String, // empty for EspRust
     pub gitignore: String,
+    /// `rust-toolchain.toml`, or empty when the default toolchain will do.
+    ///
+    /// Written only for Xtensa ESP32s. It is how the whole IDE builds them
+    /// without knowing they are special: `rustup` reads this file and every
+    /// `cargo` launched inside the project — build, check, flash, RTT, size,
+    /// profile, and rust-analyzer's own — runs under Espressif's fork. The
+    /// alternative was passing `+esp` at fourteen call sites and hoping none
+    /// was missed.
+    ///
+    /// It also fails WELL when the fork is not installed:
+    /// `error: custom toolchain 'esp' specified in override file … is not
+    /// installed` — which names the file, the toolchain and the problem.
+    pub rust_toolchain: String,
+}
+
+/// The `rust-toolchain.toml` a target needs, if any.
+///
+/// Only Xtensa. The RISC-V ESP32s build on stable with a `rustup target add`,
+/// and pinning them to a channel they do not need would break the day the user
+/// upgrades their default toolchain.
+pub fn rust_toolchain_for(target: &str) -> String {
+    if !target.starts_with("xtensa") {
+        return String::new();
+    }
+    // A raw string, NOT a `\`-continued one: the continuation keeps the
+    // source indentation, and the content of this file is not ours to indent.
+    r#"# Espressif's Rust fork. Xtensa cannot be built by stock rustc: it ships
+# the target definition, but its LLVM uses a different data layout - so even
+# nightly with -Z build-std fails inside core.
+#
+# Install with:  cargo install espup  &&  espup install
+[toolchain]
+channel = "esp"
+"#
+    .to_owned()
 }
 
 // ── Generated-block markers (per comment style) ────────────────────────────────
@@ -1087,6 +1122,10 @@ pub fn build_project_files(
         cargo_config: gen_config(ConfigFile::CargoConfig, config, toolchain),
         memory_x: gen_config(ConfigFile::MemoryX, config, toolchain),
         build_rs: gen_config(ConfigFile::BuildRs, config, toolchain),
+        // From the TARGET, not the toolchain kind: `EspRust` covers both the
+        // RISC-V parts, which build on stable, and the Xtensa ones, which
+        // cannot.
+        rust_toolchain: rust_toolchain_for(&config.target),
         gitignore: gen_config(ConfigFile::GitIgnore, config, toolchain),
     }
 }
@@ -1144,6 +1183,16 @@ pub fn write_project(
     )?;
     write_if_changed(&dest.join("src").join("main.rs"), files.main_rs.as_bytes())?;
     write_if_changed(&dest.join(".gitignore"), files.gitignore.as_bytes())?;
+    // Only Xtensa projects carry one; for everything else this would pin a
+    // toolchain the project has no opinion about.
+    if files.rust_toolchain.is_empty() {
+        let _ = fs::remove_file(dest.join("rust-toolchain.toml"));
+    } else {
+        write_if_changed(
+            &dest.join("rust-toolchain.toml"),
+            files.rust_toolchain.as_bytes(),
+        )?;
+    }
 
     // memory.x + build.rs — only for RustEmbedded (STM32/ARM).
     //

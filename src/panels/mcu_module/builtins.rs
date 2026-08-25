@@ -13,21 +13,30 @@ const ESP32C3_RON: &str = include_str!("../../../assets/mcus/esp32c3.ron");
 // Generated from Espressif's own metadata — see `esp_gen::tests::regenerate_esp_ron`.
 // The C3 above is NOT among them: it is hand-written from the datasheet and
 // carries the real QFN32 pinout, which the metadata does not describe.
+const ESP32_RON: &str = include_str!("../../../assets/mcus/esp32.ron");
 const ESP32C2_RON: &str = include_str!("../../../assets/mcus/esp32c2.ron");
 const ESP32C5_RON: &str = include_str!("../../../assets/mcus/esp32c5.ron");
 const ESP32C6_RON: &str = include_str!("../../../assets/mcus/esp32c6.ron");
 const ESP32C61_RON: &str = include_str!("../../../assets/mcus/esp32c61.ron");
 const ESP32H2_RON: &str = include_str!("../../../assets/mcus/esp32h2.ron");
+// Xtensa. They build under Espressif's fork of rustc, selected by the
+// `rust-toolchain.toml` the generated project carries — see
+// `project_gen::rust_toolchain_for`.
+const ESP32S2_RON: &str = include_str!("../../../assets/mcus/esp32s2.ron");
+const ESP32S3_RON: &str = include_str!("../../../assets/mcus/esp32s3.ron");
 
 /// Raw `(id, ron-text)` for every bundled chip.
 const BUILTINS: &[(&str, &str)] = &[
     ("stm32f103c8t6", STM32F103C8T6_RON),
+    ("esp32", ESP32_RON),
     ("esp32c2", ESP32C2_RON),
     ("esp32c3", ESP32C3_RON),
     ("esp32c5", ESP32C5_RON),
     ("esp32c6", ESP32C6_RON),
     ("esp32c61", ESP32C61_RON),
     ("esp32h2", ESP32H2_RON),
+    ("esp32s2", ESP32S2_RON),
+    ("esp32s3", ESP32S3_RON),
 ];
 
 /// Parse all bundled built-in MCU definitions (bad files are skipped + logged).

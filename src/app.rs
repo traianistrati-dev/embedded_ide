@@ -2207,6 +2207,12 @@ impl AppIde {
         self.selected_def().map(|d| d.toolchain.clone())
     }
 
+    /// The selected chip's Rust target triple, for narrowing which tools the
+    /// banner asks for — see [`RequiredTool::only_for_target`].
+    fn selected_target(&self) -> Option<String> {
+        self.selected_def().map(|d| d.project.target.clone())
+    }
+
     /// Owned `(project params, toolchain)` for project generation — cloned so no
     /// borrow of `self` is held across the subsequent `self` mutations.
     fn selected_build_cfg(&self) -> Option<(ProjectDef, ToolchainKind)> {
@@ -2240,6 +2246,12 @@ impl AppIde {
             memory_x: self.memory_x.clone(),
             build_rs: self.build_rs.clone(),
             gitignore: self.gitignore.clone(),
+            // Derived, never edited: it says which compiler the chip needs, and
+            // that is not the user's to change per project.
+            rust_toolchain: self
+                .selected_target()
+                .map(|t| project_gen::rust_toolchain_for(&t))
+                .unwrap_or_default(),
         };
         files
     }
@@ -3587,14 +3599,21 @@ impl eframe::App for AppIde {
         }
         if !self.deps_banner_dismissed {
             let tc = self.selected_toolchain();
+            // The triple decides WHICH esp tools matter: `rustup target add`
+            // for the RISC-V parts, Espressif's whole rustc fork for Xtensa.
+            let target = self.selected_target();
             // One lock for everything the banner draws: the problems, the
             // specific finding under each (which names the thing `impact` can
             // only call `<NAME>`), and whether the install hint applies at all.
             let (problems, details, any_missing) = {
                 let s = self.tools_state.lock().unwrap();
-                let p = s.blocking_problems(tc.as_ref());
+                let p: Vec<_> = s
+                    .problems_for(tc.as_ref(), target.as_deref())
+                    .into_iter()
+                    .filter(|(_, sev, _)| *sev == crate::required_tools::Severity::Blocking)
+                    .collect();
                 let d: Vec<Option<String>> = p.iter().map(|(n, _, _)| s.status_detail(n)).collect();
-                let m = s.any_blocking_missing(tc.as_ref());
+                let m = s.any_blocking_missing_for(tc.as_ref(), target.as_deref());
                 (p, d, m)
             };
             if !problems.is_empty() {

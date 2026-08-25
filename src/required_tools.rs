@@ -137,6 +137,15 @@ pub struct RequiredTool {
     pub description: &'static str,
     /// `None` = required for all toolchains.
     pub toolchain: Option<ToolchainKind>,
+    /// Narrower than [`RequiredTool::toolchain`]: the project's target triple
+    /// must START WITH this, or the tool is not relevant.
+    ///
+    /// `ToolchainKind::EspRust` covers six RISC-V chips AND three Xtensa ones,
+    /// which need entirely different things — `rustup target add` versus
+    /// Espressif's rustc fork. Without this, an ESP32-C6 user was told to
+    /// install `riscv32imc` (which their chip does not use) and never told about
+    /// `riscv32imac` (which it does).
+    pub only_for_target: Option<&'static str>,
     /// How much breaks without it.
     pub severity: Severity,
     /// What the user LOSES when it's missing, in plain words — the answer to
@@ -195,6 +204,19 @@ impl ToolsState {
         &self,
         toolchain: Option<&ToolchainKind>,
     ) -> Vec<(&'static str, Severity, &'static str)> {
+        self.problems_for(toolchain, None)
+    }
+
+    /// [`Self::problems`], narrowed to a project's target triple.
+    ///
+    /// `None` keeps every target-specific tool, which is what an unopened
+    /// project should see: it is better to list a target the user may not need
+    /// than to hide the one they do.
+    pub fn problems_for(
+        &self,
+        toolchain: Option<&ToolchainKind>,
+        target: Option<&str>,
+    ) -> Vec<(&'static str, Severity, &'static str)> {
         self.tools
             .iter()
             .filter(|t| {
@@ -207,6 +229,11 @@ impl ToolsState {
                 (Some(tc), Some(sel)) => tc == sel,
                 (Some(_), None) => false, // toolchain-specific, no chip selected
                 (None, _) => true,        // needed by everything
+            })
+            .filter(|t| match (t.only_for_target, target) {
+                (Some(prefix), Some(sel)) => sel.starts_with(prefix),
+                (Some(_), None) => true, // no project open — show it anyway
+                (None, _) => true,
             })
             .map(|t| (t.name, t.severity, t.impact))
             .collect()
@@ -251,10 +278,23 @@ impl ToolsState {
     /// at startup cannot clear it either: that needs a restart, which is the
     /// opposite of what the hint suggests.
     pub fn any_blocking_missing(&self, toolchain: Option<&ToolchainKind>) -> bool {
+        self.any_blocking_missing_for(toolchain, None)
+    }
+
+    /// [`Self::any_blocking_missing`], narrowed to a project's target triple.
+    pub fn any_blocking_missing_for(
+        &self,
+        toolchain: Option<&ToolchainKind>,
+        target: Option<&str>,
+    ) -> bool {
         self.tools
             .iter()
             .filter(|t| t.severity == Severity::Blocking)
             .filter(|t| matches!(t.status, ToolStatus::Missing))
+            .filter(|t| match (t.only_for_target, target) {
+                (Some(prefix), Some(sel)) => sel.starts_with(prefix),
+                _ => true,
+            })
             .any(|t| match (&t.toolchain, toolchain) {
                 (Some(tc), Some(sel)) => tc == sel,
                 (Some(_), None) => false,
@@ -353,6 +393,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "rustup",
             description: "Rust toolchain installer — manages Rust versions and targets",
             toolchain: None,
+            only_for_target: None,
             severity: Severity::Blocking,
             impact: "No Rust toolchain management: targets can't be installed and nothing builds.",
             check_cmd: "rustup",
@@ -368,6 +409,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "rustc",
             description: "Rust compiler (stable toolchain)",
             toolchain: None,
+            only_for_target: None,
             severity: Severity::Blocking,
             impact: "No Rust compiler: Build, Check, Clippy and Flash all fail.",
             check_cmd: "rustc",
@@ -383,6 +425,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "git",
             description: "Version control — powers the Git tab (commit / push / pull)",
             toolchain: None,
+            only_for_target: None,
             severity: Severity::Feature,
             impact: "The Git tab (commit / push / pull) and library cloning are unavailable.",
             check_cmd: "git",
@@ -398,6 +441,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "cargo-bloat",
             description: "Code-size profiler — powers the Profile tab (.text/Flash per function)",
             toolchain: None,
+            only_for_target: None,
             severity: Severity::Feature,
             impact: "The Profile tab's Static (size) view can't run; the rest of the IDE is fine.",
             check_cmd: "cargo",
@@ -414,6 +458,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "thumbv7m-none-eabi",
             description: "Rust target for ARM Cortex-M3 (STM32F1xx bare-metal)",
             toolchain: Some(ToolchainKind::RustEmbedded),
+            only_for_target: None,
             severity: Severity::Blocking,
             impact: "This STM32 chip cannot be compiled at all until the target is installed.",
             check_cmd: "rustup",
@@ -429,6 +474,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "probe-rs",
             description: "Debug probe runner — powers the Debug + RTT tabs (breakpoints, defmt logs) and SWD/JTAG flashing",
             toolchain: Some(ToolchainKind::RustEmbedded),
+            only_for_target: None,
             severity: Severity::Feature,
             // The version advice is WINDOWS-ONLY: both known-bad releases fail on
             // Windows driver binding (WinUSB), which has no equivalent elsewhere.
@@ -464,6 +510,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "dfu-util",
             description: "USB DFU flasher — programs an STM32 held in its ROM bootloader",
             toolchain: Some(ToolchainKind::RustEmbedded),
+            only_for_target: None,
             severity: Severity::Feature,
             impact: "The Flash tab's DFU (USB bootloader) path can't run; SWD flashing via \
                      probe-rs is unaffected.",
@@ -490,6 +537,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "openocd",
             description: "On-chip debugger — the alternative SWD/JTAG flash path",
             toolchain: Some(ToolchainKind::RustEmbedded),
+            only_for_target: None,
             severity: Severity::Feature,
             impact: "The Flash tab's OpenOCD path can't run; probe-rs flashing is unaffected.",
             check_cmd: "openocd",
@@ -515,6 +563,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "objcopy",
             description: "ELF -> raw binary converter - the step between `cargo build` and a DFU flash",
             toolchain: Some(ToolchainKind::RustEmbedded),
+            only_for_target: None,
             severity: Severity::Feature,
             impact: "DFU flashing stops right after the build: firmware.bin can't be produced. \
                      Any ONE of llvm-objcopy, arm-none-eabi-objcopy or `cargo objcopy` is enough \
@@ -532,13 +581,18 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             manual_url: "https://github.com/rust-embedded/cargo-binutils",
             status: ToolStatus::Unknown,
         },
-        // ── EspRust (ESP32-C3 / RISC-V) ──────────────────────────────────
+        // ── EspRust, RISC-V ──────────────────────────────────────────────
+        // TWO targets, not one: the C2 and C3 cores have no atomics extension
+        // and use `imc`; the C5, C6, C61 and H2 use `imac`. Each is gated on the
+        // project's own triple, so a C6 user is told about the one their chip
+        // needs and not about the one it does not.
         RequiredTool {
             name: "riscv32imc-unknown-none-elf",
-            description: "Rust target for RISC-V ESP32-C3 bare-metal",
+            description: "Rust target for the ESP32-C2 / C3 (RISC-V, no atomics)",
             toolchain: Some(ToolchainKind::EspRust),
+            only_for_target: Some("riscv32imc"),
             severity: Severity::Blocking,
-            impact: "This ESP32-C3 chip cannot be compiled at all until the target is installed.",
+            impact: "This ESP32 chip cannot be compiled at all until the target is installed.",
             check_cmd: "rustup",
             check_args: &["target", "list", "--installed"],
             check_pattern: "riscv32imc-unknown-none-elf",
@@ -549,9 +603,66 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             status: ToolStatus::Unknown,
         },
         RequiredTool {
+            name: "riscv32imac-unknown-none-elf",
+            description: "Rust target for the ESP32-C5 / C6 / C61 / H2 (RISC-V with atomics)",
+            toolchain: Some(ToolchainKind::EspRust),
+            only_for_target: Some("riscv32imac"),
+            severity: Severity::Blocking,
+            impact: "This ESP32 chip cannot be compiled at all until the target is installed.",
+            check_cmd: "rustup",
+            check_args: &["target", "list", "--installed"],
+            check_pattern: "riscv32imac-unknown-none-elf",
+            min_version: None,
+            install_cmd: Some("rustup"),
+            install_args: &["target", "add", "riscv32imac-unknown-none-elf"],
+            manual_url: "https://esp-rs.github.io/book/installation/riscv.html",
+            status: ToolStatus::Unknown,
+        },
+        // ── EspRust, Xtensa ──────────────────────────────────────────────
+        // A different compiler, not a different target. `rustup target add`
+        // cannot help here: stock rustc knows the triple but its LLVM has a
+        // different data layout, so even nightly with `-Z build-std` fails
+        // inside `core`. `espup` installs a fork that carries a patched LLVM,
+        // as a toolchain named `esp`.
+        RequiredTool {
+            name: "espup",
+            description: "Installer for Espressif's Rust fork — the only way to build Xtensa",
+            toolchain: Some(ToolchainKind::EspRust),
+            only_for_target: Some("xtensa"),
+            severity: Severity::Blocking,
+            impact: "ESP32 / S2 / S3 cannot be compiled: Xtensa needs Espressif's rustc fork.",
+            check_cmd: "espup",
+            check_args: &["--version"],
+            check_pattern: "",
+            min_version: None,
+            install_cmd: Some("cargo"),
+            install_args: &["install", "espup"],
+            manual_url: "https://docs.esp-rs.org/book/installation/riscv-and-xtensa.html",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "esp toolchain",
+            description: "The `esp` Rust toolchain itself — installed by `espup install`",
+            toolchain: Some(ToolchainKind::EspRust),
+            only_for_target: Some("xtensa"),
+            severity: Severity::Blocking,
+            impact: "Xtensa builds fail: `cargo +esp` has no toolchain to run.",
+            check_cmd: "rustup",
+            check_args: &["toolchain", "list"],
+            check_pattern: "esp",
+            min_version: None,
+            // `espup install` writes the toolchain; there is no rustup channel
+            // for it, so this is the one install that is not a rustup command.
+            install_cmd: Some("espup"),
+            install_args: &["install"],
+            manual_url: "https://docs.esp-rs.org/book/installation/riscv-and-xtensa.html",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
             name: "rust-src",
             description: "Rust source component — required by build-std for ESP32-C3",
             toolchain: Some(ToolchainKind::EspRust),
+            only_for_target: None,
             severity: Severity::Blocking,
             impact: "ESP32-C3 builds fail: build-std needs the Rust source component.",
             check_cmd: "rustup",
@@ -567,6 +678,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: "espflash",
             description: "ESP32 USB flash tool — programs the chip over the built-in USB serial",
             toolchain: Some(ToolchainKind::EspRust),
+            only_for_target: None,
             severity: Severity::Feature,
             impact: "The ESP32 cannot be flashed from the Flash tab.",
             check_cmd: "espflash",
@@ -595,6 +707,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             "gcc + ld (build-essential) — required to link Rust build-scripts on Linux",
         ),
         toolchain: None,
+        only_for_target: None,
         severity: Severity::Blocking,
         impact: per_os(
             "NOTHING builds: every build-script fails to link (LNK1104 msvcrt.lib / C1083 vcruntime.h).",
@@ -644,6 +757,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             "Multipurpose relay — the Serial tab's Bridge (MITM) mode uses it to create a PTY pair",
         ),
         toolchain: None,
+        only_for_target: None,
         severity: Severity::Optional,
         impact: per_os(
             "The Serial tab's Bridge (MITM) mode can't run: there is no way to make a virtual \
@@ -679,6 +793,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
         description: "Cargo's private feature namespace must be clear in the environment — \
                       build scripts cannot tell a stray variable from a real feature",
         toolchain: None,
+        only_for_target: None,
         // Blocking, i.e. it reaches the STARTUP BANNER, even though projects
         // other than RTIC build fine with the variable set. The severity here is
         // about how loud the warning has to be, not about how much breaks: the
@@ -724,6 +839,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             description:
                 "udev rules granting non-root access to debug probes (ST-Link, J-Link, CMSIS-DAP, DFU)",
             toolchain: Some(ToolchainKind::RustEmbedded),
+            only_for_target: None,
             severity: Severity::Feature,
             impact:
                 "Debug probes are visible but cannot be OPENED: probe-rs / OpenOCD / dfu-util fail \
@@ -743,6 +859,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             name: SERIAL_ACCESS_TOOL,
             description: "Permission to open /dev/ttyUSB* and /dev/ttyACM*",
             toolchain: None,
+            only_for_target: None,
             severity: Severity::Feature,
             impact: "The Serial tab and espflash can't open the port (\"Permission denied\"). \
                  The owning group differs by distro — `dialout` on Debian/Ubuntu/Fedora, `uucp` \
@@ -1735,6 +1852,73 @@ mod tests {
             s.any_blocking_missing(None),
             "a genuinely missing tool must still get the hint"
         );
+    }
+
+    /// One `ToolchainKind` covers nine chips that need three different things.
+    ///
+    /// `EspRust` is the toolchain of every Espressif part, but a C3 needs
+    /// `riscv32imc`, a C6 needs `riscv32imac`, and an ESP32-S3 needs Espressif's
+    /// entire rustc fork. Before the target gate, a C6 user was told to install
+    /// the target their chip does NOT use and never told about the one it does.
+    #[test]
+    fn esp_tools_are_gated_on_the_project_target() {
+        let s = make_tools_state();
+        let mut s = s.lock().unwrap();
+        // Pretend everything is missing, so the filter is the only thing
+        // deciding what gets reported.
+        for t in &mut s.tools {
+            t.status = ToolStatus::Missing;
+        }
+        let named = |target: &str| -> Vec<&'static str> {
+            s.problems_for(Some(&ToolchainKind::EspRust), Some(target))
+                .into_iter()
+                .map(|(n, _, _)| n)
+                .collect()
+        };
+
+        let imc = named("riscv32imc-unknown-none-elf");
+        assert!(imc.contains(&"riscv32imc-unknown-none-elf"), "{imc:?}");
+        assert!(!imc.contains(&"riscv32imac-unknown-none-elf"), "{imc:?}");
+        assert!(!imc.contains(&"espup"), "{imc:?}");
+
+        let imac = named("riscv32imac-unknown-none-elf");
+        assert!(imac.contains(&"riscv32imac-unknown-none-elf"), "{imac:?}");
+        // `riscv32imc` is a PREFIX of `riscv32imac`… but the other way round, so
+        // the imac project must not be told about the imc target.
+        assert!(!imac.contains(&"riscv32imc-unknown-none-elf"), "{imac:?}");
+        assert!(!imac.contains(&"espup"), "{imac:?}");
+
+        let xt = named("xtensa-esp32s3-none-elf");
+        assert!(xt.contains(&"espup"), "{xt:?}");
+        assert!(xt.contains(&"esp toolchain"), "{xt:?}");
+        // Xtensa is not a rustup target; offering to `rustup target add` one
+        // would send someone down an hour of the wrong road.
+        assert!(!xt.iter().any(|n| n.starts_with("riscv32")), "{xt:?}");
+
+        // Every ESP project still needs these, whatever its target.
+        for target in [
+            "riscv32imc-unknown-none-elf",
+            "riscv32imac-unknown-none-elf",
+            "xtensa-esp32s3-none-elf",
+        ] {
+            let all = named(target);
+            assert!(all.contains(&"espflash"), "{target}: {all:?}");
+            assert!(all.contains(&"rust-src"), "{target}: {all:?}");
+        }
+
+        // With no project open, nothing target-specific is hidden.
+        let none: Vec<&str> = s
+            .problems_for(Some(&ToolchainKind::EspRust), None)
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        for t in [
+            "riscv32imc-unknown-none-elf",
+            "riscv32imac-unknown-none-elf",
+            "espup",
+        ] {
+            assert!(none.contains(&t), "hidden with no project: {none:?}");
+        }
     }
 
     /// The environment check has to fire on a variable being THERE, which is
