@@ -138,6 +138,26 @@ pub struct EspChip {
     pub adc: Vec<(String, u8)>,
     /// Every peripheral singleton the chip has, GPIOs excluded.
     pub peripherals: Vec<String>,
+    /// `("USB_DM", 18)` — the analog list's non-ADC entries.
+    ///
+    /// Kept apart from [`EspChip::adc`] because they answer a different
+    /// question, but read from the SAME macro: the vendor files USB pads under
+    /// "analog functions", and a reader that keeps only the `ADC*` entries
+    /// silently loses the two pads that can carry USB at all.
+    pub analog: Vec<(String, u8)>,
+}
+
+impl EspChip {
+    /// The `(D-, D+)` pads, when this chip has USB.
+    pub fn usb_pads(&self) -> Option<(u8, u8)> {
+        let find = |s: &str| {
+            self.analog
+                .iter()
+                .find(|(n, _)| n == s)
+                .map(|(_, pad)| *pad)
+        };
+        Some((find("USB_DM")?, find("USB_DP")?))
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -388,16 +408,25 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
         .collect();
 
     let analog_body = body_of("for_each_analog_function");
-    let adc = instances(&analog_body, "analog_function")
+    let analog_all: Vec<(String, u8)> = instances(&analog_body, "analog_function")
         .iter()
         .filter_map(|t| {
             let f = fields(t);
-            if f.len() < 2 || !f[0].starts_with("ADC") {
+            if f.len() < 2 {
                 return None;
             }
             let pad = f[1].strip_prefix("GPIO")?.parse::<u8>().ok()?;
             Some((f[0].clone(), pad))
         })
+        .collect();
+    let adc: Vec<(String, u8)> = analog_all
+        .iter()
+        .filter(|(n, _)| n.starts_with("ADC"))
+        .cloned()
+        .collect();
+    let analog: Vec<(String, u8)> = analog_all
+        .into_iter()
+        .filter(|(n, _)| !n.starts_with("ADC"))
         .collect();
 
     // Not a `for_each` tuple: the entries carry doc comments full of commas and
@@ -430,6 +459,7 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
         spi,
         adc,
         peripherals,
+        analog,
     })
 }
 

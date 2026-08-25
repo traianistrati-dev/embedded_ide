@@ -197,9 +197,29 @@ impl FamilyBackend for Stm32f1Backend {
 // ── ESP32-C3 (esp-hal) ──────────────────────────────────────────────────────
 struct Esp32Backend;
 
+/// Whether `family` is one of Espressif's parts.
+///
+/// The two ESP backends are chip-agnostic: everything that differs between an
+/// ESP32-C3 and an ESP32-C6 — the `esp-hal` feature, the target triple, the
+/// `espflash --chip` name — travels in `ProjectDef`, not in the generator. So
+/// they dispatch on the vendor rather than on one chip, and adding a part is a
+/// definition file rather than a backend.
+///
+/// Only RISC-V parts ever reach here: the Xtensa ones are refused at generation
+/// time, because they need Espressif's rustc fork — see
+/// [`esp_gen::definition`](crate::panels::mcu_module::esp_gen::definition).
+pub fn is_esp(family: &str) -> bool {
+    family.starts_with("esp32")
+}
+
 impl FamilyBackend for Esp32Backend {
+    /// A LABEL, not the dispatch key — see the `handles` below.
     fn family_id(&self) -> &'static str {
         "esp32c3"
+    }
+
+    fn handles(&self, family: &str) -> bool {
+        is_esp(family)
     }
 
     /// esp-hal configures pulls through `InputConfig`/`OutputConfig` builders,
@@ -326,7 +346,7 @@ impl FamilyBackend for AsyncEspBackend {
     }
 
     fn handles(&self, family: &str) -> bool {
-        family == "esp32c3"
+        is_esp(family)
     }
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {

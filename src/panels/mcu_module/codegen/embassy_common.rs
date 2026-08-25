@@ -1755,7 +1755,10 @@ mod emit_for_manual_compile {
         use crate::panels::mcu_module::mcu::model::Runtime;
         use crate::panels::mcu_module::modules::ModuleConfig;
 
-        let esp = builtin_for("esp32c3").expect("built-in ESP32-C3");
+        // Any bundled Espressif part, so the five generated definitions can be
+        // cross-compiled the same way the hand-written one always could.
+        let chip = std::env::var("EIDE_ESP_CHIP").unwrap_or_else(|_| "esp32c3".into());
+        let esp = builtin_for(&chip).unwrap_or_else(|| panic!("no built-in {chip}"));
         let mut mcu = esp.build_mcu();
         if std::env::var("EIDE_ESP_RUNTIME").as_deref() == Ok("async") {
             mcu.runtime = Runtime::Async;
@@ -1767,33 +1770,41 @@ mod emit_for_manual_compile {
             .filter_map(|c| c.trim().parse().ok())
             .collect();
 
-        let mut want: Vec<(String, PinFunction)> = vec![
-            ("GPIO8".into(), PinFunction::GpioOutput),
-            ("GPIO0".into(), PinFunction::GpioInput),
-            ("GPIO4".into(), PinFunction::UsartTx(1)),
-            ("GPIO5".into(), PinFunction::UsartRx(1)),
-            ("GPIO20".into(), PinFunction::I2cSda(0)),
-            ("GPIO21".into(), PinFunction::I2cScl(0)),
+        // Pads are CHOSEN, not named: the GPIO numbering differs per chip (a C5
+        // has no GPIO15..22 at all), so a hard-coded list would silently drop
+        // half the wiring on five of the six parts.
+        let mut want: Vec<PinFunction> = vec![
+            PinFunction::GpioOutput,
+            PinFunction::GpioInput,
+            PinFunction::UsartTx(1),
+            PinFunction::UsartRx(1),
+            PinFunction::I2cSda(0),
+            PinFunction::I2cScl(0),
         ];
-        // One pad per channel, from the top of the range so they cannot collide
-        // with the buses above.
-        for (i, ch) in chans.iter().enumerate() {
-            want.push((
-                format!("GPIO{}", 19 - i),
-                PinFunction::TimerPwm {
-                    timer: 0,
-                    channel: *ch,
-                },
-            ));
+        for ch in &chans {
+            want.push(PinFunction::TimerPwm {
+                timer: 0,
+                channel: *ch,
+            });
         }
-        for (name, func) in want {
-            let num = mcu
+        let mut taken: Vec<usize> = Vec::new();
+        for func in want {
+            let pick = mcu
                 .iter_all_pins()
-                .find(|p| p.name == name)
+                .find(|p| {
+                    !p.reserved
+                        && !taken.contains(&p.number)
+                        && p.available_functions.contains(&func)
+                })
                 .map(|p| p.number);
-            match num.and_then(|n| mcu.find_pin_mut(n)) {
+            match pick.and_then(|n| {
+                taken.push(n);
+                mcu.find_pin_mut(n)
+            }) {
                 Some(p) => p.selected_function = func,
-                None => println!("no pin {name} for {func:?}"),
+                // Said out loud: a C61 has no PWM, and a run that quietly wired
+                // five of six peripherals would still look like a pass.
+                None => println!("[{chip}] no free pad for {func:?} - skipped"),
             }
         }
         mcu.reconcile_modules();
@@ -1808,10 +1819,17 @@ mod emit_for_manual_compile {
         }
 
         let main_rs = mcu.fresh_main_rs();
-        assert!(
-            main_rs.contains("pins::configs::pwm0::init(&ledc"),
-            "no PWM in main.rs:\n{main_rs}"
-        );
+        // Only where the chip HAS a LEDC: esp32c5 and esp32c61 carry none,
+        // so their definitions offer no PWM function to wire in at all.
+        if mcu
+            .iter_all_pins()
+            .any(|p| matches!(p.selected_function, PinFunction::TimerPwm { .. }))
+        {
+            assert!(
+                main_rs.contains("pins::configs::pwm0::init(&ledc"),
+                "no PWM in main.rs:\n{main_rs}"
+            );
+        }
 
         let mut files = project_gen::build_project_files(&esp.project, &esp.toolchain, &main_rs);
         let configs = mcu.config_files();
@@ -1820,7 +1838,7 @@ mod emit_for_manual_compile {
         files.cargo_toml = project_gen::ensure_async_deps(
             &files.cargo_toml,
             mcu.runtime == Runtime::Async,
-            project_gen::AsyncFlavor::Esp("esp32c3"),
+            project_gen::AsyncFlavor::Esp(&chip),
             configs
                 .iter()
                 .any(|(n, b)| n.starts_with("uart") && b.contains("init_async")),
@@ -1843,7 +1861,7 @@ mod emit_for_manual_compile {
                 .into_iter()
                 .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
         );
-        let dir = std::env::temp_dir().join("eide_esp_check");
+        let dir = std::env::temp_dir().join(format!("eide_esp_check_{chip}"));
         let _ = std::fs::remove_dir_all(&dir);
         project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
             .expect("write esp project");
