@@ -778,6 +778,91 @@ mod tests {
         );
     }
 
+    /// Which families actually get clock code, and which keep the commented
+    /// skeleton — asked of the SAME predicate codegen uses, one representative
+    /// chip per family, against the real vendor data.
+    ///
+    /// `cargo test --bin embedded_ide_0 which_families_generate_clock -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs real vendor data on this machine"]
+    fn which_families_generate_clock_code() {
+        use super::super::chip_sources;
+        use super::super::clock::graph::cubemx::graph_for_chip_xml;
+        use super::super::clock::model::ClockConfig;
+        use super::super::codegen::rcc::generates_clock_code_for;
+
+        let c = Catalogue::build(chip_sources::all_sources());
+        if c.sources.is_empty() {
+            println!("no chip sources - nothing to check");
+            return;
+        }
+        // One part per family, preferring a source that ships clock trees:
+        // without a tree the generic recipe has nothing to read and every
+        // family would look unsupported.
+        let mut per_family: std::collections::BTreeMap<String, &Indexed> =
+            std::collections::BTreeMap::new();
+        for &ix in &c.unified {
+            let row = &c.rows[ix];
+            if row.entry.family.is_empty() {
+                continue;
+            }
+            let better = per_family
+                .get(&row.entry.family)
+                .is_none_or(|cur| !c.sources[cur.source].has_clock() && c.sources[row.source].has_clock());
+            if better {
+                per_family.insert(row.entry.family.clone(), row);
+            }
+        }
+
+        let (mut yes, mut no) = (Vec::new(), Vec::new());
+        for (family, row) in &per_family {
+            let src = &c.sources[row.source];
+            let path = src.chip_file(&row.entry);
+            let Ok(xml) = std::fs::read_to_string(&path) else {
+                println!("{family}: could not read {}", path.display());
+                continue;
+            };
+            let clock = match src.db.as_deref() {
+                Some(db) => match graph_for_chip_xml(db, &xml, family) {
+                    Ok((gc, _)) => ClockConfig::Graph(gc),
+                    Err(_) => ClockConfig::None,
+                },
+                None => ClockConfig::None,
+            };
+            if generates_clock_code_for(family, &clock) {
+                yes.push(family.clone());
+            } else {
+                no.push(format!("{family} (e.g. {})", row.entry.ref_name));
+            }
+        }
+        println!("
+GENERATES clock code ({}):", yes.len());
+        for f in &yes {
+            println!("  {f}");
+        }
+        println!("
+KEEPS THE COMMENTED SKELETON ({}):", no.len());
+        for f in &no {
+            println!("  {f}");
+        }
+        // How much of the catalogue that actually is. A family with three parts
+        // and one with three hundred are not the same problem.
+        let affected: Vec<&str> = no.iter().filter_map(|f| f.split(' ').next()).collect();
+        let mut count = 0usize;
+        for &ix in &c.unified {
+            if affected.contains(&c.rows[ix].entry.family.as_str()) {
+                count += 1;
+            }
+        }
+        println!(
+            "
+{count} of {} parts ({:.1} %) keep the skeleton",
+            c.unified_len(),
+            100.0 * count as f64 / c.unified_len() as f64
+        );
+        assert!(!yes.is_empty(), "some family must generate clock code");
+    }
+
     /// Against every source this machine has. Ignored: needs real vendor data.
     ///
     /// Also times the build, because that cost lands on the frame that opens the
