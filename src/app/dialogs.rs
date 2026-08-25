@@ -2179,6 +2179,110 @@ mod chip_gaps_tests {
         }
     }
 
+    /// The Pins tab, for every chip that can open it.
+    ///
+    /// The canvas draws four sides; the panel that opens on a click explains
+    /// what a pin is FOR. Both are per-chip, and both were written when the only
+    /// Espressif part was the C3 — whose rails happen to be spelled the ST way.
+    #[test]
+    fn every_bundled_chip_opens_a_usable_pins_tab() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::codegen::family;
+        use crate::panels::mcu_module::pins::logic::pin::colors::reserved_role;
+
+        const GENERIC: &str = "Reserved - fixed by the package, not configurable here.";
+
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            let sides = [
+                ("top", &mcu.top_pins),
+                ("bottom", &mcu.bottom_pins),
+                ("left", &mcu.left_pins),
+                ("right", &mcu.right_pins),
+            ];
+            // A side with nothing on it draws as a bare edge. Every package here
+            // is a QFN or an LQFP, so all four carry pins.
+            for (name, pins) in sides {
+                assert!(!pins.is_empty(), "{}: the {name} side is empty", d.id);
+            }
+
+            let all: Vec<_> = mcu.iter_all_pins().collect();
+            // Pin numbers are what the canvas labels and what `find_pin` looks
+            // up; two pads sharing one would make a click ambiguous.
+            let mut numbers: Vec<usize> = all.iter().map(|p| p.number).collect();
+            numbers.sort_unstable();
+            let before = numbers.len();
+            numbers.dedup();
+            assert_eq!(numbers.len(), before, "{}: duplicate pin numbers", d.id);
+
+            let reserved: Vec<&str> = all
+                .iter()
+                .filter(|p| p.reserved)
+                .map(|p| p.name.as_str())
+                .collect();
+            let usable = all.len() - reserved.len();
+            // A reserved pad carries no functions, so the click panel has only
+            // this line to show. "Reserved - fixed by the package" is the answer
+            // for a pad nothing more can be said about — not for a crystal, an
+            // antenna feed or a chip-enable.
+            let vague: Vec<&&str> = reserved
+                .iter()
+                .filter(|n| reserved_role(n) == GENERIC)
+                .collect();
+            assert!(
+                vague.is_empty(),
+                "{}: unexplained reserved pads {vague:?}",
+                d.id
+            );
+
+            println!(
+                "{:<16} {:>2} pads  {:>2} usable  {:>2} reserved",
+                d.id,
+                all.len(),
+                usable,
+                reserved.len()
+            );
+
+            if family::is_esp(&mcu.family) {
+                // The GPIO matrix: every usable pad carries the same routable
+                // set, so a peripheral can go almost anywhere. If some pad were
+                // short of functions, autowire would silently prefer the others.
+                // Compared WITHIN a direction, not across: an ESP32's
+                // GPIO34..39 can only read, so they carry 8 functions against a
+                // full pad's 31. That is the rule working, not a gap — the two
+                // groups are uniform, and it is uniformity that says autowire
+                // has no reason to prefer one pad over another.
+                use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+                for driving in [true, false] {
+                    let sets: Vec<usize> = all
+                        .iter()
+                        .filter(|p| !p.reserved)
+                        .filter(|p| {
+                            p.available_functions.contains(&PinFunction::GpioOutput) == driving
+                        })
+                        .map(|p| p.available_functions.len())
+                        .collect();
+                    if sets.is_empty() {
+                        continue; // most parts have no read-only pads at all
+                    }
+                    let (lo, hi) = (
+                        sets.iter().min().copied().unwrap(),
+                        sets.iter().max().copied().unwrap(),
+                    );
+                    // ADC and USB are bonded to particular pads, so counts vary
+                    // by a few — but not by an order of magnitude.
+                    assert!(
+                        hi - lo <= 4,
+                        "{}: {} pads carry {lo}..{hi} functions",
+                        d.id,
+                        if driving { "driving" } else { "read-only" }
+                    );
+                }
+                assert!(all.iter().any(|p| !p.reserved), "{}: no usable pad", d.id);
+            }
+        }
+    }
+
     /// The DMA question is not ASKED of a family that has no `DmaDef` to answer
     /// it with — `None`, not `Some(0)`.
     #[test]

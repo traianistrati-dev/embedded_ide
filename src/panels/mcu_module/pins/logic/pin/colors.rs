@@ -53,8 +53,18 @@ pub fn reserved_role(name: &str) -> &'static str {
         "Boot mode select, sampled at reset: it chooses whether the chip starts from flash or from the bootloader."
     } else if n.starts_with("NPOR") {
         "Power-on reset."
-    } else if n.starts_with("CHIP_PU") {
+    } else if n.starts_with("CHIP_PU") || n.starts_with("CHIP_EN") {
+        // Two spellings of one pin: an ESP32/S2/S3/C5/C6/C61 calls it CHIP_PU,
+        // a C2/C3/H2 calls it CHIP_EN. Only the first was answered, so the most
+        // important reserved pad on half the Espressif parts read "Reserved -
+        // fixed by the package".
         "Chip enable, active HIGH. Held low the part stays in reset."
+    } else if n.starts_with("XTAL_") {
+        "Main crystal. Its frequency is what the PLL multiplies up - the Clock tab shows which."
+    } else if n.starts_with("LNA_IN") || n.starts_with("ANT") {
+        "Radio antenna feed. It reaches the antenna through a matching network, and nothing else may load it."
+    } else if n.starts_with("CAP") {
+        "Filter capacitor for an on-chip supply. It takes the part its datasheet specifies and no signal."
     } else {
         "Reserved - fixed by the package, not configurable here."
     }
@@ -81,13 +91,13 @@ impl Pin {
                     POWER
                 };
             }
-            // ESP32-C3 rails, which do not follow the ST naming.
-            if matches!(
-                self.name.as_str(),
-                "VDD3P3" | "VDD3P3_CPU" | "VDD3P3_RTC" | "VDD_SPI"
-            ) {
-                return POWER;
-            }
+            // No exact-match list of Espressif rails here. There used to be one
+            // — `VDD3P3`, `VDD3P3_CPU`, `VDD3P3_RTC`, `VDD_SPI` — and it was
+            // both DEAD and STALE: every one of those starts with `VDD`, so
+            // `is_power` above had already answered, and the eight parts added
+            // after the C3 brought `VDDA1..8`, `VDDPST1..3`, `VDD_SDIO` and
+            // `VDDA_PMU`, none of which were in it.
+            //
             // Misc reserved (NRST, BOOT0, CHIP_PU, LNA_IN, …)
             return egui::Color32::LIGHT_GRAY;
         }
@@ -155,6 +165,20 @@ mod tests {
         assert!(reserved_role("BOOT0").contains("Boot mode"));
         // The prefix order matters: VDDA must not fall into the plain-VDD arm.
         assert_ne!(reserved_role("VDDA"), reserved_role("VDD"));
-        assert!(reserved_role("LNA_IN").starts_with("Reserved"));
+
+        // The Espressif pads. `LNA_IN` was pinned to the generic answer here,
+        // which described the state rather than an invariant — on an ESP32 most
+        // reserved pads are one of these, and the panel exists to say what a pin
+        // is for.
+        assert!(reserved_role("LNA_IN").contains("antenna"));
+        assert!(reserved_role("ANT_2G").contains("antenna"));
+        assert!(reserved_role("XTAL_P").contains("crystal"));
+        assert!(reserved_role("CAP1").contains("capacitor"));
+        // One pin, two spellings: an ESP32 says CHIP_PU, a C3 says CHIP_EN.
+        assert_eq!(reserved_role("CHIP_EN"), reserved_role("CHIP_PU"));
+        assert!(reserved_role("CHIP_EN").contains("Chip enable"));
+
+        // …and the generic is still there, for a pad nothing is known about.
+        assert!(reserved_role("PAD_7").starts_with("Reserved"));
     }
 }
