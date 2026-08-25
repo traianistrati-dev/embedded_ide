@@ -282,7 +282,12 @@ fn runtime_view(
     // `probe-rs` proven absent → the on-target sampler can't run at all.
     no_probe_rs: bool,
 ) {
-    let can_run = can_run && !no_probe_rs;
+    // Halt-sampling drives probe-rs, so a chip it has no target for cannot be
+    // sampled. Asked of the installed binary — see `probe::chip_gap`.
+    let chip_gap = (!no_probe_rs)
+        .then(|| crate::probe::chip_gap(chip))
+        .flatten();
+    let can_run = can_run && !no_probe_rs && chip_gap.is_none();
     let st = flame_state.lock().unwrap().clone();
     let busy = st.is_busy();
 
@@ -318,6 +323,8 @@ fn runtime_view(
             )
             .on_disabled_hover_text(if no_probe_rs {
                 super::needs_tool_hint("probe-rs")
+            } else if let Some(gap) = &chip_gap {
+                gap.clone()
             } else {
                 "Sampling, or no chip config exists yet.".to_owned()
             })

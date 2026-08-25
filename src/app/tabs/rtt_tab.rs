@@ -43,7 +43,16 @@ pub fn show_rtt_tab(
     // probe-rs drives every action here; if the self-check proved it absent,
     // grey them out instead of letting the run fail with a spawn error.
     let no_probe_rs = super::tool_missing(missing_tools, "probe-rs");
-    let can_run = can_run && !no_probe_rs;
+    // probe-rs cannot attach to a chip it has no target for, and would fail
+    // several seconds in with a message buried in the console. Asked of the
+    // INSTALLED binary, so the block lifts on upgrade rather than needing a
+    // code change here — see `probe::chip_gap`. Skipped when probe-rs is
+    // missing: the absent tool is the truer thing to say, and there is nothing
+    // to ask anyway.
+    let chip_gap = (!no_probe_rs)
+        .then(|| crate::probe::chip_gap(chip))
+        .flatten();
+    let can_run = can_run && !no_probe_rs && chip_gap.is_none();
     ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(
@@ -65,6 +74,8 @@ pub fn show_rtt_tab(
             )
             .on_disabled_hover_text(if no_probe_rs {
                 super::needs_tool_hint("probe-rs")
+            } else if let Some(gap) = &chip_gap {
+                gap.clone()
             } else {
                 "A session is running, or no chip config exists yet.".to_owned()
             })
@@ -87,6 +98,8 @@ pub fn show_rtt_tab(
             )
             .on_disabled_hover_text(if no_probe_rs {
                 super::needs_tool_hint("probe-rs")
+            } else if let Some(gap) = &chip_gap {
+                gap.clone()
             } else {
                 "A session is running, or no chip config exists yet.".to_owned()
             })

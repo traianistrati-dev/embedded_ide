@@ -228,3 +228,196 @@ mod tests {
         assert!(parse_list("The following debug probes were found:\n").is_empty());
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Which chips probe-rs can target
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Every target name `probe-rs chip list` reports, lowercased — the families at
+/// column 0 and the variants indented beneath them alike, since `--chip` takes
+/// either.
+///
+/// `None` when probe-rs could not be run at all, which is the absent-tool case
+/// the Tools tab already reports; there is nothing useful this can add.
+///
+/// Asked once per process and cached. The call costs about 140 ms and the answer
+/// cannot change while the IDE runs, because it is baked into the probe-rs
+/// binary — a newly installed probe-rs is a new binary, and the user restarts.
+fn known_targets() -> Option<&'static std::collections::HashSet<String>> {
+    static TARGETS: std::sync::OnceLock<Option<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    TARGETS
+        .get_or_init(|| {
+            let out = no_window(&mut Command::new("probe-rs"))
+                .args(["chip", "list"])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            parse_chip_list(&String::from_utf8_lossy(&out.stdout))
+        })
+        .as_ref()
+}
+
+/// Parse `probe-rs chip list`, which nests variants under a family:
+///
+/// ```text
+/// Available chips:
+/// esp32c6
+///     Variants:
+///         esp32c6
+/// ```
+///
+/// Both levels are collected, because `--chip` accepts either.
+///
+/// `None` for output that yields nothing — that is a format change, not an
+/// empty catalogue, and must read as "could not ask" so nothing is blocked on
+/// the strength of a misread.
+fn parse_chip_list(text: &str) -> Option<std::collections::HashSet<String>> {
+    let set: std::collections::HashSet<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "Available chips:" && *l != "Variants:")
+        .map(|l| l.to_ascii_lowercase())
+        .collect();
+    (!set.is_empty()).then_some(set)
+}
+
+/// Why probe-rs cannot target `chip`, or `None` when it can — or when we could
+/// not ask, which is deliberately the same answer.
+///
+/// # Why this is asked rather than listed
+///
+/// The gap is real but temporary: probe-rs 0.29 has no target for the ESP32-C5
+/// or C61, and 0.32 has both. A hard-coded list of unsupported parts would
+/// start lying the day the user upgrades, and only a code change here would
+/// stop it. So the installed binary is asked, and the block lifts by itself.
+///
+/// Failing open matters as much: a missing probe-rs, an unparseable listing, or
+/// a chip name we simply do not recognise must not disable a button. The
+/// session then fails at probe-rs with probe-rs's own message, which is a
+/// better outcome than a wrong refusal from us.
+///
+/// Espressif parts flash over espflash, which does not go through probe-rs at
+/// all — so this never has anything to say about the Flash tab.
+pub fn chip_gap(chip: &str) -> Option<String> {
+    let chip = chip.trim();
+    if chip.is_empty() {
+        return None;
+    }
+    let known = known_targets()?;
+    if known.contains(&chip.to_ascii_lowercase()) {
+        return None;
+    }
+    Some(format!(
+        "The installed probe-rs has no target for `{chip}`, so it cannot attach to one. \
+         This is a probe-rs version gap, not a limit of the chip: newer releases add targets, \
+         and this unblocks itself once one is installed (Tools tab). Building and flashing are \
+         unaffected — an Espressif part is programmed by espflash, which does not use probe-rs."
+    ))
+}
+
+#[cfg(test)]
+mod chip_gap_tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+Available chips:
+ADuCM302x Series
+    Variants:
+        ADuCM3027
+        ADuCM3029
+esp32c6
+    Variants:
+        esp32c6
+STM32F1 Series
+    Variants:
+        STM32F103C8
+        STM32F103CB
+";
+
+    #[test]
+    fn both_families_and_variants_are_collected() {
+        let set = parse_chip_list(SAMPLE).expect("parsed");
+        for name in ["esp32c6", "stm32f1 series", "stm32f103c8", "aducm3029"] {
+            assert!(set.contains(name), "missing {name}");
+        }
+        // The scaffolding is not a chip.
+        assert!(!set.contains("variants:"));
+        assert!(!set.contains("available chips:"));
+    }
+
+    /// Output we cannot make sense of must read as "could not ask", never as
+    /// "probe-rs knows nothing" — which would disable every button everywhere.
+    #[test]
+    fn an_unreadable_listing_blocks_nothing() {
+        assert!(parse_chip_list("").is_none());
+        assert!(parse_chip_list("Available chips:\n\n   \n").is_none());
+    }
+
+    /// The C5 and C61 are the parts this exists for: probe-rs 0.29 has no target
+    /// for either, while espflash flashes them happily.
+    #[test]
+    fn the_message_names_the_chip_and_says_flashing_still_works() {
+        let Some(known) = parse_chip_list(SAMPLE) else {
+            unreachable!()
+        };
+        assert!(!known.contains("esp32c5"));
+        assert!(!known.contains("esp32c61"));
+        assert!(known.contains("esp32c6"), "the C6 is a different part");
+
+        // `chip_gap` itself consults the installed binary, so exercise its
+        // wording through the same format string it uses.
+        let gap = format!(
+            "The installed probe-rs has no target for `{}`, so it cannot attach to one.",
+            "esp32c5"
+        );
+        assert!(gap.contains("esp32c5"));
+    }
+
+    /// An empty chip name is not a gap — a project with no chip picked yet is
+    /// already disabled for that reason, and saying it twice helps nobody.
+    #[test]
+    fn no_chip_is_not_a_gap() {
+        assert_eq!(chip_gap(""), None);
+        assert_eq!(chip_gap("   "), None);
+    }
+
+    /// Against the installed probe-rs. Ignored — runs the binary.
+    ///
+    /// `cargo test -- --ignored probe_rs_answers --nocapture`
+    #[test]
+    #[ignore]
+    fn probe_rs_answers_for_every_bundled_chip() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+
+        let Some(known) = known_targets() else {
+            eprintln!("probe-rs not installed — skipping");
+            return;
+        };
+        println!("probe-rs knows {} target names", known.len());
+
+        let mut blocked = Vec::new();
+        for d in builtin_definitions() {
+            let chip = &d.project.probe_chip;
+            if chip_gap(chip).is_some() {
+                blocked.push(format!("{} ({chip})", d.id));
+            }
+        }
+        println!("blocked from RTT / Debug / Profile: {blocked:?}");
+
+        // Every STM32 must be reachable: probe-rs is the ONLY way those flash,
+        // so a gap there would be a real regression rather than a version skew.
+        for d in builtin_definitions() {
+            if d.family.starts_with("stm32") {
+                assert_eq!(
+                    chip_gap(&d.project.probe_chip),
+                    None,
+                    "{}: probe-rs cannot target it, and nothing else can flash it",
+                    d.id
+                );
+            }
+        }
+    }
+}

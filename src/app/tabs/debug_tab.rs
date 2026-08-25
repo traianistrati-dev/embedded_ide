@@ -101,7 +101,13 @@ pub fn show_debug_tab(
     // width — an overflowing row would widen the panel every frame.
     // The whole tab is probe-rs (dap-server); grey it out when it's missing.
     let no_probe_rs = super::tool_missing(missing_tools, "probe-rs");
-    let can_run = can_run && !no_probe_rs;
+    // dap-server cannot attach to a chip probe-rs has no target for. Asked of
+    // the installed binary, so an upgrade lifts this on its own; see
+    // `probe::chip_gap`.
+    let chip_gap = (!no_probe_rs)
+        .then(|| crate::probe::chip_gap(chip))
+        .flatten();
+    let can_run = can_run && !no_probe_rs && chip_gap.is_none();
     ui.horizontal_wrapped(|ui| {
         // ── Debug-friendly release profile ────────────────────────────────────
         // A toggle BUTTON, not a checkbox: it is a mode the whole session runs
@@ -166,6 +172,8 @@ pub fn show_debug_tab(
             )
             .on_disabled_hover_text(if no_probe_rs {
                 super::needs_tool_hint("probe-rs")
+            } else if let Some(gap) = &chip_gap {
+                gap.clone()
             } else {
                 "A session is running, or no chip config exists yet.".to_owned()
             })
@@ -279,6 +287,8 @@ pub fn show_debug_tab(
                 super::needs_tool_hint("probe-rs")
             } else if busy {
                 "A session owns the probe — stop it first.".to_owned()
+            } else if let Some(gap) = &chip_gap {
+                gap.clone()
             } else {
                 "No chip config exists yet.".to_owned()
             })
