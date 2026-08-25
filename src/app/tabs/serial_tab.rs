@@ -20,11 +20,47 @@ const BAUDS: [u32; 8] = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 9216
 const HANDLE_H: f32 = 6.0;
 const MIN_TX: f32 = 26.0;
 
-pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui::Context) {
+/// Why the selected port cannot be opened, and the only two ways out.
+///
+/// Assembled in pieces rather than as one continued literal: a backslash
+/// continuation renders with a run of spaces the moment rustfmt reflows it, and
+/// this string is read by a user who is already confused about why nothing
+/// connects.
+///
+/// Bridge is ruled out by name on purpose. It is the feature for "another
+/// application holds this port", so it is exactly what a user reaches for here
+/// yet `SerialMonitor::connect_bridge` opens the device port FIRST and fails
+/// identically. Better to say so than to let them find out.
+fn held_port_note(port: &str, who: &str) -> String {
+    let mut s = format!("{who} is on {port}. ");
+    s.push_str("A serial port has one owner, so this cannot open it too \u{2014} ");
+    s.push_str("stop it in the Flash tab, or turn off its auto-start after flashing. ");
+    s.push_str("Bridge is not a way around it: the bridge opens the same device port.");
+    s
+}
+
+pub fn show_serial_tab(
+    ui: &mut egui::Ui,
+    serial: &mut SerialMonitor,
+    ctx: &egui::Context,
+    // A port another part of the IDE is holding open right now, as
+    // (port, holder). Today only the ESP Monitor can be that holder, and it
+    // starts itself after every ESP flash - so on an Espressif project the
+    // default path lands the user here with the port already taken. A serial
+    // port has exactly one owner, and without this the open failed with the
+    // bare OS error ("Access is denied."), naming neither the cause nor the
+    // way out.
+    held_port: Option<(&str, &str)>,
+) {
     if serial.ports.is_empty() {
         serial.refresh_ports();
     }
     let connected = serial.is_connected();
+    // Matched on the SELECTED port, not on the holder alone: another board on
+    // another port is not a conflict, and saying so would be noise.
+    let held_note = held_port
+        .filter(|(port, _)| !port.is_empty() && *port == serial.port)
+        .map(|(port, who)| held_port_note(port, who));
 
     // ── Controls row ──────────────────────────────────────────────────────────
     ui.horizontal_wrapped(|ui| {
@@ -70,16 +106,20 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                 serial.disconnect();
             }
         } else {
-            let can = !serial.port.is_empty() && (!serial.bridge || !serial.bridge_port.is_empty());
+            let can = !serial.port.is_empty()
+                && (!serial.bridge || !serial.bridge_port.is_empty())
+                && held_note.is_none();
             if ui
                 .add_enabled(
                     can,
                     egui::Button::new(format!("{} Connect", ph::PLUGS_CONNECTED)),
                 )
-                .on_disabled_hover_text(if serial.bridge {
-                    "Bridge needs BOTH a device port and a virtual-pair port"
+                .on_disabled_hover_text(if let Some(note) = &held_note {
+                    note.clone()
+                } else if serial.bridge {
+                    "Bridge needs BOTH a device port and a virtual-pair port".to_owned()
                 } else {
-                    "Pick a port first"
+                    "Pick a port first".to_owned()
                 })
                 .clicked()
             {
@@ -293,6 +333,14 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
         }
     });
 
+    // Ahead of the click, not after it: the button is already disabled, and a
+    // hover text nobody hovers explains nothing.
+    if let Some(note) = &held_note {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 170, 90),
+            format!("{} {note}", ph::WARNING),
+        );
+    }
     if let Some(err) = serial.state.lock().unwrap().error.clone() {
         ui.colored_label(
             egui::Color32::from_rgb(220, 90, 80),
@@ -1047,4 +1095,53 @@ fn hex_string_to_bytes(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
     s.split_whitespace()
         .map(|x| u8::from_str_radix(x, 16))
         .collect()
+}
+
+#[cfg(test)]
+mod held_port_tests {
+    use super::*;
+
+    /// Only the SELECTED port is a conflict. This mirrors the `filter` in
+    /// `show_serial_tab`, which is the whole decision.
+    fn conflicts(selected: &str, held: &str) -> bool {
+        !held.is_empty() && held == selected
+    }
+
+    #[test]
+    fn only_the_selected_port_is_a_conflict() {
+        assert!(conflicts("COM7", "COM7"));
+        // A monitor watching another board is not this board's problem.
+        assert!(!conflicts("COM7", "COM3"));
+        // Idle monitor: `EspMonitor::active_port` returns "" when not busy, and
+        // an empty holder must never match an empty selection either.
+        assert!(!conflicts("COM7", ""));
+        assert!(!conflicts("", ""));
+    }
+
+    #[test]
+    fn the_note_names_the_holder_the_port_and_the_fix() {
+        let n = held_port_note("COM7", "The ESP Monitor");
+        assert!(n.contains("COM7"), "{n}");
+        assert!(n.contains("The ESP Monitor"), "{n}");
+        assert!(n.contains("Flash tab"), "names where to stop it: {n}");
+        assert!(n.contains("auto-start"), "names the other way out: {n}");
+    }
+
+    /// The one wrong turn this message exists to head off: Bridge reads like
+    /// the answer to "another program has my port", and is not — it opens the
+    /// same device port. If that sentence is ever dropped, this fails.
+    #[test]
+    fn the_note_rules_bridge_out_rather_than_offering_it() {
+        let n = held_port_note("COM7", "The ESP Monitor");
+        assert!(n.contains("Bridge is not a way around it"), "{n}");
+    }
+
+    /// No stray run of spaces — the failure mode a continued literal produces
+    /// once rustfmt reflows it, invisible in review and obvious in the UI.
+    #[test]
+    fn the_note_is_not_a_reflowed_continuation() {
+        let n = held_port_note("COM7", "The ESP Monitor");
+        assert!(!n.contains("  "), "double space in: {n}");
+        assert!(!n.contains('\n'), "newline in: {n}");
+    }
 }

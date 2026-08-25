@@ -743,7 +743,13 @@ pub(super) fn show_diag_panel(
             );
         }
         BuildPanelTab::Serial => {
-            show_serial_tab(ui, serial, ctx);
+            let monitor_port = esp_monitor.active_port();
+            show_serial_tab(
+                ui,
+                serial,
+                ctx,
+                Some((monitor_port.as_str(), "The ESP Monitor")),
+            );
         }
         BuildPanelTab::Terminal => {
             show_terminal_tab(ui, terminal, ctx);

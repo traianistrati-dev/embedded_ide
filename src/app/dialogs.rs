@@ -2408,6 +2408,38 @@ mod chip_gaps_tests {
         }
     }
 
+    /// What the Serial tab needs from a chip.
+    ///
+    /// The tab itself holds no per-chip data at all - it opens a COM port and
+    /// reads bytes, the same on every family. The ONE place chip data reaches
+    /// it is the first-open baud seeding, which takes `baud_rate` from the
+    /// first `ModuleConfig::Usart` on the board. That has a source only if the
+    /// chip actually exposes USART pin functions, so this checks the thing the
+    /// seeding depends on rather than the tab, which has nothing to check.
+    #[test]
+    fn every_bundled_chip_can_feed_the_serial_baud_seeding() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::pins::logic::pin_function::enum_::PinFunction;
+
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            let (mut tx, mut rx) = (false, false);
+            for pin in mcu.iter_all_pins() {
+                for f in &pin.available_functions {
+                    match f {
+                        PinFunction::UsartTx(_) => tx = true,
+                        PinFunction::UsartRx(_) => rx = true,
+                        _ => {}
+                    }
+                }
+            }
+            // Both halves: a chip with only one of them can carry no USART
+            // virtual module, so the Serial tab would silently keep its 115200
+            // default with nothing to say why.
+            assert!(tx && rx, "{}: no USART pads (tx {tx}, rx {rx})", d.id);
+        }
+    }
+
     /// The DMA question is not ASKED of a family that has no `DmaDef` to answer
     /// it with — `None`, not `Some(0)`.
     #[test]
