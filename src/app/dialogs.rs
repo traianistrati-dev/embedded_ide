@@ -772,49 +772,48 @@ impl AppIde {
                 first_err.get_or_insert(e);
             }
             for def in made.defs {
-                        let hal = match stm32_pin_data::embassy_feature_in(&def.project.hal_dep)
-                        {
-                            Some(feat) => {
-                                let known = embassy_features.get_or_insert_with(|| {
-                                    crate::app::editor_panel::cargo_complete::known_features(
-                                        stm32_pin_data::EMBASSY_CRATE,
-                                        stm32_pin_data::EMBASSY_VERSION,
-                                    )
-                                });
-                                feature_verdict(feat, known.as_deref())
-                            }
-                            // No embassy feature in the HAL line at all (STM32F1
-                            // uses `stm32f1xx-hal`): nothing to check, nothing
-                            // missing.
-                            None => FeatureVerdict::Present,
-                        };
-                        // `to_config` rather than the XML tree: an F1 chip carries
-                        // `ClockDef::Stm32f1` and generates clock code even though
-                        // `convert_xml` gave it nothing, and reporting that as a
-                        // gap would be a false alarm on the family that works best.
-                        let gaps = chip_gaps(
-                            &hal,
-                            crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
-                                &def.family,
-                                &def.clock.to_config(&def.clock_limits),
-                            ),
-                            uses_dma_def(&def.family)
-                                .then(|| def.dma.as_ref().map_or(0, |d| d.channels.len())),
-                        );
-                        if !gaps.is_empty() {
-                            gap_chips.push(format!("{} ({})", def.display_name, gaps.join(", ")));
-                        }
-                        match registry::save_definition(&def) {
-                            Ok(_) => {
-                                last_id = Some(def.id.clone());
-                                registry::merge_def(&mut self.mcu_registry, def);
-                                saved += 1;
-                            }
-                            Err(e) => {
-                                skipped += 1;
-                                first_err.get_or_insert(e);
-                            }
-                        }
+                let hal = match stm32_pin_data::embassy_feature_in(&def.project.hal_dep) {
+                    Some(feat) => {
+                        let known = embassy_features.get_or_insert_with(|| {
+                            crate::app::editor_panel::cargo_complete::known_features(
+                                stm32_pin_data::EMBASSY_CRATE,
+                                stm32_pin_data::EMBASSY_VERSION,
+                            )
+                        });
+                        feature_verdict(feat, known.as_deref())
+                    }
+                    // No embassy feature in the HAL line at all (STM32F1
+                    // uses `stm32f1xx-hal`): nothing to check, nothing
+                    // missing.
+                    None => FeatureVerdict::Present,
+                };
+                // `to_config` rather than the XML tree: an F1 chip carries
+                // `ClockDef::Stm32f1` and generates clock code even though
+                // `convert_xml` gave it nothing, and reporting that as a
+                // gap would be a false alarm on the family that works best.
+                let gaps = chip_gaps(
+                    &hal,
+                    crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
+                        &def.family,
+                        &def.clock.to_config(&def.clock_limits),
+                    ),
+                    uses_dma_def(&def.family)
+                        .then(|| def.dma.as_ref().map_or(0, |d| d.channels.len())),
+                );
+                if !gaps.is_empty() {
+                    gap_chips.push(format!("{} ({})", def.display_name, gaps.join(", ")));
+                }
+                match registry::save_definition(&def) {
+                    Ok(_) => {
+                        last_id = Some(def.id.clone());
+                        registry::merge_def(&mut self.mcu_registry, def);
+                        saved += 1;
+                    }
+                    Err(e) => {
+                        skipped += 1;
+                        first_err.get_or_insert(e);
+                    }
+                }
             }
         }
 
@@ -1462,99 +1461,105 @@ mod feature_verdict_tests {
             "offline is not proof of anything"
         );
         // An empty list is still an ANSWER, and the answer is no.
-        assert_eq!(feature_verdict("stm32f411re", Some(&[])), FeatureVerdict::Missing);
+        assert_eq!(
+            feature_verdict("stm32f411re", Some(&[])),
+            FeatureVerdict::Missing
+        );
     }
 }
 
-    /// Every route that puts a chip definition into the registry must have
-    /// decided about its HAL feature — or be listed here as knowingly exempt.
-    ///
-    /// Written after getting this wrong TWICE in one afternoon, in opposite
-    /// directions: first "the check does not exist", then "chip search does not
-    /// call it". Both were reasoning about which function delegates to which,
-    /// and both were wrong. This answers the question by reading the source
-    /// instead, and it fails the day a fourth route is added — which is when
-    /// nobody will be thinking about the third.
-    #[test]
-    fn every_import_route_decides_about_the_hal_feature() {
-        // fn name -> why it does not check. Anything not here must check.
-        const EXEMPT: &[(&str, &str)] = &[
-            (
-                "show_mcu_form_dialog",
-                "the user typed the dependency line themselves, in the form",
-            ),
-            (
-                "save_clock_to_definition",
-                "re-saves a chip already in the registry; the dep line is untouched",
-            ),
-            (
-                "import_wl30_for_real",
-                "a test of the FILE half; the HAL check is the dialog's, and needs the network",
-            ),
-            // `show_new_project_dialog` used to be exempt here, importing
-            // someone else's `.ron` unchecked. It now checks like the rest —
-            // an exemption is a decision, and that one did not survive being
-            // written down and looked at.
-        ];
+/// Every route that puts a chip definition into the registry must have
+/// decided about its HAL feature — or be listed here as knowingly exempt.
+///
+/// Written after getting this wrong TWICE in one afternoon, in opposite
+/// directions: first "the check does not exist", then "chip search does not
+/// call it". Both were reasoning about which function delegates to which,
+/// and both were wrong. This answers the question by reading the source
+/// instead, and it fails the day a fourth route is added — which is when
+/// nobody will be thinking about the third.
+#[test]
+fn every_import_route_decides_about_the_hal_feature() {
+    // fn name -> why it does not check. Anything not here must check.
+    const EXEMPT: &[(&str, &str)] = &[
+        (
+            "show_mcu_form_dialog",
+            "the user typed the dependency line themselves, in the form",
+        ),
+        (
+            "save_clock_to_definition",
+            "re-saves a chip already in the registry; the dep line is untouched",
+        ),
+        (
+            "import_wl30_for_real",
+            "a test of the FILE half; the HAL check is the dialog's, and needs the network",
+        ),
+        // `show_new_project_dialog` used to be exempt here, importing
+        // someone else's `.ron` unchecked. It now checks like the rest —
+        // an exemption is a decision, and that one did not survive being
+        // written down and looked at.
+    ];
 
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
-        let mut files = vec![root.join("dialogs.rs"), root.join("mcu_form_dialog.rs")];
-        files.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+    let mut files = vec![root.join("dialogs.rs"), root.join("mcu_form_dialog.rs")];
+    files.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"));
 
-        let mut unchecked: Vec<String> = Vec::new();
-        for path in files {
-            let Ok(text) = std::fs::read_to_string(&path) else {
+    let mut unchecked: Vec<String> = Vec::new();
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        // (line, name) of every `fn`, in order — the owner of a call is the
+        // last one declared before it.
+        let fns: Vec<(usize, String)> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                let rest = l.trim_start().split_once("fn ")?.1;
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                (!name.is_empty()).then_some((i, name))
+            })
+            .collect();
+
+        for (i, line) in lines.iter().enumerate() {
+            if !(line.contains("registry::merge_def(")
+                || line.contains("registry::save_definition("))
+            {
+                continue;
+            }
+            let Some((start, name)) = fns.iter().rev().find(|(f, _)| *f < i) else {
                 continue;
             };
-            let lines: Vec<&str> = text.lines().collect();
-            // (line, name) of every `fn`, in order — the owner of a call is the
-            // last one declared before it.
-            let fns: Vec<(usize, String)> = lines
+            if EXEMPT.iter().any(|(n, _)| n == name) {
+                continue;
+            }
+            let end = fns
                 .iter()
-                .enumerate()
-                .filter_map(|(i, l)| {
-                    let rest = l.trim_start().split_once("fn ")?.1;
-                    let name: String = rest
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-                    (!name.is_empty()).then_some((i, name))
-                })
-                .collect();
-
-            for (i, line) in lines.iter().enumerate() {
-                if !(line.contains("registry::merge_def(")
-                    || line.contains("registry::save_definition("))
-                {
-                    continue;
-                }
-                let Some((start, name)) = fns.iter().rev().find(|(f, _)| *f < i) else {
-                    continue;
-                };
-                if EXEMPT.iter().any(|(n, _)| n == name) {
-                    continue;
-                }
-                let end = fns
-                    .iter()
-                    .find(|(f, _)| f > start)
-                    .map_or(lines.len(), |(f, _)| *f);
-                if !lines[*start..end].iter().any(|l| l.contains("feature_verdict")) {
-                    unchecked.push(format!(
-                        "{}:{}  fn {name} stores a definition without checking its HAL feature",
-                        path.file_name().unwrap().to_string_lossy(),
-                        i + 1
-                    ));
-                }
+                .find(|(f, _)| f > start)
+                .map_or(lines.len(), |(f, _)| *f);
+            if !lines[*start..end]
+                .iter()
+                .any(|l| l.contains("feature_verdict"))
+            {
+                unchecked.push(format!(
+                    "{}:{}  fn {name} stores a definition without checking its HAL feature",
+                    path.file_name().unwrap().to_string_lossy(),
+                    i + 1
+                ));
             }
         }
-        assert!(
-            unchecked.is_empty(),
-            "a chip can reach the registry without its embassy feature being \
+    }
+    assert!(
+        unchecked.is_empty(),
+        "a chip can reach the registry without its embassy feature being \
              checked.\nEither call `feature_verdict`, or add the function to \
              EXEMPT with the reason:\n{}",
-            unchecked.join("\n")
-        );
-    }
+        unchecked.join("\n")
+    );
+}
 
 /// The per-file caches the importer carries across a bulk run.
 ///
@@ -1714,7 +1719,9 @@ pub(super) fn chip_gaps(
 ) -> Vec<String> {
     let mut out = Vec::new();
     match hal {
-        FeatureVerdict::Missing => out.push("no HAL support (the crate publishes no such chip feature)".into()),
+        FeatureVerdict::Missing => {
+            out.push("no HAL support (the crate publishes no such chip feature)".into())
+        }
         FeatureVerdict::Unverified => out.push("HAL feature unverified (offline?)".into()),
         FeatureVerdict::Present => {}
     }
@@ -1945,8 +1952,15 @@ mod chip_gaps_tests {
         assert!(uses_dma_def("stm32wl3"));
 
         // `None` is the shape those families pass, and it must stay silent.
-        assert!(local_chip_gaps(true, None).is_empty(), "no DMA question to answer");
-        assert_eq!(local_chip_gaps(false, None).len(), 1, "clock gap still reported");
+        assert!(
+            local_chip_gaps(true, None).is_empty(),
+            "no DMA question to answer"
+        );
+        assert_eq!(
+            local_chip_gaps(false, None).len(),
+            1,
+            "clock gap still reported"
+        );
     }
 
     /// The local variant must never say anything about the HAL feature — it did
@@ -1955,7 +1969,12 @@ mod chip_gaps_tests {
     /// one.
     #[test]
     fn the_local_variant_is_silent_about_the_hal() {
-        for (clock, dma) in [(true, Some(8)), (false, Some(0)), (true, Some(0)), (false, Some(8))] {
+        for (clock, dma) in [
+            (true, Some(8)),
+            (false, Some(0)),
+            (true, Some(0)),
+            (false, Some(8)),
+        ] {
             for line in local_chip_gaps(clock, dma) {
                 assert!(!line.contains("HAL"), "it did not check the HAL: {line}");
             }
@@ -2095,7 +2114,11 @@ mod import_status_colour_tests {
             ph::CHECK,
             ph::WARNING
         );
-        assert_eq!(import_status_colour(&msg), AMBER, "a warning may not read as success");
+        assert_eq!(
+            import_status_colour(&msg),
+            AMBER,
+            "a warning may not read as success"
+        );
     }
 
     #[test]

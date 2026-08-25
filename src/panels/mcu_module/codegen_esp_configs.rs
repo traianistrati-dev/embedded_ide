@@ -630,16 +630,24 @@ fn pwm_file(n: u8, chans: &[(u8, u16)], cfg: Option<&TimerModuleConfig>) -> Stri
     // DUTY_RESOLUTION allows is a real failure, and swallowing it inside a
     // generated helper would hide it.
     if !chans.is_empty() {
-        func.push_str("\n/// Hundredths of a percent into the whole percent esp-hal's LEDC takes,\n");
+        func.push_str(
+            "\n/// Hundredths of a percent into the whole percent esp-hal's LEDC takes,\n",
+        );
         func.push_str("/// rounded UP and clamped \u{2014} the same rounding the `DUTY_CH*_PCT`\n");
         func.push_str("/// constants above already show.\n");
         func.push_str("fn whole_percent(x100: u32) -> u8 {\n");
         func.push_str("    x100.div_ceil(100).min(100) as u8\n");
         func.push_str("}\n\n");
-        func.push_str("/// Set a channel's duty in the same units the STM32 backends use \u{2014}\n");
-        func.push_str("/// HUNDREDTHS of a percent \u{2014} so the call site reads the same on any chip.\n");
+        func.push_str(
+            "/// Set a channel's duty in the same units the STM32 backends use \u{2014}\n",
+        );
+        func.push_str(
+            "/// HUNDREDTHS of a percent \u{2014} so the call site reads the same on any chip.\n",
+        );
         func.push_str("///\n");
-        func.push_str("/// The channel is part of the NAME rather than an argument, and the value\n");
+        func.push_str(
+            "/// The channel is part of the NAME rather than an argument, and the value\n",
+        );
         func.push_str("/// is rounded UP to whole percent, because that is all the LEDC takes.\n");
         func.push_str(&format!(
             "pub trait DutyHandle {{\n    /// CH{first}, the lowest channel wired to PWM{n}.\n"
@@ -1023,7 +1031,10 @@ mod esp_duty_handle_tests {
             f.contains("impl<'d> DutyHandle for channel::Channel<'d, LowSpeed> {"),
             "{f}"
         );
-        assert!(f.contains("        self.set_duty(whole_percent(value))"), "{f}");
+        assert!(
+            f.contains("        self.set_duty(whole_percent(value))"),
+            "{f}"
+        );
         // CH2 is the only pad, so it is also what the bare method drives.
         assert!(f.contains("        self.set_duty_tim_0_ch2(value)"), "{f}");
         for ch in [0, 1, 3] {
@@ -1039,11 +1050,15 @@ mod esp_duty_handle_tests {
     fn the_tuple_index_is_the_position_not_the_channel() {
         let f = pwm_file(0, &[(0, 1_000), (2, 5_000)], None);
         assert!(
-            f.contains("_ch0(&self, value: u32) -> Result<(), channel::Error> {\n        self.0.set_duty("),
+            f.contains(
+                "_ch0(&self, value: u32) -> Result<(), channel::Error> {\n        self.0.set_duty("
+            ),
             "{f}"
         );
         assert!(
-            f.contains("_ch2(&self, value: u32) -> Result<(), channel::Error> {\n        self.1.set_duty("),
+            f.contains(
+                "_ch2(&self, value: u32) -> Result<(), channel::Error> {\n        self.1.set_duty("
+            ),
             "{f}"
         );
         assert!(!f.contains("self.2."), "there is no third channel:\n{f}");

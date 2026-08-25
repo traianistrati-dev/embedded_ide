@@ -740,7 +740,11 @@ mod tests {
         // Every part appears exactly once in the unified set.
         let mut seen = std::collections::HashSet::new();
         for &ix in &c.unified {
-            assert!(seen.insert(c.rows[ix].key.clone()), "duplicate: {}", c.rows[ix].key);
+            assert!(
+                seen.insert(c.rows[ix].key.clone()),
+                "duplicate: {}",
+                c.rows[ix].key
+            );
         }
 
         // And the part this was all about.
@@ -806,9 +810,9 @@ mod tests {
             if row.entry.family.is_empty() {
                 continue;
             }
-            let better = per_family
-                .get(&row.entry.family)
-                .is_none_or(|cur| !c.sources[cur.source].has_clock() && c.sources[row.source].has_clock());
+            let better = per_family.get(&row.entry.family).is_none_or(|cur| {
+                !c.sources[cur.source].has_clock() && c.sources[row.source].has_clock()
+            });
             if better {
                 per_family.insert(row.entry.family.clone(), row);
             }
@@ -835,13 +839,19 @@ mod tests {
                 no.push(format!("{family} (e.g. {})", row.entry.ref_name));
             }
         }
-        println!("
-GENERATES clock code ({}):", yes.len());
+        println!(
+            "
+GENERATES clock code ({}):",
+            yes.len()
+        );
         for f in &yes {
             println!("  {f}");
         }
-        println!("
-KEEPS THE COMMENTED SKELETON ({}):", no.len());
+        println!(
+            "
+KEEPS THE COMMENTED SKELETON ({}):",
+            no.len()
+        );
         for f in &no {
             println!("  {f}");
         }
@@ -936,7 +946,10 @@ KEEPS THE COMMENTED SKELETON ({}):", no.len());
             ..Default::default()
         };
         let rich = entry("STM32WL30KBVx", "stm32wl3");
-        assert!(rich.completeness() > thin.completeness(), "the fixture is the point");
+        assert!(
+            rich.completeness() > thin.completeness(),
+            "the fixture is the point"
+        );
 
         // Thin source listed FIRST, so "first wins" would pick the wrong one.
         let cat = catalogue(
@@ -954,7 +967,11 @@ KEEPS THE COMMENTED SKELETON ({}):", no.len());
         assert_eq!(total, 1, "and a search returns it once");
         assert_eq!(hits.len(), 1);
         // The surviving row is the one with the data.
-        assert!(hits[0].detail.contains("64"), "kept the thin copy: {:?}", hits[0].detail);
+        assert!(
+            hits[0].detail.contains("64"),
+            "kept the thin copy: {:?}",
+            hits[0].detail
+        );
     }
 
     /// A part that is BOTH in the registry and on disk keeps its disk

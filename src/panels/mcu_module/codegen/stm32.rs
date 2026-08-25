@@ -4047,9 +4047,18 @@ mod duty_handle_tests {
         }
         // One method per wired channel, and the bare one delegates rather than
         // repeating the arithmetic.
-        assert!(file.contains("fn set_duty_tim_2_ch3(&mut self, value: u32) {"), "{file}");
-        assert!(file.contains("fn set_duty_tim_2_ch4(&mut self, value: u32) {"), "{file}");
-        assert!(file.contains("        self.set_duty_tim_2_ch3(value);"), "{file}");
+        assert!(
+            file.contains("fn set_duty_tim_2_ch3(&mut self, value: u32) {"),
+            "{file}"
+        );
+        assert!(
+            file.contains("fn set_duty_tim_2_ch4(&mut self, value: u32) {"),
+            "{file}"
+        );
+        assert!(
+            file.contains("        self.set_duty_tim_2_ch3(value);"),
+            "{file}"
+        );
         assert!(file.contains("/// CH3, on PA2."), "{file}");
     }
 
@@ -4059,7 +4068,10 @@ mod duty_handle_tests {
     fn ch1_is_still_the_default_when_it_is_wired() {
         let (p1, p2) = (pwm_pin("PA0", 1), pwm_pin("PA1", 2));
         let file = pwm_config_file(2, None, &[(1, &p1), (2, &p2)], "Tim2NoRemap");
-        assert!(file.contains("        self.set_duty_tim_2_ch1(value);"), "{file}");
+        assert!(
+            file.contains("        self.set_duty_tim_2_ch1(value);"),
+            "{file}"
+        );
         assert!(file.contains("Channel::C1"), "{file}");
     }
 }

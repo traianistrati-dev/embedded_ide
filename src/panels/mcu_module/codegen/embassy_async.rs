@@ -2470,7 +2470,9 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
             .join("+");
         let mut t = String::new();
         t.push_str("\n/// Set a channel's duty in the same units the `DUTY_*` constants above\n");
-        t.push_str("/// use \u{2014} HUNDREDTHS of a percent, so `10_000` is 100 % and `750` is 7.5 %.\n");
+        t.push_str(
+            "/// use \u{2014} HUNDREDTHS of a percent, so `10_000` is 100 % and `750` is 7.5 %.\n",
+        );
         t.push_str("///\n");
         t.push_str("/// A trait rather than an inherent method because the handle is embassy's\n");
         t.push_str("/// own type, which this crate does not own. One method per WIRED channel\n");
@@ -2479,13 +2481,19 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
         ));
         if !wiring.breaks.is_empty() {
             t.push_str("///\n");
-            t.push_str("/// The impl is on the DRIVER, not on the tuple `init` returns here \u{2014}\n");
+            t.push_str(
+                "/// The impl is on the DRIVER, not on the tuple `init` returns here \u{2014}\n",
+            );
             t.push_str("/// the break pads ride along in it. `main.rs` destructures that tuple,\n");
             t.push_str(&format!("/// so `{handle}` is already the driver.\n"));
         }
         t.push_str("pub trait DutyHandle {\n");
-        t.push_str(&format!("    /// Ch{first}, the lowest channel wired to TIM{n}.\n"));
-        t.push_str(&format!("    fn set_duty_tim_{n}(&mut self, value: u32);\n"));
+        t.push_str(&format!(
+            "    /// Ch{first}, the lowest channel wired to TIM{n}.\n"
+        ));
+        t.push_str(&format!(
+            "    fn set_duty_tim_{n}(&mut self, value: u32);\n"
+        ));
         for ch in &active {
             let both = if complementary {
                 format!(" and CH{ch}N")
@@ -2501,8 +2509,12 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
         t.push_str(&format!(
             "impl<'d> DutyHandle for {driver}<'d, peripherals::TIM{n}> {{\n"
         ));
-        t.push_str(&format!("    fn set_duty_tim_{n}(&mut self, value: u32) {{\n"));
-        t.push_str(&format!("        self.set_duty_tim_{n}_ch{first}(value);\n"));
+        t.push_str(&format!(
+            "    fn set_duty_tim_{n}(&mut self, value: u32) {{\n"
+        ));
+        t.push_str(&format!(
+            "        self.set_duty_tim_{n}_ch{first}(value);\n"
+        ));
         t.push_str("    }\n");
         for ch in &active {
             t.push_str(&format!(
@@ -7657,9 +7669,18 @@ mod async_duty_handle_tests {
         let cfg = TimerModuleConfig::new(3);
         let f = pwm_config_file(3, &cfg, &wiring(&[2, 4], &[]), "_pwm3");
 
-        assert!(f.contains("impl<'d> DutyHandle for SimplePwm<'d, peripherals::TIM3>"), "{f}");
-        assert!(f.contains("fn set_duty_tim_3_ch2(&mut self, value: u32);"), "{f}");
-        assert!(f.contains("fn set_duty_tim_3_ch4(&mut self, value: u32);"), "{f}");
+        assert!(
+            f.contains("impl<'d> DutyHandle for SimplePwm<'d, peripherals::TIM3>"),
+            "{f}"
+        );
+        assert!(
+            f.contains("fn set_duty_tim_3_ch2(&mut self, value: u32);"),
+            "{f}"
+        );
+        assert!(
+            f.contains("fn set_duty_tim_3_ch4(&mut self, value: u32);"),
+            "{f}"
+        );
         // CH1 and CH3 have no pad, so nothing may reach them.
         for ch in [1, 3] {
             assert!(
@@ -7686,10 +7707,15 @@ mod async_duty_handle_tests {
             "{f}"
         );
         assert!(
-            f.contains("        self.set_duty(Channel::Ch1, self.get_max_duty() * value / 10_000);"),
+            f.contains(
+                "        self.set_duty(Channel::Ch1, self.get_max_duty() * value / 10_000);"
+            ),
             "{f}"
         );
-        assert!(!f.contains("set_duty_cycle_fraction(value"), "wrong driver's API:\n{f}");
+        assert!(
+            !f.contains("set_duty_cycle_fraction(value"),
+            "wrong driver's API:\n{f}"
+        );
         // A complementary channel means BOTH its pads, and the doc says so.
         assert!(f.contains("/// CH1 and CH1N."), "{f}");
     }

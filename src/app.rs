@@ -1444,7 +1444,10 @@ pub struct AppIde {
     /// doing it inline would freeze the app on every chip pick — and doing it in
     /// the `ui` function would do that on every repaint. Same shape as
     /// `ensure_version_fetch`, for the same reason.
-    hal_check: Option<(String, std::sync::Arc<std::sync::Mutex<Option<dialogs::FeatureVerdict>>>)>,
+    hal_check: Option<(
+        String,
+        std::sync::Arc<std::sync::Mutex<Option<dialogs::FeatureVerdict>>>,
+    )>,
     /// `(chip id, its gaps)` for the chip staged in the New Project dialog.
     ///
     /// Cached on the id because working it out clones the chip's whole clock

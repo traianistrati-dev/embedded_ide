@@ -348,9 +348,8 @@ fn file_is_mcu(path: &Path) -> bool {
 /// this module's own fixture writes. What must NOT match is a longer name that
 /// merely starts the same way.
 fn head_is_mcu(head: &str) -> bool {
-    head.match_indices("<Mcu").any(|(i, _)| {
-        !matches!(head[i + 4..].chars().next(), Some(c) if c.is_ascii_alphanumeric())
-    })
+    head.match_indices("<Mcu")
+        .any(|(i, _)| !matches!(head[i + 4..].chars().next(), Some(c) if c.is_ascii_alphanumeric()))
 }
 
 fn is_chip_xml(name: &std::ffi::OsStr) -> bool {
@@ -710,7 +709,10 @@ mod tests {
             !head_is_mcu(r#"<?xml version="1.0"?><rzone schemaVersion="0.2.0">"#),
             "a memory map is not a chip"
         );
-        assert!(!head_is_mcu("<McuList>"), "a longer tag is a different element");
+        assert!(
+            !head_is_mcu("<McuList>"),
+            "a longer tag is a different element"
+        );
         assert!(!head_is_mcu(""));
     }
 
