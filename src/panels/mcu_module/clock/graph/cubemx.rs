@@ -385,7 +385,14 @@ fn shape(r: &RawElement, p: Option<&Param>) -> (NodeKind, NodeState) {
                 },
             )
         }
-        "multiplexor" => {
+        // `xbar` is a multiplexor drawn as a crossbar — same `refParameter`, same
+        // list of possible values, same single selection. Falling through to the
+        // default made it a `Tap`, which SILENTLY DROPPED the choice: STM32N6's
+        // twenty IC clock selectors all came out as taps fed by four PLLs at
+        // once, so nothing downstream could tell which PLL a peripheral ran on.
+        //
+        // Contained: 3 of the 66 clock files use it (N6, MP2, MP21).
+        "multiplexor" | "xbar" => {
             let n = p.map(|p| p.values.len()).unwrap_or(r.inputs.len()).max(1);
             let sel = p.map(|p| p.default_index()).unwrap_or(0);
             (
