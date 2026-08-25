@@ -932,7 +932,12 @@ KEEPS THE COMMENTED SKELETON ({}):",
         let xml = std::fs::read_to_string(src.chip_file(&row.entry)).expect("read");
         match graph_for_chip_xml(src.db.as_deref().unwrap(), &xml, &want) {
             Ok((gc, missing)) => {
-                println!("{} ({want}): {} nodes, {} unbound", row.entry.ref_name, gc.graph.nodes.len(), missing.len());
+                println!(
+                    "{} ({want}): {} nodes, {} unbound",
+                    row.entry.ref_name,
+                    gc.graph.nodes.len(),
+                    missing.len()
+                );
                 let mut ids: Vec<&str> = gc.graph.nodes.iter().map(|n| n.id.as_str()).collect();
                 ids.sort_unstable();
                 println!("  {}", ids.join(" "));

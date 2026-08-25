@@ -1695,10 +1695,16 @@ pub(super) fn definitions_from_file(
 /// `DmaDef` there means nothing at all, and reporting it as a gap is a false
 /// alarm on the two families most likely to be installed.
 ///
-/// The same two names `generates_clock_code` special-cases, for the same
-/// underlying reason: they are the families that do not go through embassy.
+/// The same names `generates_clock_code` special-cases, for the same underlying
+/// reason: they are the families that do not go through embassy.
+///
+/// `is_esp`, not `"esp32c3"`. With one chip named, the eight Espressif parts
+/// added later were asked the question anyway — and since a generated ESP
+/// definition sets `dma: None`, `map_or(0, …)` at the call site turned that into
+/// `Some(0)` and reported *"no DMA channels found for it"* on every one of them.
+/// `None` is not zero, and neither is "the question does not apply".
 pub(super) fn uses_dma_def(family: &str) -> bool {
-    !matches!(family, "stm32f1" | "esp32c3")
+    !(family == "stm32f1" || crate::panels::mcu_module::codegen::family::is_esp(family))
 }
 
 /// Everything about a chip that will not work, in one list.
@@ -1911,6 +1917,53 @@ mod chip_gaps_tests {
     #[test]
     fn a_chip_with_everything_reports_nothing() {
         assert!(chip_gaps(&FeatureVerdict::Present, true, Some(8)).is_empty());
+    }
+
+    /// EVERY bundled chip must report no gaps — asked of the registry, not of a
+    /// list written here.
+    ///
+    /// This is the test that would have caught what four hard-coded family lists
+    /// did. Each named `"esp32c3"` because it was the only Espressif part when
+    /// they were written; the eight added later fell through and the New Project
+    /// dialog told users their ESP32-C6 had "no clock code" and "no DMA channels
+    /// found" — while its `main.rs` carried `with_cpu_clock(…)` and its
+    /// definition carried `dma: None`, which is not the same as zero.
+    ///
+    /// Written against `builtin_definitions()` on purpose: a list of chip ids
+    /// here would go stale the next time one is added, which is precisely the
+    /// failure it exists to prevent.
+    #[test]
+    fn no_bundled_chip_reports_a_gap() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+
+        let all = builtin_definitions();
+        assert!(all.len() >= 9, "only {} bundled chips?", all.len());
+        for d in &all {
+            let gaps = local_chip_gaps(
+                crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
+                    &d.family,
+                    &d.clock.to_config(&d.clock_limits),
+                ),
+                uses_dma_def(&d.family).then(|| d.dma.as_ref().map_or(0, |x| x.channels.len())),
+            );
+            assert!(gaps.is_empty(), "{}: {gaps:?}", d.id);
+        }
+    }
+
+    /// The DMA question is not ASKED of a family that has no `DmaDef` to answer
+    /// it with — `None`, not `Some(0)`.
+    #[test]
+    fn dma_is_not_asked_of_the_families_that_do_not_use_it() {
+        for family in [
+            "stm32f1", "esp32", "esp32c2", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2",
+            "esp32s2", "esp32s3",
+        ] {
+            assert!(!uses_dma_def(family), "{family} was asked about DMA");
+        }
+        // …and every embassy family still is.
+        for family in ["stm32f4", "stm32g0", "stm32h5", "stm32wba"] {
+            assert!(uses_dma_def(family), "{family} stopped being asked");
+        }
     }
 
     /// The WL30 case, which is why this exists: three gaps, and the import used

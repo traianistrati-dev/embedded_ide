@@ -89,6 +89,13 @@ struct Package {
     /// Checked against the metadata by
     /// [`tests::every_package_names_exactly_the_gpios_its_metadata_has`], so a
     /// mistyped number fails a test rather than quietly reserving a good pad.
+    ///
+    /// Read by that test and by nothing else — `package_layout` lays out the
+    /// pads a package HAS, so an omitted GPIO simply never appears. This is a
+    /// declared ledger, not an input: its whole job is to make the omission
+    /// deliberate and reviewable. Hence the allow, which `cargo check --tests`
+    /// never needed and `cargo build --release` does.
+    #[cfg_attr(not(test), allow(dead_code))]
     off_package: &'static [u8],
 }
 

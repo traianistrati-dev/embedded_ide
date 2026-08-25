@@ -15,6 +15,7 @@
 
 use super::super::clock::graph::model::{ClockGraph, NodeKind, NodeState};
 use super::super::clock::model::ClockConfig;
+use super::family::is_esp;
 
 /// embassy's reset default (HSI, everything /1) — the clock line for a family
 /// with no RCC recipe, or whose graph selections happen to equal the reset.
@@ -71,8 +72,13 @@ pub fn codegen_node_ids(family: &str) -> Vec<&'static str> {
             "hse", "pllsrc", "pllxtpre", "pllmul", "sw", "ahb", "apb1", "apb2", "adc", "usb",
             "systick", "rtc", "mco",
         ],
-        // esp-hal exposes only the CPU clock.
-        "esp32c3" => vec!["cpu"],
+        // esp-hal exposes only the CPU clock — on every Espressif part, not
+        // just the C3 that was once the only one here. Left as a single name,
+        // the eight parts added later fell through to the STM32 branch below,
+        // which is gated on `starts_with("stm32")` and so gave them NOTHING:
+        // no id to bind, so nothing renamed their `cpu` node, so the editor
+        // protected a name code generation actually reads.
+        f if is_esp(f) => vec!["cpu"],
         _ => match rcc_recipe(family) {
             Some((spec, _)) => {
                 let mut ids = vec![
@@ -290,12 +296,20 @@ fn hand_written_skeleton() -> String {
 /// `false` means the tree cannot be turned into code — the block is the
 /// hand-written skeleton, and manual mode is the only way to configure it.
 ///
-/// STM32F1 and ESP32-C3 are here even though they have no [`rcc_recipe`]: they
-/// generate through their own HALs (`graph_to_stm32f1`, `esp_init_line`). Left
-/// out, every F1 project would have opened defaulted to hand-written — with the
-/// generator still overwriting the block, since those paths carry no markers.
+/// STM32F1 and the Espressif parts are here even though they have no
+/// [`rcc_recipe`]: they generate through their own HALs (`graph_to_stm32f1`,
+/// `esp_init_line`). Left out, every F1 project would have opened defaulted to
+/// hand-written — with the generator still overwriting the block, since those
+/// paths carry no markers.
+///
+/// `is_esp`, not `"esp32c3"`. Naming one chip was right when there was one; the
+/// eight added later then reported *"no clock code (its tree cannot be turned
+/// into an RCC config)"* in the New Project dialog while their `main.rs` carried
+/// `with_cpu_clock(CpuClock::_160MHz)` all along. The tree indeed becomes no RCC
+/// config — an ESP has no RCC — but the question this answers is whether clock
+/// code is generated, and it is.
 pub fn generates_clock_code(family: &str) -> bool {
-    matches!(family, "stm32f1" | "esp32c3") || rcc_recipe(family).is_some()
+    family == "stm32f1" || is_esp(family) || rcc_recipe(family).is_some()
 }
 
 /// Does THIS chip's clock reach `main.rs` — family recipe or tree?
@@ -318,8 +332,12 @@ pub fn generates_clock_code_for(family: &str, clock: &ClockConfig) -> bool {
 /// Only the embassy path fences the block off. F1 and ESP generate real clock
 /// code through their own HALs and are not marker-wrapped, so offering the
 /// switch there would promise a preservation that does not happen.
+///
+/// Which is what the eight Espressif parts added after the C3 were offered:
+/// the switch appeared, and their hand-written clock would have been overwritten
+/// on the first regeneration.
 pub fn supports_manual_clock(family: &str) -> bool {
-    !matches!(family, "stm32f1" | "esp32c3")
+    !(family == "stm32f1" || is_esp(family))
 }
 
 /// The clock selections, family-neutral — what the generic emitter consumes and
@@ -1407,10 +1425,23 @@ mod tests {
         assert!(generic_recipe(&empty).is_none());
     }
 
+    /// Every Espressif family the IDE ships. Naming only `esp32c3` — which all
+    /// three of these predicates once did — is exactly the bug: eight parts
+    /// added later were told they had "no clock code" while their `main.rs`
+    /// carried `with_cpu_clock(…)`, and were offered a manual-clock switch whose
+    /// preservation the ESP path cannot honour.
+    const ESP_FAMILIES: [&str; 9] = [
+        "esp32", "esp32c2", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2", "esp32s2",
+        "esp32s3",
+    ];
+
     /// Which families can be hand-written, and which already generate.
     #[test]
     fn the_family_predicates_agree_with_the_paths_that_exist() {
-        for f in ["stm32f4", "stm32wba", "stm32g0", "stm32f1", "esp32c3"] {
+        for f in ["stm32f4", "stm32wba", "stm32g0", "stm32f1"] {
+            assert!(generates_clock_code(f), "{f} generates its clock");
+        }
+        for f in ESP_FAMILIES {
             assert!(generates_clock_code(f), "{f} generates its clock");
         }
         for f in ["stm32h5", "stm32h7", "stm32u5", "stm32f3"] {
@@ -1420,7 +1451,9 @@ mod tests {
         assert!(supports_manual_clock("stm32h5"));
         assert!(supports_manual_clock("stm32f4"));
         assert!(!supports_manual_clock("stm32f1"));
-        assert!(!supports_manual_clock("esp32c3"));
+        for f in ESP_FAMILIES {
+            assert!(!supports_manual_clock(f), "{f} was offered manual clock");
+        }
     }
 
     /// A hand-written block survives regeneration; going back to generated
@@ -1485,7 +1518,11 @@ mod tests {
         // `pll_input` is a computed frequency, not a node the bridge reads;
         // listing it would make the editor ask for an impossible binding.
         assert!(!f1.contains(&"pll_input"), "{f1:?}");
-        assert_eq!(codegen_node_ids("esp32c3"), vec!["cpu"]);
+        // Every Espressif part, not just the one that was here first: with no
+        // id to bind, nothing renames the `cpu` node the generator reads.
+        for f in ESP_FAMILIES {
+            assert_eq!(codegen_node_ids(f), vec!["cpu"], "{f}");
+        }
         // Not an STM32: nothing here would ever emit `embassy_stm32` config for
         // it, so there is nothing to protect.
         assert!(codegen_node_ids("stm8").is_empty());
