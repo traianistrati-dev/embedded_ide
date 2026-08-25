@@ -266,6 +266,18 @@ pub struct McuDefinition {
     /// `None` when the vendor states none (the whole C0 series does not).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_mhz: Option<u32>,
+    /// On-die RAM in KiB, for the catalogue and its filters.
+    ///
+    /// NOT [`ProjectDef::ram_size`], which is the linker script's RAM region and
+    /// is empty on Espressif parts because `esp-hal` writes `memory.x` itself.
+    /// Putting the SRAM figure there would state a linker value nothing sets —
+    /// the same shape of mistake as the `hal_dep` that went on claiming
+    /// "esp-hal 0.23" long after the template had moved on.
+    ///
+    /// `#[serde(default)]`, so every definition written before this field
+    /// existed still parses; those fall back to the `memory.x` size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sram_kb: Option<u32>,
     /// DMA channels + whether they are muxed. See [`DmaDef`].
     #[serde(default)]
     pub dma: Option<DmaDef>,

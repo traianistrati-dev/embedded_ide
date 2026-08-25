@@ -96,6 +96,30 @@ pub struct RegistryRow<'a> {
     pub ram_kb: Option<u32>,
     /// As the definition records it, e.g. `LQFP48`; empty when it does not.
     pub package: &'a str,
+    /// From `McuDefinition::max_mhz`.
+    pub mhz: Option<u32>,
+    /// Usable (non-reserved) pins the definition lists.
+    pub io: Option<u32>,
+    /// The definition's `cpu` string, e.g. `ARM Cortex-M3`.
+    ///
+    /// Normalised before it is compared — see [`normalise_core`]. The chip
+    /// definitions capitalise it `ARM`, the vendor index `Arm`, and a core
+    /// filter that compares them raw matches nothing.
+    pub cpu: &'a str,
+}
+
+/// A core name in the vendor index's spelling.
+///
+/// `families.xml` writes `Arm Cortex-M3`; the bundled definitions write
+/// `ARM Cortex-M3`. The catalogue's core filter is keyed on the former, so a
+/// registry row spelling it the other way would silently never match — and the
+/// chip the user definitely has is the one that would vanish.
+pub fn normalise_core(cpu: &str) -> String {
+    let t = cpu.trim();
+    match t.strip_prefix("ARM ") {
+        Some(rest) => format!("Arm {rest}"),
+        None => t.to_owned(),
+    }
 }
 
 /// A search, and what it had to leave out.
@@ -287,7 +311,14 @@ impl Catalogue {
                 metrics: RowMetrics {
                     flash_kb: r.flash_kb,
                     ram_kb: r.ram_kb,
+                    mhz: r.mhz,
+                    io: r.io,
                     package: r.package.to_owned(),
+                    cores: if r.cpu.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![normalise_core(r.cpu)]
+                    },
                     ..Default::default()
                 },
             });
@@ -505,6 +536,9 @@ mod tests {
             flash_kb: None,
             ram_kb: None,
             package: "",
+            mhz: None,
+            io: None,
+            cpu: "",
         }
     }
 
@@ -997,6 +1031,84 @@ KEEPS THE COMMENTED SKELETON ({}):",
             matches!(hit.reimport, Some(Origin::Disk { .. })),
             "no re-import offered: {:?}",
             hit.reimport
+        );
+    }
+
+    /// A bundled chip must be FILTERABLE, not merely visible.
+    ///
+    /// Before the definitions carried their own numbers, every registry row was
+    /// `Unknown` on every numeric facet — so the moment a filter was set, the
+    /// chips the IDE ships were the first to disappear.
+    #[test]
+    fn a_bundled_chip_is_judged_on_its_own_numbers() {
+        use crate::panels::mcu_module::chip_filter::Bounds;
+
+        let cat = catalogue(vec![source(SourceKind::CubeMxDb, true)], vec![]);
+        let esp = RegistryRow {
+            id: "esp32c6",
+            name: "ESP32-C6",
+            family: "esp32c6",
+            // No flash: it is an external SPI part, chosen by the module.
+            flash_kb: None,
+            ram_kb: Some(512),
+            package: "",
+            mhz: Some(160),
+            io: Some(31),
+            cpu: "RISC-V 32-bit",
+        };
+        let bounds = Bounds {
+            ram_kb: (2, 4200),
+            mhz: (24, 600),
+            io: (6, 200),
+            ..Bounds::default()
+        };
+
+        // Asked for something it has.
+        let mut f = ChipFilter::new(bounds);
+        f.ram_kb = (256, 4200);
+        f.mhz = (100, 600);
+        let r = cat.search("esp32", &[esp], &f, 10);
+        assert_eq!(r.hits.len(), 1, "hidden despite fitting: {r:?}", r = r.hits);
+        assert_eq!(r.unknown, 0, "counted as unanswerable");
+
+        // Asked for something it does not have.
+        let mut slow = ChipFilter::new(bounds);
+        slow.mhz = (200, 600);
+        assert!(cat.search("esp32", &[esp], &slow, 10).hits.is_empty());
+
+        // And FLASH is genuinely unknown, not zero — an ESP32 die cannot answer
+        // that question, so the row is set aside and counted rather than failed.
+        let mut flashy = ChipFilter::new(Bounds {
+            flash_kb: (0, 4096),
+            ..bounds
+        });
+        flashy.flash_kb = (64, 4096);
+        let r = cat.search("esp32", &[esp], &flashy, 10);
+        assert!(r.hits.is_empty());
+        assert_eq!(r.unknown, 1, "silently dropped instead of counted");
+    }
+
+    /// The two spellings of the same core.
+    #[test]
+    fn a_definition_core_is_normalised_to_the_vendor_spelling() {
+        assert_eq!(normalise_core("ARM Cortex-M3"), "Arm Cortex-M3");
+        assert_eq!(normalise_core("Arm Cortex-M4"), "Arm Cortex-M4");
+        assert_eq!(normalise_core("RISC-V 32-bit"), "RISC-V 32-bit");
+        assert_eq!(normalise_core("  ARM Cortex-M0+ "), "Arm Cortex-M0+");
+    }
+
+    /// …and that it actually makes a core filter match a bundled chip.
+    #[test]
+    fn a_bundled_arm_chip_matches_the_vendor_core_filter() {
+        let cat = catalogue(vec![source(SourceKind::CubeMxDb, true)], vec![]);
+        let mut row = reg_row("stm32f103c8t6", "STM32F103C8Tx", "stm32f1");
+        row.cpu = "ARM Cortex-M3";
+        let mut f = ChipFilter::default();
+        f.cores.insert("Arm Cortex-M3".to_owned());
+        assert_eq!(
+            cat.search("f103", &[row], &f, 10).hits.len(),
+            1,
+            "the definition says ARM, the filter says Arm"
         );
     }
 

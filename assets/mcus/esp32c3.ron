@@ -4,6 +4,7 @@ McuDefinition(
     family: "esp32c3",
     package: "QFN32",
     max_mhz: Some(160),
+    sram_kb: Some(384),
     cpu: "RISC-V 32-bit",
     toolchain: EspRust,
     project: ProjectDef(

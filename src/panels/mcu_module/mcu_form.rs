@@ -552,6 +552,9 @@ impl McuForm {
             family: self.family.trim().to_string(),
             package: self.package.trim().to_string(),
             max_mhz: self.max_mhz,
+            // Not authored in the form: the form writes a linker script, and
+            // `ram_size` is where it puts the figure.
+            sram_kb: None,
             dma: self.dma.clone(),
             irq_vectors: self.irq_vectors.clone(),
             usart_ip: self.usart_ip.clone(),

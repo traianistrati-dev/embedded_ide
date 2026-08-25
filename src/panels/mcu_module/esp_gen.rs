@@ -232,6 +232,10 @@ pub fn definition(chip: &EspChip) -> Result<McuDefinition, String> {
         // the generated code can name. An H2 is 96, not the 160 a family
         // resemblance would suggest.
         max_mhz: super::esp_clocks::max_mhz(&chip.id),
+        // The die's SRAM, straight from the metadata's DRAM region. The FLASH
+        // stays unknown on purpose: it is a separate SPI part chosen by whoever
+        // built the module, so the same die ships as 2, 4, 8 or 16 MB.
+        sram_kb: Some(chip.dram_bytes / 1024),
         toolchain: ToolchainKind::EspRust,
         project: ProjectDef {
             pkg_name: chip.id.clone(),

@@ -266,12 +266,28 @@ impl super::AppIde {
                 id: d.id.as_str(),
                 name: d.display_name.as_str(),
                 family: d.family.as_str(),
-                // A registry entry carries no vendor row of its own; its
-                // `memory.x` sizes are all it knows about itself. The search
-                // upgrades these from the vendor file whenever one exists.
+                // A registry entry carries no vendor row of its own, so these
+                // come from the definition itself. The search upgrades them from
+                // the vendor file whenever one exists.
                 flash_kb: chip_filter::parse_memory_kb(&d.project.flash_size),
-                ram_kb: chip_filter::parse_memory_kb(&d.project.ram_size),
+                // `sram_kb` first: an Espressif part has no `memory.x` of ours
+                // to read a RAM size out of, because esp-hal writes its own.
+                ram_kb: d
+                    .sram_kb
+                    .or_else(|| chip_filter::parse_memory_kb(&d.project.ram_size)),
                 package: d.package.as_str(),
+                mhz: d.max_mhz,
+                // Pins the definition marks usable. Counted rather than stored:
+                // it is the same number the Pins canvas draws, and a second copy
+                // of it could only ever disagree.
+                io: Some(
+                    [&d.pins.top, &d.pins.bottom, &d.pins.left, &d.pins.right]
+                        .iter()
+                        .flat_map(|s| s.iter())
+                        .filter(|p| !p.reserved)
+                        .count() as u32,
+                ),
+                cpu: d.cpu.as_str(),
             })
             .collect();
 

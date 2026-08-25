@@ -4,6 +4,7 @@ McuDefinition(
     family: "esp32c6",
     package: "",
     max_mhz: Some(160),
+    sram_kb: Some(512),
     dma: None,
     cpu: "RISC-V 32-bit",
     toolchain: EspRust,

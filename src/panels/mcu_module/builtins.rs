@@ -82,6 +82,10 @@ mod tests {
         package: &str,
         cpu: &str,
         max_mhz: u32,
+        // On-die RAM, for the catalogue. `None` where `ProjectDef::ram_size`
+        // already states it — the STM32s write their own `memory.x`, so the
+        // linker figure IS the answer there.
+        sram_kb: Option<u32>,
         m: &Mcu,
         project: ProjectDef,
     ) -> McuDefinition {
@@ -94,6 +98,7 @@ mod tests {
             display_name: m.name.clone(),
             family: family.into(),
             package: package.into(),
+            sram_kb,
             max_mhz: Some(max_mhz),
             // Built-in chips keep using the hand-written family tables in
             // `codegen::dma_map`; only imported ones carry vendor DMA data.
@@ -114,6 +119,24 @@ mod tests {
     /// One-shot: regenerate `assets/mcus/*.ron` from the factories.
     /// Run with:  `cargo test regenerate_builtin_ron -- --ignored`
     /// Project params are authored here (the single source for them).
+    ///
+    /// # LOSSY — check the diff before committing what this writes
+    ///
+    /// The factories carry pins and project settings; they do NOT carry the
+    /// clock, and running this **overwrites the committed clock with whatever
+    /// the bare factory has**:
+    ///
+    /// * `esp32c3.ron` loses `clock: Esp32c3` and becomes `clock: None` — the
+    ///   ESP32-C3 silently ends up with no clock tree at all.
+    /// * `stm32f103c8t6.ron` has its compact, authored `clock: Stm32f1(…)`
+    ///   expanded into a thousand-line `Graph(…)`, because `build_mcu` upgrades
+    ///   the compact form on load. That is not merely verbose: presets are
+    ///   filtered by clock family, so `Stm32f1` presets stop applying to it.
+    ///
+    /// `esp32c3_ron_matches_factory` does not catch either — it deliberately
+    /// compares pins and toolchain only, for exactly this reason.
+    ///
+    /// So: run it, `git diff`, and keep only the hunks you meant.
     #[test]
     #[ignore]
     fn regenerate_builtin_ron() {
@@ -123,6 +146,7 @@ mod tests {
 
         let stm = def_of(
             "stm32f103c8t6", "stm32f1", "LQFP48", "ARM Cortex-M3", 72,
+            None, // stated by `ram_size` below
             &create_stm32f103c8tx(),
             ProjectDef {
                 pkg_name: "stm32f103c8t6".into(),
@@ -142,6 +166,9 @@ mod tests {
             "QFN32",
             "RISC-V 32-bit",
             160,
+            // 393216 bytes of DRAM, per Espressif's own metadata. Its FLASH
+            // stays unknown: that is an external SPI part chosen by the module.
+            Some(384),
             &create_esp32c3(),
             ProjectDef {
                 pkg_name: "esp32c3".into(),
@@ -403,6 +430,7 @@ mod tests {
 
         let mut def = def_of(
             "stm32f103rb", "stm32f1", "LQFP64", "ARM Cortex-M3", 72,
+            None,
             &m,
             ProjectDef {
                 pkg_name: "stm32f103rb".into(),
