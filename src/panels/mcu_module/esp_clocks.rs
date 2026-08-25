@@ -32,6 +32,10 @@ pub fn cpu_options(chip: &str) -> &'static [u32] {
         "esp32c3" | "esp32c6" | "esp32c61" => &[80, 160],
         "esp32c5" => &[80, 160, 240],
         "esp32h2" => &[96],
+        // Xtensa. Same three everywhere, and unlike the RISC-V parts their
+        // metadata states no PLL that divides into 240 MHz — so they get no
+        // derived clock tree, only this ceiling. See `esp_gen::clock_graph`.
+        "esp32" | "esp32s2" | "esp32s3" => &[80, 160, 240],
         _ => &[],
     }
 }

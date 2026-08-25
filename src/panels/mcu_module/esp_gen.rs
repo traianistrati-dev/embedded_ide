@@ -299,12 +299,15 @@ fn clock_graph(chip: &EspChip) -> Option<ClockGraph> {
 
 /// Build the definition for one chip.
 ///
-/// Refuses Xtensa outright: those parts need Espressif's rustc fork, and a
-/// definition the IDE cannot build a project for is worse than no definition.
+/// Works for Xtensa parts too — the description is sound, and their metadata is
+/// as complete as anyone's. What is missing is downstream: nothing in the IDE
+/// can invoke `cargo +esp`, so those definitions are not registered as built-ins
+/// and the chip picker does not offer them. See
+/// [`Arch::needs_esp_toolchain`](super::esp_metadata::Arch::needs_esp_toolchain).
 pub fn definition(chip: &EspChip) -> Result<McuDefinition, String> {
     let Some(target) = chip.arch.target(&chip.id) else {
         return Err(format!(
-            "{}: {:?} needs Espressif's rustc fork (espup), which this IDE does not drive",
+            "{}: no Rust target triple for {:?}",
             chip.id, chip.arch
         ));
     };
@@ -321,7 +324,11 @@ pub fn definition(chip: &EspChip) -> Result<McuDefinition, String> {
         // Unknown, and left so: an ESP32 die ships in several modules and the
         // metadata names none of them.
         package: String::new(),
-        cpu: "RISC-V 32-bit".to_owned(),
+        cpu: match chip.arch {
+            super::esp_metadata::Arch::RiscV => "RISC-V 32-bit",
+            super::esp_metadata::Arch::Xtensa => "Xtensa LX",
+        }
+        .to_owned(),
         // NOT from the metadata, which carries no frequency at all, and not
         // from a datasheet either: the fastest this chip can be SET to is the
         // top of `esp-hal`'s own `CpuClock` enum, and that is the only number
@@ -419,15 +426,47 @@ mod tests {
         assert_eq!(instance_number("LEDC"), None);
     }
 
+    /// The Xtensa parts describe correctly; what stops them is the toolchain.
+    ///
+    /// Kept as a test rather than deleted, so the day `cargo +esp` can be
+    /// invoked the only thing left is to register them.
     #[test]
-    fn xtensa_is_refused_with_a_reason() {
+    #[ignore]
+    fn xtensa_chips_describe_but_are_not_shipped() {
         let dir = esp_metadata::vendor_dir();
         let Some(dir) = dir else { return };
-        let Ok(esp32) = esp_metadata::load(&dir, "esp32") else {
-            return;
-        };
-        let err = definition(&esp32).expect_err("xtensa must not produce a definition");
-        assert!(err.contains("espup"), "{err}");
+        for (id, target) in [
+            ("esp32", "xtensa-esp32-none-elf"),
+            ("esp32s2", "xtensa-esp32s2-none-elf"),
+            ("esp32s3", "xtensa-esp32s3-none-elf"),
+        ] {
+            let c = esp_metadata::load(&dir, id).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert!(c.arch.needs_esp_toolchain(), "{id}");
+            let d = definition(&c).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert_eq!(d.project.target, target);
+            assert_eq!(d.cpu, "Xtensa LX");
+            let pads = pad_functions(&d);
+            println!(
+                "{id:<8} {:>2} pads  {:>3} MHz  {:?} SRAM KiB  target {target}",
+                pads.len(),
+                d.max_mhz.unwrap_or(0),
+                d.sram_kb,
+            );
+            assert!(!pads.is_empty(), "{id} has no usable pad");
+            // Their metadata states no PLL that divides into 240 MHz, so the
+            // graph refuses - and refusing is the designed answer.
+            assert_eq!(
+                d.clock,
+                super::super::mcu_def::ClockDef::None,
+                "{id} grew a clock tree — recheck `clock_graph`"
+            );
+            // And the one thing that must NOT happen: being offered for
+            // selection while no build path exists.
+            assert!(
+                super::super::builtins::builtin_for(id).is_none(),
+                "{id} is registered as a built-in, but nothing can `cargo +esp`"
+            );
+        }
     }
 
     /// The yardstick: the hand-written ESP32-C3 was authored from the datasheet,

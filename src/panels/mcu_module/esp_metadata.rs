@@ -54,8 +54,11 @@ pub enum Arch {
 }
 
 impl Arch {
-    /// The Rust target triple, or `None` for Xtensa — whose target does not come
-    /// from rustup at all, and which nothing here is ready to build for.
+    /// The Rust target triple for a chip, or `None` if there is not one.
+    ///
+    /// The Xtensa triples are real and `rustc --print target-list` knows them —
+    /// but see [`Arch::needs_esp_toolchain`]: knowing the name is not the same
+    /// as being able to build it.
     pub fn target(self, chip: &str) -> Option<&'static str> {
         match self {
             // The C2/C3 cores have no atomics extension; everything later does.
@@ -63,8 +66,34 @@ impl Arch {
                 "esp32c2" | "esp32c3" => "riscv32imc-unknown-none-elf",
                 _ => "riscv32imac-unknown-none-elf",
             }),
-            Arch::Xtensa => None,
+            Arch::Xtensa => match chip {
+                "esp32" => Some("xtensa-esp32-none-elf"),
+                "esp32s2" => Some("xtensa-esp32s2-none-elf"),
+                "esp32s3" => Some("xtensa-esp32s3-none-elf"),
+                _ => None,
+            },
         }
+    }
+
+    /// Whether building for this architecture needs Espressif's fork of rustc.
+    ///
+    /// Xtensa does, and stock Rust cannot substitute for it. `rustc` ships the
+    /// target *definitions* — `xtensa-esp32-none-elf` is in `--print
+    /// target-list` — but no `core` for them, and building one with nightly and
+    /// `-Z build-std` fails in LLVM before it reaches any user code:
+    ///
+    /// ```text
+    /// error: data-layout for target `xtensa-esp32-none-elf`,
+    ///   `e-m:e-p:32:32-v1:8:8-i64:64-i128:128-n32`, differs from LLVM target's
+    ///   `xtensa-none-elf` default layout, `e-m:e-p:32:32-i8:8:32-…`
+    /// ```
+    ///
+    /// The `esp` toolchain (installed by `espup`) carries a patched LLVM, and is
+    /// invoked as `cargo +esp`. Nothing in this IDE passes that yet — cargo is
+    /// launched from eleven places, none of which take a toolchain — which is
+    /// why the Xtensa parts are not offered in the chip picker.
+    pub fn needs_esp_toolchain(self) -> bool {
+        self == Arch::Xtensa
     }
 }
 
@@ -769,7 +798,11 @@ macro_rules! for_each_peripheral {
             Arch::RiscV.target("esp32c6"),
             Some("riscv32imac-unknown-none-elf")
         );
-        assert_eq!(Arch::Xtensa.target("esp32"), None, "not a rustup target");
+        // Xtensa triples are real and rustc knows them; what they are NOT is
+        // buildable with a stock toolchain.
+        assert_eq!(Arch::Xtensa.target("esp32"), Some("xtensa-esp32-none-elf"));
+        assert!(Arch::Xtensa.needs_esp_toolchain());
+        assert!(!Arch::RiscV.needs_esp_toolchain());
     }
 
     /// Against the real vendor files. Ignored: needs an ESP project to have been
