@@ -244,8 +244,93 @@ pub fn attach_parent_console() {
 /// every save that reads as the whole app "flickering" and the taskbar spawning
 /// ghost instances. No-op on non-Windows. Returns the same `&mut Command` so it
 /// chains inline: `no_window(Command::new("cargo")).args(...)`.
+/// Where `espup` put Espressif's Xtensa GCC, if it is installed.
+///
+/// Only the LINKER lives here; the Rust side of an Xtensa build needs nothing
+/// from it. That is what makes its absence so confusing: every crate compiles,
+/// and then
+///
+/// ```text
+/// error: linker `xtensa-esp32s3-elf-gcc` not found
+/// ```
+///
+/// which reads like a code problem an hour into a build. `espup` ships an
+/// `export-esp` script that adds this directory, but the IDE inherits whatever
+/// PATH it was launched with, and a desktop shortcut has never run that script.
+///
+/// Probed once. `None` on a machine without the Xtensa toolchain, which is every
+/// machine that only ever builds ARM or RISC-V.
+fn xtensa_bin_dir() -> Option<&'static std::path::Path> {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let rustup = std::env::var_os("RUSTUP_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .or_else(|| std::env::var_os("HOME"))
+                    .map(|h| std::path::PathBuf::from(h).join(".rustup"))
+            })?;
+        let dir = rustup
+            .join("toolchains")
+            .join("esp")
+            .join("xtensa-esp-elf")
+            .join("bin");
+        // The directory existing is not enough — an interrupted install leaves
+        // one behind. Look for a linker the way rustc will.
+        let has_linker = std::fs::read_dir(&dir).ok()?.flatten().any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("xtensa-esp32") && n.contains("-elf-gcc"))
+        });
+        has_linker.then_some(dir)
+    })
+    .as_deref()
+}
+
+/// Put the Xtensa linker within reach of `cmd`, without disturbing anything.
+///
+/// APPENDED, never prepended. Two reasons, and both are the same rule the MSVC
+/// injection follows — the user's environment wins:
+///
+/// * someone who HAS run `export-esp` already has this directory, earlier, and
+///   whichever copy they chose stays in front;
+/// * of the 118 files in it, two are MinGW runtime DLLs with no `xtensa-`
+///   prefix (`libstdc++-6.dll`, `libgcc_s_seh-1.dll`). Every executable is
+///   prefixed and can collide with nothing, but those two have no business
+///   shadowing a system copy.
+fn add_xtensa_to_path(cmd: &mut Command) {
+    let Some(dir) = xtensa_bin_dir() else {
+        return;
+    };
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(&current).collect();
+    if dirs.iter().any(|d| d == dir) {
+        return; // already there — leave the value alone entirely
+    }
+    dirs.push(dir.to_path_buf());
+    if let Ok(joined) = std::env::join_paths(dirs) {
+        cmd.env("PATH", joined);
+    }
+}
+
 pub fn no_window(cmd: &mut Command) -> &mut Command {
     no_window_raw(cmd);
+    // The Xtensa linker, for ESP32/S2/S3. Harmless everywhere else: the whole
+    // directory is `xtensa-esp32*-elf-*` binaries, so an ARM or RISC-V build
+    // cannot pick anything up from it.
+    add_xtensa_to_path(cmd);
+    // Do NOT hand the user's project the toolchain that happens to be building
+    // the IDE. `cargo` sets `RUSTUP_TOOLCHAIN` for its children, so launching
+    // the IDE with `cargo run` leaks a pin into every cargo it spawns — and that
+    // variable OUTRANKS a project's own `rust-toolchain.toml`. An Xtensa project
+    // then builds with stock rustc and fails with `'esp32s3' is not a recognized
+    // processor` and `can't find crate for core`, neither of which mentions a
+    // toolchain. Same shape as the `CARGO_FEATURE_*` leak in `required_tools`.
+    //
+    // Removing it puts the choice back where it belongs: the project's own file,
+    // or rustup's default.
+    cmd.env_remove("RUSTUP_TOOLCHAIN");
     // Point the MSVC linker/compiler at a VERIFIED toolchain (Windows): rustc and
     // cc-rs pick an install by little more than "does cl.exe exist", so a
     // partially-installed Visual Studio shadows a complete one and every host
@@ -1041,5 +1126,140 @@ mod tests {
             "children": []
         });
         assert!(extract_rename(&msg).is_none());
+    }
+}
+
+#[cfg(test)]
+mod xtensa_path_tests {
+    use super::*;
+
+    /// The injection must be a no-op on a machine with no Xtensa toolchain —
+    /// which is every machine that only builds ARM or RISC-V.
+    #[test]
+    fn without_the_toolchain_the_path_is_untouched() {
+        let mut cmd = Command::new("cargo");
+        add_xtensa_to_path(&mut cmd);
+        // Nothing to assert about `Command`'s env directly, so assert the
+        // decision instead: no directory found means nothing was added.
+        if xtensa_bin_dir().is_none() {
+            // The `get_envs` iterator is empty when no override was set.
+            assert_eq!(cmd.get_envs().count(), 0, "PATH was touched anyway");
+        }
+    }
+
+    /// When it IS installed, the directory must hold a real linker — not merely
+    /// exist, which an interrupted `espup install` also achieves.
+    #[test]
+    fn a_found_directory_actually_holds_a_linker() {
+        let Some(dir) = xtensa_bin_dir() else {
+            return; // not installed here; the test above covers that
+        };
+        let linkers: Vec<String> = std::fs::read_dir(dir)
+            .expect("the directory was just probed")
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .filter(|n| n.starts_with("xtensa-esp32") && n.contains("-elf-gcc"))
+            .collect();
+        assert!(!linkers.is_empty(), "{}: no linker", dir.display());
+    }
+
+    /// Appended, never prepended: whatever the user already put on PATH wins.
+    #[test]
+    fn the_directory_goes_last() {
+        let Some(dir) = xtensa_bin_dir() else {
+            return;
+        };
+        let mut cmd = Command::new("cargo");
+        add_xtensa_to_path(&mut cmd);
+        let Some((_, Some(value))) = cmd.get_envs().find(|(k, _)| *k == "PATH") else {
+            // Already on PATH — then nothing is set, which is also correct.
+            let on_path = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .any(|d| d == dir);
+            assert!(on_path, "PATH was neither extended nor already correct");
+            return;
+        };
+        let dirs: Vec<_> = std::env::split_paths(value).collect();
+        assert_eq!(dirs.last().map(|p| p.as_path()), Some(dir), "not last");
+        // And nothing was dropped on the way.
+        let before = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).count();
+        assert_eq!(dirs.len(), before + 1, "PATH lost entries");
+    }
+
+    /// A pinned toolchain must not travel from the IDE into a user's project.
+    ///
+    /// `cargo run` sets `RUSTUP_TOOLCHAIN` for its child, and that variable
+    /// outranks a project's `rust-toolchain.toml`. An Xtensa project then builds
+    /// with stock rustc and fails with `'esp32s3' is not a recognized processor`
+    /// — a message that names neither rustup nor a toolchain.
+    #[test]
+    fn the_parents_toolchain_pin_is_not_passed_on() {
+        let mut cmd = Command::new("cargo");
+        no_window(&mut cmd);
+        let removed = cmd
+            .get_envs()
+            .any(|(k, v)| k == "RUSTUP_TOOLCHAIN" && v.is_none());
+        assert!(removed, "RUSTUP_TOOLCHAIN is still handed to the child");
+    }
+
+    /// End to end: an Xtensa project must LINK through `no_window`, from a
+    /// process whose own PATH has never heard of the toolchain.
+    ///
+    /// This is the whole point of the injection, and it is the one thing the
+    /// unit tests above cannot show — they check the decision, not the linker.
+    ///
+    /// Needs a project emitted first:
+    /// ```text
+    /// EIDE_ESP_CHIP=esp32s3 cargo test emit_esp32c3_project -- --ignored
+    /// cargo test -- --ignored an_xtensa_project_links_through_no_window --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn an_xtensa_project_links_through_no_window() {
+        let Some(dir) = xtensa_bin_dir() else {
+            eprintln!("no Xtensa toolchain on this machine — skipping");
+            return;
+        };
+        let project = std::env::temp_dir().join("eide_esp_check_esp32s3");
+        if !project.join("Cargo.toml").is_file() {
+            eprintln!("no emitted project at {} — skipping", project.display());
+            return;
+        }
+        // The premise: this process cannot see the linker.
+        let visible =
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|d| d == dir);
+        println!("linker dir already on this process's PATH: {visible}");
+
+        // Force a relink rather than trusting a cached artifact.
+        let main = project.join("src").join("main.rs");
+        let src = std::fs::read_to_string(&main).expect("main.rs");
+        std::fs::write(
+            &main,
+            format!(
+                "{src}
+// touched by the link test
+"
+            ),
+        )
+        .unwrap();
+
+        let out = no_window(&mut Command::new("cargo"))
+            .current_dir(&project)
+            .args(["build", "--release"])
+            .output()
+            .expect("cargo ran");
+        let err = String::from_utf8_lossy(&out.stderr);
+        std::fs::write(&main, src).unwrap();
+
+        assert!(
+            !err.contains("linker `xtensa"),
+            "the linker was still not found:
+{err}"
+        );
+        assert!(
+            out.status.success(),
+            "build failed:
+{err}"
+        );
+        println!("linked, with the toolchain injected rather than exported");
     }
 }
