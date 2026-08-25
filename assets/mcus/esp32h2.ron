@@ -2,7 +2,7 @@ McuDefinition(
     id: "esp32h2",
     display_name: "ESP32-H2",
     family: "esp32h2",
-    package: "",
+    package: "QFN32",
     max_mhz: Some(96),
     sram_kb: Some(320),
     dma: None,
@@ -22,102 +22,43 @@ McuDefinition(
     pins: PinLayout(
         top: [
             PinDef(
-                number: 19,
-                name: "GPIO25",
-                reserved: false,
-                functions: [
-                    GpioInput,
-                    GpioOutput,
-                    TimerPwm(
-                        timer: 0,
-                        channel: 0,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 1,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 2,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 3,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 4,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 5,
-                    ),
-                    UsartTx(0),
-                    UsartRx(0),
-                    UsartTx(1),
-                    UsartRx(1),
-                    SpiSck(2),
-                    SpiMosi(2),
-                    SpiMiso(2),
-                    SpiNss(2),
-                    I2cScl(0),
-                    I2cSda(0),
-                    I2cScl(1),
-                    I2cSda(1),
-                    CanTx,
-                    CanRx,
-                ],
+                number: 32,
+                name: "ANT",
+                reserved: true,
+                functions: [],
             ),
             PinDef(
-                number: 20,
-                name: "GPIO26",
-                reserved: false,
-                functions: [
-                    GpioInput,
-                    GpioOutput,
-                    UsbDm,
-                    TimerPwm(
-                        timer: 0,
-                        channel: 0,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 1,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 2,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 3,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 4,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 5,
-                    ),
-                    UsartTx(0),
-                    UsartRx(0),
-                    UsartTx(1),
-                    UsartRx(1),
-                    SpiSck(2),
-                    SpiMosi(2),
-                    SpiMiso(2),
-                    SpiNss(2),
-                    I2cScl(0),
-                    I2cSda(0),
-                    I2cScl(1),
-                    I2cSda(1),
-                    CanTx,
-                    CanRx,
-                ],
+                number: 31,
+                name: "VDD3P3",
+                reserved: true,
+                functions: [],
             ),
             PinDef(
-                number: 21,
+                number: 30,
+                name: "VDD3P3",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 29,
+                name: "XTAL_P",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 28,
+                name: "XTAL_N",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 27,
+                name: "VDD3P3",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 26,
                 name: "GPIO27",
                 reserved: false,
                 functions: [
@@ -164,104 +105,64 @@ McuDefinition(
                     CanRx,
                 ],
             ),
+            PinDef(
+                number: 25,
+                name: "GPIO26",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    UsbDm,
+                    TimerPwm(
+                        timer: 0,
+                        channel: 0,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 1,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 2,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 3,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 4,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 5,
+                    ),
+                    UsartTx(0),
+                    UsartRx(0),
+                    UsartTx(1),
+                    UsartRx(1),
+                    SpiSck(2),
+                    SpiMosi(2),
+                    SpiMiso(2),
+                    SpiNss(2),
+                    I2cScl(0),
+                    I2cSda(0),
+                    I2cScl(1),
+                    I2cSda(1),
+                    CanTx,
+                    CanRx,
+                ],
+            ),
         ],
         bottom: [
             PinDef(
-                number: 7,
-                name: "GPIO6",
-                reserved: false,
-                functions: [
-                    GpioInput,
-                    GpioOutput,
-                    TimerPwm(
-                        timer: 0,
-                        channel: 0,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 1,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 2,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 3,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 4,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 5,
-                    ),
-                    UsartTx(0),
-                    UsartRx(0),
-                    UsartTx(1),
-                    UsartRx(1),
-                    SpiSck(2),
-                    SpiMosi(2),
-                    SpiMiso(2),
-                    SpiNss(2),
-                    I2cScl(0),
-                    I2cSda(0),
-                    I2cScl(1),
-                    I2cSda(1),
-                    CanTx,
-                    CanRx,
-                ],
-            ),
-            PinDef(
-                number: 8,
-                name: "GPIO7",
-                reserved: false,
-                functions: [
-                    GpioInput,
-                    GpioOutput,
-                    TimerPwm(
-                        timer: 0,
-                        channel: 0,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 1,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 2,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 3,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 4,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 5,
-                    ),
-                    UsartTx(0),
-                    UsartRx(0),
-                    UsartTx(1),
-                    UsartRx(1),
-                    SpiSck(2),
-                    SpiMosi(2),
-                    SpiMiso(2),
-                    SpiNss(2),
-                    I2cScl(0),
-                    I2cSda(0),
-                    I2cScl(1),
-                    I2cSda(1),
-                    CanTx,
-                    CanRx,
-                ],
-            ),
-            PinDef(
                 number: 9,
+                name: "VDDPST1",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 10,
                 name: "GPIO8",
                 reserved: false,
                 functions: [
@@ -308,7 +209,7 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 10,
+                number: 11,
                 name: "GPIO9",
                 reserved: false,
                 functions: [
@@ -355,7 +256,7 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 11,
+                number: 12,
                 name: "GPIO10",
                 reserved: false,
                 functions: [
@@ -402,8 +303,149 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 12,
+                number: 13,
                 name: "GPIO11",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    TimerPwm(
+                        timer: 0,
+                        channel: 0,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 1,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 2,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 3,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 4,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 5,
+                    ),
+                    UsartTx(0),
+                    UsartRx(0),
+                    UsartTx(1),
+                    UsartRx(1),
+                    SpiSck(2),
+                    SpiMosi(2),
+                    SpiMiso(2),
+                    SpiNss(2),
+                    I2cScl(0),
+                    I2cSda(0),
+                    I2cScl(1),
+                    I2cSda(1),
+                    CanTx,
+                    CanRx,
+                ],
+            ),
+            PinDef(
+                number: 14,
+                name: "GPIO12",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    TimerPwm(
+                        timer: 0,
+                        channel: 0,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 1,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 2,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 3,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 4,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 5,
+                    ),
+                    UsartTx(0),
+                    UsartRx(0),
+                    UsartTx(1),
+                    UsartRx(1),
+                    SpiSck(2),
+                    SpiMosi(2),
+                    SpiMiso(2),
+                    SpiNss(2),
+                    I2cScl(0),
+                    I2cSda(0),
+                    I2cScl(1),
+                    I2cSda(1),
+                    CanTx,
+                    CanRx,
+                ],
+            ),
+            PinDef(
+                number: 15,
+                name: "GPIO13",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    TimerPwm(
+                        timer: 0,
+                        channel: 0,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 1,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 2,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 3,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 4,
+                    ),
+                    TimerPwm(
+                        timer: 0,
+                        channel: 5,
+                    ),
+                    UsartTx(0),
+                    UsartRx(0),
+                    UsartTx(1),
+                    UsartRx(1),
+                    SpiSck(2),
+                    SpiMosi(2),
+                    SpiMiso(2),
+                    SpiNss(2),
+                    I2cScl(0),
+                    I2cSda(0),
+                    I2cScl(1),
+                    I2cSda(1),
+                    CanTx,
+                    CanRx,
+                ],
+            ),
+            PinDef(
+                number: 16,
+                name: "GPIO14",
                 reserved: false,
                 functions: [
                     GpioInput,
@@ -452,6 +494,18 @@ McuDefinition(
         left: [
             PinDef(
                 number: 1,
+                name: "VDD3P3",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 2,
+                name: "VDD3P3",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 3,
                 name: "GPIO0",
                 reserved: false,
                 functions: [
@@ -498,7 +552,7 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 2,
+                number: 4,
                 name: "GPIO1",
                 reserved: false,
                 functions: [
@@ -549,7 +603,7 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 3,
+                number: 5,
                 name: "GPIO2",
                 reserved: false,
                 functions: [
@@ -600,7 +654,7 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 4,
+                number: 6,
                 name: "GPIO3",
                 reserved: false,
                 functions: [
@@ -651,7 +705,7 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 5,
+                number: 7,
                 name: "GPIO4",
                 reserved: false,
                 functions: [
@@ -702,7 +756,7 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 6,
+                number: 8,
                 name: "GPIO5",
                 reserved: false,
                 functions: [
@@ -755,8 +809,8 @@ McuDefinition(
         ],
         right: [
             PinDef(
-                number: 13,
-                name: "GPIO12",
+                number: 24,
+                name: "GPIO25",
                 reserved: false,
                 functions: [
                     GpioInput,
@@ -802,8 +856,8 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 14,
-                name: "GPIO13",
+                number: 23,
+                name: "GPIO24",
                 reserved: false,
                 functions: [
                     GpioInput,
@@ -849,101 +903,7 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 15,
-                name: "GPIO14",
-                reserved: false,
-                functions: [
-                    GpioInput,
-                    GpioOutput,
-                    TimerPwm(
-                        timer: 0,
-                        channel: 0,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 1,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 2,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 3,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 4,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 5,
-                    ),
-                    UsartTx(0),
-                    UsartRx(0),
-                    UsartTx(1),
-                    UsartRx(1),
-                    SpiSck(2),
-                    SpiMosi(2),
-                    SpiMiso(2),
-                    SpiNss(2),
-                    I2cScl(0),
-                    I2cSda(0),
-                    I2cScl(1),
-                    I2cSda(1),
-                    CanTx,
-                    CanRx,
-                ],
-            ),
-            PinDef(
-                number: 16,
-                name: "GPIO22",
-                reserved: false,
-                functions: [
-                    GpioInput,
-                    GpioOutput,
-                    TimerPwm(
-                        timer: 0,
-                        channel: 0,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 1,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 2,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 3,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 4,
-                    ),
-                    TimerPwm(
-                        timer: 0,
-                        channel: 5,
-                    ),
-                    UsartTx(0),
-                    UsartRx(0),
-                    UsartTx(1),
-                    UsartRx(1),
-                    SpiSck(2),
-                    SpiMosi(2),
-                    SpiMiso(2),
-                    SpiNss(2),
-                    I2cScl(0),
-                    I2cSda(0),
-                    I2cScl(1),
-                    I2cSda(1),
-                    CanTx,
-                    CanRx,
-                ],
-            ),
-            PinDef(
-                number: 17,
+                number: 22,
                 name: "GPIO23",
                 reserved: false,
                 functions: [
@@ -990,8 +950,8 @@ McuDefinition(
                 ],
             ),
             PinDef(
-                number: 18,
-                name: "GPIO24",
+                number: 21,
+                name: "GPIO22",
                 reserved: false,
                 functions: [
                     GpioInput,
@@ -1035,6 +995,30 @@ McuDefinition(
                     CanTx,
                     CanRx,
                 ],
+            ),
+            PinDef(
+                number: 20,
+                name: "VDDPST2",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 19,
+                name: "VDDA_PMU",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 18,
+                name: "VBAT",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 17,
+                name: "CHIP_EN",
+                reserved: true,
+                functions: [],
             ),
         ],
         grid: None,
