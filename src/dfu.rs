@@ -615,7 +615,9 @@ impl ProgrammerInfo {
                 "USB-Serial adapter. STM32 UART boot: STM32CubeProgrammer. \
                  ESP32: esptool.py. Arduino: avrdude."
             }
-            "ESP32" => "ESP32 in USB-CDC mode. Flash with: esptool.py.",
+            "ESP32" => {
+                "Espressif USB detected. Flash runs espflash; the chip comes from the project, not from this descriptor."
+            }
             _ => "",
         }
     }
@@ -676,11 +678,42 @@ pub(crate) const KNOWN_PROGRAMMERS: &[(&str, &str, &str)] = &[
     // ── Prolific PL2303 ───────────────────────────────────────────────────────
     ("067b:2303", "PL2303 USB-Serial", "USB-Serial"),
     ("067b:23a3", "PL2303HXN USB-Serial", "USB-Serial"),
-    // ── ESP32 direct USB (S2 / S3 / C3 in CDC mode) ──────────────────────────
-    ("303a:1001", "ESP32-S2 (USB-CDC)", "ESP32"),
-    ("303a:4001", "ESP32-S3 (USB-CDC)", "ESP32"),
-    ("303a:1002", "ESP32-C3 (USB-CDC)", "ESP32"),
+    // ── Espressif direct USB ─────────────────────────────────────────────────
+    // An Espressif PID names the USB PERIPHERAL, never the die behind it, so
+    // none of these can be labelled with a chip. `0x1001` is one PID shared by
+    // every part carrying the `USB_DEVICE` block (C3, C5, C6, C61, H2, S3 —
+    // per esp-metadata), and espflash calls that constant `USB_SERIAL_JTAG_PID`
+    // for the same reason. Which chip is flashed comes from `--chip`, taken
+    // from the project, not from the descriptor.
+    //
+    // An Espressif PID we do NOT list is resolved by `find_programmer`, which
+    // special-cases the vendor rather than falling into its by-prefix loop: the
+    // first `303a` row in this table is the S2's ROM DFU, and answering
+    // "DFU Bootloader" for, say, a P4 would drop the board out of the Flash
+    // tab's list entirely.
+    ("303a:1001", "Espressif built-in USB-Serial/JTAG", "ESP32"),
+    ("303a:1002", "ESP USB Bridge (ESP-Prog)", "ESP32"),
+    // USB-OTG, present only on the S2 and S3; 0x4001 is the TinyUSB CDC device
+    // an application enumerates as, not a ROM identity.
+    ("303a:4001", "Espressif USB-OTG (CDC)", "ESP32"),
+    // The original ESP32 and the C2 have neither block: they reach the host
+    // through a CP210x or CH340, matched as "USB-Serial" above.
 ];
+
+/// Whether espflash can talk to this device — the Flash tab's filter on an
+/// Espressif project.
+///
+/// `kind` alone is not enough. The S2's ROM enumerates as `303a:0002`, which
+/// this catalogue calls a DFU bootloader; that is true, and it is also a CDC
+/// port espflash reaches over the normal serial protocol. Judged by `kind` the
+/// board vanished from the list, with no way for the user to tell why.
+///
+/// So: anything the vendor made counts, plus the third-party UART bridges
+/// (CP210x, CH340) that carry every original ESP32 and C2.
+pub fn is_espressif_target(kind: &str, vid_pid: &str) -> bool {
+    matches!(kind, "USB-Serial" | "ESP32")
+        || vid_pid.trim().to_ascii_lowercase().starts_with("303a:")
+}
 
 /// Look up VID:PID in the programmer catalogue.
 /// Returns `Some((display_name, kind))` only for recognised embedded programmers.
@@ -691,8 +724,18 @@ fn find_programmer(vid_pid: &str) -> Option<(&'static str, &'static str)> {
             return Some((name, kind));
         }
     }
-    // 2. VID-only fallback for families with many PIDs
+    // 2. Vendor fallbacks, for families with many PIDs
     let vid = vid_pid.split(':').next().unwrap_or("").to_lowercase();
+
+    // 2a. Espressif, before the generic by-prefix sweep below. That sweep returns
+    //    the first row whose VID matches, and for `303a` that is the S2's ROM
+    //    DFU — so every Espressif PID this table has not heard of would be
+    //    called a DFU bootloader and, being neither "ESP32" nor "USB-Serial",
+    //    would be filtered out of the Flash tab on an ESP project. A part we do
+    //    not recognise is still an Espressif part; say so and let it through.
+    if vid == "303a" {
+        return Some(("Espressif USB device", "ESP32"));
+    }
 
     for &(vp, name, kind) in KNOWN_PROGRAMMERS {
         if vp
@@ -1084,4 +1127,107 @@ fn cargo_clean(project_dir: &Path) {
     }
 
     let _ = cmd.output();
+}
+
+#[cfg(test)]
+mod espressif_usb_tests {
+    use super::*;
+
+    /// Which chip is being flashed comes from the project, never from the USB
+    /// descriptor — because one Espressif PID covers many dice.
+    ///
+    /// `0x1001` is the `USB_DEVICE` block, which esp-metadata gives to the C3,
+    /// C5, C6, C61, H2 and S3 but NOT the S2. Labelling it "ESP32-S2" named the
+    /// one shipped part that cannot present it.
+    #[test]
+    fn no_espressif_row_claims_to_identify_a_die() {
+        let chips = [
+            "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2", "esp32s2", "esp32s3", "esp32c2",
+        ];
+        for &(vp, name, kind) in KNOWN_PROGRAMMERS {
+            if !vp.starts_with("303a:") || kind == "DFU Bootloader" {
+                continue;
+            }
+            let flat = name.to_ascii_lowercase().replace(['-', ' ', '_'], "");
+            for c in chips {
+                assert!(
+                    !flat.contains(c),
+                    "`{vp}` is named `{name}`, but a PID does not name a die"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_espressif_pid_reaches_the_flash_tab() {
+        // The three we list.
+        for vp in ["303a:1001", "303a:1002", "303a:4001"] {
+            let (name, kind) = find_programmer(vp).unwrap_or_else(|| panic!("{vp}"));
+            assert_eq!(kind, "ESP32", "{vp} -> {name}");
+            assert!(is_espressif_target(kind, vp), "{vp}");
+        }
+
+        // And one we do not: the P4 is a real part the IDE does not ship, and
+        // any future die lands here too. The by-prefix sweep would have found
+        // `303a:0002` first and called it a DFU bootloader, dropping the board
+        // off the list; the vendor special-case is what prevents that.
+        let (name, kind) = find_programmer("303a:1234").expect("unknown Espressif PID");
+        assert_eq!(kind, "ESP32", "{name}");
+        assert!(is_espressif_target(kind, "303a:1234"));
+
+        // The S2's ROM stays a DFU bootloader for the DFU path — and is still
+        // offered on an ESP project, which is the whole point of judging by VID
+        // rather than by `kind`.
+        let (_, rom) = find_programmer("303a:0002").expect("S2 ROM");
+        assert_eq!(rom, "DFU Bootloader");
+        assert!(is_espressif_target(rom, "303a:0002"));
+
+        // A bridge chip on an original ESP32 or a C2, which have no USB block.
+        for vp in ["10c4:ea60", "1a86:7523"] {
+            let (_, kind) = find_programmer(vp).unwrap_or_else(|| panic!("{vp}"));
+            assert!(is_espressif_target(kind, vp), "{vp}");
+        }
+
+        // Not everything, though: an ST-Link is not an espflash target.
+        let (_, st) = find_programmer("0483:3748").expect("ST-Link");
+        assert!(!is_espressif_target(st, "0483:3748"));
+    }
+
+    /// Against esp-metadata: exactly the parts with a `USB_DEVICE` block are the
+    /// ones that can present `303a:1001`. Ignored — reads the cargo registry.
+    ///
+    /// `cargo test -- --ignored usb_device_block --nocapture`
+    #[test]
+    #[ignore]
+    fn the_usb_device_block_is_not_the_s2() {
+        use crate::panels::mcu_module::esp_metadata;
+
+        let Some(dir) = esp_metadata::vendor_dir() else {
+            eprintln!("no esp-metadata-generated in the registry — skipping");
+            return;
+        };
+        let mut with_block = Vec::new();
+        for chip in [
+            "esp32", "esp32c2", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2", "esp32s2",
+            "esp32s3",
+        ] {
+            // `vendor_dir` already points at the crate's `src`.
+            let path = dir.join(format!("_generated_{chip}.rs"));
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                eprintln!("{chip}: unreadable — skipping");
+                continue;
+            };
+            if text.to_ascii_lowercase().contains("usb_device") {
+                with_block.push(chip);
+            }
+        }
+        println!("USB_DEVICE (PID 0x1001): {with_block:?}");
+        assert!(
+            !with_block.contains(&"esp32s2"),
+            "the S2 has no USB_DEVICE block; the old label said otherwise"
+        );
+        for c in ["esp32c3", "esp32c6", "esp32h2", "esp32s3"] {
+            assert!(with_block.contains(&c), "{c} should have USB_DEVICE");
+        }
+    }
 }

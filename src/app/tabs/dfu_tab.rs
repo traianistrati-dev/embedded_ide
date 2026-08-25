@@ -1425,7 +1425,7 @@ fn programmer_combo(
                         p.kind.as_str(),
                         "DFU Bootloader" | "ST-Link" | "STLink" | "STM" | "J-Link" | "CMSIS-DAP"
                     );
-                    let is_esp_programmer = matches!(p.kind.as_str(), "USB-Serial" | "ESP32");
+                    let is_esp_programmer = crate::dfu::is_espressif_target(&p.kind, &p.vid_pid);
 
                     let is_compatible = match toolchain {
                         ToolchainKind::RustEmbedded => is_stm_programmer,

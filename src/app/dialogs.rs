@@ -2296,6 +2296,118 @@ mod chip_gaps_tests {
         }
     }
 
+    /// The Flash tab's per-chip data, for every chip that can open it.
+    ///
+    /// The tab itself branches on `ToolchainKind`, which is the same for all
+    /// nine Espressif parts. What differs per chip is one string — `probe_chip`
+    /// — and it is read by two different things that must both accept it.
+    #[test]
+    fn every_bundled_chip_carries_flashable_identifiers() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::codegen::family;
+        use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+
+        for d in builtin_definitions() {
+            assert!(
+                !d.project.probe_chip.trim().is_empty(),
+                "{}: no probe_chip",
+                d.id
+            );
+            assert!(
+                !d.project.pkg_name.trim().is_empty(),
+                "{}: no pkg_name",
+                d.id
+            );
+
+            if !family::is_esp(&d.family) {
+                continue;
+            }
+            assert_eq!(d.toolchain, ToolchainKind::EspRust, "{}", d.id);
+
+            // `--chip` for espflash AND the espflash monitor. Anything the
+            // vendor's own metadata calls the chip is what espflash calls it, so
+            // this is also the check that the two agree.
+            assert_eq!(
+                d.project.probe_chip, d.family,
+                "{}: the espflash chip name is not the family key",
+                d.id
+            );
+
+            // The monitor finds the ELF at `target/<triple>/release/
+            // <probe_chip>-project` — from `probe_chip`, not `pkg_name`. That
+            // works only while the two are equal, which every ESP definition
+            // happens to satisfy and nothing enforced. An STM32F103 has
+            // `STM32F103C8` against `stm32f103c8t6`, so the coupling is real; it
+            // is simply never exercised off the ESP path.
+            assert_eq!(
+                d.project.pkg_name, d.project.probe_chip,
+                "{}: the monitor would look for `{}-project` and the build writes `{}-project`",
+                d.id, d.project.probe_chip, d.project.pkg_name
+            );
+
+            // No `memory.x` of ours: esp-hal writes its own, and the flash is an
+            // external SPI part whose size the die cannot state. The size bars
+            // show bytes without a percentage, which is the honest answer —
+            // `size::parse_memory_x("")` yields no limits.
+            assert!(
+                d.project.flash_size.is_empty() && d.project.ram_size.is_empty(),
+                "{}: a linker size on a chip whose flash is a separate part",
+                d.id
+            );
+        }
+    }
+
+    /// Against espflash itself: every chip name we would pass, it accepts.
+    ///
+    /// Ignored — it runs `espflash`. Worth having anyway: the name travels from
+    /// Espressif's metadata through a `.ron` into a command line, and nothing
+    /// between those checks that the two spell it the same way. A rejected
+    /// `--chip` surfaces as a flash that fails on a board that is plugged in and
+    /// working.
+    ///
+    /// `cargo test -- --ignored espflash_accepts --nocapture`
+    #[test]
+    #[ignore]
+    fn espflash_accepts_every_chip_name_we_would_pass() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::codegen::family;
+
+        let out = match std::process::Command::new("espflash")
+            .args(["flash", "--help"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("espflash not installed ({e}) — skipping");
+                return;
+            }
+        };
+        let help = String::from_utf8_lossy(&out.stdout);
+        // `          - esp32c6:  ESP32-C6`
+        let known: Vec<&str> = help
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("- ")?.split(':').next())
+            .collect();
+        assert!(
+            known.contains(&"esp32"),
+            "could not read the chip list:
+{help}"
+        );
+        println!("espflash knows: {known:?}");
+
+        for d in builtin_definitions() {
+            if !family::is_esp(&d.family) {
+                continue;
+            }
+            assert!(
+                known.contains(&d.project.probe_chip.as_str()),
+                "{}: espflash rejects `--chip {}`",
+                d.id,
+                d.project.probe_chip
+            );
+        }
+    }
+
     /// The DMA question is not ASKED of a family that has no `DmaDef` to answer
     /// it with — `None`, not `Some(0)`.
     #[test]
