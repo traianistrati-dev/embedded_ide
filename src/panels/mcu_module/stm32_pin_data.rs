@@ -950,6 +950,13 @@ pub(crate) fn core_to_target(core: &str) -> &'static str {
         "thumbv6m-none-eabi"
     } else if c.contains("cortex-m33") {
         "thumbv8m.main-none-eabihf"
+    // Armv8.1-M (M55 on STM32N6, M85) has no target of its own in stable rustc
+    // — `rustup target add thumbv8.1m.main-none-eabihf` is refused. v8-M Main
+    // is the triple these are built with, and the extra instructions are opt-in
+    // anyway. Without this arm they fell through to the M3 default, which is
+    // both the wrong architecture and the wrong float ABI.
+    } else if c.contains("cortex-m55") || c.contains("cortex-m85") {
+        "thumbv8m.main-none-eabihf"
     } else if c.contains("cortex-m23") {
         "thumbv8m.base-none-eabi"
     } else if c.contains("cortex-m4") || c.contains("cortex-m7") {
@@ -1204,11 +1211,25 @@ pub fn embassy_feature_in(dep_line: &str) -> Option<&str> {
 /// `<PackageLetter>x` pair — `STM32F411RETx` → `stm32f411re`).
 fn embassy_chip_feature(name: &str) -> String {
     let slug = slugify(name);
+    // `x` stands for the temperature range, and embassy's feature stops just
+    // before the package letter that precedes it: STM32F103C8Tx -> stm32f103c8.
     if slug.len() > 2 && slug.ends_with('x') {
-        slug[..slug.len() - 2].to_string()
-    } else {
-        slug
+        return slug[..slug.len() - 2].to_string();
     }
+    // 387 parts carry ONE more character after the `x` — an `N` for the
+    // no-crystal variants (STM32C071C8TxN), a `Q` for the secure ones
+    // (STM32N645A0HxQ). embassy does not distinguish those, so the same three
+    // characters come off: verified against the published feature list, where
+    // `stm32c071c8` and `stm32n645a0` exist and `stm32c071c8t` /
+    // `stm32n645a0h` do not.
+    //
+    // Getting this wrong is not a small error: the derived name goes straight
+    // into Cargo.toml, and a feature that does not exist makes the whole
+    // project unresolvable — which kills rust-analyzer for it entirely.
+    if slug.len() > 3 && slug.as_bytes()[slug.len() - 2] == b'x' {
+        return slug[..slug.len() - 3].to_string();
+    }
+    slug
 }
 
 /// Lower-case, keep only `a–z 0–9` — a valid registry id / file stem.
@@ -1721,6 +1742,30 @@ mod tests {
         for p in ["LQFP64", "UFQFPN48", "UFBGA100", "WLCSP25", "TFBGA216"] {
             assert!(!is_two_row_package(p), "{p} should NOT be two-row");
         }
+    }
+
+    /// The two derivations a chip cannot be used without, on the naming ST uses
+    /// for its newest parts.
+    ///
+    /// Both were wrong for STM32N6 and both fail LOUDLY only much later: the
+    /// target triple as a wrong architecture, the feature as a Cargo.toml no
+    /// resolver can satisfy. Verified against embassy's published list, where
+    /// `stm32n645a0` and `stm32c071c8` exist while `stm32n645a0h` and
+    /// `stm32c071c8t` do not.
+    #[test]
+    fn the_newest_part_names_derive_correctly() {
+        // `x` + one more character: `N` for no-crystal, `Q` for secure.
+        assert_eq!(embassy_chip_feature("STM32N645A0HxQ"), "stm32n645a0");
+        assert_eq!(embassy_chip_feature("STM32C071C8TxN"), "stm32c071c8");
+        // The plain form is untouched.
+        assert_eq!(embassy_chip_feature("STM32F103C8Tx"), "stm32f103c8");
+        assert_eq!(embassy_chip_feature("STM32WL30KBVx"), "stm32wl30kb");
+
+        // Armv8.1-M has no stable triple; v8-M Main is what it builds as.
+        assert_eq!(core_to_target("Arm Cortex-M55"), "thumbv8m.main-none-eabihf");
+        assert_eq!(core_to_target("Arm Cortex-M85"), "thumbv8m.main-none-eabihf");
+        // And it must not fall through to the M3 default any more.
+        assert_ne!(core_to_target("Arm Cortex-M55"), "thumbv7m-none-eabi");
     }
 
     #[test]

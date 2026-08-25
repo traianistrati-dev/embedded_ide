@@ -205,6 +205,13 @@ $CASES = @(
     @{ n = "imported chip, async DMA";     t = "emit_imported_dma_project";  e = @{}; q = $true; p = $CUBE_DB }
     @{ n = "imported chip, comparators";   t = "emit_comp_project";          e = @{}; q = $true; p = $CUBE_DB }
 
+    # STM32N6 — the first family whose clock block does not come from the
+    # descriptor model. Cortex-M55 on a v8-M Main triple, a chip feature derived
+    # through the `x`+suffix rule, and an RCC block with four-PLL types in it:
+    # three separate derivations that were each wrong until this project was
+    # emitted end to end.
+    @{ n = "STM32N6 clock + project";      t = "emit_n6_project";            e = @{}; q = $true; p = $CUBE_DB }
+
     # Not a project: a VERDICT (`v`). STM32WL30 is the chip the import preflight
     # was written for — `embassy-stm32` publishes no `stm32wl3*` feature, its
     # clock tree is an architecture no recipe can read, and its DMA channels

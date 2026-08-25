@@ -1894,6 +1894,88 @@ mod emit_for_manual_compile {
         println!("target: {}", esp.project.target);
     }
 
+    /// A whole STM32N6 project, from the vendor file to `main.rs`.
+    ///
+    /// The clock block was type-checked on its own; this is the rest of the
+    /// generation around it — manifest, target, entry point — for a family that
+    /// until now only ever produced a commented skeleton.
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 emit_n6_project -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the STM32Cube database, writes a project for a manual cross-compile"]
+    fn emit_n6_project() {
+        warn_if_matrix_running();
+        let Some(path) = vendor_chip_file("EIDE_CHIP_XML", "STM32N645A0HxQ.xml") else {
+            println!("no STM32N6 vendor file - skipped");
+            return;
+        };
+        let path = path.as_path();
+        let xml = std::fs::read_to_string(path).expect("read the vendor file");
+        let mut def = stm32_pin_data::convert_xml(&xml)
+            .expect("convert")
+            .remove(0)
+            .form
+            .to_definition();
+
+        // Without the vendor's tree there is no RCC block to generate, and this
+        // harness would silently prove nothing.
+        let db = crate::panels::mcu_module::chip_sources::all_sources()
+            .into_iter()
+            .find_map(|s| s.db)
+            .expect("a source with clock trees");
+        let (gc, _) =
+            crate::panels::mcu_module::clock::graph::cubemx::graph_for_chip_xml(&db, &xml, "stm32n6")
+                .expect("the N6 clock tree");
+        def.clock = crate::panels::mcu_module::mcu_def::ClockDef::Graph(gc);
+
+        let mcu = def.build_mcu();
+        let main_rs = mcu.fresh_main_rs();
+        assert!(
+            main_rs.contains("config.rcc.cpu = CpuClk::"),
+            "the N6 clock block is missing from main.rs:
+{main_rs}"
+        );
+        assert!(
+            !main_rs.contains("has no generated RCC recipe"),
+            "still the commented skeleton:
+{main_rs}"
+        );
+
+        let files = project_gen::build_project_files(&def.project, &def.toolchain, &main_rs);
+        // `main.rs` declares `pub mod pins;`, and the app writes that module
+        // when it saves. A harness that skips it compiles a project the IDE
+        // never produces - and fails on the one file it forgot.
+        let configs = mcu.config_files();
+        let mut user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;
+".into()),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| format!("pub mod {};
+", n.trim_end_matches(".rs")))
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let dir = std::env::temp_dir().join("eide_n6_check");
+        let _ = std::fs::remove_dir_all(&dir);
+        project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write n6 project");
+        println!("wrote {} ({})", dir.display(), def.display_name);
+        println!(
+            "target: {}  hal: {}",
+            def.project.target, def.project.hal_dep
+        );
+    }
+
     /// A REAL chip imported from the vendor database, with USART/SPI/I2C all on
     /// async DMA — the point of the mux rule.
     ///
