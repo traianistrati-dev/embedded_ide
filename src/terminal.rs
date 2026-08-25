@@ -198,15 +198,7 @@ impl TerminalConsole {
         self.stop = Some(Arc::clone(&stop));
 
         let (shell, shell_args) = shell_invocation();
-        let mut command = Command::new(&shell);
-        command
-            .args(&shell_args)
-            .arg(&cmd)
-            .current_dir(&self.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        crate::build::no_window(&mut command);
+        let mut command = shell_command(&shell, &shell_args, &cmd, &self.cwd);
 
         let mut child = match command.spawn() {
             Ok(c) => c,
@@ -341,6 +333,32 @@ impl TerminalConsole {
 /// because `$SHELL` is simply absent when the app is launched from a desktop
 /// entry rather than a login shell. There is no `-NonInteractive` equivalent —
 /// `stdin(Stdio::null())` at the call site is what stops a prompt from hanging.
+/// The child process a typed command runs as.
+///
+/// Split out of `run` so its ENVIRONMENT can be asserted, because that
+/// environment is load-bearing and invisible. `build::no_window` is what puts
+/// the Xtensa linker on PATH and drops an inherited `RUSTUP_TOOLCHAIN`; without
+/// both, a `cargo build` typed into this tab fails on an ESP32/S2/S3 project
+/// while the Build button on the same project succeeds. One command, two
+/// answers, and nothing on screen to explain the difference.
+///
+/// `stdin` is null deliberately. This is not a PTY, so a tool that stops to ask
+/// something - `espflash` with several boards attached, say - reads EOF and
+/// fails with its own message rather than hanging the tab forever waiting for
+/// an answer that cannot be typed.
+fn shell_command(shell: &str, shell_args: &[String], cmd: &str, cwd: &std::path::Path) -> Command {
+    let mut command = Command::new(shell);
+    command
+        .args(shell_args)
+        .arg(cmd)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::build::no_window(&mut command);
+    command
+}
+
 fn shell_invocation() -> (String, Vec<String>) {
     if cfg!(target_os = "windows") {
         (
@@ -684,5 +702,108 @@ mod tests {
         assert_eq!(strip_line("done\n"), "done");
         // Progress bar rewriting the line → last segment wins.
         assert_eq!(strip_line("10%\r50%\r100%\n"), "100%");
+    }
+}
+
+#[cfg(test)]
+mod esp_environment_tests {
+    use super::*;
+
+    fn built(cwd: &std::path::Path) -> Command {
+        let (shell, args) = shell_invocation();
+        shell_command(&shell, &args, "cargo build --release", cwd)
+    }
+
+    /// The one thing that makes an Xtensa project buildable from this tab.
+    ///
+    /// `RUSTUP_TOOLCHAIN` outranks a project's own `rust-toolchain.toml`, and
+    /// launching the IDE with `cargo run` leaks one into every child. An ESP32,
+    /// S2 or S3 project would then build with stock rustc and fail with
+    /// `'esp32s3' is not a recognized processor` - a message that names no
+    /// toolchain, from a tab where the Build button works fine.
+    #[test]
+    fn a_typed_command_does_not_inherit_the_ides_toolchain_pin() {
+        let cmd = built(std::path::Path::new("."));
+        assert!(
+            cmd.get_envs()
+                .any(|(k, v)| k == "RUSTUP_TOOLCHAIN" && v.is_none()),
+            "the tab would hand its own toolchain pin to the user's cargo"
+        );
+    }
+
+    /// Where a typed command runs. `cargo build` here has to mean the generated
+    /// project, which is also where `rust-toolchain.toml` is written - the two
+    /// have to be the same directory or the Xtensa pin is simply not seen.
+    #[test]
+    fn a_typed_command_runs_where_the_project_was_written() {
+        let ws = crate::workspace::dir();
+        let t = TerminalConsole::default();
+        assert_eq!(t.cwd, ws, "the console does not start in the build dir");
+        let cmd = built(&ws);
+        assert_eq!(cmd.get_current_dir(), Some(ws.as_path()));
+    }
+
+    /// Not a PTY: a tool that stops to ask something must fail, not hang.
+    /// `espflash` asking which of several attached boards to flash is the case
+    /// that reaches this on an ESP project.
+    ///
+    /// Spawned for real, because `Stdio` cannot be read back off a `Command` —
+    /// the only way to show stdin is at EOF is to let something try to read it.
+    /// Polled rather than waited on, so a regression to a piped stdin fails
+    /// here in seconds instead of hanging the suite.
+    #[test]
+    fn a_prompting_tool_reads_eof_instead_of_blocking() {
+        let (shell, args) = shell_invocation();
+        let read_all_of_stdin = if cfg!(target_os = "windows") {
+            "[Console]::In.ReadToEnd().Length"
+        } else {
+            "wc -c"
+        };
+        let mut child = shell_command(&shell, &args, read_all_of_stdin, std::path::Path::new("."))
+            .spawn()
+            .expect("spawn a shell");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            match child.try_wait().expect("try_wait") {
+                Some(_) => break,
+                None if std::time::Instant::now() > deadline => {
+                    let _ = child.kill();
+                    panic!("the child is still waiting on stdin — it is no longer null");
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
+
+    /// The Xtensa linker directory, when this machine has one. Skipped on a
+    /// machine without `espup`, which is every machine that only builds ARM or
+    /// RISC-V — `add_xtensa_to_path` is a no-op there and leaves PATH untouched.
+    #[test]
+    fn the_xtensa_linker_reaches_a_typed_command() {
+        let cmd = built(std::path::Path::new("."));
+        let Some(path) = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .and_then(|(_, v)| v)
+        else {
+            eprintln!("no Xtensa toolchain on this machine — PATH untouched, as intended");
+            return;
+        };
+        let has_linker = std::env::split_paths(path).any(|d| {
+            std::fs::read_dir(&d).is_ok_and(|mut e| {
+                e.any(|f| {
+                    f.is_ok_and(|f| {
+                        let n = f.file_name();
+                        let n = n.to_string_lossy();
+                        n.starts_with("xtensa-esp") && n.contains("-elf-gcc")
+                    })
+                })
+            })
+        });
+        assert!(
+            has_linker,
+            "PATH was rewritten but carries no xtensa-esp*-elf-gcc"
+        );
     }
 }
