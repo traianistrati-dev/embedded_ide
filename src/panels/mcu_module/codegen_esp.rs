@@ -526,7 +526,11 @@ fn make_gen_section(
         }
     }
 
-    // ── USB — comment only (hardware-fixed on GPIO18/GPIO19) ─────────────────
+    // ── USB — comment only. The pads are fixed in hardware, but WHICH pads
+    // differs per part: a C3 uses GPIO18/19, a C6 GPIO12/13, an S3 GPIO19/20,
+    // an H2 GPIO26/27. The emitted line names none of them for that reason —
+    // the definition already puts `UsbDm`/`UsbDp` on the right two pads.
+    // ─────────────────────────────────────────────────────────────────────────
     if has_usb {
         body.push('\n');
         body.push_str("    // ── USB — configured automatically by the USB peripheral ──\n");

@@ -974,6 +974,92 @@ fn cost_note(cost: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The Peripherals tab, for every chip that can open it.
+    ///
+    /// The tab is thirteen hard-coded categories plus whatever the chip's own
+    /// signals derive. What it must never do is offer a peripheral the chip
+    /// has not got — the categories come from PIN FUNCTIONS, so the check is
+    /// whether those agree with what the part actually carries.
+    #[test]
+    fn every_bundled_chip_opens_a_truthful_peripherals_tab() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::codegen::family;
+
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            let cats = build_categories(&mcu);
+            let names: Vec<&str> = cats.iter().map(|c| c.name.as_str()).collect();
+            println!("{:<16} {:?}", d.id, names);
+
+            assert!(!cats.is_empty(), "{}: the tab would be blank", d.id);
+            for c in &cats {
+                // An empty category is a heading over nothing. `build_categories`
+                // drops them; this is what keeps that true.
+                assert!(!c.pins.is_empty(), "{}: `{}` lists no pin", d.id, c.name);
+                assert!(
+                    !c.blurb.trim().is_empty(),
+                    "{}: `{}` has no blurb",
+                    d.id,
+                    c.name
+                );
+                for p in &c.pins {
+                    assert!(
+                        !p.options.is_empty(),
+                        "{}: `{}` pin {} has no signal",
+                        d.id,
+                        c.name,
+                        p.pin_num
+                    );
+                }
+            }
+            let mut sorted = names.clone();
+            sorted.sort_unstable();
+            let before = sorted.len();
+            sorted.dedup();
+            assert_eq!(sorted.len(), before, "{}: a category is listed twice", d.id);
+
+            if family::is_esp(&mcu.family) {
+                // Cross-checked against the pins, which came from the vendor
+                // metadata: a category may appear only where the chip has the
+                // signals for it. The C5 and C61 have no LEDC at all, and the
+                // ESP32 and C2 no USB — so those tabs must be short.
+                use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+                let has = |pred: &dyn Fn(&PinFunction) -> bool| {
+                    mcu.iter_all_pins()
+                        .any(|p| p.available_functions.iter().any(|f| pred(f)))
+                };
+                for (cat, pred) in [
+                    (
+                        "Timers / PWM",
+                        &(|f: &PinFunction| matches!(f, PinFunction::TimerPwm { .. }))
+                            as &dyn Fn(&PinFunction) -> bool,
+                    ),
+                    ("USB", &|f: &PinFunction| {
+                        matches!(f, PinFunction::UsbDm | PinFunction::UsbDp)
+                    }),
+                    ("ADC", &|f: &PinFunction| {
+                        matches!(f, PinFunction::AdcChannel { .. })
+                    }),
+                    ("CAN", &|f: &PinFunction| {
+                        matches!(f, PinFunction::CanTx | PinFunction::CanRx)
+                    }),
+                ] {
+                    assert_eq!(
+                        names.contains(&cat),
+                        has(pred),
+                        "{}: `{cat}` is offered {} the pins for it",
+                        d.id,
+                        if names.contains(&cat) {
+                            "without"
+                        } else {
+                            "despite"
+                        }
+                    );
+                }
+            }
+        }
+    }
     use super::*;
     use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
     use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
