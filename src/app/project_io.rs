@@ -921,25 +921,52 @@ fn is_resolution_detail(line: &str) -> bool {
     MARKERS.iter().any(|m| line.contains(m))
 }
 
+/// The `ProjectFiles`-derived half of the git snapshot: every generated file
+/// `write_project` puts on disk, keyed by project-relative path.
+///
+/// Split out of `git_disk_snapshot` so it can be checked against
+/// `git_tab::is_ide_managed` directly — the two lists had drifted, and nothing
+/// tied them together.
+///
+/// The conditional ones are conditional for real: `memory.x` and `build.rs` are
+/// empty on EspRust, and `rust-toolchain.toml` exists ONLY on the three Xtensa
+/// parts. That last one was missing here entirely, which made this function's
+/// own promise false for esp32 / esp32s2 / esp32s3: switching a saved project
+/// to one of them left the pin in memory and absent from disk, and the Git tab
+/// reported the tree clean. The commit then carried an Xtensa `Cargo.toml` with
+/// no toolchain to build it, and the failure surfaced on someone else's clone
+/// as `'esp32s3' is not a recognized processor`.
+///
+/// A file that is empty is one `write_project` does not write, so it is left
+/// out rather than tracked as an empty file that never matches disk.
+fn generated_files_snapshot(
+    files: crate::panels::mcu_module::project_gen::ProjectFiles,
+) -> Vec<(String, String)> {
+    let mut snap = vec![
+        ("src/main.rs".to_owned(), files.main_rs),
+        ("Cargo.toml".to_owned(), files.cargo_toml),
+        (".cargo/config.toml".to_owned(), files.cargo_config),
+        (".gitignore".to_owned(), files.gitignore),
+    ];
+    for (rel, content) in [
+        ("memory.x", files.memory_x),
+        ("build.rs", files.build_rs),
+        ("rust-toolchain.toml", files.rust_toolchain),
+    ] {
+        if !content.is_empty() {
+            snap.push((rel.to_owned(), content));
+        }
+    }
+    snap
+}
+
 impl AppIde {
     /// The in-memory project content, keyed by project-relative path — the
     /// exact file set `write_project` persists. The git worker compares it
     /// against disk for the "unsaved changes" warning (commits are strictly
     /// what's ON DISK; this only powers the warning).
     fn git_disk_snapshot(&self) -> Vec<(String, String)> {
-        let files = self.current_project_files();
-        let mut snap = vec![
-            ("src/main.rs".to_owned(), files.main_rs),
-            ("Cargo.toml".to_owned(), files.cargo_toml),
-            (".cargo/config.toml".to_owned(), files.cargo_config),
-            (".gitignore".to_owned(), files.gitignore),
-        ];
-        if !files.memory_x.is_empty() {
-            snap.push(("memory.x".to_owned(), files.memory_x));
-        }
-        if !files.build_rs.is_empty() {
-            snap.push(("build.rs".to_owned(), files.build_rs));
-        }
+        let mut snap = generated_files_snapshot(self.current_project_files());
         let mcu_cfg = self.mcu_config_text();
         if !mcu_cfg.trim().is_empty() {
             snap.push((
@@ -1617,5 +1644,85 @@ mod fs_create_tests {
         apply_fs_create(&mut files, &mut folders, "ghost.rs", false, None);
         assert!(files.is_empty(), "no phantom (\"ghost.rs\", \"\") entries");
         assert!(folders.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod git_snapshot_tests {
+    use super::*;
+    use crate::app::tabs::git_tab::is_ide_managed;
+    use crate::panels::mcu_module::project_gen::ProjectFiles;
+
+    /// Every generated file carries content, so nothing is dropped for being
+    /// empty and the two conditional families are both present.
+    fn xtensa_files() -> ProjectFiles {
+        ProjectFiles {
+            main_rs: "fn main() {}".into(),
+            cargo_toml: "[package]".into(),
+            cargo_config: "[build]".into(),
+            gitignore: "/target".into(),
+            // An ESP has neither, which is what makes them conditional.
+            memory_x: String::new(),
+            build_rs: String::new(),
+            rust_toolchain: "[toolchain]\nchannel = \"esp\"\n".into(),
+        }
+    }
+
+    /// The defect this guards: the pin lived in memory and never in the
+    /// snapshot, so the Git tab called an Xtensa project clean while its
+    /// toolchain file was missing from disk.
+    #[test]
+    fn the_xtensa_toolchain_pin_is_tracked() {
+        let snap = generated_files_snapshot(xtensa_files());
+        let paths: Vec<&str> = snap.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.contains(&"rust-toolchain.toml"),
+            "the unsaved-changes warning cannot see it: {paths:?}"
+        );
+    }
+
+    /// A RISC-V ESP or an STM32 must not gain a phantom entry: an empty file is
+    /// one `write_project` does not write, and tracking it would report the
+    /// project permanently unsaved.
+    #[test]
+    fn a_project_without_one_does_not_track_it() {
+        let mut files = xtensa_files();
+        files.rust_toolchain = String::new();
+        let paths: Vec<String> = generated_files_snapshot(files)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p == "rust-toolchain.toml"),
+            "{paths:?}"
+        );
+        // The always-present four survive.
+        for p in [
+            "src/main.rs",
+            "Cargo.toml",
+            ".cargo/config.toml",
+            ".gitignore",
+        ] {
+            assert!(paths.iter().any(|q| q == p), "lost {p}: {paths:?}");
+        }
+    }
+
+    /// The invariant that ties the two lists together. They were maintained by
+    /// hand, in different files, and drifted — `rust-toolchain.toml` was in
+    /// neither. Anything the IDE regenerates on Save must also be refused for a
+    /// hunk-revert, or the user reverts a change that silently comes back.
+    #[test]
+    fn everything_the_ide_rewrites_is_also_refused_for_hunk_revert() {
+        let mut files = xtensa_files();
+        // Fill the conditional ones too, so every path this can emit is checked
+        // in one pass rather than one family at a time.
+        files.memory_x = "MEMORY {}".into();
+        files.build_rs = "fn main() {}".into();
+        for (path, _) in generated_files_snapshot(files) {
+            assert!(
+                is_ide_managed(&path),
+                "`{path}` is rewritten by Save but hunk-revert would accept it"
+            );
+        }
     }
 }

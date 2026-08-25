@@ -23,6 +23,11 @@ pub(crate) fn is_ide_managed(path: &str) -> bool {
             | "memory.x"
             | "build.rs"
             | ".gitignore"
+            // Xtensa only (esp32 / s2 / s3). Reverting a hunk of it would be
+            // undone by the next Save without a word, exactly like the others
+            // here - and this is the file that decides whether the project
+            // compiles at all.
+            | "rust-toolchain.toml"
     ) || path == crate::panels::mcu_module::mcu_config::FILE_NAME
         || crate::project_tree::gui::generated_file_reason(path).is_some()
 }
