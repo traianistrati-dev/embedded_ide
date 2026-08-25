@@ -52,6 +52,88 @@ use super::pins::logic::pin_function::PinFunction;
 /// one the hand-written definition already makes.
 const RESERVED: &[(&str, &[u8])] = &[("esp32c3", &[11])];
 
+/// The real package pinout of a part, transcribed from its datasheet.
+///
+/// `("esp32c5", "QFN48", ESP32C5_QFN48)`. A pad named `GPIOn` is usable and
+/// takes the metadata's function list; every other name is a supply rail, an
+/// antenna or a crystal pad and is emitted RESERVED with no functions — which
+/// is how the hand-written ESP32-C3 already describes its QFN32.
+///
+/// A chip appears here only once someone has read its table. The rest keep the
+/// LOGICAL layout of [`logical_layout`], because inventing pin numbers is
+/// better than getting real ones wrong.
+const PACKAGES: &[(&str, &str, &[(u8, &str)])] = &[("esp32c5", "QFN48", ESP32C5_QFN48)];
+
+/// ESP32-C5, Table 7-1 "Pin Overview" — all 48 pads, in the vendor's numbering.
+///
+/// Two things it says that the metadata does not:
+///
+/// * **Where the GPIOs are.** They occupy pins 9-23 and 25-38, not 1-29, and
+///   nineteen of the package's pads are not GPIOs at all.
+/// * **That GPIO19 is not a GPIO.** Pin 29 is `VDD_SPI/NC`, the rail powering
+///   the external flash. It is left out by name for the same reason the C3
+///   leaves out its GPIO11 (see [`RESERVED`]): offering it invites someone to
+///   drive the supply of the chip they are about to boot from.
+///
+/// The `/NC` suffixes the datasheet gives pins 26-32 mean those pads are the
+/// in-package flash bus on the variants that have one and Not Connected on the
+/// ones that do not. They stay usable here, exactly as the C3's own flash bus
+/// (GPIO12-GPIO17) does — the die cannot say which variant it was packaged as.
+const ESP32C5_QFN48: &[(u8, &str)] = &[
+    // Left edge, top to bottom.
+    (1, "VDDA6"),
+    (2, "GND"),
+    (3, "VDDA7"),
+    (4, "XTAL_N"),
+    (5, "XTAL_P"),
+    (6, "VDDA8"),
+    (7, "CHIP_PU"),
+    (8, "VDDPST1"),
+    (9, "GPIO0"),
+    (10, "GPIO1"),
+    (11, "GPIO2"),
+    (12, "GPIO3"),
+    // Bottom edge, left to right.
+    (13, "GPIO4"),
+    (14, "GPIO5"),
+    (15, "GPIO6"),
+    (16, "GPIO7"),
+    (17, "GPIO8"),
+    (18, "GPIO9"),
+    (19, "GPIO10"),
+    (20, "GPIO11"),
+    (21, "GPIO12"),
+    (22, "GPIO13"),
+    (23, "GPIO14"),
+    (24, "VDDPST2"),
+    // Right edge, bottom to top.
+    (25, "GPIO15"),
+    (26, "GPIO16"),
+    (27, "GPIO17"),
+    (28, "GPIO18"),
+    (29, "VDD_SPI"),
+    (30, "GPIO20"),
+    (31, "GPIO21"),
+    (32, "GPIO22"),
+    (33, "GPIO23"),
+    (34, "GPIO24"),
+    (35, "GPIO25"),
+    (36, "GPIO26"),
+    // Top edge, right to left.
+    (37, "GPIO27"),
+    (38, "GPIO28"),
+    (39, "VDDPST3"),
+    (40, "VDDA1"),
+    (41, "VDDA2"),
+    (42, "ANT_2G"),
+    (43, "GND"),
+    (44, "VDDA3"),
+    (45, "VDDA4"),
+    (46, "VDDA5"),
+    (47, "GND"),
+    (48, "ANT_5G"),
+];
+
 /// How many LEDC channels the PWM driver exposes, per chip.
 ///
 /// Not in the metadata. Taken from `esp-hal`'s own `#[cfg]` on
@@ -198,13 +280,61 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
     out
 }
 
+/// The chip's pin layout: its real package when the datasheet has been read for
+/// it, the logical arrangement otherwise.
+fn layout(chip: &EspChip, reserved: &[u8]) -> PinLayout {
+    match PACKAGES.iter().find(|(id, _, _)| *id == chip.id) {
+        Some((_, _, pads)) => package_layout(chip, pads),
+        None => logical_layout(chip, reserved),
+    }
+}
+
+/// The part's real pinout, laid out the way a QFN is numbered: pin 1 at the top
+/// of the LEFT edge, counter-clockwise from there.
+///
+/// The two far sides are reversed because each side is drawn top-to-bottom or
+/// left-to-right, while the numbering runs up the right edge and back along the
+/// top. This reproduces the arrangement the hand-written ESP32-C3 uses, which is
+/// the yardstick for what an ESP chip should look like.
+fn package_layout(chip: &EspChip, pads: &[(u8, &str)]) -> PinLayout {
+    let per = pads.len() / 4;
+    let one = |&(number, name): &(u8, &str)| {
+        // A pad the metadata does not know as a GPIO is a supply, a crystal or
+        // an antenna feed. It is a real pin of the package and belongs on the
+        // drawing, but nothing can be assigned to it.
+        let gpio = name
+            .strip_prefix("GPIO")
+            .and_then(|n| n.parse::<u8>().ok())
+            .and_then(|n| chip.gpios.iter().find(|g| g.number == n).copied());
+        PinDef {
+            number: number as usize,
+            name: name.to_owned(),
+            reserved: gpio.is_none(),
+            functions: gpio.map(|g| functions_for(chip, g)).unwrap_or_default(),
+            af: Vec::new(),
+            fn_owner: Vec::new(),
+        }
+    };
+    let side = |from: usize| pads[from..from + per].iter().map(one).collect::<Vec<_>>();
+    let (mut right, mut top) = (side(2 * per), side(3 * per));
+    right.reverse();
+    top.reverse();
+    PinLayout {
+        left: side(0),
+        bottom: side(per),
+        right,
+        top,
+        grid: None,
+    }
+}
+
 /// Spread the pads over the four sides of a square, in order.
 ///
 /// A LOGICAL layout — see the module docs. The pin numbers are positions in this
 /// arrangement, not the part's real pin numbers, which the metadata does not
 /// carry. Going round rather than down one side keeps a 31-GPIO chip from
 /// drawing as a strip.
-fn layout(chip: &EspChip, reserved: &[u8]) -> PinLayout {
+fn logical_layout(chip: &EspChip, reserved: &[u8]) -> PinLayout {
     let pads = &chip.gpios;
     let per = pads.len().div_ceil(4);
     let mut sides: Vec<Vec<PinDef>> = vec![Vec::new(); 4];
@@ -354,9 +484,14 @@ pub fn definition(chip: &EspChip) -> Result<McuDefinition, String> {
         id: chip.id.clone(),
         display_name: chip.name.clone(),
         family: chip.id.clone(),
-        // Unknown, and left so: an ESP32 die ships in several modules and the
-        // metadata names none of them.
-        package: String::new(),
+        // From the datasheet table when there is one; otherwise unknown and
+        // left so, since an ESP32 die ships in several modules and the metadata
+        // names none of them.
+        package: PACKAGES
+            .iter()
+            .find(|(id, _, _)| *id == chip.id)
+            .map(|(_, name, _)| (*name).to_owned())
+            .unwrap_or_default(),
         cpu: match chip.arch {
             super::esp_metadata::Arch::RiscV => "RISC-V 32-bit",
             super::esp_metadata::Arch::Xtensa => "Xtensa LX",
@@ -448,6 +583,96 @@ mod tests {
             );
         }
         out
+    }
+
+    /// A datasheet table is typed in by hand, so it gets checked like one.
+    ///
+    /// Every pad numbered once, from 1 with no gaps, and four equal sides — the
+    /// three ways a transcription goes wrong that produce a plausible-looking
+    /// chip rather than a crash.
+    #[test]
+    fn every_package_table_is_a_complete_numbering() {
+        for (id, name, pads) in PACKAGES {
+            let numbers: Vec<u8> = pads.iter().map(|(n, _)| *n).collect();
+            let want: Vec<u8> = (1..=pads.len() as u8).collect();
+            assert_eq!(
+                numbers,
+                want,
+                "{id} ({name}): pins are not 1..={}",
+                pads.len()
+            );
+            assert_eq!(
+                pads.len() % 4,
+                0,
+                "{id} ({name}): {} pads do not divide over four sides",
+                pads.len()
+            );
+        }
+    }
+
+    /// The transcribed table and the vendor metadata must name the same GPIOs.
+    ///
+    /// This is the check that matters: a mistyped number would silently turn a
+    /// usable pad into a reserved one (the name would not resolve) or move a
+    /// peripheral onto the wrong pin, and nothing downstream would notice.
+    /// `GPIO19` is the one deliberate difference — see [`ESP32C5_QFN48`].
+    #[test]
+    #[ignore]
+    fn the_c5_package_names_exactly_the_gpios_the_metadata_has() {
+        let c5 = chip("esp32c5");
+        let in_table: BTreeSet<u8> = ESP32C5_QFN48
+            .iter()
+            .filter_map(|(_, n)| n.strip_prefix("GPIO")?.parse().ok())
+            .collect();
+        let in_metadata: BTreeSet<u8> = c5.gpios.iter().map(|g| g.number).collect();
+        assert_eq!(
+            in_metadata
+                .difference(&in_table)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![19],
+            "GPIO19 is pin 29, VDD_SPI; every other pad must be on the drawing"
+        );
+        assert!(
+            in_table.is_subset(&in_metadata),
+            "the table names a GPIO the chip does not have: {:?}",
+            in_table.difference(&in_metadata).collect::<Vec<_>>()
+        );
+    }
+
+    /// The C5 draws as its real QFN48, not as 29 pins numbered 1..29.
+    #[test]
+    #[ignore]
+    fn the_c5_carries_its_datasheet_pinout() {
+        let def = definition(&chip("esp32c5")).expect("c5 generates");
+        assert_eq!(def.package, "QFN48");
+        let sides = [
+            &def.pins.left,
+            &def.pins.bottom,
+            &def.pins.right,
+            &def.pins.top,
+        ];
+        assert!(sides.iter().all(|s| s.len() == 12), "12 pads a side");
+        // Counter-clockwise from the top of the left edge, exactly as the
+        // hand-written C3 is arranged.
+        assert_eq!(def.pins.left[0].name, "VDDA6");
+        assert_eq!(def.pins.left[0].number, 1);
+        assert_eq!(def.pins.bottom[0].number, 13);
+        assert_eq!(def.pins.right[0].number, 36);
+        assert_eq!(def.pins.top[0].number, 48);
+        // The supplies are on the drawing and unassignable; the flash bus is
+        // usable but its rail is not.
+        let pad = |name: &str| {
+            sides
+                .iter()
+                .flat_map(|s| s.iter())
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("{name} is not on the package"))
+        };
+        assert!(pad("VDD_SPI").reserved && pad("VDD_SPI").functions.is_empty());
+        assert!(pad("ANT_5G").reserved);
+        assert!(!pad("GPIO16").reserved, "the flash bus stays usable");
+        assert_eq!(pad("GPIO0").number, 9, "GPIO0 is package pin 9");
     }
 
     #[test]
