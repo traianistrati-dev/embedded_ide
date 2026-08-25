@@ -138,6 +138,25 @@ pub struct EspChip {
     pub adc: Vec<(String, u8)>,
     /// Every peripheral singleton the chip has, GPIOs excluded.
     pub peripherals: Vec<String>,
+    /// The PLL's output, in Hz, when the metadata states one.
+    ///
+    /// NOT in the clock-tree TYPES — those only name the nodes. The frequencies
+    /// live in `implement_peripheral_clocks`, as generated functions whose whole
+    /// body is a literal:
+    ///
+    /// ```text
+    /// pub fn pll_clk_frequency(clocks: &mut ClockTree) -> u32 { 480000000 }
+    /// ```
+    ///
+    /// The largest such `pll*` constant is the PLL proper — the others
+    /// (`pll_f80m`, `pll_f160m`) are its taps.
+    pub pll_hz: Option<u32>,
+    /// The crystal frequencies this part accepts, in Hz.
+    ///
+    /// Usually one; an ESP32-C2 takes either 26 or 40 MHz. From
+    /// `impl XtalClkConfig { fn value() }`, which unlike most of the clock tree
+    /// DOES state its numbers in the types.
+    pub xtal_hz: Vec<u32>,
     /// `("USB_DM", 18)` — the analog list's non-ADC entries.
     ///
     /// Kept apart from [`EspChip::adc`] because they answer a different
@@ -448,6 +467,46 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
     peripherals.sort();
     peripherals.dedup();
 
+    // `pub fn <node>_frequency(clocks: &mut ClockTree) -> u32 { 480000000 }`,
+    // taking only the bodies that ARE a literal: the rest are computed from the
+    // live configuration and cannot be read as a constant.
+    let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    const SIG: &str = "_frequency(clocks: &mut ClockTree) -> u32 { ";
+    let mut pll_hz: Option<u32> = None;
+    for chunk in flat.split("pub fn ").skip(1) {
+        let Some((name, body)) = chunk.split_once(SIG) else {
+            continue;
+        };
+        if !name.starts_with("pll") || name.contains(' ') {
+            continue;
+        }
+        if let Ok(hz) = body.split(' ').next().unwrap_or("").parse::<u32>() {
+            pll_hz = Some(pll_hz.map_or(hz, |cur| cur.max(hz)));
+        }
+    }
+
+    // `impl XtalClkConfig { pub fn value(&self) -> u32 { match self {
+    //  XtalClkConfig::_40 => 40000000, } } }`
+    let mut xtal_hz: Vec<u32> = Vec::new();
+    if let Some(at) = flat.find("impl XtalClkConfig { pub fn value(&self) -> u32 { match self {")
+        && let Some(end) = flat[at..].find("} }")
+    {
+        for arm in flat[at..at + end].split("XtalClkConfig::_").skip(1) {
+            if let Some((_, hz)) = arm.split_once("=> ")
+                && let Ok(v) = hz
+                    .trim_end_matches(',')
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .parse()
+            {
+                xtal_hz.push(v);
+            }
+        }
+    }
+    xtal_hz.sort_unstable();
+    xtal_hz.dedup();
+
     Ok(EspChip {
         id,
         name,
@@ -460,6 +519,8 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
         adc,
         peripherals,
         analog,
+        pll_hz,
+        xtal_hz,
     })
 }
 
@@ -741,6 +802,9 @@ macro_rules! for_each_peripheral {
             assert_eq!(c.arch, Arch::RiscV, "{chip} is meant to be RISC-V");
             assert!(!c.gpios.is_empty(), "{chip} has no GPIOs");
             assert!(c.dram_bytes > 100_000, "{chip} SRAM looks wrong");
+            // The PLL is what a CPU-clock graph divides down from, so a chip
+            // without one gets no clock tree rather than a wrong one.
+            println!("          PLL {:?} MHz", c.pll_hz.map(|h| h / 1_000_000));
             assert!(!c.uarts.is_empty(), "{chip} has no UART");
             assert!(!c.spi.is_empty(), "{chip} has no SPI master");
             assert!(!c.i2c.is_empty(), "{chip} has no I2C master");

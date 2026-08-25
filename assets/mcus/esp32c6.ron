@@ -1455,5 +1455,238 @@ McuDefinition(
         ],
         grid: None,
     ),
-    clock: None,
+    clock: Graph(GraphClock(
+        graph: ClockGraph(
+            nodes: [
+                Node(
+                    id: "xtal",
+                    kind: Source(
+                        min_hz: 40000000,
+                        max_hz: 40000000,
+                        gated: false,
+                    ),
+                    state: Source(
+                        enabled: true,
+                        hz: 40000000,
+                    ),
+                    limit: None,
+                ),
+                Node(
+                    id: "pll",
+                    kind: Source(
+                        min_hz: 480000000,
+                        max_hz: 480000000,
+                        gated: false,
+                    ),
+                    state: Source(
+                        enabled: true,
+                        hz: 480000000,
+                    ),
+                    limit: None,
+                ),
+                Node(
+                    id: "cpu_div",
+                    kind: Divider(
+                        options: [
+                            3,
+                            6,
+                        ],
+                    ),
+                    state: Index(0),
+                    limit: None,
+                ),
+                Node(
+                    id: "cpu",
+                    kind: Mux(
+                        inputs: 2,
+                    ),
+                    state: Index(1),
+                    limit: None,
+                ),
+            ],
+            edges: [
+                Edge(
+                    from: "pll",
+                    to: "cpu_div",
+                    input: 0,
+                ),
+                Edge(
+                    from: "xtal",
+                    to: "cpu",
+                    input: 0,
+                ),
+                Edge(
+                    from: "cpu_div",
+                    to: "cpu",
+                    input: 1,
+                ),
+            ],
+        ),
+        layout: ClockLayout(
+            nodes: [
+                NodeBox(
+                    node: "xtal",
+                    x: 46.0,
+                    y: 51.0,
+                    w: 64.0,
+                    h: 36.0,
+                ),
+                NodeBox(
+                    node: "pll",
+                    x: 46.0,
+                    y: 134.0,
+                    w: 64.0,
+                    h: 36.0,
+                ),
+                NodeBox(
+                    node: "cpu_div",
+                    x: 246.0,
+                    y: 92.5,
+                    w: 64.0,
+                    h: 36.0,
+                ),
+                NodeBox(
+                    node: "cpu",
+                    x: 446.0,
+                    y: 92.5,
+                    w: 88.0,
+                    h: 36.0,
+                ),
+            ],
+            blocks: [
+                BlockDef(
+                    x: 246.0,
+                    y: 92.5,
+                    w: 64.0,
+                    h: 36.0,
+                    label: "",
+                    node: Some("cpu_div"),
+                ),
+                BlockDef(
+                    x: 446.0,
+                    y: 92.5,
+                    w: 88.0,
+                    h: 36.0,
+                    label: "",
+                    node: Some("cpu"),
+                ),
+            ],
+            outputs: [],
+            tags: [
+                TagDef(
+                    x: 46.0,
+                    y: 99.0,
+                    name: "",
+                    src: Node("xtal"),
+                    limit: None,
+                ),
+                TagDef(
+                    x: 46.0,
+                    y: 182.0,
+                    name: "",
+                    src: Node("pll"),
+                    limit: None,
+                ),
+                TagDef(
+                    x: 246.0,
+                    y: 140.5,
+                    name: "",
+                    src: Node("cpu_div"),
+                    limit: None,
+                ),
+                TagDef(
+                    x: 446.0,
+                    y: 140.5,
+                    name: "",
+                    src: Node("cpu"),
+                    limit: None,
+                ),
+            ],
+            labels_above: [
+                LabelDef(
+                    x: 46.0,
+                    y: 48.0,
+                    text: "xtal",
+                    node: Some("xtal"),
+                ),
+                LabelDef(
+                    x: 46.0,
+                    y: 131.0,
+                    text: "pll",
+                    node: Some("pll"),
+                ),
+                LabelDef(
+                    x: 246.0,
+                    y: 89.5,
+                    text: "cpu_div",
+                    node: Some("cpu_div"),
+                ),
+                LabelDef(
+                    x: 446.0,
+                    y: 89.5,
+                    text: "cpu",
+                    node: Some("cpu"),
+                ),
+            ],
+            mux_titles: [],
+            wires: [
+                [
+                    (110.0, 152.0),
+                    (230.0, 152.0),
+                    (230.0, 110.5),
+                    (246.0, 110.5),
+                ],
+                [
+                    (110.0, 69.0),
+                    (430.0, 69.0),
+                    (430.0, 104.5),
+                    (446.0, 104.5),
+                ],
+                [
+                    (310.0, 110.5),
+                    (421.0, 110.5),
+                    (421.0, 116.5),
+                    (446.0, 116.5),
+                ],
+            ],
+            widgets: [
+                DragMhz(
+                    node: "xtal",
+                    x: 46.0,
+                    y: 51.0,
+                    w: 64.0,
+                    min_mhz: 40.0,
+                    max_mhz: 40.0,
+                ),
+                DragMhz(
+                    node: "pll",
+                    x: 46.0,
+                    y: 134.0,
+                    w: 64.0,
+                    min_mhz: 480.0,
+                    max_mhz: 480.0,
+                ),
+                Combo(
+                    node: "cpu_div",
+                    x: 251.0,
+                    y: 97.5,
+                    w: 54.0,
+                    options: [
+                        ("/3", Index(0)),
+                        ("/6", Index(1)),
+                    ],
+                ),
+                Combo(
+                    node: "cpu",
+                    x: 451.0,
+                    y: 97.5,
+                    w: 78.0,
+                    options: [
+                        ("xtal", Index(0)),
+                        ("cpu_div", Index(1)),
+                    ],
+                ),
+            ],
+        ),
+    )),
 )

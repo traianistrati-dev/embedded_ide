@@ -34,6 +34,7 @@
 //! uses it as the yardstick — comparing what each pad can DO, which the metadata
 //! does know, and ignoring where each pad IS, which it does not.
 
+use super::clock::graph::model::{ClockGraph, Edge, Node, NodeKind, NodeState};
 use super::esp_metadata::EspChip;
 use super::mcu_catalog::ToolchainKind;
 use super::mcu_def::{McuDefinition, PinDef, PinLayout, ProjectDef};
@@ -201,6 +202,101 @@ fn layout(chip: &EspChip, reserved: &[u8]) -> PinLayout {
     }
 }
 
+/// The CPU-clock chain, or `None` when it cannot be built from evidence.
+///
+/// # Deliberately smaller than the silicon
+///
+/// The metadata describes the whole tree, and it is derivable: muxes, dividers
+/// and constants, in three regular shapes. But it describes what the HARDWARE
+/// can express, and `esp-hal` exposes far less — an ESP32-H2's `CpuClkConfig`
+/// is a divisor of 0..=255, while its `CpuClock` enum has exactly one variant.
+/// A faithful tree would therefore offer 96/13 = 7.4 MHz, which the code
+/// generator cannot emit, and the Clock tab would be promising settings that
+/// silently snap to something else on the way out.
+///
+/// So the divider carries exactly the options `esp-hal` can name. That is also
+/// what the hand-written ESP32-C3 graph does — `Divider { options: [3, 6] }`
+/// gives 160 and 80 and nothing between them.
+///
+/// # It refuses rather than guesses
+///
+/// Every number comes from one of two checked sources: the PLL and crystal from
+/// Espressif's metadata, the CPU frequencies from `esp-hal`. The divisors are
+/// what reconciles them — and if a division is not exact, the two sources
+/// disagree about the chip and no graph is built at all.
+fn clock_graph(chip: &EspChip) -> Option<ClockGraph> {
+    let pll = chip.pll_hz?;
+    let xtal = *chip.xtal_hz.first()?;
+    let opts = super::esp_clocks::cpu_options(&chip.id);
+    if opts.is_empty() {
+        return None;
+    }
+    // Fastest first, so index 0 is the default a project boots at.
+    let mut divs: Vec<u32> = Vec::new();
+    for mhz in opts.iter().rev() {
+        let hz = mhz * 1_000_000;
+        if hz == 0 || pll % hz != 0 {
+            return None;
+        }
+        divs.push(pll / hz);
+    }
+
+    let n = |id: &str, kind: NodeKind, state: NodeState| Node {
+        id: id.to_owned(),
+        kind,
+        state,
+        // No datasheet ceilings: `esp-hal`'s own enum already bounds what the
+        // CPU node can be set to, so a second limit could only disagree.
+        limit: None,
+    };
+    let e = |from: &str, to: &str, input: usize| Edge {
+        from: from.to_owned(),
+        to: to.to_owned(),
+        input,
+    };
+    Some(ClockGraph {
+        nodes: vec![
+            n(
+                "xtal",
+                NodeKind::Source {
+                    min_hz: xtal,
+                    max_hz: *chip.xtal_hz.last().unwrap_or(&xtal),
+                    gated: false,
+                },
+                NodeState::Source {
+                    enabled: true,
+                    hz: xtal,
+                },
+            ),
+            // A fixed source, not a multiplier: the metadata states the PLL's
+            // output directly and says nothing about how it reaches it.
+            n(
+                "pll",
+                NodeKind::Source {
+                    min_hz: pll,
+                    max_hz: pll,
+                    gated: false,
+                },
+                NodeState::Source {
+                    enabled: true,
+                    hz: pll,
+                },
+            ),
+            n(
+                "cpu_div",
+                NodeKind::Divider { options: divs },
+                NodeState::Index(0),
+            ),
+            n("cpu", NodeKind::Mux { inputs: 2 }, NodeState::Index(1)),
+        ],
+        edges: vec![
+            e("pll", "cpu_div", 0),
+            e("xtal", "cpu", 0),
+            e("cpu_div", "cpu", 1),
+        ],
+    })
+}
+
 /// Build the definition for one chip.
 ///
 /// Refuses Xtensa outright: those parts need Espressif's rustc fork, and a
@@ -256,9 +352,18 @@ pub fn definition(chip: &EspChip) -> Result<McuDefinition, String> {
             memory_comment: String::new(),
         },
         pins: layout(chip, reserved),
-        // Modelled per family, which is later work. `None` means the Clock tab
-        // says so rather than drawing a tree that is not this chip's.
-        clock: super::mcu_def::ClockDef::None,
+        // Stored as a graph rather than a new `ClockDef` variant per chip: the
+        // shape is the same for all of them and only the numbers differ, so a
+        // variant would be three names for one topology. `None` where the two
+        // sources cannot be reconciled — see [`clock_graph`].
+        clock: match clock_graph(chip) {
+            Some(graph) => super::mcu_def::ClockDef::Graph(super::clock::graph::GraphClock {
+                layout: super::clock::graph::auto_layout::auto_layout(&graph),
+                graph,
+                bindings: Default::default(),
+            }),
+            None => super::mcu_def::ClockDef::None,
+        },
         dma: None,
         irq_vectors: Vec::new(),
         usart_ip: None,
@@ -463,6 +568,77 @@ mod tests {
                 "{id} is out of date — run regenerate_esp_ron"
             );
         }
+    }
+
+    /// The graph must be able to produce EVERY frequency `esp-hal` can name, and
+    /// nothing else.
+    ///
+    /// This is the whole safety argument for deriving a clock tree. The PLL and
+    /// crystal come from Espressif's metadata; the CPU options come from
+    /// `esp-hal`. They are independent sources, and the divider is what has to
+    /// reconcile them — so evaluating the graph at each divider setting and
+    /// getting back exactly `cpu_options` proves both readings agree about the
+    /// chip. A tree that showed a frequency the generator cannot emit would be
+    /// worse than the honest `ClockDef::None` it replaced.
+    #[test]
+    #[ignore]
+    fn a_derived_tree_produces_exactly_the_frequencies_esp_hal_can_name() {
+        use super::super::clock::graph::evaluate;
+        use super::super::clock::graph::model::NodeState;
+
+        let dir = esp_metadata::vendor_dir().expect("esp-metadata in the cargo registry");
+        for id in GENERATED {
+            let c = esp_metadata::load(&dir, id).unwrap();
+            let mut graph = clock_graph(&c).unwrap_or_else(|| panic!("{id}: no clock graph"));
+            let want = super::super::esp_clocks::cpu_options(id);
+
+            let divs = graph
+                .nodes
+                .iter()
+                .find(|n| n.id == "cpu_div")
+                .map(|n| match &n.kind {
+                    super::NodeKind::Divider { options } => options.clone(),
+                    other => panic!("{id}: cpu_div is {other:?}"),
+                })
+                .expect("a cpu_div node");
+            assert_eq!(divs.len(), want.len(), "{id}: {divs:?} vs {want:?}");
+
+            let mut got: Vec<u32> = Vec::new();
+            for ix in 0..divs.len() {
+                for node in &mut graph.nodes {
+                    if node.id == "cpu_div" {
+                        node.state = NodeState::Index(ix);
+                    }
+                }
+                let hz = evaluate(&graph).get("cpu").copied().unwrap_or(0);
+                assert_eq!(hz % 1_000_000, 0, "{id}: {hz} Hz is not a whole MHz");
+                got.push(hz / 1_000_000);
+            }
+            got.sort_unstable();
+            println!(
+                "{id:<9} xtal {:?} MHz  PLL {} MHz  divisors {divs:?}  ->  CPU {got:?} MHz",
+                c.xtal_hz.iter().map(|h| h / 1_000_000).collect::<Vec<_>>(),
+                c.pll_hz.unwrap() / 1_000_000,
+            );
+            assert_eq!(got, want, "{id}: the graph and esp-hal disagree");
+        }
+    }
+
+    /// A chip whose sources cannot be reconciled gets no tree, not a wrong one.
+    #[test]
+    fn an_unreconcilable_chip_gets_no_graph() {
+        let dir = esp_metadata::vendor_dir();
+        let Some(dir) = dir else { return };
+        let Ok(mut c) = esp_metadata::load(&dir, "esp32c6") else {
+            return;
+        };
+        assert!(clock_graph(&c).is_some(), "the real C6 should reconcile");
+        // A PLL that does not divide into 160 MHz cannot be this chip's.
+        c.pll_hz = Some(333_000_000);
+        assert!(clock_graph(&c).is_none(), "built a tree from a bad PLL");
+        // …and neither can no PLL at all.
+        c.pll_hz = None;
+        assert!(clock_graph(&c).is_none());
     }
 
     /// The held-back pair are held back for ONE reason, and it is not this code.
