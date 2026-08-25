@@ -907,6 +907,40 @@ KEEPS THE COMMENTED SKELETON ({}):",
         assert!(!yes.is_empty(), "some family must generate clock code");
     }
 
+    /// Dump one family's clock-tree node ids, which is what a codegen recipe
+    /// has to read. `EIDE_FAMILY=stm32n6` picks the family.
+    ///
+    /// `cargo test --bin embedded_ide_0 dump_clock_tree -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs real vendor data on this machine"]
+    fn dump_clock_tree_nodes() {
+        use super::super::chip_sources;
+        use super::super::clock::graph::cubemx::graph_for_chip_xml;
+
+        let want = std::env::var("EIDE_FAMILY").unwrap_or_else(|_| "stm32n6".into());
+        let c = Catalogue::build(chip_sources::all_sources());
+        let Some(row) = c
+            .unified
+            .iter()
+            .map(|&ix| &c.rows[ix])
+            .find(|r| r.entry.family == want && c.sources[r.source].has_clock())
+        else {
+            println!("no {want} part from a source with clock trees");
+            return;
+        };
+        let src = &c.sources[row.source];
+        let xml = std::fs::read_to_string(src.chip_file(&row.entry)).expect("read");
+        match graph_for_chip_xml(src.db.as_deref().unwrap(), &xml, &want) {
+            Ok((gc, missing)) => {
+                println!("{} ({want}): {} nodes, {} unbound", row.entry.ref_name, gc.graph.nodes.len(), missing.len());
+                let mut ids: Vec<&str> = gc.graph.nodes.iter().map(|n| n.id.as_str()).collect();
+                ids.sort_unstable();
+                println!("  {}", ids.join(" "));
+            }
+            Err(e) => println!("{} ({want}): no tree - {e}", row.entry.ref_name),
+        }
+    }
+
     /// Against every source this machine has. Ignored: needs real vendor data.
     ///
     /// Also times the build, because that cost lands on the frame that opens the
