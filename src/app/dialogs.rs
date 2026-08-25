@@ -2003,13 +2003,26 @@ mod chip_gaps_tests {
                 "", ""
             );
             // A runtime that is greyed out has to say why, or the tab is a dead
-            // control with no explanation.
-            if !rtic {
-                assert!(
-                    family::rtic_unavailable_reason(fam).is_some(),
-                    "{}: RTIC is greyed out with no reason given",
-                    d.id
-                );
+            // control with no explanation — and the reason has to name THIS
+            // chip's family, not the one the sentence was written for.
+            for (on, why, what) in [
+                (rtic, family::rtic_unavailable_reason(fam), "RTIC"),
+                (
+                    family::native_supported(fam),
+                    family::native_unavailable_reason(fam),
+                    "Native",
+                ),
+            ] {
+                match (on, why) {
+                    (true, Some(_)) => panic!("{}: {what} is offered AND excused", d.id),
+                    (false, None) => panic!("{}: {what} is greyed out with no reason", d.id),
+                    (false, Some(r)) => assert!(
+                        r.contains(fam),
+                        "{}: the {what} reason does not name `{fam}` — {r}",
+                        d.id
+                    ),
+                    (true, None) => {}
+                }
             }
 
             if family::is_esp(fam) {

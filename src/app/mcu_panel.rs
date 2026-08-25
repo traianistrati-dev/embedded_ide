@@ -1765,7 +1765,9 @@ impl AppIde {
                                  embassy-time 0.5. Leaving Async removes them again."),
                 ("Not yet:", "USART/SPI/I2C stay the blocking esp-hal drivers written inline in main.rs — \
                               ESP has no src/pins/configs/*.rs, so there is no async bus driver to select."),
-                ("Applies to:", "ESP32-C3 (riscv32imc). The STM32 async path is embassy-stm32 instead."),
+                // One sentence, no `\`-continuation: the continuation keeps the
+                // source indentation and renders as a run of spaces.
+                ("Applies to:", "Every Espressif part - RISC-V and Xtensa alike. The STM32 async path is embassy-stm32 instead."),
             ];
             runtime_details(
                 ui,
