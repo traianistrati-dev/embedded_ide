@@ -2065,6 +2065,120 @@ mod chip_gaps_tests {
         }
     }
 
+    /// The Clock tab, for every chip that can open it.
+    ///
+    /// The tab is driven entirely from the `Mcu`: the graph it draws, the
+    /// frequencies it shows, the limits it validates against, the ids code
+    /// generation reads back. Each of those is a separate chance for a chip to
+    /// open a tab that is empty, wrong, or accusing — and none of them is
+    /// visible from the dialog that got the user there.
+    #[test]
+    fn every_bundled_chip_opens_a_usable_clock_tab() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::clock::graph::{auto_layout, evaluate, over_limits};
+        use crate::panels::mcu_module::codegen::{family, rcc};
+
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            let ClockConfig::Graph(gc) = &mcu.clock else {
+                // No tree is a legitimate answer, but not for anything bundled:
+                // every shipped chip should have something to show.
+                panic!("{}: the Clock tab would have nothing to draw", d.id);
+            };
+
+            // A diagram: hand-authored, or computed from the topology. The tab
+            // fills an empty one itself, so the real question is whether that
+            // fill covers the graph rather than leaving nodes off-screen.
+            let layout = if gc.layout.is_empty() {
+                auto_layout(&gc.graph)
+            } else {
+                gc.layout.clone()
+            };
+            assert!(!layout.is_empty(), "{}: no diagram", d.id);
+
+            // Every id code generation reads back must EXIST in the tree. A
+            // missing one is a silent zero in the generated clock.
+            //
+            // Existence only, not a frequency: an F103's `mco` is its clock
+            // OUTPUT pin and is off by default, so 0 Hz there is the correct
+            // answer rather than a gap. What must be running is checked per
+            // family below, where there is something to check it against.
+            let freqs = evaluate(&gc.graph);
+            for id in rcc::codegen_node_ids(&mcu.family) {
+                assert!(
+                    gc.graph.nodes.iter().any(|n| n.id == id),
+                    "{}: codegen reads `{id}`, which the tree has not got",
+                    d.id
+                );
+            }
+
+            // The tab's verdict line. A bundled chip must open clean — and an
+            // ESP one carries the STM32F103 default limits, which would accuse
+            // it of a 240 MHz violation the moment one of its nodes grew a
+            // `LimitKey`.
+            let issues = over_limits(&gc.graph, &mcu.clock_limits, &freqs);
+            assert!(
+                issues.is_empty(),
+                "{}: the Clock tab opens accusing it — {issues:?}",
+                d.id
+            );
+
+            // Reset must go back to the tree the chip SHIPPED with, so pressing
+            // it on a freshly opened project changes nothing. A `defaults` that
+            // differed here would mean the button silently retunes the clock the
+            // first time it is touched.
+            match &mcu.clock_defaults {
+                Some(def) => assert_eq!(
+                    def, &gc.graph,
+                    "{}: Reset would not return to the shipped tree",
+                    d.id
+                ),
+                None => panic!("{}: no Reset button", d.id),
+            }
+
+            let cpu = freqs.get("cpu").copied().unwrap_or(0) / 1_000_000;
+            println!(
+                "{:<16} {:>2} nodes  {:>3} MHz cpu  reset={}  presets={}",
+                d.id,
+                gc.graph.nodes.len(),
+                cpu,
+                mcu.clock_defaults.is_some(),
+                mcu.clock_presets.len(),
+            );
+
+            if family::is_esp(&mcu.family) {
+                // What the tab is FOR on an ESP: picking the CPU clock. It has
+                // to offer every frequency `esp-hal` can name, or the tab shows
+                // less than the chip can do.
+                let want = crate::panels::mcu_module::esp_clocks::cpu_options(&mcu.family);
+                let div =
+                    gc.graph
+                        .nodes
+                        .iter()
+                        .find(|n| n.id == "cpu_div")
+                        .map(|n| match &n.kind {
+                            crate::panels::mcu_module::clock::graph::model::NodeKind::Divider {
+                                options,
+                            } => options.len(),
+                            _ => 0,
+                        });
+                // The hand-written C3 spells its divider differently; only the
+                // generated ones are held to the derived shape.
+                if let Some(n) = div {
+                    assert_eq!(
+                        n,
+                        want.len(),
+                        "{}: {n} CPU settings, not {}",
+                        d.id,
+                        want.len()
+                    );
+                }
+                assert!(want.contains(&cpu), "{}: boots at {cpu} MHz", d.id);
+            }
+        }
+    }
+
     /// The DMA question is not ASKED of a family that has no `DmaDef` to answer
     /// it with — `None`, not `Some(0)`.
     #[test]
