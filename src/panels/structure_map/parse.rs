@@ -718,6 +718,69 @@ fn main() {
         g.nodes.iter().position(|n| n.path == path).unwrap()
     }
 
+    /// The Structure tab, against the code the IDE really generates.
+    ///
+    /// The tab has no per-chip anything - it parses Rust - so what this checks
+    /// is that the parser survives the shape of a generated `main.rs`, for
+    /// every family at once.
+    #[test]
+    fn every_bundled_chip_draws_a_structure_diagram() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            let main_rs = mcu.fresh_main_rs();
+            let g = build_graph(&main_rs, &[]);
+
+            let root = g
+                .nodes
+                .first()
+                .unwrap_or_else(|| panic!("{}: no root node", d.id));
+            let names: Vec<&str> = root.symbols.iter().map(|s| s.name.as_str()).collect();
+            assert!(
+                names.contains(&"main"),
+                "{}: the entry point is not in the diagram: {names:?}",
+                d.id
+            );
+
+            // Without this the generated `pins::configs::*` modules are drawn
+            // as orphans - and the project does not compile either. A missing
+            // `pub mod pins;` has already shipped once, in the two embassy
+            // headers, so it is worth asserting rather than assuming.
+            assert!(
+                main_rs.lines().any(|l| {
+                    let t = l.trim();
+                    t == "mod pins;" || t == "pub mod pins;"
+                }),
+                "{}: main.rs never declares the pins module",
+                d.id
+            );
+
+            // Statements inside `fn main` sit at COLUMN 0 in generated code -
+            // everything between the GENERATED markers is unindented. An item
+            // scan keyed on indentation would end `main` at the first of them
+            // and orphan every call site after it, which is exactly how call
+            // edges vanished before `enclosing_row` became brace-based.
+            let main_row = root
+                .symbols
+                .iter()
+                .position(|s| s.name == "main")
+                .expect("checked above");
+            let lines: Vec<&str> = main_rs.lines().collect();
+            let closing = lines
+                .iter()
+                .rposition(|l| l.trim() == "}")
+                .map(|i| i + 1)
+                .unwrap_or_else(|| panic!("{}: main.rs does not end in a block", d.id));
+            assert_eq!(
+                root.enclosing_row(closing),
+                Some(main_row),
+                "{}: the end of main.rs is not attributed to `main` - depth tracking broke",
+                d.id
+            );
+        }
+    }
+
     #[test]
     fn builds_nodes_and_containment() {
         let (main_rs, files) = sample();
