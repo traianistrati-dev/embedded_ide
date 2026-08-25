@@ -97,6 +97,14 @@ impl Arch {
     }
 }
 
+/// One pad, and the directions it supports.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Gpio {
+    pub number: u8,
+    pub input: bool,
+    pub output: bool,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Uart {
     pub id: u8,
@@ -155,9 +163,14 @@ pub struct EspChip {
     /// separate SPI chip chosen by whoever built the module, so the same part
     /// ships as 2, 4, 8 or 16 MB and the die cannot answer the question.
     pub dram_bytes: u32,
-    /// Every GPIO number the chip has. All of them are input- and
-    /// output-capable on every RISC-V part — checked, not assumed.
-    pub gpios: Vec<u8>,
+    /// Every GPIO the chip has, with what it can do.
+    ///
+    /// Not every pad can drive: an ESP32's GPIO34..39 are input-only, and the
+    /// vendor says so with an EMPTY second capability group —
+    /// `GPIO34() () ([Input] [])`. Reading the number and ignoring the brackets
+    /// is how a generated project offers `Output::new(peripherals.GPIO34)` and
+    /// fails to compile on `PeripheralOutput`.
+    pub gpios: Vec<Gpio>,
     pub uarts: Vec<Uart>,
     pub i2c: Vec<I2cMaster>,
     pub spi: Vec<SpiMaster>,
@@ -197,14 +210,20 @@ pub struct EspChip {
 
 impl EspChip {
     /// The `(D-, D+)` pads, when this chip has USB.
+    ///
+    /// Matched on the SUFFIX, not the whole name: esp-metadata 0.4 called these
+    /// `USB_DM`/`USB_DP` and 0.5 calls them `USJ_DM`/`USJ_DP` (USB Serial/JTAG).
+    /// A reader pinned to the old spelling kept working and silently dropped
+    /// the only two pads that can carry USB — which the ESP32-C3 yardstick
+    /// caught, and nothing else would have.
     pub fn usb_pads(&self) -> Option<(u8, u8)> {
-        let find = |s: &str| {
+        let find = |suffix: &str| {
             self.analog
                 .iter()
-                .find(|(n, _)| n == s)
+                .find(|(n, _)| n.ends_with(suffix))
                 .map(|(_, pad)| *pad)
         };
-        Some((find("USB_DM")?, find("USB_DP")?))
+        Some((find("_DM")?, find("_DP")?))
     }
 }
 
@@ -380,13 +399,26 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
 
     let body_of = |m: &str| macro_body(src, m).unwrap_or_default();
 
+    // `(34, GPIO34() () ([Input] []))` — the number, then the pad's signals,
+    // then the capability groups. Only the LAST parenthesised group matters
+    // here, and an empty bracket inside it is the whole point.
     let gpio_body = body_of("for_each_gpio");
-    let mut gpios: Vec<u8> = instances(&gpio_body, "gpio")
+    let mut gpios: Vec<Gpio> = instances(&gpio_body, "gpio")
         .iter()
-        .filter_map(|t| fields(t).first()?.parse::<u8>().ok())
+        .filter_map(|t| {
+            let f = fields(t);
+            let number = f.first()?.parse::<u8>().ok()?;
+            let caps = f.get(1).map(String::as_str).unwrap_or("");
+            let caps = &caps[caps.rfind('(').map_or(0, |i| i + 1)..];
+            Some(Gpio {
+                number,
+                input: caps.contains("[Input]"),
+                output: caps.contains("[Output]"),
+            })
+        })
         .collect();
-    gpios.sort_unstable();
-    gpios.dedup();
+    gpios.sort_unstable_by_key(|g| g.number);
+    gpios.dedup_by_key(|g| g.number);
     if gpios.is_empty() {
         return Err(format!("{id}: no GPIOs"));
     }
@@ -496,19 +528,27 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
     peripherals.sort();
     peripherals.dedup();
 
-    // `pub fn <node>_frequency(clocks: &mut ClockTree) -> u32 { 480000000 }`,
-    // taking only the bodies that ARE a literal: the rest are computed from the
-    // live configuration and cannot be read as a constant.
+    // `pub fn <node>_frequency(…) -> u32 { 480000000 }`, keeping only the
+    // bodies that ARE a literal: the rest are computed from the live
+    // configuration and cannot be read as a constant.
+    //
+    // The ARGUMENT LIST is deliberately not matched. esp-metadata 0.4 wrote
+    // `_frequency(clocks: &mut ClockTree)` and 0.5 writes `_frequency()`; a
+    // reader that pinned the old signature kept parsing, kept producing chip
+    // definitions, and silently dropped every clock tree — which is exactly what
+    // happened, and why `the_real_metadata_parses` now asserts a PLL is found.
     let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
-    const SIG: &str = "_frequency(clocks: &mut ClockTree) -> u32 { ";
     let mut pll_hz: Option<u32> = None;
     for chunk in flat.split("pub fn ").skip(1) {
-        let Some((name, body)) = chunk.split_once(SIG) else {
+        let Some((name, rest)) = chunk.split_once("_frequency(") else {
             continue;
         };
         if !name.starts_with("pll") || name.contains(' ') {
             continue;
         }
+        let Some((_args, body)) = rest.split_once(") -> u32 { ") else {
+            continue;
+        };
         if let Ok(hz) = body.split(' ').next().unwrap_or("").parse::<u32>() {
             pll_hz = Some(pll_hz.map_or(hz, |cur| cur.max(hz)));
         }
@@ -758,7 +798,11 @@ macro_rules! for_each_peripheral {
     /// commas, so a naive split would read `GPIO4(_0 => MTMS …)` as a number.
     #[test]
     fn gpio_numbers_survive_their_alternate_functions() {
-        assert_eq!(c3().gpios, [0, 1, 4]);
+        assert_eq!(
+            c3().gpios.iter().map(|g| g.number).collect::<Vec<_>>(),
+            [0, 1, 4]
+        );
+        assert!(c3().gpios.iter().all(|g| g.input && g.output));
     }
 
     /// USB_DM is an analog function too, and it is not an ADC channel.
@@ -838,6 +882,11 @@ macro_rules! for_each_peripheral {
             // The PLL is what a CPU-clock graph divides down from, so a chip
             // without one gets no clock tree rather than a wrong one.
             println!("          PLL {:?} MHz", c.pll_hz.map(|h| h / 1_000_000));
+            // Asserted, not just printed: losing the PLL costs every generated
+            // chip its clock tree, and nothing else about the definition looks
+            // any different when it happens.
+            assert!(c.pll_hz.is_some(), "{chip}: no PLL frequency found");
+            assert!(!c.xtal_hz.is_empty(), "{chip}: no crystal frequency found");
             assert!(!c.uarts.is_empty(), "{chip} has no UART");
             assert!(!c.spi.is_empty(), "{chip} has no SPI master");
             assert!(!c.i2c.is_empty(), "{chip} has no I2C master");
@@ -853,56 +902,91 @@ macro_rules! for_each_peripheral {
             }
             // ADC pads must be real GPIOs.
             for (ch, pad) in &c.adc {
-                assert!(c.gpios.contains(pad), "{chip}: {ch} on absent GPIO{pad}");
+                assert!(
+                    c.gpios.iter().any(|g| g.number == *pad),
+                    "{chip}: {ch} on absent GPIO{pad}"
+                );
             }
             // Strictly increasing and unique - but NOT contiguous, which is
             // the point of checking. A definition must lay out the numbers the
             // vendor gives, not `0..n`.
             assert!(
-                c.gpios.windows(2).all(|w| w[0] < w[1]),
+                c.gpios.windows(2).all(|w| w[0].number < w[1].number),
                 "{chip}: {:?}",
                 c.gpios
             );
         }
 
-        // Two of the six skip a block of GPIO numbers - they are wired to the
-        // internal SPI flash and never reach a pad. Asserted rather than
-        // described, because the obvious assumption is that GPIOs run 0..n, and
-        // laying these out that way would put every pin past the gap under the
-        // wrong number.
-        for (chip, gap) in [("esp32c5", 15..=22u8), ("esp32h2", 15..=21u8)] {
+        // Some parts skip a block of GPIO numbers — wired to the internal SPI
+        // flash, never reaching a pad. Asserted rather than described, because
+        // the obvious assumption is that GPIOs run 0..n, and laying these out
+        // that way would put every pin past the gap under the wrong number.
+        //
+        // These are per-VERSION facts, not laws: esp-metadata 0.4 showed a gap
+        // at 15..22 on the C5 that 0.5 filled in. That is the point of pinning
+        // them — the change was silent everywhere else.
+        for (chip, gaps) in [
+            ("esp32h2", &[15u8, 16, 17, 18, 19, 20, 21][..]),
+            ("esp32", &[24, 28, 29, 30, 31][..]),
+            ("esp32s2", &[22, 23, 24, 25][..]),
+            ("esp32s3", &[22, 23, 24, 25][..]),
+        ] {
             let c = load(&dir, chip).unwrap();
-            for n in gap.clone() {
-                assert!(!c.gpios.contains(&n), "{chip} gained GPIO{n}");
+            for n in gaps {
+                assert!(
+                    !c.gpios.iter().any(|g| g.number == *n),
+                    "{chip} gained GPIO{n}"
+                );
             }
             assert!(
-                c.gpios.contains(&(gap.end() + 1)),
+                c.gpios.iter().any(|g| g.number > *gaps.last().unwrap()),
                 "{chip} lost the pins after the gap"
             );
         }
-        for chip in ["esp32c2", "esp32c3", "esp32c6", "esp32c61"] {
+        for chip in ["esp32c2", "esp32c3", "esp32c5", "esp32c6", "esp32c61"] {
             let c = load(&dir, chip).unwrap();
             let want: Vec<u8> = (0..c.gpios.len() as u8).collect();
-            assert_eq!(c.gpios, want, "{chip} was contiguous — recheck");
+            let got: Vec<u8> = c.gpios.iter().map(|g| g.number).collect();
+            assert_eq!(got, want, "{chip} grew a gap — recheck the layout");
         }
 
-        // The C61's metadata carries NO analog functions and no ADC peripheral,
-        // though its datasheet describes a SAR ADC. That is the vendor data
-        // being incomplete for a new part, not the chip lacking one - recorded
-        // here so the missing ADC pins in its generated definition read as a
-        // known gap rather than a bug in the reader.
+        // The ESP32 is the only part with pads that cannot drive. Its GPIO34..39
+        // are input-only, and the vendor says so with an empty second capability
+        // group rather than by omitting anything.
+        let esp32 = load(&dir, "esp32").unwrap();
+        for n in 34..=39u8 {
+            let pad = esp32.gpios.iter().find(|g| g.number == n).unwrap();
+            assert!(pad.input && !pad.output, "GPIO{n}: {pad:?}");
+        }
+        for chip in RISCV_CHIPS {
+            let c = load(&dir, chip).unwrap();
+            assert!(
+                c.gpios.iter().all(|g| g.input && g.output),
+                "{chip} grew a one-way pad"
+            );
+        }
+
+        // The C61 carried no analog functions at all in esp-metadata 0.4, though
+        // its datasheet describes a SAR ADC; 0.5 filled them in. Kept as an
+        // assertion because the two readings differ, and a definition generated
+        // against the older data silently lacked every ADC pin.
         let c61 = load(&dir, "esp32c61").unwrap();
-        assert!(c61.adc.is_empty(), "esp32c61 gained an ADC — regenerate");
         assert!(
-            !c61.peripherals.iter().any(|p| p.starts_with("ADC")),
-            "esp32c61 gained an ADC peripheral — regenerate"
+            !c61.adc.is_empty(),
+            "esp32c61 lost its ADC — is an older esp-metadata being read?"
         );
 
-        // …and the Xtensa parts must be readable AND correctly refused a target.
-        for chip in ["esp32", "esp32s2", "esp32s3"] {
+        // The Xtensa parts read the same way and name their own triples; what
+        // sets them apart is needing Espressif's fork to build.
+        for (chip, target) in [
+            ("esp32", "xtensa-esp32-none-elf"),
+            ("esp32s2", "xtensa-esp32s2-none-elf"),
+            ("esp32s3", "xtensa-esp32s3-none-elf"),
+        ] {
             let c = load(&dir, chip).unwrap_or_else(|e| panic!("{chip}: {e}"));
             assert_eq!(c.arch, Arch::Xtensa, "{chip}");
-            assert_eq!(c.arch.target(chip), None);
+            assert_eq!(c.arch.target(chip), Some(target));
+            assert!(c.arch.needs_esp_toolchain(), "{chip}");
         }
     }
 }

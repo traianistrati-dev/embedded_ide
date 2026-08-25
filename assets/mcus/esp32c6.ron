@@ -710,7 +710,7 @@ McuDefinition(
                     GpioInput,
                     GpioOutput,
                     AdcChannel(
-                        adc: 0,
+                        adc: 1,
                         channel: 0,
                     ),
                     TimerPwm(
@@ -759,7 +759,7 @@ McuDefinition(
                     GpioInput,
                     GpioOutput,
                     AdcChannel(
-                        adc: 0,
+                        adc: 1,
                         channel: 1,
                     ),
                     TimerPwm(
@@ -808,7 +808,7 @@ McuDefinition(
                     GpioInput,
                     GpioOutput,
                     AdcChannel(
-                        adc: 0,
+                        adc: 1,
                         channel: 2,
                     ),
                     TimerPwm(
@@ -857,7 +857,7 @@ McuDefinition(
                     GpioInput,
                     GpioOutput,
                     AdcChannel(
-                        adc: 0,
+                        adc: 1,
                         channel: 3,
                     ),
                     TimerPwm(
@@ -906,7 +906,7 @@ McuDefinition(
                     GpioInput,
                     GpioOutput,
                     AdcChannel(
-                        adc: 0,
+                        adc: 1,
                         channel: 4,
                     ),
                     TimerPwm(
@@ -955,7 +955,7 @@ McuDefinition(
                     GpioInput,
                     GpioOutput,
                     AdcChannel(
-                        adc: 0,
+                        adc: 1,
                         channel: 5,
                     ),
                     TimerPwm(
@@ -1004,7 +1004,7 @@ McuDefinition(
                     GpioInput,
                     GpioOutput,
                     AdcChannel(
-                        adc: 0,
+                        adc: 1,
                         channel: 6,
                     ),
                     TimerPwm(

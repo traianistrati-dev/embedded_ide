@@ -93,8 +93,36 @@ fn instance_number(name: &str) -> Option<u8> {
 ///
 /// Order matters only for the generated file's readability; the UI sorts its own
 /// lists. This follows the hand-written C3 so the two can be diffed.
-fn functions_for(chip: &EspChip, gpio: u8) -> Vec<PinFunction> {
-    let mut out = vec![PinFunction::GpioInput, PinFunction::GpioOutput];
+/// Whether a function has to DRIVE the pad.
+///
+/// The distinction only matters on parts that have pads which cannot: an
+/// ESP32's GPIO34..39 are input-only. Getting this wrong is not a warning — the
+/// generated project fails on `PeripheralOutput`, and it does so for whichever
+/// function landed there, not just for `GpioOutput`. The first fix only covered
+/// GPIO output, and the very next build put a UART TX, an I2C pair and a PWM
+/// channel on those same pads.
+///
+/// Open-drain still counts as driving: I2C pulls the line down.
+fn drives(f: &PinFunction) -> bool {
+    !matches!(
+        f,
+        PinFunction::GpioInput
+            | PinFunction::UsartRx(_)
+            | PinFunction::SpiMiso(_)
+            | PinFunction::CanRx
+            | PinFunction::AdcChannel { .. }
+    )
+}
+
+fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunction> {
+    let gpio = pad.number;
+    let mut out = Vec::new();
+    if pad.input {
+        out.push(PinFunction::GpioInput);
+    }
+    if pad.output {
+        out.push(PinFunction::GpioOutput);
+    }
 
     // The functions that are NOT routable. Everything else on a pad gets there
     // through the GPIO matrix; these are bonded to one pad each, which is why
@@ -162,6 +190,11 @@ fn functions_for(chip: &EspChip, gpio: u8) -> Vec<PinFunction> {
         out.push(PinFunction::CanRx);
     }
 
+    // Last, and over EVERYTHING above: a pad that cannot drive keeps only the
+    // functions that read.
+    if !pad.output {
+        out.retain(|f| !drives(f));
+    }
     out
 }
 
@@ -172,19 +205,19 @@ fn functions_for(chip: &EspChip, gpio: u8) -> Vec<PinFunction> {
 /// carry. Going round rather than down one side keeps a 31-GPIO chip from
 /// drawing as a strip.
 fn layout(chip: &EspChip, reserved: &[u8]) -> PinLayout {
-    let pads: Vec<u8> = chip.gpios.clone();
+    let pads = &chip.gpios;
     let per = pads.len().div_ceil(4);
     let mut sides: Vec<Vec<PinDef>> = vec![Vec::new(); 4];
-    for (ix, gpio) in pads.iter().enumerate() {
-        let is_reserved = reserved.contains(gpio);
+    for (ix, pad) in pads.iter().enumerate() {
+        let is_reserved = reserved.contains(&pad.number);
         sides[(ix / per).min(3)].push(PinDef {
             number: ix + 1,
-            name: format!("GPIO{gpio}"),
+            name: format!("GPIO{}", pad.number),
             reserved: is_reserved,
             functions: if is_reserved {
                 Vec::new()
             } else {
-                functions_for(chip, *gpio)
+                functions_for(chip, *pad)
             },
             // No alternate-function indices: the GPIO matrix has none to
             // publish, which is the whole difference from an STM32 pad.
@@ -647,7 +680,12 @@ mod tests {
         let dir = esp_metadata::vendor_dir().expect("esp-metadata in the cargo registry");
         for id in GENERATED {
             let c = esp_metadata::load(&dir, id).unwrap();
-            let mut graph = clock_graph(&c).unwrap_or_else(|| panic!("{id}: no clock graph"));
+            // The Xtensa parts state no PLL that divides into 240 MHz, so they
+            // get no tree at all — asserted in `xtensa_chips_ship_…`, not here.
+            let Some(mut graph) = clock_graph(&c) else {
+                assert!(c.arch.needs_esp_toolchain(), "{id}: no clock graph");
+                continue;
+            };
             let want = super::super::esp_clocks::cpu_options(id);
 
             let divs = graph
@@ -697,6 +735,68 @@ mod tests {
         // …and neither can no PLL at all.
         c.pll_hz = None;
         assert!(clock_graph(&c).is_none());
+    }
+
+    /// Input-only pads must not be offered as outputs.
+    ///
+    /// The ESP32's GPIO34..39 can only read. The vendor states it with an EMPTY
+    /// second capability group — `GPIO34() () ([Input] [])` — which a reader
+    /// that takes the number and skips the brackets never sees. The generated
+    /// project then said `Output::new(peripherals.GPIO34)` and the compiler
+    /// rejected it on `PeripheralOutput`. That is how this was found; this is so
+    /// it stays found.
+    #[test]
+    #[ignore]
+    fn input_only_pads_are_not_offered_as_outputs() {
+        let c = chip("esp32");
+        for n in 34..=39u8 {
+            let pad = c.gpios.iter().find(|g| g.number == n).expect("pad exists");
+            assert!(pad.input && !pad.output, "GPIO{n}: {pad:?}");
+        }
+        let d = definition(&c).unwrap();
+        let pads = pad_functions(&d);
+        for n in 34..=39u8 {
+            let f = &pads[&format!("GPIO{n}")];
+            assert!(f.contains("GpioInput"), "GPIO{n} lost its input");
+            // EVERY driving function, not just GPIO output. The first fix
+            // covered only that, and the next build put a UART TX, an I2C pair
+            // and a PWM channel on these same pads.
+            for driver in [
+                "GpioOutput",
+                "UsartTx",
+                "SpiSck",
+                "SpiMosi",
+                "SpiNss",
+                "I2cScl",
+                "I2cSda",
+                "TimerPwm",
+                "CanTx",
+                "UsbDm",
+                "UsbDp",
+            ] {
+                assert!(
+                    !f.iter().any(|x| x.starts_with(driver)),
+                    "GPIO{n} is offered {driver}, but it cannot drive"
+                );
+            }
+            // …and the reading half is still there.
+            assert!(
+                f.iter().any(|x| x.starts_with("UsartRx")),
+                "GPIO{n} lost UsartRx"
+            );
+        }
+        // …and a pad that CAN drive still can.
+        let f = &pads["GPIO33"];
+        assert!(f.contains("GpioOutput") && f.contains("GpioInput"));
+
+        // Every RISC-V part drives every pad, so nothing there changed.
+        for id in ["esp32c3", "esp32c6"] {
+            let c = chip(id);
+            assert!(
+                c.gpios.iter().all(|g| g.input && g.output),
+                "{id} has a one-way pad — recheck"
+            );
+        }
     }
 
     /// The two chips whose metadata carries no LEDC must generate no PWM, rather
