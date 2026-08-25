@@ -962,8 +962,16 @@ KEEPS THE COMMENTED SKELETON ({}):",
                                     .filter(|e| e.to == n.id)
                                     .map(|e| format!("{}#{}", e.from, e.input))
                                     .collect();
-                                println!("  {id}: {:?}
-      fed by: {}", n.kind, feeds.join(" "));
+                                let hz = super::super::clock::graph::eval::evaluate(&gc.graph)
+                                    .get(id.as_str())
+                                    .copied()
+                                    .unwrap_or(0);
+                                println!(
+                                    "  {id}: {:?}  -> {hz} Hz
+      fed by: {}",
+                                    n.kind,
+                                    feeds.join(" ")
+                                );
                             }
                         }
                     }

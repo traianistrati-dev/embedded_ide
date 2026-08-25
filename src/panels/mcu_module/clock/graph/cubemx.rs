@@ -316,11 +316,16 @@ pub fn parse_clock_tree(
             if !raw.iter().any(|o| o.id == *from) {
                 continue; // fed by an element this variant does not have
             }
+            // `xbar` belongs here for the same reason it belongs in the node
+            // kind: it IS a mux. Giving its inputs the index 0 apiece left the
+            // evaluator unable to find any input but the first, so an IC set to
+            // PLL2 evaluated to 0 Hz — and on STM32N6 the vendor's own default
+            // tree puts four ICs on PLL2 and two on PLL3.
             let input = match (r.kind, ref_value, p) {
-                ("multiplexor", Some(rv), Some(p)) => {
+                ("multiplexor" | "xbar", Some(rv), Some(p)) => {
                     p.values.iter().position(|(v, _)| v == rv).unwrap_or(n)
                 }
-                ("multiplexor", _, _) => n,
+                ("multiplexor" | "xbar", _, _) => n,
                 _ => 0,
             };
             edges.push(Edge {

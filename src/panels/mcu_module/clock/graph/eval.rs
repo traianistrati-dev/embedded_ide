@@ -219,6 +219,48 @@ mod tests {
         assert_eq!(r["out"], 36_000_000);
     }
 
+    /// A mux whose inputs all carry the index 0 answers 0 Hz for any selection
+    /// but the first — silently, with no error anywhere.
+    ///
+    /// This is what the STM32N6 crossbars looked like until the converter gave
+    /// their edges real indices: twenty IC selectors, four of them set to PLL2
+    /// by the vendor's own default, every one of them evaluating to nothing.
+    /// The test is here rather than in the converter because it pins the
+    /// CONSEQUENCE — anyone wiring a mux this way gets the same silence.
+    #[test]
+    fn a_mux_whose_edges_share_an_index_can_only_reach_its_first_input() {
+        let mux = |sel: usize, inputs: Vec<(usize, &str)>| {
+            let g = ClockGraph {
+                nodes: vec![
+                    n(
+                        "a",
+                        NodeKind::Source { min_hz: 0, max_hz: 0, gated: false },
+                        NodeState::Source { enabled: true, hz: 8_000_000 },
+                    ),
+                    n(
+                        "b",
+                        NodeKind::Source { min_hz: 0, max_hz: 0, gated: false },
+                        NodeState::Source { enabled: true, hz: 12_000_000 },
+                    ),
+                    n("m", NodeKind::Mux { inputs: 2 }, NodeState::Index(sel)),
+                ],
+                edges: inputs
+                    .into_iter()
+                    .map(|(input, from)| Edge { from: from.into(), to: "m".into(), input })
+                    .collect(),
+            };
+            evaluate(&g).get("m").copied().unwrap_or(0)
+        };
+
+        // Both edges at index 0 - the broken shape.
+        assert_eq!(mux(0, vec![(0, "a"), (0, "b")]), 8_000_000, "first still works");
+        assert_eq!(mux(1, vec![(0, "a"), (0, "b")]), 0, "and the second is unreachable");
+
+        // Real indices - the shape the converter now produces.
+        assert_eq!(mux(0, vec![(0, "a"), (1, "b")]), 8_000_000);
+        assert_eq!(mux(1, vec![(0, "a"), (1, "b")]), 12_000_000, "now it reaches it");
+    }
+
     /// Mux selects between two sources; Choice applies a non-integer ratio.
     #[test]
     fn mux_and_ratio_choice() {
