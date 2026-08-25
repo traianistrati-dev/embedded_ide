@@ -1950,6 +1950,121 @@ mod chip_gaps_tests {
         }
     }
 
+    /// Every fact the New Project dialog computes about a chip, for every chip
+    /// it can offer.
+    ///
+    /// The dialog asks five separate questions, each keyed on the family, and
+    /// four of them had gone stale at once. A test per predicate would not have
+    /// caught that — each looked right on the chip it was written for. Walking
+    /// the whole registry through all five is what makes a new chip's arrival
+    /// the thing that fails, rather than a user's first project.
+    ///
+    /// `--nocapture` prints the table; the assertions are what run in CI.
+    #[test]
+    fn every_bundled_chip_answers_every_dialog_question() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::codegen::{family, rcc};
+        use crate::panels::mcu_module::stm32_pin_data;
+
+        println!(
+            "{:<16} {:<10} {:<8} {:<7} {:<6} {:<7} {}",
+            "chip", "family", "backend", "clock", "manual", "dma?", "clock nodes"
+        );
+        for d in builtin_definitions() {
+            let fam = &d.family;
+            let backend = family::backend_for(fam).is_some();
+            let clock = rcc::generates_clock_code_for(fam, &d.clock.to_config(&d.clock_limits));
+            let manual = rcc::supports_manual_clock(fam);
+            let dma = uses_dma_def(fam);
+            let nodes = rcc::codegen_node_ids(fam);
+            println!(
+                "{:<16} {:<10} {:<8} {:<7} {:<6} {:<7} {:?}",
+                d.id, fam, backend, clock, manual, dma, nodes
+            );
+
+            // The dialog says "no codegen backend for '{fam}'" without one, and
+            // then generates nothing at all.
+            assert!(backend, "{}: no codegen backend", d.id);
+            // Every bundled chip's clock reaches main.rs one way or another.
+            assert!(clock, "{}: reports no clock code", d.id);
+            // A chip with a clock generator has node ids, or the editor cannot
+            // protect the names that generator reads.
+            assert!(!nodes.is_empty(), "{}: no codegen node ids", d.id);
+
+            // The System tab is where the dialog LANDS once a chip is picked,
+            // so its answers are part of the same first impression.
+            let (asy, rtic, usb) = (
+                family::async_supported(fam),
+                family::rtic_supported(fam),
+                family::usb_supported(fam),
+            );
+            println!(
+                "{:<16} {:<10} async={asy:<6} rtic={rtic:<6} usb={usb}",
+                "", ""
+            );
+            // A runtime that is greyed out has to say why, or the tab is a dead
+            // control with no explanation.
+            if !rtic {
+                assert!(
+                    family::rtic_unavailable_reason(fam).is_some(),
+                    "{}: RTIC is greyed out with no reason given",
+                    d.id
+                );
+            }
+
+            if family::is_esp(fam) {
+                assert_eq!(nodes, vec!["cpu"], "{}", d.id);
+                // esp-rtos + embassy-executor, on every part.
+                assert!(asy, "{}: no async runtime", d.id);
+                assert!(
+                    family::async_is_esp(fam),
+                    "{}: async is not the ESP one",
+                    d.id
+                );
+                // RTIC 2 has cortex-m backends only, so no Espressif part can
+                // have it — RISC-V or Xtensa alike.
+                assert!(!rtic, "{}: RTIC cannot work here", d.id);
+                assert!(
+                    family::blocking_hal_note(fam).contains("esp-hal"),
+                    "{}",
+                    d.id
+                );
+
+                // `usb_supported` is deliberately family-wide and says yes for
+                // every Espressif part — but the ORIGINAL ESP32 and the C2 have
+                // no USB peripheral at all (that is why an ESP32 board carries a
+                // separate UART bridge). The two answers compose: the family
+                // says whether the backend can WRITE USB code, the pins say
+                // whether this chip HAS it, and a chip without the pads cannot
+                // host the module however willing the backend is.
+                use crate::panels::mcu_module::modules::ModuleKind;
+                use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+                let mcu = d.build_mcu();
+                let has_pads = mcu
+                    .iter_all_pins()
+                    .any(|p| p.available_functions.contains(&PinFunction::UsbDm));
+                println!("{:<16} {:<10} usb module={has_pads}", "", "");
+                assert_eq!(
+                    mcu.supports_module(ModuleKind::GenericInterfaceUsb),
+                    has_pads,
+                    "{}: the USB module and the USB pads disagree",
+                    d.id
+                );
+                assert!(!manual, "{}: offered a manual clock it cannot keep", d.id);
+                assert!(!dma, "{}: asked about a DmaDef it has no use for", d.id);
+                // And the HAL check must not fire: an `esp-hal` line is not an
+                // `embassy-stm32` one, and a generated ESP definition carries no
+                // HAL line at all.
+                assert_eq!(
+                    stm32_pin_data::embassy_feature_in(&d.project.hal_dep),
+                    None,
+                    "{}: the embassy feature lookup would run for an ESP chip",
+                    d.id
+                );
+            }
+        }
+    }
+
     /// The DMA question is not ASKED of a family that has no `DmaDef` to answer
     /// it with — `None`, not `Some(0)`.
     #[test]
