@@ -3,6 +3,7 @@ McuDefinition(
     display_name: "ESP32-C6",
     family: "esp32c6",
     package: "",
+    max_mhz: Some(160),
     dma: None,
     cpu: "RISC-V 32-bit",
     toolchain: EspRust,

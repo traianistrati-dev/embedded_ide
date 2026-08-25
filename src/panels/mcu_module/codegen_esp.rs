@@ -123,21 +123,23 @@ impl EspRuntime {
 
 /// The `esp_hal::init(...)` line, with the CPU clock taken from the clock graph.
 ///
-/// esp-hal exposes only `CpuClock::_80MHz` / `_160MHz` for the ESP32-C3, so the
-/// graph's `cpu` node (160 MHz on the ÷3 divider, 80 MHz on ÷6) maps to those.
-/// When the chip has no graph clock the line falls back to `CpuClock::max()`,
-/// matching the previous hardcoded default.
-fn esp_init_line(clock: &ClockConfig) -> String {
+/// `CpuClock` is a DIFFERENT enum on every chip, and naming a variant the part
+/// lacks is a compile error in the USER's project. This used to emit `_160MHz`
+/// or `_80MHz` unconditionally — right for the ESP32-C3 it was written for, and
+/// both wrong for an ESP32-H2, whose only variant is `_96MHz`. See
+/// [`esp_clocks`](super::esp_clocks).
+///
+/// With no graph clock the line falls back to `CpuClock::max()`, valid on every
+/// part — which is why chips added before this table still generated code that
+/// built.
+fn esp_init_line(clock: &ClockConfig, chip: &str) -> String {
     let cpu = match clock {
         ClockConfig::Graph(gc) => {
             let cpu_hz = evaluate(&gc.for_codegen()).get("cpu").copied().unwrap_or(0);
-            if cpu_hz >= 120_000_000 {
-                "esp_hal::clock::CpuClock::_160MHz"
-            } else {
-                "esp_hal::clock::CpuClock::_80MHz"
-            }
+            super::esp_clocks::cpu_variant(chip, cpu_hz / 1_000_000)
+                .unwrap_or_else(|| "esp_hal::clock::CpuClock::max()".to_owned())
         }
-        ClockConfig::None => "esp_hal::clock::CpuClock::max()",
+        ClockConfig::None => "esp_hal::clock::CpuClock::max()".to_owned(),
     };
     format!("esp_hal::init(esp_hal::Config::default().with_cpu_clock({cpu}))")
 }
@@ -156,9 +158,22 @@ pub fn fresh_esp32c3_main_rs(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
+    // The chip id (`esp32h2`) — it decides which `CpuClock`
+    // variants exist, and they differ per part.
+    chip: &str,
     runtime: EspRuntime,
 ) -> String {
-    let section = make_gen_section(pins, clock, usart, spi, i2c, timer, custom_inits, runtime);
+    let section = make_gen_section(
+        pins,
+        clock,
+        usart,
+        spi,
+        i2c,
+        timer,
+        custom_inits,
+        chip,
+        runtime,
+    );
     format!(
         "{}{section}\n{USER_TAIL}",
         invariant_header(mcu_name, id, runtime)
@@ -178,9 +193,22 @@ pub fn update_esp32c3_main_rs(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
+    // The chip id (`esp32h2`) — it decides which `CpuClock`
+    // variants exist, and they differ per part.
+    chip: &str,
     runtime: EspRuntime,
 ) -> String {
-    let new_section = make_gen_section(pins, clock, usart, spi, i2c, timer, custom_inits, runtime);
+    let new_section = make_gen_section(
+        pins,
+        clock,
+        usart,
+        spi,
+        i2c,
+        timer,
+        custom_inits,
+        chip,
+        runtime,
+    );
     if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
         // Strip ALL leading newlines after GEN_END, then re-add exactly one
@@ -295,6 +323,9 @@ fn make_gen_section(
     timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
     custom_inits: &str,
+    // The chip id (`esp32h2`) — it decides which `CpuClock`
+    // variants exist, and they differ per part.
+    chip: &str,
     runtime: EspRuntime,
 ) -> String {
     let configured: Vec<&Pin> = pins
@@ -304,7 +335,7 @@ fn make_gen_section(
         .collect();
 
     if configured.is_empty() {
-        return make_default_gen_section(clock, runtime);
+        return make_default_gen_section(clock, chip, runtime);
     }
 
     // ── Feature flags ────────────────────────────────────────────────────────
@@ -357,7 +388,7 @@ fn make_gen_section(
     let mut body = String::new();
     body.push_str(&format!(
         "    let peripherals = {};\n",
-        esp_init_line(clock)
+        esp_init_line(clock, chip)
     ));
     // Async: start the scheduler before anything awaits (or spawns).
     body.push_str(runtime.start_block());
@@ -533,7 +564,7 @@ fn make_gen_section(
 
 // ── Default generated section (no pins configured yet) ────────────────────────
 
-fn make_default_gen_section(clock: &ClockConfig, runtime: EspRuntime) -> String {
+fn make_default_gen_section(clock: &ClockConfig, chip: &str, runtime: EspRuntime) -> String {
     format!(
         "{GEN_BEGIN}\n\
          {use_block}\
@@ -544,7 +575,7 @@ fn make_default_gen_section(clock: &ClockConfig, runtime: EspRuntime) -> String 
          {GEN_END}\n",
         use_block = build_use_block(false, false, false, false, false, false, false, runtime),
         entry = runtime.entry(),
-        init = esp_init_line(clock),
+        init = esp_init_line(clock, chip),
         start = runtime.start_block(),
     )
 }
@@ -884,6 +915,7 @@ mod tests {
             &no_i2c(),
             &timer,
             "",
+            "esp32c3",
             EspRuntime::Blocking,
         );
         assert_eq!(
@@ -929,6 +961,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Blocking,
         );
         assert!(!code.contains("Ledc"), "{code}");
@@ -971,6 +1004,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Blocking,
         );
         assert!(
@@ -993,6 +1027,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Blocking,
         );
         assert!(
@@ -1015,6 +1050,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Blocking,
         );
         assert!(code.contains("CpuClock::max()"), "{code}");
@@ -1034,6 +1070,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Blocking,
         );
         assert_eq!(parse_mcu_id(&fresh).as_deref(), Some("esp32c3-graph"));
@@ -1048,6 +1085,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Blocking,
         );
         assert_eq!(parse_mcu_id(&updated).as_deref(), Some("esp32c3-graph"));
@@ -1071,6 +1109,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Blocking,
         );
         assert!(
@@ -1096,6 +1135,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Async,
         );
         assert!(
@@ -1129,6 +1169,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Async,
         );
         assert_eq!(again, updated, "re-splice must not churn the header");
@@ -1169,6 +1210,7 @@ mod tests {
                 &no_i2c(),
                 &Default::default(),
                 "",
+                "esp32c3",
                 runtime,
             );
             for (i, line) in code.lines().enumerate() {
@@ -1243,6 +1285,7 @@ mod tests {
             &no_i2c(),
             &Default::default(),
             "",
+            "esp32c3",
             EspRuntime::Blocking,
         );
         // The baud lives in the CONFIG MODULE now, not in main.rs — main.rs

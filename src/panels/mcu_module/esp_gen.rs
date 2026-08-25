@@ -226,10 +226,12 @@ pub fn definition(chip: &EspChip) -> Result<McuDefinition, String> {
         // metadata names none of them.
         package: String::new(),
         cpu: "RISC-V 32-bit".to_owned(),
-        // The metadata carries no maximum frequency. Typing one in from a
-        // datasheet would be a number nothing here could check; it arrives with
-        // the clock tree.
-        max_mhz: None,
+        // NOT from the metadata, which carries no frequency at all, and not
+        // from a datasheet either: the fastest this chip can be SET to is the
+        // top of `esp-hal`'s own `CpuClock` enum, and that is the only number
+        // the generated code can name. An H2 is 96, not the 160 a family
+        // resemblance would suggest.
+        max_mhz: super::esp_clocks::max_mhz(&chip.id),
         toolchain: ToolchainKind::EspRust,
         project: ProjectDef {
             pkg_name: chip.id.clone(),

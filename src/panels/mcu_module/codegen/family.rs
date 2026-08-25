@@ -259,6 +259,8 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &i2c,
         &timer,
         &mcu.custom_module_inits(),
+        // On an ESP the family key IS the chip - `esp32h2`, not a series.
+        &mcu.family,
         runtime,
     )
 }
@@ -319,6 +321,8 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &i2c,
         &timer,
         &mcu.custom_module_inits(),
+        // On an ESP the family key IS the chip - `esp32h2`, not a series.
+        &mcu.family,
         runtime,
     )
 }

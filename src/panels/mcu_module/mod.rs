@@ -8,6 +8,7 @@ pub mod codegen_esp;
 pub mod codegen_esp_configs;
 pub mod comparator;
 pub mod datasheet_import;
+pub mod esp_clocks;
 pub mod esp_gen;
 pub mod esp_metadata;
 pub mod mcu;

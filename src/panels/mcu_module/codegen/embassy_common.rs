@@ -248,6 +248,29 @@ mod emit_for_manual_compile {
     use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
     use crate::panels::mcu_module::{project_gen, stm32_pin_data};
 
+    /// Where a named vendor file actually is on THIS machine.
+    ///
+    /// The default used to be one hard-coded `H:` path. That works until the
+    /// checkout there turns out to be partial — this machine's holds 232 of the
+    /// 2123 parts, and neither G431 nor G474 is among them, so both importer
+    /// cases reported "no chip xml" and failed the whole matrix. The chip was
+    /// installed the whole time, one directory over.
+    ///
+    /// So: ask the sources the IDE itself would search, and take the first that
+    /// has the file. The env override still wins, for pointing at a specific
+    /// copy.
+    fn vendor_chip_file(env_var: &str, file: &str) -> Option<std::path::PathBuf> {
+        if let Ok(p) = std::env::var(env_var) {
+            let p = std::path::PathBuf::from(p);
+            return p.is_file().then_some(p);
+        }
+        crate::panels::mcu_module::chip_sources::all_sources()
+            .into_iter()
+            .filter(|s| s.has_clock())
+            .map(|s| s.chips.join(file))
+            .find(|p| p.is_file())
+    }
+
     /// Say something when a codegen matrix run is in progress.
     ///
     /// These harnesses REWRITE fixed directories under the temp dir, and the
@@ -1019,13 +1042,15 @@ mod emit_for_manual_compile {
             self, CompConfig, Hysteresis, InvertingInput, PowerMode,
         };
 
-        let chip = std::env::var("EIDE_COMP_XML").unwrap_or_else(|_| {
-            "H:/stm32cube-database-master/stm32cube-database-master/db/mcu/STM32G474R(B-C-E)Tx.xml"
-                .into()
-        });
-        let path = std::path::Path::new(&chip);
+        let Some(path) = vendor_chip_file("EIDE_COMP_XML", "STM32G474R(B-C-E)Tx.xml") else {
+            eprintln!(
+                "STM32G474R(B-C-E)Tx.xml is in none of this machine's chip sources - nothing emitted"
+            );
+            return;
+        };
+        let path = path.as_path();
         let Ok(xml) = std::fs::read_to_string(path) else {
-            eprintln!("no chip xml at {chip} - nothing emitted");
+            eprintln!("could not read {} - nothing emitted", path.display());
             return;
         };
         let af = stm32_pin_data::gpio_ip_version(&xml).and_then(|v| {
@@ -1889,12 +1914,15 @@ mod emit_for_manual_compile {
         use crate::panels::mcu_module::codegen::dma_data;
         use crate::panels::mcu_module::modules::{AsyncBusMode, ModuleConfig, UsartMode};
 
-        let chip = std::env::var("EIDE_CHIP_XML").unwrap_or_else(|_| {
-            "H:/stm32cube-database-master/stm32cube-database-master/db/mcu/STM32G431C(6-8-B)Tx.xml".into()
-        });
-        let path = std::path::Path::new(&chip);
+        let Some(path) = vendor_chip_file("EIDE_CHIP_XML", "STM32G431C(6-8-B)Tx.xml") else {
+            eprintln!(
+                "STM32G431C(6-8-B)Tx.xml is in none of this machine's chip sources - nothing emitted"
+            );
+            return;
+        };
+        let path = path.as_path();
         let Ok(xml) = std::fs::read_to_string(path) else {
-            eprintln!("no chip xml at {chip} - nothing emitted");
+            eprintln!("could not read {} - nothing emitted", path.display());
             return;
         };
         let af = stm32_pin_data::gpio_ip_version(&xml).and_then(|v| {
