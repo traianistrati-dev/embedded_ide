@@ -1,7 +1,6 @@
 //! Chip body and pin rendering — draws the MCU chip and its pins on 4 sides.
 
 use super::geometry::{PinGeom, PinPlace, PinSide, pin_geometry};
-use super::layout;
 use super::rotate::{Rot, RotMode, ScreenSide};
 use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT, PIN_WIDTH};
 use crate::panels::mcu_module::pins::logic::pin::{PIN_FONT_SIZE, Pin};
@@ -215,7 +214,7 @@ fn render_diamond(
             painter.add(egui::Shape::convex_polygon(
                 rot.quad(lp.rect),
                 egui::Color32::TRANSPARENT,
-                egui::Stroke::new(if is_sel { 3.0 } else { 1.5 }, egui::Color32::WHITE),
+                egui::Stroke::new(if is_sel { 3.0_f32 } else { 1.5_f32 }, egui::Color32::WHITE),
             ));
         }
         // Label positioned exactly like the un-rotated layout (over the pin,

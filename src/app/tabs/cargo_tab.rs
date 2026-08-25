@@ -409,7 +409,7 @@ fn usage_bar(
         painter.rect_stroke(
             rect,
             2.0,
-            egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(80)),
             egui::StrokeKind::Inside,
         );
         resp.on_hover_text(section_breakdown(usage, flash));

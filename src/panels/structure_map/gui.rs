@@ -661,13 +661,13 @@ fn show_canvas(
                     .iter()
                     .any(|s| s.name.to_lowercase().contains(&query)));
         let (stroke_c, base_w) = if blink_on {
-            (ERROR_STROKE, 3.0)
+            (ERROR_STROKE, 3.0_f32)
         } else if search_hit {
-            (SEARCH_STROKE, 2.0)
+            (SEARCH_STROKE, 2.0_f32)
         } else if selected || resp.hovered() {
-            (HOVER_STROKE, 1.6)
+            (HOVER_STROKE, 1.6_f32)
         } else {
-            (NODE_STROKE, 1.0)
+            (NODE_STROKE, 1.0_f32)
         };
         painter.rect(
             r,
@@ -677,7 +677,14 @@ fn show_canvas(
                 4.0 * scale.clamp(0.5, 1.5)
             },
             fill,
-            egui::Stroke::new(if is_pkg_root { base_w * 2.0 } else { base_w }, stroke_c),
+            egui::Stroke::new(
+                if is_pkg_root {
+                    base_w * 2.0_f32
+                } else {
+                    base_w
+                },
+                stroke_c,
+            ),
             egui::StrokeKind::Inside,
         );
 
@@ -743,7 +750,7 @@ fn show_canvas(
                     egui::pos2(r.left() + 4.0 * scale, header.bottom()),
                     egui::pos2(r.right() - 4.0 * scale, header.bottom()),
                 ],
-                egui::Stroke::new(0.8, NODE_STROKE),
+                egui::Stroke::new(0.8_f32, NODE_STROKE),
             );
             let row_h = ROW_H * scale;
             for j in 0..rows {

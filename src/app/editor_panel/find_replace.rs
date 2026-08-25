@@ -211,7 +211,10 @@ impl AppIde {
         let frame = egui::Frame::new()
             .fill(egui::Color32::from_rgb(40, 40, 47))
             .inner_margin(egui::Margin::same(6))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 82)));
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                egui::Color32::from_rgb(70, 70, 82),
+            ));
 
         frame.show(ui, |ui| {
             // ── Row 1: title + query + nav + status + close ──

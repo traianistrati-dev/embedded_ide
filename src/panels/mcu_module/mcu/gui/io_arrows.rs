@@ -32,7 +32,7 @@ fn connector(
     // function): a plain line says "wired here", an arrow would be a guess.
     head: bool,
 ) {
-    let stroke = egui::Stroke::new(2.0, color);
+    let stroke = egui::Stroke::new(2.0_f32, color);
     painter.line_segment([from, to], stroke);
     let v = to - from;
     if !head || v.length() < 1.0 {
@@ -473,7 +473,7 @@ pub fn draw_io_arrows(
                 field_rect.union(handle_rect).union(name_rect).expand(3.0),
                 4.0,
                 // Same 2.8 px as a selected module box's border.
-                egui::Stroke::new(2.8, egui::Color32::WHITE),
+                egui::Stroke::new(2.8_f32, egui::Color32::WHITE),
                 egui::StrokeKind::Middle,
             );
         }

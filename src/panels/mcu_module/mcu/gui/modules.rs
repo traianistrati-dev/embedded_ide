@@ -233,7 +233,7 @@ fn arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: 
     }
     let dir = v.normalized();
     let rot = egui::emath::Rot2::from_angle(std::f32::consts::TAU / 12.0);
-    let stroke = egui::Stroke::new(1.6, color);
+    let stroke = egui::Stroke::new(1.6_f32, color);
     painter.line_segment([to, to - 7.0 * (rot * dir)], stroke);
     painter.line_segment([to, to - 7.0 * (rot.inverse() * dir)], stroke);
 }
@@ -551,13 +551,13 @@ fn draw_box(
     // A pending removal outranks the selection: the box is about to disappear,
     // which is the more urgent thing to say about it.
     let stroke = if removing_blink.is_some() {
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(235, 70, 70)) // pending removal
+        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(235, 70, 70)) // pending removal
     } else if selected {
-        egui::Stroke::new(2.8, egui::Color32::WHITE) // 2× the connected border
+        egui::Stroke::new(2.8_f32, egui::Color32::WHITE) // 2× the connected border
     } else if connected {
-        egui::Stroke::new(1.4, color) // border matches the pin colour
+        egui::Stroke::new(1.4_f32, color) // border matches the pin colour
     } else {
-        egui::Stroke::new(1.2, egui::Color32::from_rgb(120, 90, 90)) // disconnected
+        egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(120, 90, 90)) // disconnected
     };
     painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Middle);
 
@@ -780,7 +780,7 @@ pub fn draw_modules(
             };
             painter.circle_filled(term, 3.5, color);
             painter.circle_filled(*anchor, 3.5, color);
-            painter.line_segment([term, *anchor], egui::Stroke::new(1.6, color));
+            painter.line_segment([term, *anchor], egui::Stroke::new(1.6_f32, color));
             // Custom modules show the DATA DIRECTION: an MCU input is driven by
             // the device (module → pin), an output is driven by the MCU
             // (pin → module). Peripheral buses are bidirectional, so no head.
@@ -824,7 +824,7 @@ pub fn draw_modules(
             painter.rect_stroke(
                 *rect,
                 6.0,
-                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(50)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(50)),
                 egui::StrokeKind::Middle,
             );
         }
@@ -905,7 +905,7 @@ pub fn draw_modules(
                             egui::pos2(r.right() + 2.0, r.bottom() + 2.0),
                         ),
                         4.0,
-                        egui::Stroke::new(2.8, egui::Color32::WHITE),
+                        egui::Stroke::new(2.8_f32, egui::Color32::WHITE),
                         egui::StrokeKind::Middle,
                     );
                 }

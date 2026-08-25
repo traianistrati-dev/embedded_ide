@@ -16,7 +16,6 @@ pub mod modules;
 pub mod panel;
 pub mod rotate;
 
-use crate::panels::mcu_module::mcu::logic::partner_functions;
 use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;

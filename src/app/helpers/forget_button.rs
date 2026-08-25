@@ -94,9 +94,9 @@ mod tests {
     /// whether a project disappears.)
     #[test]
     fn arming_is_one_slot_and_expires() {
-        let mut armed: Armed = None;
-        // A fresh arm is remembered…
-        armed = Some(("/a/one".into(), std::time::Instant::now()));
+        // Starts armed: the `None` this used to hold was overwritten
+        // on the very next line and never read.
+        let mut armed: Armed = Some(("/a/one".into(), std::time::Instant::now()));
         assert!(armed.as_ref().is_some_and(|(p, _)| p == "/a/one"));
         // …and arming another entry replaces it rather than adding to it, so
         // two rows can never both look armed.

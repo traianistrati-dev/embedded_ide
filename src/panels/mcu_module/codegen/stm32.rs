@@ -297,7 +297,7 @@ pub(super) fn gen_parts(
     // CAN's `assign_pins` needs AFIO too (it may remap the pins), and so does
     // `disable_jtag` — it lives on `afio.mapr`.
     let needs_afio = has_serial || has_spi || has_i2c || has_timer || has_can || free_jtag;
-    let has_periph_fns = has_serial || has_spi || has_i2c || has_adc || has_can;
+    let _has_periph_fns = has_serial || has_spi || has_i2c || has_adc || has_can;
 
     // ── SPI instances ────────────────────────────────────────────────────────
     let mut spi_instances: BTreeSet<u8> = BTreeSet::new();

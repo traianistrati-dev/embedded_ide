@@ -158,7 +158,7 @@ pub fn detect_dfu(
 
         // Make sure a DFU device is listed even if the OS doesn't show it
         // (some DFU drivers hide the device in WMI / lsusb).
-        if let DfuState::DeviceFound(ref desc) = dfu_result {
+        if let DfuState::DeviceFound(ref _desc) = dfu_result {
             // let already = programmer_devices.iter().any(|p| p.kind == "DFU Bootloader");
             // if !already {
             //     programmer_devices.insert(
@@ -207,7 +207,7 @@ pub fn detect_dfu(
                 log.push("── No known programmer / serial adapter detected ─────".to_string());
             } else {
                 log.push("── Detected programmers / adapters ──────────────────".to_string());
-                for (key, programmer) in &programmer_devices {
+                for (_key, programmer) in &programmer_devices {
                     log.push(format!(
                         "  [{}]  {}  [{}] {}",
                         programmer.kind, programmer.name, programmer.vid_pid, programmer.port
@@ -771,7 +771,7 @@ fn list_programmer_devices() -> HashMap<String, ProgrammerInfo> {
                         let product = handle
                             .read_product_string_ascii(&descriptor)
                             .unwrap_or_default();
-                        let serial_number = handle
+                        let _serial_number = handle
                             .read_serial_number_string_ascii(&descriptor)
                             .unwrap_or_default();
                         let manufacturer = handle

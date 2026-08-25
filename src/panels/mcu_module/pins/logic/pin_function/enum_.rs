@@ -1,5 +1,3 @@
-use eframe::egui;
-
 // ── Info struct ──────────────────────────────────────────────────────────────
 
 pub struct FunctionInfo {

@@ -273,11 +273,11 @@ pub(crate) fn edit_nodes(
             if resp.dragged() { MUX_FILL } else { BOX_FILL },
             Stroke::new(
                 if is_sel {
-                    2.4
+                    2.4_f32
                 } else if active {
-                    1.8
+                    1.8_f32
                 } else {
-                    1.0
+                    1.0_f32
                 },
                 if is_sel { SELECT_STROKE } else { EDIT_STROKE },
             ),
@@ -331,7 +331,7 @@ pub(crate) fn edit_nodes(
     {
         ui.painter().line_segment(
             [tf.p(nb.x + nb.w, nb.y + nb.h / 2.0), cursor],
-            Stroke::new(1.5, SELECT_STROKE),
+            Stroke::new(1.5_f32, SELECT_STROKE),
         );
     }
 
@@ -351,7 +351,7 @@ fn port(ui: &mut egui::Ui, center: Pos2, node: &str, side: &'static str, armed: 
         center,
         if hot { 5.0 } else { 3.5 },
         if hot { SELECT_STROKE } else { MUX_FILL },
-        Stroke::new(1.2, if hot { SELECT_STROKE } else { STROKE_C }),
+        Stroke::new(1.2_f32, if hot { SELECT_STROKE } else { STROKE_C }),
     );
     resp.clicked()
 }
@@ -547,13 +547,13 @@ fn mux_radios(
     painter.add(Shape::convex_polygon(
         poly,
         MUX_FILL,
-        Stroke::new(1.2, MUX_STROKE),
+        Stroke::new(1.2_f32, MUX_STROKE),
     ));
 
     let mut changed = false;
     for (i, (label, dy)) in inputs.iter().enumerate() {
         let cy = y + dy;
-        let stroke = Stroke::new(1.2, WIRE_C);
+        let stroke = Stroke::new(1.2_f32, WIRE_C);
         // Radio sits just inside the wide edge (left for normal, right for flip);
         // the input stub stops at the mux edge so the wire meets the radio.
         let (stub_a, stub_b, lbl_x, lbl_align, radio_cx) = if flip {
@@ -598,7 +598,7 @@ fn block(p: &egui::Painter, tf: &Tf, x: f32, y: f32, w: f32, h: f32, title: &str
         r,
         3.0,
         BOX_FILL,
-        Stroke::new(1.2, STROKE_C),
+        Stroke::new(1.2_f32, STROKE_C),
         egui::StrokeKind::Inside,
     );
     p.text(
@@ -626,7 +626,7 @@ fn out_box(
         r,
         3.0,
         OUT_FILL,
-        Stroke::new(1.0, STROKE_C),
+        Stroke::new(1.0_f32, STROKE_C),
         egui::StrokeKind::Inside,
     );
     let bad = limit.map(|l| hz > l).unwrap_or(false);

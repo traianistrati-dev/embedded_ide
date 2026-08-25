@@ -400,7 +400,7 @@ fn legend(ui: &mut egui::Ui) {
         ui.painter().rect_stroke(
             rect,
             2.0,
-            egui::Stroke::new(1.0, FREE_PIN),
+            egui::Stroke::new(1.0_f32, FREE_PIN),
             egui::StrokeKind::Inside,
         );
         ui.label(
@@ -957,7 +957,7 @@ fn chip_text(cost: usize, assigned: bool) -> egui::Color32 {
 /// assigned chip is already a solid block of category colour.
 fn chip_stroke(cost: usize, assigned: bool) -> egui::Stroke {
     if cost == 0 && !assigned {
-        egui::Stroke::new(1.0, FREE_PIN)
+        egui::Stroke::new(1.0_f32, FREE_PIN)
     } else {
         egui::Stroke::NONE
     }

@@ -224,7 +224,7 @@ impl AppIde {
                     ui.painter().hline(
                         handle_rect.x_range(),
                         mid_y,
-                        egui::Stroke::new(1.5, line_color),
+                        egui::Stroke::new(1.5_f32, line_color),
                     );
                     for dx in [-6.0_f32, 0.0, 6.0] {
                         ui.painter().circle_filled(

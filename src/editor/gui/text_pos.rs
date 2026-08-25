@@ -206,7 +206,7 @@ pub fn draw_wavy_underline(
     if x_end <= x_start {
         return;
     }
-    let stroke = egui::Stroke::new(1.2, color);
+    let stroke = egui::Stroke::new(1.2_f32, color);
     let mut x = x_start;
     let mut up = true;
     while x < x_end {

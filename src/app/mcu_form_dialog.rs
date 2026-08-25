@@ -56,7 +56,7 @@ impl AppIde {
             let warnings = form.warnings();
 
             egui::ScrollArea::vertical()
-                .max_height(ui.ctx().screen_rect().height() * 0.62)
+                .max_height(ui.ctx().content_rect().height() * 0.62)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui

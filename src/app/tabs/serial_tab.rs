@@ -814,8 +814,11 @@ fn show_rx_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f32) {
                 egui::Color32::from_gray(70)
             };
             let cx = div_rect.center().x;
-            ui.painter()
-                .vline(cx, div_rect.y_range(), egui::Stroke::new(1.5, div_color));
+            ui.painter().vline(
+                cx,
+                div_rect.y_range(),
+                egui::Stroke::new(1.5_f32, div_color),
+            );
             for dy in [-6.0_f32, 0.0, 6.0] {
                 ui.painter().circle_filled(
                     egui::pos2(cx, div_rect.center().y + dy),
@@ -931,7 +934,7 @@ fn show_tx_area(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui::Conte
     ui.painter().hline(
         handle_rect.x_range(),
         mid_y,
-        egui::Stroke::new(1.5, line_color),
+        egui::Stroke::new(1.5_f32, line_color),
     );
     for dx in [-6.0_f32, 0.0, 6.0] {
         ui.painter().circle_filled(

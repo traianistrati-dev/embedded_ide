@@ -144,7 +144,7 @@ pub(crate) fn rust_layout_job(
             if mark.underline {
                 // Drawn in the token's OWN colour, so it reads as a property of
                 // the identifier rather than a foreign marker pasted over it.
-                fmt.underline = egui::Stroke::new(1.0, color);
+                fmt.underline = egui::Stroke::new(1.0_f32, color);
             }
             job.append(s, 0.0, fmt);
         }

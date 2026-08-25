@@ -314,7 +314,7 @@ pub fn show_plot(ui: &mut egui::Ui, plot: &mut PlotState, height: f32) {
     painter.rect_stroke(
         rect,
         3.0,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(60)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(60)),
         egui::StrokeKind::Inside,
     );
 
@@ -382,7 +382,7 @@ pub fn show_plot(ui: &mut egui::Ui, plot: &mut PlotState, height: f32) {
         painter.hline(
             egui::Rangef::new(plot_l, plot_r),
             y,
-            egui::Stroke::new(1.0, grid_col),
+            egui::Stroke::new(1.0_f32, grid_col),
         );
         painter.text(
             egui::pos2(rect.left() + GUTTER_L - 4.0, y),
@@ -400,7 +400,7 @@ pub fn show_plot(ui: &mut egui::Ui, plot: &mut PlotState, height: f32) {
         painter.vline(
             x,
             egui::Rangef::new(plot_t, plot_b),
-            egui::Stroke::new(1.0, grid_col),
+            egui::Stroke::new(1.0_f32, grid_col),
         );
         painter.text(
             egui::pos2(x, rect.bottom() - 2.0),
@@ -428,7 +428,7 @@ pub fn show_plot(ui: &mut egui::Ui, plot: &mut PlotState, height: f32) {
         } else if pts.len() > 1 {
             painter.add(egui::Shape::line(
                 pts,
-                egui::Stroke::new(1.5, channel_color(i)),
+                egui::Stroke::new(1.5_f32, channel_color(i)),
             ));
         }
     }
@@ -441,7 +441,7 @@ pub fn show_plot(ui: &mut egui::Ui, plot: &mut PlotState, height: f32) {
             painter.vline(
                 to_screen(hx, y_min).x,
                 egui::Rangef::new(plot_t, plot_b),
-                egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)),
             );
             let mut ty = plot_t + 2.0;
             painter.text(

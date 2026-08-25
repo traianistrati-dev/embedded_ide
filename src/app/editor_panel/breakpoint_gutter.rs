@@ -226,7 +226,7 @@ impl AppIde {
                     painter.circle_stroke(
                         egui::pos2(dot_x, (top + bot) * 0.5),
                         BP_GHOST_RADIUS,
-                        egui::Stroke::new(1.2, BP_FILL.gamma_multiply(0.6)),
+                        egui::Stroke::new(1.2_f32, BP_FILL.gamma_multiply(0.6)),
                     );
                 }
             }

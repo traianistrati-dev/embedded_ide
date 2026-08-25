@@ -794,7 +794,7 @@ pub fn show_project_tree(
     new_src_folder_name: &mut Option<String>,
     new_file_parent_folder: &mut Option<String>,
     new_folder_parent_folder: &mut Option<String>,
-    new_file_in_folder: &mut Option<(String, String)>,
+    _new_file_in_folder: &mut Option<(String, String)>,
     renaming_file: &mut Option<(usize, String)>,
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
@@ -1075,7 +1075,7 @@ pub fn show_project_tree(
                 ui.painter().rect_stroke(
                     src_ch.header_response.rect,
                     3.0,
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 170, 240)),
+                    egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(120, 170, 240)),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -1214,7 +1214,7 @@ pub fn show_project_tree(
         ui.painter().hline(
             handle_rect.x_range(),
             mid_y,
-            egui::Stroke::new(1.0, line_color),
+            egui::Stroke::new(1.0_f32, line_color),
         );
         for dx in [-6.0_f32, 0.0, 6.0] {
             ui.painter().circle_filled(
@@ -1751,7 +1751,7 @@ pub fn show_project_tree(
     // editor, which is already consuming the same event. And anything that is
     // not one of our tokens is ordinary text, so Ctrl+V with a normal clipboard
     // is silently a no-op rather than a surprise.
-    if clip_paste.is_none() && !ui.ctx().wants_keyboard_input() {
+    if clip_paste.is_none() && !ui.ctx().egui_wants_keyboard_input() {
         let pasted = ui.input(|i| {
             i.events.iter().find_map(|e| match e {
                 egui::Event::Paste(t) => Some(t.clone()),
@@ -2050,7 +2050,7 @@ fn render_tree_node(
                         ui.painter().rect_stroke(
                             ch.header_response.rect,
                             3.0,
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 170, 240)),
+                            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(120, 170, 240)),
                             egui::StrokeKind::Inside,
                         );
                     }

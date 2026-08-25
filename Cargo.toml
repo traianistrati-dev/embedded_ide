@@ -2,7 +2,7 @@
 name = "embedded_ide_0"
 version = "0.1.0"
 edition = "2024"
-author = "Traian Istrati"
+authors = ["Traian Istrati"]
 
 [dependencies]
 eframe           = { version = "0.34.1", features = ["persistence"] }

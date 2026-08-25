@@ -121,10 +121,10 @@ pub fn draw_graph_clock(
     let mut freqs = evaluate(&gc.graph);
 
     // ── Fixed footer: Info (always visible) ─────────────────────────────────
-    egui::TopBottomPanel::bottom("graph_clock_footer")
+    egui::Panel::bottom("graph_clock_footer")
         .resizable(true)
-        .default_height(190.0)
-        .min_height(100.0)
+        .default_size(190.0)
+        .min_size(100.0)
         .show_inside(ui, |ui| {
             // Info alone now. The "Frequencies" half listed the OUTPUTS, which
             // the Fields list ends with instead — one place for every value,
@@ -465,9 +465,9 @@ pub fn draw_graph_clock(
     // ── Properties panel (edit mode) ─────────────────────────────────────────
     if view.edit {
         let mut edited = false;
-        egui::SidePanel::right("clock_edit_props")
+        egui::Panel::right("clock_edit_props")
             .resizable(true)
-            .default_width(260.0)
+            .default_size(260.0)
             .show_inside(ui, |ui| {
                 edited = properties_panel(ui, gc, &mut view, positions, family, note);
             });
@@ -478,9 +478,9 @@ pub fn draw_graph_clock(
 
     // ── Fields (left, beside the diagram) ────────────────────────────────────
     if *fields {
-        egui::SidePanel::left("clock_fields")
+        egui::Panel::left("clock_fields")
             .resizable(true)
-            .default_width(300.0)
+            .default_size(300.0)
             .show_inside(ui, |ui| {
                 if fields_panel(ui, gc, limits, &freqs, field_search) {
                     changed = true;

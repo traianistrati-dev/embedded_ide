@@ -48,16 +48,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n    }\n}\n";
 
-/// First link of every esp-hal bus builder chain: `Uart::new` / `Spi::new` /
-/// `I2c::new` all return `Result<Self, ConfigError>` on esp-hal 1.1, so the
-/// `.with_xxx(...)` links below them do not exist until it is unwrapped.
-///
-/// A bad config here is a programming error the IDE wrote (the values come from
-/// the Virtual Module UI, which range-limits them), not a runtime condition the
-/// firmware could handle — the same reason the STM32 backend emits
-/// `pac::Peripherals::take().unwrap()`.
-const UNWRAP_CFG: &str = "\n        .unwrap()";
-
 // ── Runtime (entry point) ────────────────────────────────────────────────────
 
 /// Which entry point the generated `main` opens — the only structural difference
@@ -838,24 +828,6 @@ fn bus_sections(
         ));
     }
     out
-}
-
-/// One `.with_xxx(peripherals.GPIOn)` link of an esp-hal builder chain, with the
-/// pin's function named in a comment on its OWN line above the call. Empty when
-/// the peripheral has no pin for that role.
-///
-/// The comment must NOT trail the call: the chain's terminating `;` is appended
-/// after the LAST link, so a trailing `// …` swallows it and the generated file
-/// stops parsing (`expected ';', found keyword 'loop'`).
-fn with_pin(method: &str, pin: Option<&&Pin>) -> String {
-    pin.map(|p| {
-        format!(
-            "\n        // {label}\n        .{method}(peripherals.{name})",
-            label = p.selected_function.label(),
-            name = p.name,
-        )
-    })
-    .unwrap_or_default()
 }
 
 /// `_<sanitized label>` suffix for a module's generated handle (`_uart1_imu`),

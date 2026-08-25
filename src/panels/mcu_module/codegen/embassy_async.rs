@@ -6764,6 +6764,7 @@ mod i2s_tests {
     }
 }
 
+#[cfg(test)]
 mod pwm_tests {
     use super::*;
     use crate::panels::mcu_module::pins::logic::pin::Pin;

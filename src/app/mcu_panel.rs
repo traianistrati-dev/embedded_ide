@@ -378,7 +378,7 @@ impl AppIde {
                     // buttons off the line — and the buttons are what you see.
                     // Both bars are bottom-anchored, so equal content is what
                     // puts equal rows on one line.
-                    egui::TopBottomPanel::bottom("vmodules_panel")
+                    egui::Panel::bottom("vmodules_panel")
                         // NOT `resizable`: the handle below does the resizing,
                         // and egui's own can only cap a content-sized panel.
                         .resizable(false)
@@ -433,7 +433,7 @@ impl AppIde {
                                     hrect.x_range(),
                                     hrect.center().y,
                                     egui::Stroke::new(
-                                        if live { 2.0 } else { 1.0 },
+                                        if live { 2.0_f32 } else { 1.0_f32 },
                                         if live {
                                             egui::Color32::from_rgb(120, 160, 210)
                                         } else {
@@ -2028,7 +2028,7 @@ impl AppIde {
             .inner_margin(egui::Margin::same(10))
             .corner_radius(egui::CornerRadius::same(6))
             .fill(egui::Color32::from_rgb(48, 44, 30))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 130, 70)))
+            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(150, 130, 70)))
             .show(ui, |ui| {
                 if !mcu.pending_apply_confirm {
                     ui.horizontal_wrapped(|ui| {
@@ -2404,9 +2404,9 @@ fn runtime_card(
         egui::Color32::from_rgb(38, 38, 46)
     };
     let border = if selected {
-        egui::Stroke::new(1.5, accent)
+        egui::Stroke::new(1.5_f32, accent)
     } else {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 82))
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(70, 70, 82))
     };
 
     let inner = egui::Frame::new()

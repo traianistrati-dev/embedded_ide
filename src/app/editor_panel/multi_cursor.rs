@@ -534,7 +534,7 @@ impl AppIde {
             }
             painter.line_segment(
                 [egui::pos2(x, y_top), egui::pos2(x, y_bot)],
-                egui::Stroke::new(1.5, color),
+                egui::Stroke::new(1.5_f32, color),
             );
         }
     }

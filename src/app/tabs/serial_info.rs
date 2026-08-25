@@ -104,7 +104,7 @@ pub fn show_bridge_info(
         painter.rect_stroke(
             r,
             6.0 * scale,
-            egui::Stroke::new(1.2, border),
+            egui::Stroke::new(1.2_f32, border),
             egui::StrokeKind::Middle,
         );
         if !b.title.is_empty() {
@@ -173,7 +173,7 @@ pub fn show_bridge_info(
         painter.rect_stroke(
             r,
             4.0 * scale,
-            egui::Stroke::new(1.0, border),
+            egui::Stroke::new(1.0_f32, border),
             egui::StrokeKind::Middle,
         );
         painter.text(
@@ -187,7 +187,7 @@ pub fn show_bridge_info(
 
     // Every link is two-way: a reply travels back the road the command came in.
     let link = |a: egui::Pos2, b: egui::Pos2| {
-        painter.line_segment([a, b], egui::Stroke::new(1.3, dim));
+        painter.line_segment([a, b], egui::Stroke::new(1.3_f32, dim));
         arrow_head(&painter, a, b, dim);
         arrow_head(&painter, b, a, dim);
     };
@@ -223,7 +223,7 @@ fn arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: 
     }
     let dir = v.normalized();
     let rot = egui::emath::Rot2::from_angle(std::f32::consts::TAU / 12.0);
-    let stroke = egui::Stroke::new(1.3, color);
+    let stroke = egui::Stroke::new(1.3_f32, color);
     painter.line_segment([to, to - 7.0 * (rot * dir)], stroke);
     painter.line_segment([to, to - 7.0 * (rot.inverse() * dir)], stroke);
 }

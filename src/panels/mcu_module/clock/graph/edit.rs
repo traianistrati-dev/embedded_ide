@@ -706,7 +706,7 @@ mod tests {
     fn issues_report_the_real_problems() {
         let (mut g, mut b) = empty();
         let mux = add(&mut g, &mut b, PaletteKind::Mux);
-        let tim = add(&mut g, &mut b, PaletteKind::TimerMul);
+        let _tim = add(&mut g, &mut b, PaletteKind::TimerMul);
         let src = add(&mut g, &mut b, PaletteKind::Source);
         connect(&mut g, &src, &mux).unwrap();
 

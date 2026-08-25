@@ -209,7 +209,7 @@ pub fn diag_row_link_hint(
         painter.hline(
             location.x_range(),
             location.bottom() - 0.5,
-            egui::Stroke::new(1.0, color),
+            egui::Stroke::new(1.0_f32, color),
         );
         painter
             .ctx()
@@ -1701,7 +1701,7 @@ impl AppIde {
         // missed (app start, Alt+Tab), leaving typing functional but the caret
         // invisible. A steady caret keeps the two paints indistinguishable.
         cc.egui_ctx
-            .style_mut(|s| s.visuals.text_cursor.blink = false);
+            .global_style_mut(|s| s.visuals.text_cursor.blink = false);
 
         // ── Load persisted project state ─────────────────────────────────────
         let mut persisted: PersistedState = cc

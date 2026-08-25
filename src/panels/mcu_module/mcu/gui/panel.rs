@@ -54,7 +54,7 @@ fn draw_close(painter: &egui::Painter, ui: &mut egui::Ui, rect: egui::Rect, num:
     painter.rect_filled(rect, 4.0, bg);
     let c = rect.center();
     let r = 4.5;
-    let stroke = egui::Stroke::new(1.6, fg);
+    let stroke = egui::Stroke::new(1.6_f32, fg);
     painter.line_segment(
         [egui::pos2(c.x - r, c.y - r), egui::pos2(c.x + r, c.y + r)],
         stroke,
@@ -152,7 +152,7 @@ pub fn draw_pin_functions(
             egui::pos2(content_rect.left() + 8.0, sep_y),
             egui::pos2(content_rect.right() - 8.0, sep_y),
         ],
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 120)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(100, 100, 120)),
     );
 
     // ── Reserved pins: a description, not a list ─────────────────────────
@@ -264,11 +264,11 @@ pub fn draw_pin_functions(
         };
         list_painter.rect_filled(info_rect, 5.0, info_bg);
         let ic = info_rect.center();
-        list_painter.circle_stroke(ic, 7.5, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        list_painter.circle_stroke(ic, 7.5, egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
         list_painter.circle_filled(egui::pos2(ic.x, ic.y - 2.5), 1.3, egui::Color32::WHITE);
         list_painter.line_segment(
             [egui::pos2(ic.x, ic.y - 0.5), egui::pos2(ic.x, ic.y + 4.0)],
-            egui::Stroke::new(1.8, egui::Color32::WHITE),
+            egui::Stroke::new(1.8_f32, egui::Color32::WHITE),
         );
 
         // Only rows actually on screen take clicks — a scrolled-away button must
@@ -283,7 +283,7 @@ pub fn draw_pin_functions(
                 list_painter.rect_stroke(
                     btn_rect,
                     5.0,
-                    egui::Stroke::new(1.5, egui::Color32::WHITE),
+                    egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
                     egui::StrokeKind::Middle,
                 );
             }
@@ -306,7 +306,7 @@ pub fn draw_pin_functions(
                 list_painter.rect_stroke(
                     info_rect,
                     5.0,
-                    egui::Stroke::new(1.5, egui::Color32::WHITE),
+                    egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
                     egui::StrokeKind::Middle,
                 );
             }
@@ -356,7 +356,7 @@ pub fn draw_pin_functions(
                         list_painter.rect_stroke(
                             r,
                             4.0,
-                            egui::Stroke::new(1.2, egui::Color32::WHITE),
+                            egui::Stroke::new(1.2_f32, egui::Color32::WHITE),
                             egui::StrokeKind::Middle,
                         );
                     }

@@ -44,7 +44,7 @@ pub fn apply_dark_theme(ctx: &egui::Context) {
     vis.code_bg_color = Color32::from_rgb(0x1a, 0x1d, 0x23);
 
     // ── Window chrome ────────────────────────────────────────────────────────
-    vis.window_stroke = egui::Stroke::new(1.0, sep);
+    vis.window_stroke = egui::Stroke::new(1.0_f32, sep);
     vis.window_corner_radius = egui::CornerRadius::same(6);
     vis.menu_corner_radius = egui::CornerRadius::same(5);
     vis.window_shadow = egui::Shadow {
@@ -63,42 +63,42 @@ pub fn apply_dark_theme(ctx: &egui::Context) {
     // ── Widgets: noninteractive ───────────────────────────────────────────────
     vis.widgets.noninteractive.bg_fill = bg1;
     vis.widgets.noninteractive.weak_bg_fill = bg1;
-    vis.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, sep);
-    vis.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, fg0);
+    vis.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, sep);
+    vis.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, fg0);
     vis.widgets.noninteractive.corner_radius = cr4;
 
     // ── Widgets: inactive ────────────────────────────────────────────────────
     vis.widgets.inactive.bg_fill = bg2;
     vis.widgets.inactive.weak_bg_fill = bg2;
-    vis.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, sep);
-    vis.widgets.inactive.fg_stroke = egui::Stroke::new(1.5, fg0);
+    vis.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, sep);
+    vis.widgets.inactive.fg_stroke = egui::Stroke::new(1.5_f32, fg0);
     vis.widgets.inactive.corner_radius = cr4;
 
     // ── Widgets: hovered ─────────────────────────────────────────────────────
     vis.widgets.hovered.bg_fill = bg3;
     vis.widgets.hovered.weak_bg_fill = bg3;
-    vis.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(0x60, 0x6a, 0x80));
-    vis.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, fg1);
+    vis.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(0x60, 0x6a, 0x80));
+    vis.widgets.hovered.fg_stroke = egui::Stroke::new(1.5_f32, fg1);
     vis.widgets.hovered.corner_radius = cr4;
 
     // ── Widgets: active (pressed) ────────────────────────────────────────────
     vis.widgets.active.bg_fill = bg4;
     vis.widgets.active.weak_bg_fill = bg4;
-    vis.widgets.active.bg_stroke = egui::Stroke::new(1.0, acc);
-    vis.widgets.active.fg_stroke = egui::Stroke::new(2.0, fg1);
+    vis.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, acc);
+    vis.widgets.active.fg_stroke = egui::Stroke::new(2.0_f32, fg1);
     vis.widgets.active.corner_radius = cr4;
 
     // ── Widgets: open (combo-box open state) ─────────────────────────────────
     vis.widgets.open.bg_fill = bg4;
     vis.widgets.open.weak_bg_fill = bg4;
-    vis.widgets.open.bg_stroke = egui::Stroke::new(1.0, acc);
-    vis.widgets.open.fg_stroke = egui::Stroke::new(1.5, fg1);
+    vis.widgets.open.bg_stroke = egui::Stroke::new(1.0_f32, acc);
+    vis.widgets.open.fg_stroke = egui::Stroke::new(1.5_f32, fg1);
     vis.widgets.open.corner_radius = cr4;
 
     // ── Text / selection ─────────────────────────────────────────────────────
     vis.override_text_color = Some(fg0);
     vis.selection.bg_fill = acc_bg;
-    vis.selection.stroke = egui::Stroke::new(1.0, acc);
+    vis.selection.stroke = egui::Stroke::new(1.0_f32, acc);
 
     // ── Misc ─────────────────────────────────────────────────────────────────
     vis.hyperlink_color = Color32::from_rgb(0x61, 0xaf, 0xef);

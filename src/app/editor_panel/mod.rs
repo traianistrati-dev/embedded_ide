@@ -1415,8 +1415,8 @@ impl AppIde {
             egui::Panel::left("code_editor")
                 .resizable(true)
                 .default_size(avail * 0.5)
-                .min_width(crate::app::EDITOR_MIN_W)
-                .max_width(editor_max)
+                .min_size(crate::app::EDITOR_MIN_W)
+                .max_size(editor_max)
                 .show_inside(ui, body);
         }
     }

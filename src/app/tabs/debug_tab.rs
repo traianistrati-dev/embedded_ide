@@ -819,7 +819,7 @@ pub fn show_debug_tab(
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
         let stroke = if hot {
-            egui::Stroke::new(2.0, accent)
+            egui::Stroke::new(2.0_f32, accent)
         } else {
             sep
         };
@@ -1054,7 +1054,7 @@ fn breakpoint_pane(
                                         ui.painter().circle_stroke(
                                             dot.center(),
                                             3.5,
-                                            egui::Stroke::new(1.2, UNARMED_GREY),
+                                            egui::Stroke::new(1.2_f32, UNARMED_GREY),
                                         );
                                     } else {
                                         ui.painter().circle_filled(dot.center(), 3.5, BP_FILL);
