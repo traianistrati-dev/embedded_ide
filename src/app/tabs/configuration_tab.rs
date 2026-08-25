@@ -286,6 +286,47 @@ fn problem_and_reset(ui: &mut egui::Ui, problem: Option<String>, mut reset: impl
     });
 }
 
+/// Why the DMA card is empty, in the words that fit THIS chip.
+///
+/// Apart from the drawing because the four answers are a real decision and
+/// a `ui.label` is not: one of them used to tell Espressif users to
+/// "re-import it from the STM32Cube database", and nothing could have
+/// noticed.
+fn dma_note(
+    dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
+    family: &str,
+    on_dma_runtime: bool,
+) -> String {
+    // FOUR different silences, and the difference is the whole point:
+    // "nothing asked for it" is not the same as "it could not be given".
+    if crate::panels::mcu_module::codegen::family::is_esp(family) {
+        // FIRST, because every branch below assumes a chip whose DMA
+        // the IDE models. An Espressif part on the Async runtime was
+        // told to "re-import it from the STM32Cube database" — advice
+        // with no object: no CubeMX release has ever described an
+        // ESP32. It reached them because the branch was excluded for
+        // one family by name (`!= "stm32f1"`) rather than by asking
+        // whether the family uses a `DmaDef` at all.
+        format!(
+            "The {family} backend generates no DMA. esp-hal has the drivers; nothing here emits them yet, so a bus on this chip is a blocking esp-hal driver written inline in main.rs."
+        )
+    } else if !on_dma_runtime {
+        format!(
+            "No DMA on this runtime for {family}. Switch a bus to the Async runtime \
+                 (System tab) - or, on the STM32F1, turn on the Blocking DMA transport \
+                 in a USART or SPI module."
+        )
+    } else if dma.is_none() && family != "stm32f1" {
+        "This chip carries no DMA channel data - re-import it from the STM32Cube \
+             database so the IDE can allocate channels instead of leaving a TODO."
+            .to_owned()
+    } else {
+        "No bus is on DMA yet. Turn it on in a USART, SPI or I2C module and the \
+             channels it takes appear here."
+            .to_owned()
+    }
+}
+
 /// The DMA card: every channel the project takes, and who has it.
 ///
 /// Read-only on purpose. The channel a peripheral gets is chosen in its Virtual
@@ -323,23 +364,7 @@ fn dma_card(
         ui.add_space(6.0);
 
         if uses.is_empty() {
-            // Three different silences, and the difference is the whole point:
-            // "nothing asked for it" is not the same as "it could not be given".
-            let why = if !on_dma_runtime {
-                format!(
-                    "No DMA on this runtime for {family}. Switch a bus to the Async runtime \
-                     (System tab) - or, on the STM32F1, turn on the Blocking DMA transport \
-                     in a USART or SPI module."
-                )
-            } else if dma.is_none() && family != "stm32f1" {
-                "This chip carries no DMA channel data - re-import it from the STM32Cube \
-                 database so the IDE can allocate channels instead of leaving a TODO."
-                    .to_owned()
-            } else {
-                "No bus is on DMA yet. Turn it on in a USART, SPI or I2C module and the \
-                 channels it takes appear here."
-                    .to_owned()
-            };
+            let why = dma_note(dma, family, on_dma_runtime);
             ui.label(dim(why));
             return;
         }
@@ -593,4 +618,49 @@ fn comp_card(
                 ui.end_row();
             });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::codegen::family;
+
+    /// No chip may be sent to a database that has never heard of it.
+    ///
+    /// The empty-DMA message had four cases and the Espressif one fell into
+    /// "re-import it from the STM32Cube database" — because the branch was
+    /// excluded for one family BY NAME (`!= "stm32f1"`) instead of by asking
+    /// whether the family uses a `DmaDef`. Every bundled chip is walked through
+    /// both runtimes here, since the runtime picks the branch.
+    #[test]
+    fn the_dma_note_never_sends_an_esp_chip_to_cubemx() {
+        for d in builtin_definitions() {
+            for on_dma_runtime in [true, false] {
+                let note = dma_note(d.dma.as_ref(), &d.family, on_dma_runtime);
+                assert!(!note.trim().is_empty(), "{}: no explanation", d.id);
+                if family::is_esp(&d.family) {
+                    assert!(
+                        !note.contains("STM32Cube"),
+                        "{}: sent to CubeMX — {note}",
+                        d.id
+                    );
+                    // And the one it does get names the chip and says what is
+                    // actually missing, rather than what to go and fetch.
+                    assert!(note.contains(&d.family), "{}: {note}", d.id);
+                    assert!(note.contains("esp-hal"), "{}: {note}", d.id);
+                }
+            }
+        }
+    }
+
+    /// …while the families that DO carry channel data keep their advice.
+    #[test]
+    fn a_chip_with_no_channel_data_is_still_told_where_to_get_it() {
+        let note = dma_note(None, "stm32wl3", true);
+        assert!(note.contains("STM32Cube"), "{note}");
+        // The F1 is excluded for a real reason: its channels are fixed in the
+        // HAL's types, so there is nothing to import.
+        assert!(!dma_note(None, "stm32f1", true).contains("STM32Cube"));
+    }
 }
