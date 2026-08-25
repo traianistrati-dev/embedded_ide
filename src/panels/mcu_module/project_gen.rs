@@ -1549,7 +1549,7 @@ fn cargo_toml_esp(c: &ProjectDef) -> String {
          \n\
          [dependencies]\n\
          esp-hal       = {{ version = \"{ESP_HAL_REQ}\", features = [\"{chip}\", \"unstable\"] }}\n\
-         esp-println   = {{ version = \"0.13\", features = [\"{chip}\", \"log\"] }}\n\
+         esp-println   = {{ version = \"0.17\", features = [\"{chip}\", \"log-04\"] }}\n\
          esp-bootloader-esp-idf = {{ version = \"0.5.0\", features = [\"{chip}\"] }}\n\
          critical-section = \"1.2.0\"\n\
          \n\
@@ -2653,7 +2653,7 @@ fn f() {}
     fn esp_async_adds_the_unstable_feature_when_missing() {
         let base = "[package]\nname = \"x\"\n\n[dependencies]\n\
                     esp-hal       = { version = \"~1.1.0\", features = [\"esp32c3\"] }\n\
-                    esp-println   = { version = \"0.13\", features = [\"esp32c3\", \"log\"] }\n";
+                    esp-println   = { version = \"0.17\", features = [\"esp32c3\", \"log-04\"] }\n";
         let with = ensure_async_deps(
             base,
             true,
@@ -2672,7 +2672,7 @@ fn f() {}
         // Only the HAL line — a sibling esp-* crate must not be touched.
         assert!(
             with.contains(
-                "esp-println   = { version = \"0.13\", features = [\"esp32c3\", \"log\"] }"
+                "esp-println   = { version = \"0.17\", features = [\"esp32c3\", \"log-04\"] }"
             ),
             "esp-println untouched:\n{with}"
         );

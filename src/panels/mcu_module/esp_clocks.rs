@@ -23,9 +23,9 @@
 /// Selectable CPU frequencies in MHz, lowest first, or empty for a chip nothing
 /// here knows about.
 ///
-/// `esp32c5` and `esp32c61` are listed even though the IDE does not ship them —
-/// see `esp_gen`'s `HELD_BACK`. Keeping them costs two lines and means the table
-/// is not the thing that has to change when they become shippable.
+/// Every RISC-V part the IDE ships is here; the numbers come from `esp-hal`, so
+/// a chip missing from this table is one whose CPU clock the generator cannot
+/// name and which therefore falls back to `CpuClock::max()`.
 pub fn cpu_options(chip: &str) -> &'static [u32] {
     match chip {
         "esp32c2" => &[80, 120],

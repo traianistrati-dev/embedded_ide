@@ -508,20 +508,13 @@ mod tests {
     /// the metadata knows. Regenerating it would be a downgrade — so instead it
     /// serves as the yardstick, in
     /// [`the_generator_agrees_with_the_hand_written_c3`].
-    const GENERATED: [&str; 3] = ["esp32c2", "esp32c6", "esp32h2"];
-
-    /// Chips this generator can describe but the IDE does not ship.
+    /// Every RISC-V part except the C3, which keeps its hand-written definition.
     ///
-    /// Their metadata parses and [`definition`] produces a coherent chip — but
-    /// the project it would create cannot resolve its dependencies: no published
-    /// `esp-println` (0.13 through 0.15) has an `esp32c5` or `esp32c61` feature,
-    /// and the generated `Cargo.toml` asks for one. Shipping them would put two
-    /// chips in the picker that fail at the first build.
-    ///
-    /// Kept as a list rather than deleted, so
-    /// [`held_back_chips_still_generate`] keeps proving the only thing missing
-    /// is upstream.
-    const HELD_BACK: [&str; 2] = ["esp32c5", "esp32c61"];
+    /// The C5 and C61 were held back for a while: the generated `Cargo.toml`
+    /// pinned `esp-println = "0.13"`, which has no feature for either. That was
+    /// a pin of ours, not a gap upstream — `esp-println` 0.17 carries both, and
+    /// every other dependency already did at the version we ask for.
+    const GENERATED: [&str; 5] = ["esp32c2", "esp32c5", "esp32c6", "esp32c61", "esp32h2"];
 
     /// One-shot: write `assets/mcus/esp32*.ron` from the vendor metadata.
     ///
@@ -639,26 +632,6 @@ mod tests {
         // …and neither can no PLL at all.
         c.pll_hz = None;
         assert!(clock_graph(&c).is_none());
-    }
-
-    /// The held-back pair are held back for ONE reason, and it is not this code.
-    ///
-    /// If this ever fails because a definition stopped generating, the problem
-    /// is here. If it passes and `esp-println` has meanwhile published the
-    /// features, they can simply be moved into [`GENERATED`].
-    #[test]
-    #[ignore]
-    fn held_back_chips_still_generate() {
-        let dir = esp_metadata::vendor_dir().expect("esp-metadata in the cargo registry");
-        for id in HELD_BACK {
-            let c = esp_metadata::load(&dir, id).unwrap_or_else(|e| panic!("{id}: {e}"));
-            let d = definition(&c).unwrap_or_else(|e| panic!("{id}: {e}"));
-            assert!(!pad_functions(&d).is_empty(), "{id} generated no pads");
-            assert!(
-                !std::path::Path::new(&format!("assets/mcus/{id}.ron")).exists(),
-                "{id} is shipped, but its project cannot resolve esp-println"
-            );
-        }
     }
 
     /// The two chips whose metadata carries no LEDC must generate no PWM, rather
