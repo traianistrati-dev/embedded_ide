@@ -958,9 +958,13 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
 
     // PCNT. The two pads of a unit are both INPUTS, so an input-only pad keeps
     // them — see the `drives` filter at the end.
-    for u in 0..pcnt_units(chip) {
-        out.push(PinFunction::PcntEdge(u));
-        out.push(PinFunction::PcntCtrl(u));
+    for unit in 0..pcnt_units(chip) {
+        // TWO channels per unit, each with its own edge and control pads. Both
+        // count into the same counter, which is what a quadrature encoder needs.
+        for channel in 0..2 {
+            out.push(PinFunction::PcntEdge { unit, channel });
+            out.push(PinFunction::PcntCtrl { unit, channel });
+        }
     }
 
     // PARL_IO: the whole bus is offered on every pad, because the GPIO matrix
@@ -972,6 +976,13 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
         }
         out.push(PinFunction::ParlClk);
         out.push(PinFunction::ParlValid);
+        // The RECEIVING half gets its own pads: both halves run at once, and
+        // the GPIO matrix has separate `PARL_TX_*` and `PARL_RX_*` signals.
+        for lane in 0..parl_io_lanes(chip) {
+            out.push(PinFunction::ParlRxData { lane });
+        }
+        out.push(PinFunction::ParlRxClk);
+        out.push(PinFunction::ParlRxValid);
     }
 
     // MCPWM: three operators per unit, each a complementary pair.

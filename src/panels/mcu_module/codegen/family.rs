@@ -372,6 +372,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
     let usb_cfg = esp_usb_configs(mcu);
     let touch_cfg = modules::touch_configs(&mcu.modules);
     let lcd_cam_cfg = esp_lcd_configs(mcu);
+    let parl_cfg = modules::parl_io_configs(&mcu.modules);
     crate::panels::mcu_module::codegen_esp_configs::config_files(
         &uart,
         &spi_n,
@@ -419,7 +420,10 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         if mcu.family == "esp32h2" { 32 } else { 40 },
         // The parallel port, and whether a VALID pad went with it.
         &codegen_esp::parl_io_wired(&configured),
-        modules::parl_io_configs(&mcu.modules).get(&0),
+        parl_cfg.get(&0),
+        // The receiving half, wired and configured on its own.
+        &codegen_esp::parl_io_rx_wired(&configured),
+        parl_cfg.get(&1),
         &codegen_esp::lcd_wired(&configured),
         lcd_cam_cfg.get(&0),
         // The camera half, wired and configured independently of the display.
@@ -1749,6 +1753,11 @@ mod tests {
         // present because its PADS are, so that is what this changes.
         let lcd_half = std::env::var("ESP_LCD_HALF").unwrap_or_default();
 
+        // `ESP_PARL_HALF=tx|rx` wires ONE half of the parallel port instead of
+        // both. Same reasoning as the video port: a half is present because its
+        // pads are.
+        let parl_half = std::env::var("ESP_PARL_HALF").unwrap_or_default();
+
         // By search, not by name: GPIO4 is a JTAG pad on one part and a plain
         // pad on the next, and the pin NUMBERS differ between packages.
         let mut want = vec![
@@ -1773,8 +1782,24 @@ mod tests {
             PinFunction::RmtChannel(rx_chan),
             // A PCNT unit with BOTH pads: the encoder shape, which is the one
             // that emits `set_ctrl_signal` and `set_ctrl_mode`.
-            PinFunction::PcntEdge(0),
-            PinFunction::PcntCtrl(0),
+            PinFunction::PcntEdge {
+                unit: 0,
+                channel: 0,
+            },
+            PinFunction::PcntCtrl {
+                unit: 0,
+                channel: 0,
+            },
+            // …and the unit's SECOND channel, which is the other half of a
+            // quadrature encoder and its own pair of pads.
+            PinFunction::PcntEdge {
+                unit: 0,
+                channel: 1,
+            },
+            PinFunction::PcntCtrl {
+                unit: 0,
+                channel: 1,
+            },
             // The chip's own USB serial port: no pins are passed to it, but the
             // two pads are what makes it appear at all.
             PinFunction::UsbDm,
@@ -1804,6 +1829,13 @@ mod tests {
             PinFunction::ParlData { lane: 3 },
             PinFunction::ParlClk,
             PinFunction::ParlValid,
+            // …and the RECEIVING half's own pads, so the project exercises the
+            // two halves running at once off one DMA channel.
+            PinFunction::ParlRxData { lane: 0 },
+            PinFunction::ParlRxData { lane: 1 },
+            PinFunction::ParlRxData { lane: 2 },
+            PinFunction::ParlRxData { lane: 3 },
+            PinFunction::ParlRxClk,
             // Both TWAI pads. A node with one wire emits nothing, so the pair
             // is what proves the section at all.
             PinFunction::CanRx,
@@ -1851,6 +1883,17 @@ mod tests {
             PinFunction::DacOut { dac: 1, channel: 1 },
             PinFunction::DacOut { dac: 1, channel: 2 },
         ];
+        want.retain(|f| match parl_half.as_str() {
+            "tx" => !matches!(
+                f,
+                PinFunction::ParlRxData { .. } | PinFunction::ParlRxClk | PinFunction::ParlRxValid
+            ),
+            "rx" => !matches!(
+                f,
+                PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid
+            ),
+            _ => true,
+        });
         want.retain(|f| match lcd_half.as_str() {
             "lcd" => !matches!(
                 f,
@@ -2005,6 +2048,19 @@ mod tests {
                     Ok("dpi") => LcdCamMode::Dpi,
                     _ => LcdCamMode::I8080,
                 };
+                c
+            }),
+            connections: Vec::new(),
+        });
+        mcu.modules.push(VirtualModule {
+            id: "parl_rx".into(),
+            kind: ModuleKind::GenericInterfaceParlIoRx,
+            name: "PARL RX".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::ParlIo({
+                use crate::panels::mcu_module::modules::{ParlIoModuleConfig, ParlIoWidth};
+                let mut c = ParlIoModuleConfig::new_rx();
+                c.width = ParlIoWidth::Four;
                 c
             }),
             connections: Vec::new(),
@@ -3710,6 +3766,181 @@ mod tests {
         assert!(
             main.contains("let (_mcpwm0_timer0, mut _mcpwm0_op0a"),
             "one handle:\n{main}"
+        );
+    }
+
+    /// Both PARL_IO halves at once: one `ParlIo::new`, one DMA channel, two
+    /// drivers. The single channel is what differs from LCD_CAM — esp-hal
+    /// splits it into a tx and an rx half itself.
+    #[test]
+    fn esp_parl_io_runs_both_halves_off_one_channel() {
+        use crate::panels::mcu_module::modules::{
+            ModuleConfig, ModuleKind, ParlIoModuleConfig, ParlIoWidth, VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32c6")
+            .unwrap()
+            .build_mcu();
+        let mut want: Vec<PinFunction> = (0..4u8)
+            .map(|lane| PinFunction::ParlData { lane })
+            .collect();
+        want.push(PinFunction::ParlClk);
+        // The receiving half's OWN pads — separate `PARL_RX_*` signals.
+        want.extend((0..4u8).map(|lane| PinFunction::ParlRxData { lane }));
+        want.push(PinFunction::ParlRxClk);
+        for f in &want {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(f)
+                })
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("no C6 pad for {f:?}"));
+            mcu.apply_pin_function(num, f.clone());
+        }
+        for (kind, mut cfg) in [
+            (
+                ModuleKind::GenericInterfaceParlIo,
+                ParlIoModuleConfig::new(0),
+            ),
+            (
+                ModuleKind::GenericInterfaceParlIoRx,
+                ParlIoModuleConfig::new_rx(),
+            ),
+        ] {
+            cfg.width = ParlIoWidth::Four;
+            mcu.modules.push(VirtualModule {
+                id: format!("{kind:?}"),
+                kind,
+                name: "P".into(),
+                pos: (0.0, 0.0),
+                config: ModuleConfig::ParlIo(cfg),
+                connections: Vec::new(),
+            });
+        }
+
+        let main = mcu.fresh_main_rs();
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "parl_io.rs")
+            .map(|(_, c)| c)
+            .expect("one file for both halves");
+
+        assert_eq!(
+            file.matches("ParlIo::new(parl_io, dma)").count(),
+            1,
+            "{file}"
+        );
+        assert!(
+            file.contains(
+                "-> (ParlIoTx<'d, Blocking>, DmaTxBuf, ParlIoRx<'d, Blocking>, DmaRxBuf)"
+            ),
+            "both drivers:\n{file}"
+        );
+        assert!(file.contains("port.tx.with_config("), "{file}");
+        assert!(file.contains("port.rx.with_config("), "{file}");
+        // ONE channel, not two — the peripheral splits it itself.
+        assert_eq!(
+            file.matches("impl DmaChannelFor<PARL_IO<'d>>").count(),
+            1,
+            "one channel:\n{file}"
+        );
+        let call = main
+            .lines()
+            .find(|l| l.contains("configs::parl_io::init"))
+            .expect("the call");
+        assert_eq!(call.matches("peripherals.DMA_CH").count(), 1, "{call}");
+        assert!(main.contains("mut _parl,"), "both handles:\n{main}");
+        assert!(main.contains("mut _parl_rx,"), "both handles:\n{main}");
+
+        // The receiver's clock is NOT the transmitter's type: `ClkInPin` is a
+        // TxClkPin, and using it for the rx half does not compile.
+        assert!(file.contains("RxClkInPin::new("), "rx clock:\n{file}");
+        assert!(file.contains("ClkOutPin::new("), "tx clock:\n{file}");
+        // `RxClkInPin` CONTAINS `ClkInPin`, so the bare one is absent only
+        // when every occurrence belongs to the Rx type.
+        assert_eq!(
+            file.matches("ClkInPin::new(").count(),
+            file.matches("RxClkInPin::new(").count(),
+            "never the tx-clocked one:\n{file}"
+        );
+    }
+
+    /// A PCNT unit has two channels adding into one counter, each with its own
+    /// pads and its own rules — which is what a quadrature encoder needs.
+    #[test]
+    fn esp_pcnt_configures_both_channels() {
+        use crate::panels::mcu_module::modules::{
+            ModuleConfig, ModuleKind, PcntChannelCfg, PcntCtrlMode, PcntEdgeMode, PcntModuleConfig,
+            VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32c6")
+            .unwrap()
+            .build_mcu();
+        for f in [
+            PinFunction::PcntEdge {
+                unit: 0,
+                channel: 0,
+            },
+            PinFunction::PcntCtrl {
+                unit: 0,
+                channel: 0,
+            },
+            PinFunction::PcntEdge {
+                unit: 0,
+                channel: 1,
+            },
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(&f)
+                })
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("no pad for {f:?}"));
+            mcu.apply_pin_function(num, f);
+        }
+        let mut cfg = PcntModuleConfig::new(0);
+        cfg.set_channel(
+            1,
+            PcntChannelCfg {
+                pos_edge: PcntEdgeMode::Decrement,
+                neg_edge: PcntEdgeMode::Hold,
+                ctrl_low: PcntCtrlMode::Keep,
+                ctrl_high: PcntCtrlMode::Keep,
+            },
+        );
+        mcu.modules.push(VirtualModule {
+            id: "pcnt_0".into(),
+            kind: ModuleKind::GenericInterfacePcnt,
+            name: "PCNT0".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Pcnt(cfg),
+            connections: Vec::new(),
+        });
+
+        let main = mcu.fresh_main_rs();
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "pcnt0.rs")
+            .map(|(_, c)| c)
+            .expect("the unit's file");
+
+        assert!(file.contains("let channel0 = &unit.channel0;"), "{file}");
+        assert!(file.contains("let channel1 = &unit.channel1;"), "{file}");
+        // Channel 0 has a control pad and channel 1 does not, so only one of
+        // them takes a ctrl argument or sets a ctrl mode.
+        assert!(file.contains("channel0.set_ctrl_signal(ctrl0);"), "{file}");
+        assert!(!file.contains("channel1.set_ctrl_signal"), "{file}");
+        // Each channel's own rules reach the file.
+        assert!(
+            file.contains("channel1.set_input_mode(EdgeMode::Hold, EdgeMode::Decrement);"),
+            "channel 1's rules:\n{file}"
+        );
+        assert!(
+            main.contains("_pcnt0_edge1"),
+            "the second edge pad:\n{main}"
         );
     }
 }

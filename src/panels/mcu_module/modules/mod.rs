@@ -17,13 +17,13 @@ pub use model::{
     I2sClockPolarity, I2sDirection, I2sFormat, I2sMode, I2sModuleConfig, I2sStandard, LcdCamMode,
     LcdCamModuleConfig, McpwmModuleConfig, ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType,
     OspiMode, OspiModuleConfig, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoModuleConfig,
-    ParlIoWidth, PcntCtrlMode, PcntEdgeMode, PcntModuleConfig, PwmChannelConfig, PwmCounting,
-    PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig,
-    RmtDirection, RmtModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig,
-    SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, SpiRole, StopBits,
-    TimerModuleConfig, TouchModuleConfig, TouchScan, TouchThreshold, UsartDirection, UsartFlow,
-    UsartMode, UsartModuleConfig, UsbModuleConfig, UsbRole, VirtualModule, XspiMemoryType,
-    XspiMode, XspiModuleConfig, module_signal_of,
+    ParlIoWidth, PcntChannelCfg, PcntCtrlMode, PcntEdgeMode, PcntModuleConfig, PwmChannelConfig,
+    PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize,
+    QspiModuleConfig, RmtDirection, RmtModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode,
+    SaiModuleConfig, SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig,
+    SpiRole, StopBits, TimerModuleConfig, TouchModuleConfig, TouchScan, TouchThreshold,
+    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, UsbRole,
+    VirtualModule, XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,
 };
 
 use std::collections::BTreeMap;

@@ -162,22 +162,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -303,22 +415,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -444,22 +668,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -583,22 +919,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -722,22 +1170,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -873,22 +1433,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1021,22 +1693,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1168,22 +1952,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1311,22 +2207,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1455,22 +2463,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1599,22 +2719,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1749,22 +2981,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1893,22 +3237,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -2037,22 +3493,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -2183,22 +3751,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -2327,22 +4007,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -2611,22 +4403,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -2753,22 +4657,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -2892,22 +4908,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -3031,22 +5159,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -3170,22 +5410,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -3309,22 +5661,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -3448,22 +5912,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -3587,22 +6163,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -3726,22 +6414,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -3865,22 +6665,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -4004,22 +6916,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -4149,22 +7173,134 @@ McuDefinition(
                     RmtChannel(5),
                     RmtChannel(6),
                     RmtChannel(7),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
-                    PcntEdge(4),
-                    PcntCtrl(4),
-                    PcntEdge(5),
-                    PcntCtrl(5),
-                    PcntEdge(6),
-                    PcntCtrl(6),
-                    PcntEdge(7),
-                    PcntCtrl(7),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 4,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 5,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 6,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 7,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 7,
+                        channel: 1,
+                    ),
                     McpwmA(
                         unit: 0,
                         operator: 0,

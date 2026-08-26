@@ -49,9 +49,12 @@ impl PinFunction {
             | PinFunction::CamMclk => egui::Color32::from_rgb(185, 125, 190),
             // PARL_IO is a bus, so it sits with the buses — a slate blue
             // distinct from SPI's teal, since a pad can rarely be both.
-            PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => {
-                egui::Color32::from_rgb(110, 130, 190)
-            }
+            PinFunction::ParlData { .. }
+            | PinFunction::ParlClk
+            | PinFunction::ParlValid
+            | PinFunction::ParlRxData { .. }
+            | PinFunction::ParlRxClk
+            | PinFunction::ParlRxValid => egui::Color32::from_rgb(110, 130, 190),
             // MCPWM shares the PWM orange: it IS pwm, and a reader looking
             // for "which pins can switch something" wants the two together.
             PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. } => {
@@ -59,7 +62,7 @@ impl PinFunction {
             }
             // PCNT counts edges rather than driving them — a cooler green,
             // apart from RMT's amber and from the GPIO-input green.
-            PinFunction::PcntEdge(..) | PinFunction::PcntCtrl(..) => {
+            PinFunction::PcntEdge { .. } | PinFunction::PcntCtrl { .. } => {
                 egui::Color32::from_rgb(90, 175, 140)
             }
             // Audio too, but a deeper blue: SAI is the bigger, multi-block one.

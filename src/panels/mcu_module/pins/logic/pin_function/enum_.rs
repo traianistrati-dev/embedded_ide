@@ -202,6 +202,21 @@ pub enum PinFunction {
     /// is fine for a continuous stream and wrong for a framed one.
     ParlValid,
 
+    // ── PARL_IO, receiving half ─────────────────────────────────────────────
+    // A SECOND family, and the reason is that both halves can run at once: the
+    // peripheral has separate `PARL_TX_*` and `PARL_RX_*` signals in the GPIO
+    // matrix, so a sent bit and a received one are never the same wire. The
+    // sending half above keeps the `Parl` names.
+    /// PARL_IO RX data line {lane} — one pad of the receiving bus.
+    ParlRxData {
+        lane: u8,
+    },
+    /// PARL_IO RX clock. The port owns it either way — it is driven out when
+    /// receiving on an internal clock and read in when the sender supplies one.
+    ParlRxClk,
+    /// PARL_IO RX valid/enable line, optional. Marks which clocks carry data.
+    ParlRxValid,
+
     // ── Touch ───────────────────────────────────────────────────────────────
     /// Capacitive touch channel {0} — a pad that senses a finger.
     ///
@@ -297,14 +312,30 @@ pub enum PinFunction {
     /// Espressif's pulse counter: a hardware counter that follows edges on this
     /// pin without waking the CPU, with a glitch filter and limits that fire an
     /// interrupt. What reads a flow meter, a tachometer or a rotary encoder.
-    PcntEdge(u8),
+    /// PCNT unit {unit}, channel {channel} — the pulse input.
+    ///
+    /// A unit has TWO channels, each with its own edge and control inputs and
+    /// its own counting rules, and both add into the same counter. That is what
+    /// a quadrature encoder needs: one channel per phase.
+    PcntEdge {
+        unit: u8,
+        channel: u8,
+    },
     /// PCNT unit {n} — the control input that MODIFIES the counting.
     ///
     /// Optional, and what turns a counter into an encoder: its level decides
     /// whether an edge counts up, counts down, or is ignored. Wire an encoder's
     /// B phase here and its A phase to [`PinFunction::PcntEdge`], and the unit
     /// follows direction on its own.
-    PcntCtrl(u8),
+    /// PCNT unit {unit}, channel {channel} — the control input, optional.
+    ///
+    /// What it does at each level is the channel's own setting: leaving both at
+    /// "keep" is a plain counter, and setting one to "reverse" is what turns
+    /// the pair into an encoder.
+    PcntCtrl {
+        unit: u8,
+        channel: u8,
+    },
 
     // ── RMT ─────────────────────────────────────────────────────────────────
     /// RMT channel {n} — Espressif's Remote Control transceiver.

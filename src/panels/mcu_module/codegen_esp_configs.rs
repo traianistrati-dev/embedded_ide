@@ -901,125 +901,188 @@ fn esp_dac_value(v12: u16) -> u8 {
 
 // ── PARL_IO ─────────────────────────────────────────────────────────────────
 
-/// The chip's parallel port, in the direction and width the module asked for.
+/// The parallel port: the sending half, the receiving half, or BOTH.
 ///
-/// # DMA only, like the I2S
+/// # One constructor, one channel, two halves
 ///
-/// `ParlIo::new` TAKES a channel: there is no other constructor, so a port with
-/// no channel left is not generated at all rather than generated half-working.
+/// `ParlIo::new` consumes the peripheral and takes a SINGLE DMA channel, which
+/// it splits into a tx and an rx half itself. That is the one thing that
+/// differs from LCD_CAM, whose halves want a channel each — and it is why this
+/// file has one `init` rather than two.
 ///
-/// # The buffer comes back
+/// # The halves never share a wire
 ///
-/// Same reason as the I2S: `dma_buffers!` makes the descriptors that disappear
-/// into the driver and the BUFFER that every transfer reads or writes, so the
-/// second has to be returned.
+/// The GPIO matrix has separate `PARL_TX_*` and `PARL_RX_*` signals, so the two
+/// halves have their own pads, their own width, their own frequency. The
+/// constants are prefixed for that reason.
 ///
-/// # The valid line
+/// # Buffers come back with the drivers
 ///
-/// Espressif puts it on the sixteenth data line when the bus is sixteen wide,
-/// and on a pad of its own when it is narrower — esp-hal says so by
-/// implementing `NotContainsValidSignalPin` for every width but the widest.
-/// So a wired VALID pad is used below 16 bits and ignored at 16, which the
-/// module states rather than leaving to be discovered.
-fn parl_io_file(cfg: Option<&ParlIoModuleConfig>, has_valid: bool, rt: EspRuntime) -> String {
-    let d = ParlIoModuleConfig::new(0);
-    let c = cfg.unwrap_or(&d);
-    let tx = c.direction.is_tx();
-    let lanes = c.width.lanes();
-    // At sixteen bits the valid signal IS one of the data lines.
-    let valid = has_valid && lanes < 16;
+/// The descriptors go into the driver and the buffer is what each transfer
+/// moves, so `init` hands both back for every half it builds.
+fn parl_io_file(
+    tx: Option<(&ParlIoModuleConfig, bool)>,
+    rx: Option<(&ParlIoModuleConfig, bool)>,
+    rt: EspRuntime,
+) -> String {
+    // `(prefix, config, has a valid pad, is the receiving half)`, sending
+    // first — the order `main.rs` passes the pads in.
+    let halves: Vec<(&str, &ParlIoModuleConfig, bool, bool)> = [
+        tx.map(|(c, v)| ("TX", c, v, false)),
+        rx.map(|(c, v)| ("RX", c, v, true)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
-    let consts = format!(
-        "const FREQUENCY_HZ: u32 = {};\n\
-         const BUFFER_BYTES: usize = {};\n",
-        c.freq_hz, c.buffer_bytes,
-    );
-
-    let pad_bound = if tx {
-        "impl PeripheralOutput<'d>"
-    } else {
-        "impl PeripheralInput<'d>"
-    };
+    let mut consts = String::new();
     let mut params =
-        format!("    parl_io: PARL_IO<'d>,\n    dma: impl DmaChannelFor<PARL_IO<'d>>,\n");
-    for lane in 0..lanes {
-        params.push_str(&format!("    d{lane}: {pad_bound},\n"));
-    }
-    params.push_str(&format!(
-        "    clk: impl Peripheral{}<'d>,\n",
-        if tx { "Output" } else { "Input" }
-    ));
-    if valid {
-        params.push_str("    valid: impl PeripheralOutput<'d>,\n");
-    }
+        String::from("    parl_io: PARL_IO<'d>,\n    dma: impl DmaChannelFor<PARL_IO<'d>>,\n");
+    let mut rets: Vec<String> = Vec::new();
+    let mut gives: Vec<String> = Vec::new();
+    let mut descs: Vec<String> = Vec::new();
 
-    let data_args: Vec<String> = (0..lanes).map(|l| format!("d{l}")).collect();
-    let pins_ty = c.width.esp_hal(tx);
-    let mut build = format!(
-        "\x20   let pins = {pins_ty}::new({});\n",
-        data_args.join(", ")
-    );
-    if valid {
-        build.push_str("\x20   let pins = TxPinConfigWithValidPin::new(pins, valid);\n");
-    }
-    build.push_str(&format!(
-        "\x20   let clk_pin = Clk{}Pin::new(clk);\n",
-        if tx { "Out" } else { "In" }
-    ));
+    for (prefix, c, has_valid, is_rx) in &halves {
+        let lanes = c.width.lanes();
+        // At sixteen bits the valid signal IS one of the data lines.
+        let valid = *has_valid && lanes < 16;
+        let lower = prefix.to_lowercase();
+        let pad = if *is_rx { "r" } else { "" };
+        consts.push_str(&format!(
+            "const {prefix}_FREQUENCY_HZ: u32 = {};\n\
+             const {prefix}_BUFFER_BYTES: usize = {};\n",
+            c.freq_hz, c.buffer_bytes,
+        ));
+        let pad_bound = if *is_rx {
+            "impl PeripheralInput<'d>"
+        } else {
+            "impl PeripheralOutput<'d>"
+        };
+        for lane in 0..lanes {
+            params.push_str(&format!("    {pad}d{lane}: {pad_bound},\n"));
+        }
+        params.push_str(&format!(
+            "    {pad}clk: impl Peripheral{}<'d>,\n",
+            if *is_rx { "Input" } else { "Output" }
+        ));
+        if valid {
+            params.push_str(&format!(
+                "    {pad}valid: impl Peripheral{}<'d>,\n",
+                if *is_rx { "Input" } else { "Output" }
+            ));
+        }
 
-    let (buffers, sizes, buf_ty, half) = if tx {
-        (
-            "(_, _, buffer, descriptors)",
-            "0, BUFFER_BYTES",
-            "DmaTxBuf",
-            "tx",
-        )
-    } else {
-        (
-            "(buffer, descriptors, _, _)",
-            "BUFFER_BYTES, 0",
-            "DmaRxBuf",
-            "rx",
-        )
-    };
-    let cfg_ty = if tx { "TxConfig" } else { "RxConfig" };
-    let driver = if tx { "ParlIoTx" } else { "ParlIoRx" };
-    // The receiver needs a timeout or a frame never ends; the transmitter has
-    // no such knob.
-    let extra_cfg = if tx {
-        String::new()
-    } else {
-        "\n\x20       .with_timeout_ticks(0xfff)".to_owned()
-    };
+        let data_args: Vec<String> = (0..lanes).map(|l| format!("{pad}d{l}")).collect();
+        descs.push(format!(
+            "\x20   let {lower}_pins = {}::new({});\n",
+            c.width.esp_hal(!*is_rx),
+            data_args.join(", "),
+        ));
+        if valid {
+            descs.push(format!(
+                "\x20   let {lower}_pins = {}PinConfigWithValidPin::new({lower}_pins, {pad}valid);\n",
+                if *is_rx { "Rx" } else { "Tx" },
+            ));
+        }
+        // `ClkInPin` is a TxClkPin — a transmitter clocked from OUTSIDE.
+        // The receiver wants `RxClkInPin`, which also names the edge it
+        // samples on. Sampling on the wrong one reads the bus
+        // mid-transition: garbage that looks like noise, not an error.
+        descs.push(if *is_rx {
+            format!(
+                "\x20   let {lower}_clk = RxClkInPin::new({pad}clk, SampleEdge::{});\n",
+                c.sample_edge.esp_hal(),
+            )
+        } else {
+            format!("\x20   let {lower}_clk = ClkOutPin::new({pad}clk);\n")
+        });
+
+        let (buffers, sizes, buf_ty) = if *is_rx {
+            (
+                format!("({lower}_buffer, {lower}_desc, _, _)"),
+                format!("{prefix}_BUFFER_BYTES, 0"),
+                "DmaRxBuf",
+            )
+        } else {
+            (
+                format!("(_, _, {lower}_buffer, {lower}_desc)"),
+                format!("0, {prefix}_BUFFER_BYTES"),
+                "DmaTxBuf",
+            )
+        };
+        descs.push(format!(
+            "\x20   let {buffers} = dma_buffers!({sizes});\n\
+             \x20   let {lower}_buf = {buf_ty}::new({lower}_desc, {lower}_buffer).unwrap();\n",
+        ));
+
+        rets.push(format!(
+            "ParlIo{}<'d, {{DM}}>",
+            if *is_rx { "Rx" } else { "Tx" }
+        ));
+        rets.push(buf_ty.to_owned());
+        gives.push(format!("{lower}_driver"));
+        gives.push(format!("{lower}_buf"));
+    }
 
     let body_for = |name: &str, mode: &str, into_async: &str| {
+        let mut build = String::new();
+        for (prefix, c, has_valid, is_rx) in &halves {
+            let lower = prefix.to_lowercase();
+            let valid = *has_valid && c.width.lanes() < 16;
+            let _ = valid;
+            // The receiver needs a timeout or a frame never ends; the
+            // transmitter has no such knob.
+            let extra = if *is_rx {
+                "\n\x20       .with_timeout_ticks(0xfff)"
+            } else {
+                ""
+            };
+            build.push_str(&format!(
+                "\x20   let {lower}_config = {}Config::default()\n\
+                 \x20       .with_frequency(Rate::from_hz({prefix}_FREQUENCY_HZ))\n\
+                 \x20       .with_bit_order(BitPackOrder::{}){extra};\n",
+                if *is_rx { "Rx" } else { "Tx" },
+                c.bit_order.esp_hal(),
+            ));
+        }
+        let mut take = String::new();
+        for (prefix, _, _, is_rx) in &halves {
+            let lower = prefix.to_lowercase();
+            take.push_str(&format!(
+                "\x20   let {lower}_driver = port.{}.with_config({lower}_pins, {lower}_clk, {lower}_config).unwrap();\n",
+                if *is_rx { "rx" } else { "tx" },
+            ));
+        }
         format!(
             "pub fn {name}<'d>(\n\
-             {params}) -> ({driver}<'d, {mode}>, {buf_ty}) {{\n\
-             \x20   let {buffers} = dma_buffers!({sizes});\n\
-             \x20   let dma_buf = {buf_ty}::new(descriptors, buffer).unwrap();\n\
-             {build}\
-             \x20   let config = {cfg_ty}::default()\n\
-             \x20       .with_frequency(Rate::from_hz(FREQUENCY_HZ))\n\
-             \x20       .with_bit_order(BitPackOrder::{order})\
-             {extra_cfg};\n\
+             {params}) -> ({}) {{\n\
+             {}{build}\
              \x20   let port = ParlIo::new(parl_io, dma).unwrap(){into_async};\n\
-             \x20   let driver = port.{half}.with_config(pins, clk_pin, config).unwrap();\n\
-             \x20   (driver, dma_buf)\n\
+             {take}\
+             \x20   ({})\n\
              }}\n",
-            order = c.bit_order.esp_hal(),
+            rets.join(", ").replace("{DM}", mode),
+            descs.concat(),
+            gives.join(", "),
         )
     };
 
     let mut body = format!(
-        "/// The parallel port — {} {} lines at {} Hz.\n\
+        "/// The parallel port — {}.\n\
          ///\n\
-         /// Returns the driver AND its DMA buffer: the descriptors go into the\n\
+         /// Returns each driver AND its DMA buffer: the descriptors go into the\n\
          /// driver, the buffer is what each transfer moves.\n\
          {}",
-        if tx { "transmitting" } else { "receiving" },
-        lanes,
-        c.freq_hz,
+        halves
+            .iter()
+            .map(|(_, c, _, is_rx)| format!(
+                "{} {} lines at {} Hz",
+                if *is_rx { "receiving" } else { "transmitting" },
+                c.width.lanes(),
+                c.freq_hz
+            ))
+            .collect::<Vec<_>>()
+            .join(" + "),
         body_for("init", "Blocking", ""),
     );
     if rt == EspRuntime::Async {
@@ -1029,84 +1092,110 @@ fn parl_io_file(cfg: Option<&ParlIoModuleConfig>, has_valid: bool, rt: EspRuntim
         ));
     }
 
-    // Every call below is the REAL one: `write`/`read` take a length and the
-    // buffer and hand back a transfer, which gives both back when it ends.
-    // `wait_for_done` is the only async-specific method — the rest is shared.
-    let example = example_for(
-        "Using the parallel port",
-        "_parl",
-        &if tx {
-            vec![
-                "Fill the buffer, hand it over, and take it back when done:",
-                "",
-                "    let (mut port, mut buf) = …;   // as generated above",
-                "    buf.as_mut_slice().fill(0xAA);",
-                "    let transfer = port.write(buf.len(), buf).unwrap();",
-                "    let (result, p, b) = transfer.wait();",
-                "    (port, buf) = (p, b);",
-                "    result.ok();",
-            ]
+    // The handles `main.rs` binds, so the snippet is pasteable rather than a
+    // sketch with a `…` in it. A `write`/`read` takes the buffer BY VALUE and
+    // the transfer hands it back, which is why they are reassigned.
+    let sending = halves.iter().any(|(_, _, _, is_rx)| !*is_rx);
+    let (handle, buf, verb, len) = if sending {
+        ("_parl", "_parl_buf", "write", "_parl_buf.len()")
+    } else {
+        (
+            "_parl_rx",
+            "_parl_rx_buf",
+            "read",
+            "Some(_parl_rx_buf.len())",
+        )
+    };
+    let fill = if sending {
+        format!("    {buf}.as_mut_slice().fill(0xAA);\n")
+    } else {
+        String::new()
+    };
+    let sync = vec![
+        if sending {
+            "Fill the buffer, hand it over, and take it back when done:".to_owned()
         } else {
-            vec![
-                "Hand the buffer over and take it back full:",
-                "",
-                "    let (mut port, mut buf) = …;   // as generated above",
-                "    let transfer = port.read(Some(buf.len()), buf).unwrap();",
-                "    let (result, p, b) = transfer.wait();",
-                "    (port, buf) = (p, b);",
-                "    result.ok();",
-            ]
+            "Hand the buffer over and take it back full:".to_owned()
         },
-        &if tx {
-            vec![
-                "`init_async` gives the transfer a `.wait_for_done()` that yields",
-                "instead of spinning; everything else is the same:",
-                "",
-                "    let (mut port, mut buf) = …;   // as generated above",
-                "    buf.as_mut_slice().fill(0xAA);",
-                "    let mut transfer = port.write(buf.len(), buf).unwrap();",
-                "    transfer.wait_for_done().await;",
-                "    let (_, p, b) = transfer.wait();",
-                "    (port, buf) = (p, b);",
-            ]
-        } else {
-            vec![
-                "`init_async` gives the transfer a `.wait_for_done()` that yields",
-                "instead of spinning; everything else is the same:",
-                "",
-                "    let (mut port, mut buf) = …;   // as generated above",
-                "    let mut transfer = port.read(Some(buf.len()), buf).unwrap();",
-                "    transfer.wait_for_done().await;",
-                "    let (_, p, b) = transfer.wait();",
-                "    (port, buf) = (p, b);",
-            ]
-        },
-        rt,
-    );
+        String::new(),
+        fill.trim_end().to_owned(),
+        format!("    let t = {handle}.{verb}({len}, {buf}).unwrap();"),
+        "    let (result, p, b) = t.wait();".to_owned(),
+        format!("    ({handle}, {buf}) = (p, b);"),
+        "    result.ok();".to_owned(),
+        String::new(),
+        "// With BOTH halves built, each has its own handle and its own buffer -".to_owned(),
+        "// they share only the peripheral and the ONE DMA channel it splits.".to_owned(),
+    ];
+    let asyn = [
+        "The same, awaited:".to_owned(),
+        String::new(),
+        format!("    let mut t = {handle}.{verb}({len}, {buf}).unwrap();"),
+        "    t.wait_for_done().await;".to_owned(),
+        "    let (result, p, b) = t.wait();".to_owned(),
+        format!("    ({handle}, {buf}) = (p, b);"),
+        "    result.ok();".to_owned(),
+    ];
+    let sync: Vec<&str> = sync.iter().map(String::as_str).collect();
+    let asyn: Vec<&str> = asyn.iter().map(String::as_str).collect();
+    let example = example_for("Using the parallel port", handle, &sync, &asyn, rt);
 
-    let mut uses = format!(
-        "{}\
-         use esp_hal::dma::{{DmaChannelFor, {buf_ty}}};\n\
-         use esp_hal::dma_buffers;\n",
-        mode_import(rt),
-    );
-    uses.push_str(&format!(
-        "use esp_hal::gpio::interconnect::{};\n",
-        if tx {
-            "PeripheralOutput"
+    let mut uses = vec![
+        // The mode markers name the return type. `Async` only appears when the
+        // async twin is emitted, so it is added with that.
+        "use esp_hal::Blocking;".to_owned(),
+        "use esp_hal::dma::DmaChannelFor;".to_owned(),
+        "use esp_hal::dma_buffers;".to_owned(),
+        "use esp_hal::peripherals::PARL_IO;".to_owned(),
+        "use esp_hal::time::Rate;".to_owned(),
+    ];
+    let mut items: Vec<String> = vec!["BitPackOrder".to_owned(), "ParlIo".to_owned()];
+    for (_, c, has_valid, is_rx) in &halves {
+        let valid = *has_valid && c.width.lanes() < 16;
+        items.push(c.width.esp_hal(!*is_rx).to_owned());
+        if *is_rx {
+            items.extend([
+                "RxClkInPin".to_owned(),
+                "SampleEdge".to_owned(),
+                "ParlIoRx".to_owned(),
+                "RxConfig".to_owned(),
+            ]);
+            uses.push("use esp_hal::dma::DmaRxBuf;".to_owned());
+            if valid {
+                items.push("RxPinConfigWithValidPin".to_owned());
+            }
         } else {
-            "{PeripheralInput, PeripheralOutput}"
+            items.extend([
+                "ClkOutPin".to_owned(),
+                "ParlIoTx".to_owned(),
+                "TxConfig".to_owned(),
+            ]);
+            uses.push("use esp_hal::dma::DmaTxBuf;".to_owned());
+            if valid {
+                items.push("TxPinConfigWithValidPin".to_owned());
+            }
+        }
+    }
+    let ins = halves.iter().any(|(_, _, _, is_rx)| *is_rx);
+    let outs = halves.iter().any(|(_, _, _, is_rx)| !*is_rx);
+    uses.push(format!(
+        "use esp_hal::gpio::interconnect::{};",
+        match (ins, outs) {
+            (true, true) => "{PeripheralInput, PeripheralOutput}".to_owned(),
+            (true, false) => "PeripheralInput".to_owned(),
+            _ => "PeripheralOutput".to_owned(),
         }
     ));
-    uses.push_str(&format!(
-        "use esp_hal::parl_io::{{BitPackOrder, Clk{}Pin, ParlIo, {driver}, {cfg_ty}, {pins_ty}{}}};\n\
-         use esp_hal::peripherals::PARL_IO;\n\
-         use esp_hal::time::Rate;\n",
-        if tx { "Out" } else { "In" },
-        if valid { ", TxPinConfigWithValidPin" } else { "" },
-    ));
+    if rt == EspRuntime::Async {
+        uses.push("use esp_hal::Async;".to_owned());
+    }
+    items.sort();
+    items.dedup();
+    uses.push(format!("use esp_hal::parl_io::{{{}}};", items.join(", ")));
+    uses.sort();
+    uses.dedup();
 
-    file(&uses, &consts, &body, &example)
+    file(&format!("{}\n", uses.join("\n")), &consts, &body, &example)
 }
 
 // ── MCPWM ───────────────────────────────────────────────────────────────────
@@ -2249,22 +2338,30 @@ fn twai_file(n: u8, cfg: Option<&CanModuleConfig>, rt: EspRuntime) -> String {
 
 // ── PCNT ────────────────────────────────────────────────────────────────────
 
-/// One PCNT unit: its limits, its filter, and what each edge means.
+/// One PCNT unit: its limits, its filter, and what each edge means on each of
+/// its two channels.
 ///
 /// # It hands the unit back
 ///
 /// Unlike the buses, there is no driver object to keep — the unit IS the
-/// handle, and `main.rs` reads the count off it with `.counter.get()`. So
-/// `init` takes the unit, configures it, and returns it.
+/// counter, and `main.rs` reads `.counter` off it. So `init` takes the unit,
+/// configures it, and returns it.
 ///
-/// # Only channel 0
+/// # Two channels, one counter
 ///
-/// A unit has two channels and wiring both is how a quadrature encoder is
-/// counted four times per cycle instead of twice. The module wires one; the
-/// second is a signal to add, not a limit of the hardware.
-fn pcnt_file(n: u8, has_ctrl: bool, cfg: Option<&PcntModuleConfig>, rt: EspRuntime) -> String {
+/// A unit has `channel0` and `channel1`, each with its own edge pad, its own
+/// optional control pad, and its own answer to what an edge means at each
+/// control level. They add into the SAME counter, which is what makes a
+/// quadrature encoder possible: one channel per phase, with opposite rules.
+fn pcnt_file(
+    n: u8,
+    chans: &[(u8, bool)],
+    cfg: Option<&PcntModuleConfig>,
+    rt: EspRuntime,
+) -> String {
     let d = PcntModuleConfig::new(n);
     let c = cfg.unwrap_or(&d);
+    let any_ctrl = chans.iter().any(|(_, has_ctrl)| *has_ctrl);
     let consts = format!(
         "const LOW_LIMIT: i16 = {};\n\
          const HIGH_LIMIT: i16 = {};\n\
@@ -2282,11 +2379,19 @@ fn pcnt_file(n: u8, has_ctrl: bool, cfg: Option<&PcntModuleConfig>, rt: EspRunti
         },
     );
 
-    let ctrl_param = if has_ctrl {
-        "\x20   ctrl: impl PeripheralInput<'d>,\n"
-    } else {
-        ""
-    };
+    // One edge parameter per wired channel, each followed by its control pad
+    // when there is one — the order `main.rs` passes them in.
+    let params: String = chans
+        .iter()
+        .map(|(ch, has_ctrl)| {
+            let mut s = format!("\x20   edge{ch}: impl PeripheralInput<'d>,\n");
+            if *has_ctrl {
+                s.push_str(&format!("\x20   ctrl{ch}: impl PeripheralInput<'d>,\n"));
+            }
+            s
+        })
+        .collect();
+
     let mut steps = String::from(
         "\x20   unit.set_low_limit(Some(LOW_LIMIT)).unwrap();\n\
          \x20   unit.set_high_limit(Some(HIGH_LIMIT)).unwrap();\n",
@@ -2294,41 +2399,46 @@ fn pcnt_file(n: u8, has_ctrl: bool, cfg: Option<&PcntModuleConfig>, rt: EspRunti
     if c.filter > 0 {
         steps.push_str("\x20   unit.set_filter(Some(FILTER)).unwrap();\n");
     }
-    steps.push_str(
-        "\x20   unit.clear();\n\
-         \n\
-         \x20   let channel = &unit.channel0;\n\
-         \x20   channel.set_edge_signal(edge);\n",
-    );
-    if has_ctrl {
-        steps.push_str("\x20   channel.set_ctrl_signal(ctrl);\n");
-    }
-    // The vendor's own argument order, and it is NOT the obvious one:
-    // `set_input_mode` takes the FALLING edge first.
-    steps.push_str(&format!(
-        "\x20   channel.set_input_mode(EdgeMode::{}, EdgeMode::{}); // (falling, rising)\n",
-        c.neg_edge.esp_hal(),
-        c.pos_edge.esp_hal(),
-    ));
-    if has_ctrl {
+    steps.push_str("\x20   unit.clear();\n");
+
+    for (ch, has_ctrl) in chans {
+        let k = c.channel(*ch);
         steps.push_str(&format!(
-            "\x20   channel.set_ctrl_mode(CtrlMode::{}, CtrlMode::{}); // (low, high)\n",
-            c.ctrl_low.esp_hal(),
-            c.ctrl_high.esp_hal(),
+            "\n\x20   let channel{ch} = &unit.channel{ch};\n\
+             \x20   channel{ch}.set_edge_signal(edge{ch});\n"
         ));
+        if *has_ctrl {
+            steps.push_str(&format!("\x20   channel{ch}.set_ctrl_signal(ctrl{ch});\n"));
+        }
+        // The vendor's own argument order, and it is NOT the obvious one:
+        // `set_input_mode` takes the FALLING edge first.
+        steps.push_str(&format!(
+            "\x20   channel{ch}.set_input_mode(EdgeMode::{}, EdgeMode::{}); // (falling, rising)\n",
+            k.neg_edge.esp_hal(),
+            k.pos_edge.esp_hal(),
+        ));
+        if *has_ctrl {
+            steps.push_str(&format!(
+                "\x20   channel{ch}.set_ctrl_mode(CtrlMode::{}, CtrlMode::{}); // (low, high)\n",
+                k.ctrl_low.esp_hal(),
+                k.ctrl_high.esp_hal(),
+            ));
+        }
     }
 
     let body = format!(
-        "/// PCNT unit {n} — a hardware pulse counter.\n\
+        "/// PCNT unit {n} — a hardware pulse counter on {} channel{}.\n\
          ///\n\
          /// `main.rs` builds the one `Pcnt` and lends this unit in; it comes back\n\
-         /// configured, and the count is read off `.counter`.\n\
+         /// configured, and the count is read off `.counter`. Both channels add\n\
+         /// into that ONE counter.\n\
          pub fn init<'d, const U: usize>(\n\
          \x20   unit: Unit<'d, U>,\n\
-         \x20   edge: impl PeripheralInput<'d>,\n\
-         {ctrl_param}) -> Unit<'d, U> {{\n\
-         {steps}\x20   unit\n\
-         }}\n"
+         {params}) -> Unit<'d, U> {{\n\
+         {steps}\n\x20   unit\n\
+         }}\n",
+        chans.len(),
+        if chans.len() == 1 { "" } else { "s" },
     );
 
     let example = example_for(
@@ -2337,9 +2447,10 @@ fn pcnt_file(n: u8, has_ctrl: bool, cfg: Option<&PcntModuleConfig>, rt: EspRunti
         &[
             "The counter runs on its own; read it whenever you like:",
             "",
-            "    let count = {H}.counter.get();",
+            "    let _count = {H}.counter.get();",
             "",
-            "    // Start again from zero - `clear` is on the UNIT",
+            "    // Start again from zero - `clear` is on the UNIT, so it",
+            "    // resets what BOTH channels have added.",
             "    {H}.clear();",
             "",
             "// Reaching a limit CLEARS the counter and raises an event, so a",
@@ -2348,7 +2459,7 @@ fn pcnt_file(n: u8, has_ctrl: bool, cfg: Option<&PcntModuleConfig>, rt: EspRunti
         &[
             "The counter runs on its own; read it between .awaits:",
             "",
-            "    let count = {H}.counter.get();",
+            "    let _count = {H}.counter.get();",
             "    {H}.clear();",
         ],
         rt,
@@ -2359,7 +2470,7 @@ fn pcnt_file(n: u8, has_ctrl: bool, cfg: Option<&PcntModuleConfig>, rt: EspRunti
             "use esp_hal::gpio::interconnect::PeripheralInput;\n\
              use esp_hal::pcnt::channel::{{{}}};\n\
              use esp_hal::pcnt::unit::Unit;\n",
-            if has_ctrl {
+            if any_ctrl {
                 "CtrlMode, EdgeMode"
             } else {
                 "EdgeMode"
@@ -2915,9 +3026,9 @@ pub fn config_files(
     rmt: &[u8],
     rmt_cfg: &BTreeMap<u8, RmtModuleConfig>,
     rmt_hz: u32,
-    // `(unit, has a control pad)` — the second decides whether `init` takes a
-    // ctrl argument at all.
-    pcnt: &[(u8, bool)],
+    // `(unit, its wired channels as (channel, has a control pad))` — a unit has
+    // two, and which of them are wired decides the generated signature.
+    pcnt: &[(u8, Vec<(u8, bool)>)],
     pcnt_cfg: &BTreeMap<u8, PcntModuleConfig>,
     // True when the USB pads are wired AND this chip's esp-hal has the driver
     // — see `codegen_esp::has_usb_serial_jtag`.
@@ -2938,9 +3049,14 @@ pub fn config_files(
     mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
     // The MCPWM peripheral clock, in MHz. 40 everywhere but the H2, which is 32.
     mcpwm_source_mhz: u32,
-    // `Some(has a valid pad)` when the parallel port is wired at all.
+    // `Some(has a valid pad)` when the SENDING half of the parallel port is
+    // wired, and the module that configures it.
     parl_io: &Option<bool>,
     parl_io_cfg: Option<&ParlIoModuleConfig>,
+    // The RECEIVING half, wired and configured on its own. Both halves run at
+    // once, off one peripheral and one DMA channel.
+    parl_rx: &Option<bool>,
+    parl_rx_cfg: Option<&ParlIoModuleConfig>,
     // The DISPLAY half's signal names wired, and the module that gives them
     // meaning. Empty means no display on this canvas.
     lcd_cam: &[String],
@@ -2986,10 +3102,10 @@ pub fn config_files(
             rmt_file(*n, rmt_cfg.get(n), rt, rmt_hz),
         ));
     }
-    for (n, has_ctrl) in pcnt {
+    for (n, chans) in pcnt {
         out.push((
             format!("pcnt{n}.rs"),
-            pcnt_file(*n, *has_ctrl, pcnt_cfg.get(n), rt),
+            pcnt_file(*n, chans, pcnt_cfg.get(n), rt),
         ));
     }
     if usb {
@@ -3028,10 +3144,16 @@ pub fn config_files(
     if !dac.is_empty() {
         out.push(("dac.rs".to_owned(), dac_file(dac, dac_cfg, rt)));
     }
-    if let Some(has_valid) = parl_io {
+    if parl_io.is_some() || parl_rx.is_some() {
+        let d = ParlIoModuleConfig::new(0);
+        let dr = ParlIoModuleConfig::new_rx();
         out.push((
             "parl_io.rs".to_owned(),
-            parl_io_file(parl_io_cfg, *has_valid, rt),
+            parl_io_file(
+                parl_io.map(|v| (parl_io_cfg.unwrap_or(&d), v)),
+                parl_rx.map(|v| (parl_rx_cfg.unwrap_or(&dr), v)),
+                rt,
+            ),
         ));
     }
     for (unit, outputs) in mcpwm {
@@ -3299,7 +3421,8 @@ mod tests {
             &[2],
             &BTreeMap::new(),
             80_000_000,
-            &[(1, true)],
+            // Unit 1: channel 0 with a control pad, channel 1 without.
+            &[(1, vec![(0, true), (1, false)])],
             &BTreeMap::new(),
             true,
             // The USB module left at its defaults — Serial/JTAG, not OTG.
@@ -3314,6 +3437,9 @@ mod tests {
             &BTreeMap::new(),
             40,
             &Some(false),
+            None,
+            // …and the receiving half, unwired: one file, one half.
+            &None,
             None,
             // An 8-bit i8080 display: DC, WR and D0..D7 wired.
             &[

@@ -282,8 +282,12 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
         ModuleKind::GenericInterfaceI2s => PinFunction::I2sCk(instance),
         ModuleKind::GenericInterfaceRmt => PinFunction::RmtChannel(instance),
-        ModuleKind::GenericInterfacePcnt => PinFunction::PcntEdge(instance),
+        ModuleKind::GenericInterfacePcnt => PinFunction::PcntEdge {
+            unit: instance,
+            channel: 0,
+        },
         ModuleKind::GenericInterfaceParlIo => PinFunction::ParlData { lane: 0 },
+        ModuleKind::GenericInterfaceParlIoRx => PinFunction::ParlRxData { lane: 0 },
         ModuleKind::GenericInterfaceLcdCam => PinFunction::LcdCamData { lane: 0 },
         ModuleKind::GenericInterfaceCamera => PinFunction::CamData { lane: 0 },
         ModuleKind::GenericInterfaceTouch => PinFunction::TouchPad(0),
@@ -455,6 +459,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfacePcnt => format!("_pcnt{n}{sfx}"),
         // The port is one driver, whatever the bus is wide.
         ModuleKind::GenericInterfaceParlIo => format!("_parl{sfx}"),
+        ModuleKind::GenericInterfaceParlIoRx => format!("_parl_rx{sfx}"),
         ModuleKind::GenericInterfaceLcdCam => format!("_lcd{sfx}"),
         ModuleKind::GenericInterfaceCamera => format!("_cam{sfx}"),
         ModuleKind::GenericInterfaceTouch => format!("_touch{sfx}"),
@@ -1923,64 +1928,104 @@ pub fn module_config_ui(
                     }
                 }
                 ModuleConfig::Pcnt(cfg) => {
-                    ui.label("Counts");
-                    ui.horizontal(|ui| {
-                        for (lbl, mode, id) in [
-                            ("Rising", &mut cfg.pos_edge, "pcnt_pos"),
-                            ("Falling", &mut cfg.neg_edge, "pcnt_neg"),
-                        ] {
-                            ui.label(egui::RichText::new(lbl).size(11.0));
-                            egui::ComboBox::from_id_salt(id)
-                                .width(96.0)
-                                .selected_text(mode.label())
-                                .show_ui(ui, |ui| {
-                                    for v in PcntEdgeMode::ALL {
-                                        ui.selectable_value(mode, v, v.label());
-                                    }
-                                });
-                        }
+                    // A unit has two channels and each is wired on its own, so
+                    // the rules are shown per WIRED channel. Channel 1 with no
+                    // edge pad is not a channel — it gets no rows at all.
+                    let wired: Vec<(u8, bool)> = [
+                        (0u8, ModuleSignal::PcntEdgeSig, ModuleSignal::PcntCtrlSig),
+                        (1, ModuleSignal::PcntEdgeSig1, ModuleSignal::PcntCtrlSig1),
+                    ]
+                    .into_iter()
+                    .filter(|(_, edge, _)| m.connections.iter().any(|c| c.signal == *edge))
+                    .map(|(ch, _, ctrl)| {
+                        (ch, m.connections.iter().any(|c| c.signal == ctrl))
                     })
-                    .response
-                    .on_hover_text(
-                        "What each edge does to the counter. Counting BOTH edges doubles \
-                         the resolution and halves the range.",
-                    );
-                    ui.end_row();
+                    .collect();
+                    // With one channel there is nothing to disambiguate, so the
+                    // rows keep the names they always had.
+                    let one = wired.len() <= 1;
 
-                    // Only meaningful with a control pad wired, and the module
-                    // knows whether one is: the signal is optional.
-                    let has_ctrl = m
-                        .connections
-                        .iter()
-                        .any(|c| c.signal == ModuleSignal::PcntCtrlSig);
-                    ui.label("Control input");
-                    ui.add_enabled_ui(has_ctrl, |ui| {
+                    for (ch, has_ctrl) in &wired {
+                        let tag = if one {
+                            String::new()
+                        } else {
+                            format!(" ch{ch}")
+                        };
+                        let mut k = cfg.channel(*ch);
+
+                        ui.label(format!("Counts{tag}"));
                         ui.horizontal(|ui| {
                             for (lbl, mode, id) in [
-                                ("Low", &mut cfg.ctrl_low, "pcnt_cl"),
-                                ("High", &mut cfg.ctrl_high, "pcnt_ch"),
+                                ("Rising", &mut k.pos_edge, format!("pcnt_pos{ch}")),
+                                ("Falling", &mut k.neg_edge, format!("pcnt_neg{ch}")),
                             ] {
                                 ui.label(egui::RichText::new(lbl).size(11.0));
                                 egui::ComboBox::from_id_salt(id)
-                                    .width(104.0)
+                                    .width(96.0)
                                     .selected_text(mode.label())
                                     .show_ui(ui, |ui| {
-                                        for v in PcntCtrlMode::ALL {
+                                        for v in PcntEdgeMode::ALL {
                                             ui.selectable_value(mode, v, v.label());
                                         }
                                     });
                             }
+                        })
+                        .response
+                        .on_hover_text(
+                            "What each edge does to the counter. Counting BOTH edges \
+                             doubles the resolution and halves the range. Both channels \
+                             add into the SAME counter.",
+                        );
+                        ui.end_row();
+
+                        ui.label(format!("Control input{tag}"));
+                        ui.add_enabled_ui(*has_ctrl, |ui| {
+                            ui.horizontal(|ui| {
+                                for (lbl, mode, id) in [
+                                    ("Low", &mut k.ctrl_low, format!("pcnt_cl{ch}")),
+                                    ("High", &mut k.ctrl_high, format!("pcnt_ch{ch}")),
+                                ] {
+                                    ui.label(egui::RichText::new(lbl).size(11.0));
+                                    egui::ComboBox::from_id_salt(id)
+                                        .width(104.0)
+                                        .selected_text(mode.label())
+                                        .show_ui(ui, |ui| {
+                                            for v in PcntCtrlMode::ALL {
+                                                ui.selectable_value(mode, v, v.label());
+                                            }
+                                        });
+                                }
+                            });
+                        })
+                        .response
+                        .on_hover_text(if *has_ctrl {
+                            "What the control input's level does. Set one side to Reverse \
+                             and the unit follows an encoder's direction on its own."
+                        } else {
+                            "No control pad on this channel. Assign a PCNT CTRL pin on the \
+                             canvas - it is what turns the counter into an encoder."
                         });
-                    })
-                    .response
-                    .on_hover_text(if has_ctrl {
-                        "What the control input's level does. Set one side to Reverse and \
-                         the unit follows an encoder's direction on its own."
-                    } else {
-                        "No control pad is wired. Assign a PCNT CTRL pin on the canvas - \
-                         it is what turns the counter into an encoder."
-                    });
-                    ui.end_row();
+                        ui.end_row();
+
+                        cfg.set_channel(*ch, k);
+                    }
+
+                    // The second channel is the other half of a quadrature
+                    // encoder, and nothing else says so.
+                    if one {
+                        ui.label("Second channel");
+                        ui.label(
+                            egui::RichText::new("assign PCNT EDGE1 on the canvas")
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        )
+                        .on_hover_text(
+                            "The unit's other channel, with its own edge and control pads \
+                             and its own rules, counting into the same counter. Two \
+                             channels with opposite rules is a quadrature encoder.",
+                        );
+                        ui.end_row();
+                    }
 
                     ui.label("Limits");
                     ui.horizontal(|ui| {

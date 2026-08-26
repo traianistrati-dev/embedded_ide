@@ -49,10 +49,13 @@ impl PinFunction {
             PinFunction::ParlData { .. } => "parl_d",
             PinFunction::ParlClk => "parl_clk",
             PinFunction::ParlValid => "parl_valid",
+            PinFunction::ParlRxData { .. } => "parl_rx_d",
+            PinFunction::ParlRxClk => "parl_rx_clk",
+            PinFunction::ParlRxValid => "parl_rx_valid",
             PinFunction::McpwmA { .. } => "mcpwm_a",
             PinFunction::McpwmB { .. } => "mcpwm_b",
-            PinFunction::PcntEdge(..) => "pcnt_edge",
-            PinFunction::PcntCtrl(..) => "pcnt_ctrl",
+            PinFunction::PcntEdge { .. } => "pcnt_edge",
+            PinFunction::PcntCtrl { .. } => "pcnt_ctrl",
             PinFunction::RmtChannel(..) => "rmt",
             PinFunction::TimerPwm { .. } => "pwm",
             PinFunction::TimerPwmN { .. } => "pwmn",
@@ -139,10 +142,13 @@ impl PinFunction {
             PinFunction::ParlData { lane } => format!("PARL  D{lane}"),
             PinFunction::ParlClk => "PARL  CLK".to_owned(),
             PinFunction::ParlValid => "PARL  VALID".to_owned(),
+            PinFunction::ParlRxData { lane } => format!("PARL  RXD{lane}"),
+            PinFunction::ParlRxClk => "PARL  RXCLK".to_owned(),
+            PinFunction::ParlRxValid => "PARL  RXVALID".to_owned(),
             PinFunction::McpwmA { unit, operator } => format!("MCPWM{unit}  OP{operator}A"),
             PinFunction::McpwmB { unit, operator } => format!("MCPWM{unit}  OP{operator}B"),
-            PinFunction::PcntEdge(n) => format!("PCNT{n}  EDGE"),
-            PinFunction::PcntCtrl(n) => format!("PCNT{n}  CTRL"),
+            PinFunction::PcntEdge { unit, channel } => format!("PCNT{unit}  EDGE{channel}"),
+            PinFunction::PcntCtrl { unit, channel } => format!("PCNT{unit}  CTRL{channel}"),
             PinFunction::RmtChannel(n) => format!("RMT  CH{n}"),
             PinFunction::TimerPwm { timer, channel } => format!("TIM{timer}  CH{channel}  (PWM)"),
             PinFunction::TimerPwmN { timer, channel } => {
@@ -412,7 +418,7 @@ impl PinFunction {
             // channel, and CH1N reads as complementary on its own.
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
             PinFunction::RmtChannel(..) => "RMT",
-            PinFunction::PcntEdge(..) | PinFunction::PcntCtrl(..) => "PCNT",
+            PinFunction::PcntEdge { .. } | PinFunction::PcntCtrl { .. } => "PCNT",
             PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. } => "MCPWM",
             PinFunction::TouchPad(..) => "TOUCH",
             PinFunction::LcdCamData { .. }
@@ -429,7 +435,12 @@ impl PinFunction {
             | PinFunction::CamHsync
             | PinFunction::CamHenable
             | PinFunction::CamMclk => "CAM",
-            PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => "PARL",
+            PinFunction::ParlData { .. }
+            | PinFunction::ParlClk
+            | PinFunction::ParlValid
+            | PinFunction::ParlRxData { .. }
+            | PinFunction::ParlRxClk
+            | PinFunction::ParlRxValid => "PARL",
             PinFunction::TimerBreak { .. } => "BRK",
             PinFunction::DacOut { .. } => "DAC",
             PinFunction::HspiClk { .. }

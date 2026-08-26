@@ -3046,6 +3046,9 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         | PinFunction::ParlData { .. }
         | PinFunction::ParlClk
         | PinFunction::ParlValid
+        | PinFunction::ParlRxData { .. }
+        | PinFunction::ParlRxClk
+        | PinFunction::ParlRxValid
         | PinFunction::RmtChannel(..)
         | PinFunction::McpwmA { .. }
         | PinFunction::McpwmB { .. } => {
@@ -3053,7 +3056,7 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         }
         // PCNT reads, so its two pads are inputs — again unreachable on an
         // STM32, and again grouped rather than left to a panic.
-        PinFunction::PcntEdge(..) | PinFunction::PcntCtrl(..) => {
+        PinFunction::PcntEdge { .. } | PinFunction::PcntCtrl { .. } => {
             format!("into_floating_input(&mut {pv}.{crx})")
         }
         // The F1 backend has no I2S codegen; the pads still take the alternate

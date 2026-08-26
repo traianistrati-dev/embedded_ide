@@ -451,7 +451,7 @@ fn make_gen_section(
         .any(|p| matches!(p.selected_function, PinFunction::RmtChannel(..)));
     let has_pcnt = configured
         .iter()
-        .any(|p| matches!(p.selected_function, PinFunction::PcntEdge(..)));
+        .any(|p| matches!(p.selected_function, PinFunction::PcntEdge { .. }));
     let use_block = build_use_block(
         has_output, has_input, has_adc, has_uart, has_spi, has_i2c, has_pwm, has_rmt, has_pcnt,
         runtime,
@@ -555,7 +555,8 @@ fn make_gen_section(
         runtime,
         spi,
         &i2s_wired,
-        collect_parl_io(&configured).is_some(),
+        collect_parl_io(&configured, false).is_some()
+            || collect_parl_io(&configured, true).is_some(),
         !collect_lcd(&configured).is_empty(),
         !collect_cam(&configured).is_empty(),
     );
@@ -569,6 +570,7 @@ fn make_gen_section(
         pcnt,
         mcpwm,
         parl_io.get(&0),
+        parl_io.get(&1),
         lcd_cam.get(&0),
         lcd_cam.get(&1),
         dac.get(&1),
@@ -1018,16 +1020,22 @@ pub(crate) fn dac_channels_wired(configured: &[&Pin]) -> Vec<u8> {
 /// mistake worth showing rather than papering over.
 fn collect_parl_io<'a>(
     configured: &[&'a Pin],
+    rx: bool,
 ) -> Option<(BTreeMap<u8, &'a Pin>, Option<&'a Pin>, Option<&'a Pin>)> {
     let mut data: BTreeMap<u8, &Pin> = BTreeMap::new();
     let (mut clk, mut valid) = (None, None);
     for p in configured {
         match p.selected_function {
-            PinFunction::ParlData { lane } => {
+            PinFunction::ParlData { lane } if !rx => {
                 data.insert(lane, *p);
             }
-            PinFunction::ParlClk => clk = Some(*p),
-            PinFunction::ParlValid => valid = Some(*p),
+            PinFunction::ParlClk if !rx => clk = Some(*p),
+            PinFunction::ParlValid if !rx => valid = Some(*p),
+            PinFunction::ParlRxData { lane } if rx => {
+                data.insert(lane, *p);
+            }
+            PinFunction::ParlRxClk if rx => clk = Some(*p),
+            PinFunction::ParlRxValid if rx => valid = Some(*p),
             _ => {}
         }
     }
@@ -1094,9 +1102,14 @@ pub(crate) fn cam_wired(configured: &[&Pin]) -> Vec<String> {
     collect_cam(configured).into_keys().collect()
 }
 
-/// `Some(has a valid pad)` when the parallel port is wired.
+/// `Some(has a valid pad)` when the SENDING half of the parallel port is wired.
 pub(crate) fn parl_io_wired(configured: &[&Pin]) -> Option<bool> {
-    collect_parl_io(configured).map(|(_, _, v)| v.is_some())
+    collect_parl_io(configured, false).map(|(_, _, v)| v.is_some())
+}
+
+/// The same for the RECEIVING half, which is wired and configured on its own.
+pub(crate) fn parl_io_rx_wired(configured: &[&Pin]) -> Option<bool> {
+    collect_parl_io(configured, true).map(|(_, _, v)| v.is_some())
 }
 
 /// The MCPWM outputs the canvas wires, by unit.
@@ -1222,33 +1235,47 @@ pub(crate) fn twai_wired(configured: &[&Pin]) -> bool {
 /// Keyed by UNIT. The edge pad is what makes a unit exist here — a ctrl pad on
 /// its own counts nothing, and the module requires the edge signal, so this
 /// keeps only the units that have one.
-fn collect_pcnt<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, (&'a Pin, Option<&'a Pin>)> {
-    let mut edge: BTreeMap<u8, &Pin> = BTreeMap::new();
-    let mut ctrl: BTreeMap<u8, &Pin> = BTreeMap::new();
+fn collect_pcnt<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, Vec<(u8, &'a Pin, Option<&'a Pin>)>> {
+    let mut edge: BTreeMap<(u8, u8), &Pin> = BTreeMap::new();
+    let mut ctrl: BTreeMap<(u8, u8), &Pin> = BTreeMap::new();
     for p in configured {
         match p.selected_function {
-            PinFunction::PcntEdge(n) => {
-                edge.insert(n, *p);
+            PinFunction::PcntEdge { unit, channel } => {
+                edge.insert((unit, channel), *p);
             }
-            PinFunction::PcntCtrl(n) => {
-                ctrl.insert(n, *p);
+            PinFunction::PcntCtrl { unit, channel } => {
+                ctrl.insert((unit, channel), *p);
             }
             _ => {}
         }
     }
-    edge.into_iter()
-        .map(|(n, e)| (n, (e, ctrl.get(&n).copied())))
-        .collect()
+    // Grouped by UNIT: one `init` configures the unit and every channel of it,
+    // because the unit is what `main.rs` lends in and gets back.
+    let mut out: BTreeMap<u8, Vec<(u8, &Pin, Option<&Pin>)>> = BTreeMap::new();
+    for ((unit, channel), e) in edge {
+        out.entry(unit)
+            .or_default()
+            .push((channel, e, ctrl.get(&(unit, channel)).copied()));
+    }
+    out
 }
 
 /// `(unit, has a control pad)` for every wired PCNT unit.
 ///
 /// The config-file list and `main.rs` are built from this same answer, so the
 /// generated `init` can never take a `ctrl` argument the call does not pass.
-pub(crate) fn pcnt_units_wired(configured: &[&Pin]) -> Vec<(u8, bool)> {
+pub(crate) fn pcnt_units_wired(configured: &[&Pin]) -> Vec<(u8, Vec<(u8, bool)>)> {
     collect_pcnt(configured)
         .into_iter()
-        .map(|(n, (_, c))| (n, c.is_some()))
+        .map(|(unit, chans)| {
+            (
+                unit,
+                chans
+                    .into_iter()
+                    .map(|(ch, _, ctrl)| (ch, ctrl.is_some()))
+                    .collect(),
+            )
+        })
         .collect()
 }
 
@@ -1490,6 +1517,7 @@ fn bus_sections(
     pcnt_cfg: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io_cfg: Option<&ParlIoModuleConfig>,
+    parl_rx_cfg: Option<&ParlIoModuleConfig>,
     lcd_cam_cfg: Option<&LcdCamModuleConfig>,
     cam_cfg: Option<&LcdCamModuleConfig>,
     dac_cfg: Option<&DacModuleConfig>,
@@ -1680,26 +1708,24 @@ fn bus_sections(
     let pcnt = collect_pcnt(configured);
     if !pcnt.is_empty() {
         let mut body = String::from("    let pcnt = Pcnt::new(peripherals.PCNT);\n");
-        for (n, (edge, ctrl)) in &pcnt {
+        for (n, chans) in &pcnt {
             let sfx = pcnt_cfg
                 .get(n)
                 .map(|c| module_label_sfx(&c.custom_label))
                 .unwrap_or_default();
-            let ev = esp_binding(edge);
-            body.push_str(&format!(
-                "    let {ev} = peripherals.{gpio}; // {label}\n",
-                gpio = edge.name,
-                label = edge.selected_function.label(),
-            ));
-            let mut args = vec![ev];
-            if let Some(c) = ctrl {
-                let cv = esp_binding(c);
-                body.push_str(&format!(
-                    "    let {cv} = peripherals.{gpio}; // {label}\n",
-                    gpio = c.name,
-                    label = c.selected_function.label(),
-                ));
-                args.push(cv);
+            // Channel order, edge then ctrl within each — the same order the
+            // generated `init` declares its parameters in.
+            let mut args = Vec::new();
+            for (_, edge, ctrl) in chans {
+                for p in std::iter::once(edge).chain(ctrl.iter()) {
+                    let var = esp_binding(p);
+                    body.push_str(&format!(
+                        "    let {var} = peripherals.{gpio}; // {label}\n",
+                        gpio = p.name,
+                        label = p.selected_function.label(),
+                    ));
+                    args.push(var);
+                }
             }
             body.push_str(&format!(
                 "    let {handle} =\n\
@@ -1746,46 +1772,69 @@ fn bus_sections(
     }
     // PARL_IO. Like the I2S it is DMA-only, so a port with no channel left
     // produces a note rather than a call that could not be written.
-    if let Some((data, clk, valid)) = collect_parl_io(configured) {
-        let sfx = parl_io_cfg
-            .map(|c| module_label_sfx(&c.custom_label))
-            .unwrap_or_default();
+    //
+    // ONE call for both halves: `ParlIo::new` consumes the peripheral AND takes
+    // a single DMA channel, splitting it into a tx and an rx half itself. Two
+    // independent `init`s could not express that, and would ask for two
+    // channels the peripheral does not want.
+    let parl_tx = collect_parl_io(configured, false);
+    let parl_rx = collect_parl_io(configured, true);
+    if parl_tx.is_some() || parl_rx.is_some() {
         let mut body = String::new();
         let mut args = Vec::new();
-        let lanes = parl_io_cfg.map(|c| c.width.lanes()).unwrap_or(8);
-        for lane in 0..lanes {
-            let Some(p) = data.get(&lane) else {
-                body.push_str(&format!(
-                    "    // TODO: PARL_IO D{lane} is not assigned - the bus is {lanes} wide.\n"
-                ));
+        let mut handles = Vec::new();
+        for (rx, half) in [(false, &parl_tx), (true, &parl_rx)] {
+            let Some((data, clk, valid)) = half else {
                 continue;
             };
-            let var = esp_binding(p);
-            body.push_str(&format!(
-                "    let {var} = peripherals.{gpio}; // {label}\n",
-                gpio = p.name,
-                label = p.selected_function.label(),
-            ));
-            args.push(var);
-        }
-        for p in [clk, valid].into_iter().flatten() {
-            // The valid pad is only an argument below sixteen bits; at sixteen
-            // the signal rides the bus - see `parl_io_file`.
-            if p.selected_function == PinFunction::ParlValid && lanes >= 16 {
-                continue;
+            let cfg = if rx { parl_rx_cfg } else { parl_io_cfg };
+            let sfx = cfg
+                .map(|c| module_label_sfx(&c.custom_label))
+                .unwrap_or_default();
+            let tag = if rx { "_rx" } else { "" };
+            handles.push(format!("mut _parl{tag}{sfx}"));
+            handles.push(format!("mut _parl{tag}{sfx}_buf"));
+            let lanes = cfg.map(|c| c.width.lanes()).unwrap_or(8);
+            for lane in 0..lanes {
+                let Some(p) = data.get(&lane) else {
+                    body.push_str(&format!(
+                        "    // TODO: PARL_IO {}D{lane} is not assigned - the bus is {lanes} wide.\n",
+                        if rx { "RX" } else { "" },
+                    ));
+                    continue;
+                };
+                let var = esp_binding(p);
+                body.push_str(&format!(
+                    "    let {var} = peripherals.{gpio}; // {label}\n",
+                    gpio = p.name,
+                    label = p.selected_function.label(),
+                ));
+                args.push(var);
             }
-            let var = esp_binding(p);
-            body.push_str(&format!(
-                "    let {var} = peripherals.{gpio}; // {label}\n",
-                gpio = p.name,
-                label = p.selected_function.label(),
-            ));
-            args.push(var);
+            for p in [clk, valid].into_iter().flatten() {
+                // The valid pad is only an argument below sixteen bits; at
+                // sixteen the signal rides the bus - see `parl_io_file`.
+                if matches!(
+                    p.selected_function,
+                    PinFunction::ParlValid | PinFunction::ParlRxValid
+                ) && lanes >= 16
+                {
+                    continue;
+                }
+                let var = esp_binding(p);
+                body.push_str(&format!(
+                    "    let {var} = peripherals.{gpio}; // {label}\n",
+                    gpio = p.name,
+                    label = p.selected_function.label(),
+                ));
+                args.push(var);
+            }
         }
         match dma_plan.parl_io.as_ref() {
             Some(u) => body.push_str(&format!(
-                "    let (mut _parl{sfx}, mut _parl{sfx}_buf) =\n\
+                "    let ({}) =\n\
                  \x20       pins::configs::parl_io::{init_fn}(peripherals.PARL_IO, peripherals.{}, {});\n",
+                handles.join(", "),
                 u.peri,
                 args.join(", "),
             )),

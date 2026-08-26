@@ -125,14 +125,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -159,6 +215,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -239,14 +321,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -273,6 +411,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -360,14 +524,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -394,6 +614,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -473,14 +719,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -507,6 +809,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -586,14 +914,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -620,6 +1004,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -699,14 +1109,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -733,6 +1199,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -812,14 +1304,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -846,6 +1394,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -925,14 +1499,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -959,6 +1589,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1038,14 +1694,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -1072,6 +1784,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1165,14 +1903,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -1199,6 +1993,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1282,14 +2102,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -1316,6 +2192,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1399,14 +2301,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -1433,6 +2391,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1516,14 +2500,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -1550,6 +2590,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1633,14 +2699,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -1667,6 +2789,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1750,14 +2898,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -1784,6 +2988,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1865,14 +3095,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -1899,6 +3185,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1978,14 +3290,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -2012,6 +3380,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -2091,14 +3485,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -2125,6 +3575,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -2204,14 +3680,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     ParlData(
                         lane: 0,
                     ),
@@ -2238,6 +3770,32 @@ McuDefinition(
                     ),
                     ParlClk,
                     ParlValid,
+                    ParlRxData(
+                        lane: 0,
+                    ),
+                    ParlRxData(
+                        lane: 1,
+                    ),
+                    ParlRxData(
+                        lane: 2,
+                    ),
+                    ParlRxData(
+                        lane: 3,
+                    ),
+                    ParlRxData(
+                        lane: 4,
+                    ),
+                    ParlRxData(
+                        lane: 5,
+                    ),
+                    ParlRxData(
+                        lane: 6,
+                    ),
+                    ParlRxData(
+                        lane: 7,
+                    ),
+                    ParlRxClk,
+                    ParlRxValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,

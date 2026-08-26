@@ -497,14 +497,21 @@ impl PinFunction {
                 }
             }
 
-            PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => {
+            PinFunction::ParlData { .. }
+            | PinFunction::ParlClk
+            | PinFunction::ParlValid
+            | PinFunction::ParlRxData { .. }
+            | PinFunction::ParlRxClk
+            | PinFunction::ParlRxValid => {
                 let role = match self {
                     PinFunction::ParlClk => {
                         "the clock — driven out when the port transmits, read in when it receives"
                     }
-                    PinFunction::ParlValid => {
+                    PinFunction::ParlValid | PinFunction::ParlRxValid => {
                         "the valid line, which marks the clocks that carry real data"
                     }
+                    PinFunction::ParlRxClk => "the RECEIVING half's clock",
+                    PinFunction::ParlRxData { .. } => "one data line of the receiving half",
                     _ => "one data line of the bus",
                 };
                 FunctionInfo {
@@ -556,8 +563,8 @@ impl PinFunction {
                     ],
                 }
             }
-            PinFunction::PcntEdge(n) | PinFunction::PcntCtrl(n) => {
-                let ctrl = matches!(self, PinFunction::PcntCtrl(_));
+            PinFunction::PcntEdge { unit: n, .. } | PinFunction::PcntCtrl { unit: n, .. } => {
+                let ctrl = matches!(self, PinFunction::PcntCtrl { .. });
                 FunctionInfo {
                     description: format!(
                         "PCNT unit {n} — {}. A hardware pulse counter: it follows edges on                          its own, with a glitch filter and high/low limits that raise an                          interrupt, so nothing has to be polled. What reads a flow meter, a                          tachometer or a rotary encoder.",

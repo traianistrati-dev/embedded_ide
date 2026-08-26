@@ -1381,6 +1381,8 @@ mod module_support_tests {
                         // PARL_IO likewise: only three ESP parts have one, and
                         // the C3 is not among them.
                         | ModuleKind::GenericInterfaceParlIo
+                        // …and its receiving half, which is its own kind.
+                        | ModuleKind::GenericInterfaceParlIoRx
                         // LCD_CAM is the ESP32-S3's alone, and neither built-in
                         // is one - so neither offers the pads.
                         | ModuleKind::GenericInterfaceLcdCam

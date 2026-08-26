@@ -80,6 +80,16 @@ pub enum ModuleKind {
     /// wider width does. Wiring eight pads for a port someone added to try it
     /// would spend the chip.
     GenericInterfaceParlIo,
+    /// The RECEIVING half of the parallel port — "PARL RX".
+    ///
+    /// A second kind on the same peripheral, for the same reason the camera is
+    /// one: `ParlIo` hands back `.tx` and `.rx` together and they run at the
+    /// same time. The two halves have separate signals in the GPIO matrix —
+    /// `PARL_TX_*` and `PARL_RX_*` — so they never share a wire.
+    ///
+    /// They DO share one DMA channel: `ParlIo::new` takes a single channel and
+    /// splits it, which is the one thing that differs from LCD_CAM.
+    GenericInterfaceParlIoRx,
     /// The parallel video port — "LCD".
     ///
     /// ONE module for what esp-hal splits into three drivers, because the
@@ -162,7 +172,7 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 23] = [
+    pub const ALL: [ModuleKind; 24] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
@@ -172,6 +182,7 @@ impl ModuleKind {
         ModuleKind::GenericInterfacePcnt,
         ModuleKind::GenericInterfaceMcpwm,
         ModuleKind::GenericInterfaceParlIo,
+        ModuleKind::GenericInterfaceParlIoRx,
         ModuleKind::GenericInterfaceLcdCam,
         ModuleKind::GenericInterfaceCamera,
         ModuleKind::GenericInterfaceTouch,
@@ -220,8 +231,14 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceRmt => (&[RmtLine], &[]),
             // The edge input is the counter; the control input is what
             // turns it into an encoder, and plenty of uses do not want one.
-            ModuleKind::GenericInterfacePcnt => (&[PcntEdgeSig], &[PcntCtrlSig]),
+            // Only the first channel's edge is required. The control pad is
+            // what turns a counter into an encoder, and the second channel
+            // is what turns it into a QUADRATURE one — both are choices.
+            ModuleKind::GenericInterfacePcnt => {
+                (&[PcntEdgeSig], &[PcntCtrlSig, PcntEdgeSig1, PcntCtrlSig1])
+            }
             ModuleKind::GenericInterfaceParlIo => (&[ParlD0, ParlClkSig], &[]),
+            ModuleKind::GenericInterfaceParlIoRx => (&[ParlRxD0, ParlRxClkSig], &[]),
             // Two data lines and nothing else is auto-wired. Which CONTROL
             // pads a mode needs differs — i8080 wants DC and WR, RGB wants
             // four sync lines, a camera wants three — so wiring any of them
@@ -295,6 +312,10 @@ impl ModuleKind {
                 // module on the other half is still allowed.
                 | ModuleKind::GenericInterfaceLcdCam
                 | ModuleKind::GenericInterfaceCamera
+                // One PARL_IO, and each HALF is its own kind — so a second
+                // module on the other half is still allowed.
+                | ModuleKind::GenericInterfaceParlIo
+                | ModuleKind::GenericInterfaceParlIoRx
                 // One touch controller; the number on its pin functions is the
                 // CHANNEL, not an instance.
                 | ModuleKind::GenericInterfaceTouch
@@ -313,6 +334,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfacePcnt => "PCNT",
             ModuleKind::GenericInterfaceMcpwm => "MCPWM",
             ModuleKind::GenericInterfaceParlIo => "PARL",
+            ModuleKind::GenericInterfaceParlIoRx => "PARL RX",
             ModuleKind::GenericInterfaceLcdCam => "LCD",
             ModuleKind::GenericInterfaceCamera => "CAM",
             ModuleKind::GenericInterfaceTouch => "TOUCH",
@@ -349,6 +371,9 @@ impl ModuleKind {
             ModuleKind::GenericInterfacePcnt => ModuleConfig::Pcnt(PcntModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceParlIo => {
                 ModuleConfig::ParlIo(ParlIoModuleConfig::new(instance))
+            }
+            ModuleKind::GenericInterfaceParlIoRx => {
+                ModuleConfig::ParlIo(ParlIoModuleConfig::new_rx())
             }
             ModuleKind::GenericInterfaceLcdCam => {
                 ModuleConfig::LcdCam(LcdCamModuleConfig::new(instance))
@@ -467,6 +492,13 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::LcdCamVsync => (GenericInterfaceLcdCam, 0, LcdCamVsyncSig),
         PinFunction::LcdCamHsync => (GenericInterfaceLcdCam, 0, LcdCamHsyncSig),
         PinFunction::LcdCamDe => (GenericInterfaceLcdCam, 0, LcdCamDeSig),
+        PinFunction::ParlRxData { lane } => (
+            GenericInterfaceParlIoRx,
+            1,
+            PARL_RX_DATA_SIGNALS[(*lane as usize).min(15)],
+        ),
+        PinFunction::ParlRxClk => (GenericInterfaceParlIoRx, 1, ParlRxClkSig),
+        PinFunction::ParlRxValid => (GenericInterfaceParlIoRx, 1, ParlRxValidSig),
         PinFunction::ParlClk => (GenericInterfaceParlIo, 0, ParlClkSig),
         PinFunction::ParlValid => (GenericInterfaceParlIo, 0, ParlValidSig),
         PinFunction::McpwmA { unit, operator } => (
@@ -487,8 +519,24 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
                 _ => McpwmB2,
             },
         ),
-        PinFunction::PcntEdge(n) => (GenericInterfacePcnt, *n, PcntEdgeSig),
-        PinFunction::PcntCtrl(n) => (GenericInterfacePcnt, *n, PcntCtrlSig),
+        PinFunction::PcntEdge { unit, channel } => (
+            GenericInterfacePcnt,
+            *unit,
+            if *channel == 0 {
+                PcntEdgeSig
+            } else {
+                PcntEdgeSig1
+            },
+        ),
+        PinFunction::PcntCtrl { unit, channel } => (
+            GenericInterfacePcnt,
+            *unit,
+            if *channel == 0 {
+                PcntCtrlSig
+            } else {
+                PcntCtrlSig1
+            },
+        ),
         PinFunction::I2sCk(n) => (GenericInterfaceI2s, *n, I2sCk),
         PinFunction::I2sWs(n) => (GenericInterfaceI2s, *n, I2sWs),
         PinFunction::I2sSd(n) => (GenericInterfaceI2s, *n, I2sSd),
@@ -689,6 +737,10 @@ pub enum ModuleSignal {
     PcntEdgeSig,
     /// The level that decides what each edge means.
     PcntCtrlSig,
+    /// The unit's SECOND channel — its own edge and control pads, counting into
+    /// the same counter. One channel per phase is a quadrature encoder.
+    PcntEdgeSig1,
+    PcntCtrlSig1,
     // PARL_IO — the data bus, its clock, and the optional valid line.
     ParlD0,
     ParlD1,
@@ -708,6 +760,26 @@ pub enum ModuleSignal {
     ParlD15,
     ParlClkSig,
     ParlValidSig,
+
+    // ── PARL_IO, receiving half ─────────────────────────────────────────
+    ParlRxD0,
+    ParlRxD1,
+    ParlRxD2,
+    ParlRxD3,
+    ParlRxD4,
+    ParlRxD5,
+    ParlRxD6,
+    ParlRxD7,
+    ParlRxD8,
+    ParlRxD9,
+    ParlRxD10,
+    ParlRxD11,
+    ParlRxD12,
+    ParlRxD13,
+    ParlRxD14,
+    ParlRxD15,
+    ParlRxClkSig,
+    ParlRxValidSig,
 
     // ── LCD_CAM ─────────────────────────────────────────────────────────
     LcdCamD0,
@@ -898,6 +970,8 @@ impl ModuleSignal {
             ModuleSignal::RmtLine => "RMT",
             ModuleSignal::PcntEdgeSig => "EDGE",
             ModuleSignal::PcntCtrlSig => "CTRL",
+            ModuleSignal::PcntEdgeSig1 => "EDGE1",
+            ModuleSignal::PcntCtrlSig1 => "CTRL1",
             ModuleSignal::Touch0 => "T0",
             ModuleSignal::Touch1 => "T1",
             ModuleSignal::Touch2 => "T2",
@@ -968,6 +1042,24 @@ impl ModuleSignal {
             ModuleSignal::ParlD13 => "D13",
             ModuleSignal::ParlD14 => "D14",
             ModuleSignal::ParlD15 => "D15",
+            ModuleSignal::ParlRxD0 => "D0",
+            ModuleSignal::ParlRxD1 => "D1",
+            ModuleSignal::ParlRxD2 => "D2",
+            ModuleSignal::ParlRxD3 => "D3",
+            ModuleSignal::ParlRxD4 => "D4",
+            ModuleSignal::ParlRxD5 => "D5",
+            ModuleSignal::ParlRxD6 => "D6",
+            ModuleSignal::ParlRxD7 => "D7",
+            ModuleSignal::ParlRxD8 => "D8",
+            ModuleSignal::ParlRxD9 => "D9",
+            ModuleSignal::ParlRxD10 => "D10",
+            ModuleSignal::ParlRxD11 => "D11",
+            ModuleSignal::ParlRxD12 => "D12",
+            ModuleSignal::ParlRxD13 => "D13",
+            ModuleSignal::ParlRxD14 => "D14",
+            ModuleSignal::ParlRxD15 => "D15",
+            ModuleSignal::ParlRxClkSig => "CLK",
+            ModuleSignal::ParlRxValidSig => "VALID",
             ModuleSignal::ParlClkSig => "CLK",
             ModuleSignal::ParlValidSig => "VALID",
             ModuleSignal::McpwmA0 => "OP0A",
@@ -1099,8 +1191,22 @@ impl ModuleSignal {
     pub fn pin_function(self, instance: u8) -> PinFunction {
         match self {
             ModuleSignal::RmtLine => PinFunction::RmtChannel(instance),
-            ModuleSignal::PcntEdgeSig => PinFunction::PcntEdge(instance),
-            ModuleSignal::PcntCtrlSig => PinFunction::PcntCtrl(instance),
+            ModuleSignal::PcntEdgeSig => PinFunction::PcntEdge {
+                unit: instance,
+                channel: 0,
+            },
+            ModuleSignal::PcntCtrlSig => PinFunction::PcntCtrl {
+                unit: instance,
+                channel: 0,
+            },
+            ModuleSignal::PcntEdgeSig1 => PinFunction::PcntEdge {
+                unit: instance,
+                channel: 1,
+            },
+            ModuleSignal::PcntCtrlSig1 => PinFunction::PcntCtrl {
+                unit: instance,
+                channel: 1,
+            },
             ModuleSignal::Touch0 => PinFunction::TouchPad(0),
             ModuleSignal::Touch1 => PinFunction::TouchPad(1),
             ModuleSignal::Touch2 => PinFunction::TouchPad(2),
@@ -1171,6 +1277,24 @@ impl ModuleSignal {
             ModuleSignal::ParlD13 => PinFunction::ParlData { lane: 13 },
             ModuleSignal::ParlD14 => PinFunction::ParlData { lane: 14 },
             ModuleSignal::ParlD15 => PinFunction::ParlData { lane: 15 },
+            ModuleSignal::ParlRxD0 => PinFunction::ParlRxData { lane: 0 },
+            ModuleSignal::ParlRxD1 => PinFunction::ParlRxData { lane: 1 },
+            ModuleSignal::ParlRxD2 => PinFunction::ParlRxData { lane: 2 },
+            ModuleSignal::ParlRxD3 => PinFunction::ParlRxData { lane: 3 },
+            ModuleSignal::ParlRxD4 => PinFunction::ParlRxData { lane: 4 },
+            ModuleSignal::ParlRxD5 => PinFunction::ParlRxData { lane: 5 },
+            ModuleSignal::ParlRxD6 => PinFunction::ParlRxData { lane: 6 },
+            ModuleSignal::ParlRxD7 => PinFunction::ParlRxData { lane: 7 },
+            ModuleSignal::ParlRxD8 => PinFunction::ParlRxData { lane: 8 },
+            ModuleSignal::ParlRxD9 => PinFunction::ParlRxData { lane: 9 },
+            ModuleSignal::ParlRxD10 => PinFunction::ParlRxData { lane: 10 },
+            ModuleSignal::ParlRxD11 => PinFunction::ParlRxData { lane: 11 },
+            ModuleSignal::ParlRxD12 => PinFunction::ParlRxData { lane: 12 },
+            ModuleSignal::ParlRxD13 => PinFunction::ParlRxData { lane: 13 },
+            ModuleSignal::ParlRxD14 => PinFunction::ParlRxData { lane: 14 },
+            ModuleSignal::ParlRxD15 => PinFunction::ParlRxData { lane: 15 },
+            ModuleSignal::ParlRxClkSig => PinFunction::ParlRxClk,
+            ModuleSignal::ParlRxValidSig => PinFunction::ParlRxValid,
             ModuleSignal::ParlClkSig => PinFunction::ParlClk,
             ModuleSignal::ParlValidSig => PinFunction::ParlValid,
             ModuleSignal::McpwmA0 | ModuleSignal::McpwmA1 | ModuleSignal::McpwmA2 => {
@@ -3845,6 +3969,14 @@ pub struct PcntModuleConfig {
     /// is wired.
     pub ctrl_low: PcntCtrlMode,
     pub ctrl_high: PcntCtrlMode,
+    /// Channel 1's rules. The four fields above are channel 0's — keeping their
+    /// names is what lets a config written before the second channel existed
+    /// still mean what it said.
+    ///
+    /// Both channels count into the SAME counter. Two channels with opposite
+    /// rules is how a quadrature encoder tells one direction from the other.
+    #[serde(default)]
+    pub ch1: PcntChannelCfg,
     pub rx_model: String,
     pub tx_model: String,
     #[serde(default)]
@@ -4053,6 +4185,10 @@ pub struct ParlIoModuleConfig {
     pub freq_hz: u32,
     #[serde(default)]
     pub bit_order: ParlIoBitOrder,
+    /// Which clock edge the RECEIVING half samples on. Unused when sending —
+    /// a transmitter drives the clock itself.
+    #[serde(default)]
+    pub sample_edge: ParlIoSampleEdge,
     /// Bytes the DMA buffer holds. A parallel port exists to move blocks, so
     /// this is the size of the block.
     pub buffer_bytes: u32,
@@ -4062,12 +4198,45 @@ pub struct ParlIoModuleConfig {
     pub custom_label: String,
 }
 
+/// Which clock edge the RECEIVING half samples the data on.
+///
+/// Only the receiver has this: a transmitter drives the clock and puts the data
+/// out itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParlIoSampleEdge {
+    /// Sample on the rising edge.
+    #[default]
+    Rising,
+    /// Sample on the falling edge.
+    Falling,
+}
+
+impl ParlIoSampleEdge {
+    pub const ALL: [Self; 2] = [Self::Rising, Self::Falling];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rising => "Rising edge",
+            Self::Falling => "Falling edge",
+        }
+    }
+
+    /// esp-hal names them after the register bit, not the edge.
+    pub fn esp_hal(self) -> &'static str {
+        match self {
+            Self::Rising => "Normal",
+            Self::Falling => "Invert",
+        }
+    }
+}
+
 impl ParlIoModuleConfig {
     /// Defaults: transmit, eight lines, 1 MHz, MSB first, 4 KiB of buffer.
     pub fn new(instance: u8) -> Self {
         Self {
             instance,
             direction: ParlIoDirection::default(),
+            sample_edge: ParlIoSampleEdge::default(),
             width: ParlIoWidth::default(),
             freq_hz: 1_000_000,
             bit_order: ParlIoBitOrder::default(),
@@ -4075,6 +4244,15 @@ impl ParlIoModuleConfig {
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
+        }
+    }
+
+    /// The receiving half's defaults, with `instance: 1` so the two halves
+    /// never collide in a config map.
+    pub fn new_rx() -> Self {
+        Self {
+            direction: ParlIoDirection::Receive,
+            ..Self::new(1)
         }
     }
 }
@@ -4133,6 +4311,26 @@ const LCD_DATA_SIGNALS: [ModuleSignal; 16] = [
     ModuleSignal::LcdCamD13,
     ModuleSignal::LcdCamD14,
     ModuleSignal::LcdCamD15,
+];
+
+/// The receiving half's sixteen data lanes — see [`PinFunction::ParlRxData`].
+const PARL_RX_DATA_SIGNALS: [ModuleSignal; 16] = [
+    ModuleSignal::ParlRxD0,
+    ModuleSignal::ParlRxD1,
+    ModuleSignal::ParlRxD2,
+    ModuleSignal::ParlRxD3,
+    ModuleSignal::ParlRxD4,
+    ModuleSignal::ParlRxD5,
+    ModuleSignal::ParlRxD6,
+    ModuleSignal::ParlRxD7,
+    ModuleSignal::ParlRxD8,
+    ModuleSignal::ParlRxD9,
+    ModuleSignal::ParlRxD10,
+    ModuleSignal::ParlRxD11,
+    ModuleSignal::ParlRxD12,
+    ModuleSignal::ParlRxD13,
+    ModuleSignal::ParlRxD14,
+    ModuleSignal::ParlRxD15,
 ];
 
 const PARL_DATA_SIGNALS: [ModuleSignal; 16] = [
@@ -4247,6 +4445,32 @@ impl McpwmModuleConfig {
     }
 }
 
+/// One PCNT channel's counting rules.
+///
+/// A unit has two channels and they are independent: each has its own edge pad,
+/// its own optional control pad, and its own answer to "what does an edge mean
+/// at this control level".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PcntChannelCfg {
+    pub pos_edge: PcntEdgeMode,
+    pub neg_edge: PcntEdgeMode,
+    pub ctrl_low: PcntCtrlMode,
+    pub ctrl_high: PcntCtrlMode,
+}
+
+impl Default for PcntChannelCfg {
+    /// The same plain counter channel 0 starts as: count up on the rising edge,
+    /// ignore the falling one, and let the control pad change nothing.
+    fn default() -> Self {
+        Self {
+            pos_edge: PcntEdgeMode::Increment,
+            neg_edge: PcntEdgeMode::Hold,
+            ctrl_low: PcntCtrlMode::Keep,
+            ctrl_high: PcntCtrlMode::Keep,
+        }
+    }
+}
+
 impl PcntModuleConfig {
     /// Defaults: count up on the rising edge, +/-32767, no filter — a plain
     /// pulse counter. Adding a control pad and setting one level to `Reverse`
@@ -4261,9 +4485,36 @@ impl PcntModuleConfig {
             neg_edge: PcntEdgeMode::Hold,
             ctrl_low: PcntCtrlMode::Keep,
             ctrl_high: PcntCtrlMode::Keep,
+            ch1: PcntChannelCfg::default(),
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
+        }
+    }
+
+    /// One channel's rules. Channel 0 reads the unit's own four fields.
+    pub fn channel(&self, channel: u8) -> PcntChannelCfg {
+        if channel == 0 {
+            PcntChannelCfg {
+                pos_edge: self.pos_edge,
+                neg_edge: self.neg_edge,
+                ctrl_low: self.ctrl_low,
+                ctrl_high: self.ctrl_high,
+            }
+        } else {
+            self.ch1
+        }
+    }
+
+    /// Write one channel's rules back.
+    pub fn set_channel(&mut self, channel: u8, v: PcntChannelCfg) {
+        if channel == 0 {
+            self.pos_edge = v.pos_edge;
+            self.neg_edge = v.neg_edge;
+            self.ctrl_low = v.ctrl_low;
+            self.ctrl_high = v.ctrl_high;
+        } else {
+            self.ch1 = v;
         }
     }
 }

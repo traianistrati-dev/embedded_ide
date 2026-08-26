@@ -131,14 +131,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -230,14 +286,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -305,14 +417,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -380,14 +548,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -455,14 +679,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -530,14 +810,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -611,14 +947,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -686,14 +1078,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -767,14 +1215,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -846,14 +1350,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -925,14 +1485,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1004,14 +1620,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1083,14 +1755,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1168,14 +1896,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1247,14 +2031,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1330,14 +2170,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1413,14 +2309,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1493,14 +2445,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1573,14 +2581,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1654,14 +2718,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1755,14 +2875,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1834,14 +3010,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1913,14 +3145,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1992,14 +3280,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2071,14 +3415,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2150,14 +3550,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2229,14 +3685,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2308,14 +3820,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2387,14 +3955,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2466,14 +4090,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2543,14 +4223,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2618,14 +4354,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2693,14 +4485,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2768,14 +4616,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2843,14 +4747,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2918,14 +4878,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2993,14 +5009,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3068,14 +5140,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3143,14 +5271,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3218,14 +5402,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3293,14 +5533,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3368,14 +5664,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3449,14 +5801,70 @@ McuDefinition(
                     RmtChannel(1),
                     RmtChannel(2),
                     RmtChannel(3),
-                    PcntEdge(0),
-                    PcntCtrl(0),
-                    PcntEdge(1),
-                    PcntCtrl(1),
-                    PcntEdge(2),
-                    PcntCtrl(2),
-                    PcntEdge(3),
-                    PcntCtrl(3),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 0,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 1,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 2,
+                        channel: 1,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 0,
+                    ),
+                    PcntEdge(
+                        unit: 3,
+                        channel: 1,
+                    ),
+                    PcntCtrl(
+                        unit: 3,
+                        channel: 1,
+                    ),
                     CanTx,
                     CanRx,
                 ],
