@@ -281,6 +281,8 @@ pub fn var_suffix(func: &PinFunction) -> String {
         PinFunction::SaiFs { sai, block } => format!("sai{sai}{}_fs", sai_tag(*block)),
         PinFunction::SaiMclk { sai, block } => format!("sai{sai}{}_mclk", sai_tag(*block)),
         PinFunction::RmtChannel(n) => format!("rmt{n}"),
+        PinFunction::PcntEdge(n) => format!("pcnt{n}_edge"),
+        PinFunction::PcntCtrl(n) => format!("pcnt{n}_ctrl"),
         PinFunction::I2sCk(n) => format!("i2s{n}_ck"),
         PinFunction::I2sWs(n) => format!("i2s{n}_ws"),
         PinFunction::I2sSd(n) => format!("i2s{n}_sd"),

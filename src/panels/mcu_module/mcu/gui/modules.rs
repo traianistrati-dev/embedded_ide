@@ -13,9 +13,9 @@ use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, HspiMode, I2sClockPolarity, I2sDirection,
     I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType,
-    OspiMode, Parity, PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES,
-    QspiAddressSize, RmtDirection, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder,
-    StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
+    OspiMode, Parity, PcntCtrlMode, PcntEdgeMode, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
+    QSPI_MEMORY_SIZES, QspiAddressSize, RmtDirection, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx,
+    SpiBitOrder, StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
     XspiMemoryType, XspiMode,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -281,6 +281,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
         ModuleKind::GenericInterfaceI2s => PinFunction::I2sCk(instance),
         ModuleKind::GenericInterfaceRmt => PinFunction::RmtChannel(instance),
+        ModuleKind::GenericInterfacePcnt => PinFunction::PcntEdge(instance),
         ModuleKind::GenericInterfaceDac => PinFunction::DacOut {
             dac: instance,
             channel: 1,
@@ -442,6 +443,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
         ModuleKind::GenericInterfaceI2s => format!("_i2s{n}{sfx}"),
         ModuleKind::GenericInterfaceRmt => format!("_rmt{n}{sfx}"),
+        ModuleKind::GenericInterfacePcnt => format!("_pcnt{n}{sfx}"),
         ModuleKind::GenericInterfaceDac => format!("_dac{n}{sfx}"),
         // One handle per SUB-BLOCK: they are independent streams.
         ModuleKind::GenericInterfaceSai => format!("_sai{n}a{sfx}, _sai{n}b{sfx}"),
@@ -1484,6 +1486,110 @@ pub fn module_config_ui(
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
             match &mut m.config {
+                ModuleConfig::Pcnt(cfg) => {
+                    ui.label("Counts");
+                    ui.horizontal(|ui| {
+                        for (lbl, mode, id) in [
+                            ("Rising", &mut cfg.pos_edge, "pcnt_pos"),
+                            ("Falling", &mut cfg.neg_edge, "pcnt_neg"),
+                        ] {
+                            ui.label(egui::RichText::new(lbl).size(11.0));
+                            egui::ComboBox::from_id_salt(id)
+                                .width(96.0)
+                                .selected_text(mode.label())
+                                .show_ui(ui, |ui| {
+                                    for v in PcntEdgeMode::ALL {
+                                        ui.selectable_value(mode, v, v.label());
+                                    }
+                                });
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "What each edge does to the counter. Counting BOTH edges doubles \
+                         the resolution and halves the range.",
+                    );
+                    ui.end_row();
+
+                    // Only meaningful with a control pad wired, and the module
+                    // knows whether one is: the signal is optional.
+                    let has_ctrl = m
+                        .connections
+                        .iter()
+                        .any(|c| c.signal == ModuleSignal::PcntCtrlSig);
+                    ui.label("Control input");
+                    ui.add_enabled_ui(has_ctrl, |ui| {
+                        ui.horizontal(|ui| {
+                            for (lbl, mode, id) in [
+                                ("Low", &mut cfg.ctrl_low, "pcnt_cl"),
+                                ("High", &mut cfg.ctrl_high, "pcnt_ch"),
+                            ] {
+                                ui.label(egui::RichText::new(lbl).size(11.0));
+                                egui::ComboBox::from_id_salt(id)
+                                    .width(104.0)
+                                    .selected_text(mode.label())
+                                    .show_ui(ui, |ui| {
+                                        for v in PcntCtrlMode::ALL {
+                                            ui.selectable_value(mode, v, v.label());
+                                        }
+                                    });
+                            }
+                        });
+                    })
+                    .response
+                    .on_hover_text(if has_ctrl {
+                        "What the control input's level does. Set one side to Reverse and \
+                         the unit follows an encoder's direction on its own."
+                    } else {
+                        "No control pad is wired. Assign a PCNT CTRL pin on the canvas - \
+                         it is what turns the counter into an encoder."
+                    });
+                    ui.end_row();
+
+                    ui.label("Limits");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.low_limit)
+                                .range(-32_767..=0)
+                                .prefix("low "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.high_limit)
+                                .range(0..=32_767)
+                                .prefix("high "),
+                        );
+                    })
+                    .response
+                    .on_hover_text(
+                        "The counter is signed 16-bit. Reaching a limit CLEARS it and \
+                         raises an event - which is how a count wider than 16 bits is \
+                         accumulated.",
+                    );
+                    ui.end_row();
+
+                    ui.label("Glitch filter");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.filter)
+                                .range(0..=1023)
+                                .suffix(" APB clocks"),
+                        );
+                        if cfg.filter == 0 {
+                            ui.label(
+                                egui::RichText::new("off")
+                                    .size(11.0)
+                                    .color(egui::Color32::GRAY),
+                            );
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Pulses shorter than this are ignored - the difference between \
+                         counting a contact bounce once and counting it eight times. The \
+                         hardware caps it at 1023.",
+                    );
+                    ui.end_row();
+                }
                 ModuleConfig::Rmt(cfg) => {
                     ui.label("Direction");
                     let dirs = RmtDirection::options(family, cfg.instance);

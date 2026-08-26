@@ -42,8 +42,8 @@ use super::codegen::dma_map::DmaUse;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
 use super::mcu_def::DmaDef;
 use super::modules::{
-    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, RmtModuleConfig, SpiModuleConfig,
-    TimerModuleConfig, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, PcntModuleConfig, RmtModuleConfig,
+    SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -153,6 +153,7 @@ pub fn fresh_esp32c3_main_rs(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     i2s: &BTreeMap<u8, I2sModuleConfig>,
     rmt: &BTreeMap<u8, RmtModuleConfig>,
+    pcnt: &BTreeMap<u8, PcntModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -171,6 +172,7 @@ pub fn fresh_esp32c3_main_rs(
         i2c,
         i2s,
         rmt,
+        pcnt,
         timer,
         custom_inits,
         chip,
@@ -196,6 +198,7 @@ pub fn update_esp32c3_main_rs(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     i2s: &BTreeMap<u8, I2sModuleConfig>,
     rmt: &BTreeMap<u8, RmtModuleConfig>,
+    pcnt: &BTreeMap<u8, PcntModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -214,6 +217,7 @@ pub fn update_esp32c3_main_rs(
         i2c,
         i2s,
         rmt,
+        pcnt,
         timer,
         custom_inits,
         chip,
@@ -332,6 +336,7 @@ fn make_gen_section(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     i2s: &BTreeMap<u8, I2sModuleConfig>,
     rmt: &BTreeMap<u8, RmtModuleConfig>,
+    pcnt: &BTreeMap<u8, PcntModuleConfig>,
     // PWM (LEDC) module settings, keyed by LEDC timer.
     timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
@@ -397,8 +402,12 @@ fn make_gen_section(
     let has_rmt = configured
         .iter()
         .any(|p| matches!(p.selected_function, PinFunction::RmtChannel(..)));
+    let has_pcnt = configured
+        .iter()
+        .any(|p| matches!(p.selected_function, PinFunction::PcntEdge(..)));
     let use_block = build_use_block(
-        has_output, has_input, has_adc, has_uart, has_spi, has_i2c, has_pwm, has_rmt, runtime,
+        has_output, has_input, has_adc, has_uart, has_spi, has_i2c, has_pwm, has_rmt, has_pcnt,
+        runtime,
     );
 
     // ── fn main() body ────────────────────────────────────────────────────────
@@ -502,6 +511,7 @@ fn make_gen_section(
         i2c,
         i2s,
         rmt,
+        pcnt,
         crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(chip),
         runtime,
         &dma_plan,
@@ -609,7 +619,7 @@ fn make_default_gen_section(clock: &ClockConfig, chip: &str, runtime: EspRuntime
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n",
         use_block = build_use_block(
-            false, false, false, false, false, false, false, false, runtime,
+            false, false, false, false, false, false, false, false, false, runtime,
         ),
         entry = runtime.entry(),
         init = esp_init_line(clock, chip),
@@ -628,6 +638,7 @@ fn build_use_block(
     has_i2c: bool,
     has_pwm: bool,
     has_rmt: bool,
+    has_pcnt: bool,
     runtime: EspRuntime,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -671,6 +682,10 @@ fn build_use_block(
     if has_rmt {
         lines.push("use esp_hal::rmt::Rmt;".into());
         lines.push("use esp_hal::time::Rate;".into());
+    }
+    // And once more for the pulse counter: one block, units as fields.
+    if has_pcnt {
+        lines.push("use esp_hal::pcnt::Pcnt;".into());
     }
     // No bus imports: UART/SPI/I2C are built inside `pins/configs/<bus>.rs`, and
     // `main.rs` only hands them peripherals it already has in scope.
@@ -766,6 +781,42 @@ fn collect_rmt<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, &'a Pin> {
             PinFunction::RmtChannel(n) => Some((n, *p)),
             _ => None,
         })
+        .collect()
+}
+
+/// The PCNT units the canvas wires: the edge pad, and the ctrl pad if there is
+/// one.
+///
+/// Keyed by UNIT. The edge pad is what makes a unit exist here — a ctrl pad on
+/// its own counts nothing, and the module requires the edge signal, so this
+/// keeps only the units that have one.
+fn collect_pcnt<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, (&'a Pin, Option<&'a Pin>)> {
+    let mut edge: BTreeMap<u8, &Pin> = BTreeMap::new();
+    let mut ctrl: BTreeMap<u8, &Pin> = BTreeMap::new();
+    for p in configured {
+        match p.selected_function {
+            PinFunction::PcntEdge(n) => {
+                edge.insert(n, *p);
+            }
+            PinFunction::PcntCtrl(n) => {
+                ctrl.insert(n, *p);
+            }
+            _ => {}
+        }
+    }
+    edge.into_iter()
+        .map(|(n, e)| (n, (e, ctrl.get(&n).copied())))
+        .collect()
+}
+
+/// `(unit, has a control pad)` for every wired PCNT unit.
+///
+/// The config-file list and `main.rs` are built from this same answer, so the
+/// generated `init` can never take a `ctrl` argument the call does not pass.
+pub(crate) fn pcnt_units_wired(configured: &[&Pin]) -> Vec<(u8, bool)> {
+    collect_pcnt(configured)
+        .into_iter()
+        .map(|(n, (_, c))| (n, c.is_some()))
         .collect()
 }
 
@@ -962,6 +1013,7 @@ fn bus_sections(
     i2c_cfg: &BTreeMap<u8, I2cModuleConfig>,
     i2s_cfg: &BTreeMap<u8, I2sModuleConfig>,
     rmt_cfg: &BTreeMap<u8, RmtModuleConfig>,
+    pcnt_cfg: &BTreeMap<u8, PcntModuleConfig>,
     // The RMT source clock, which `Rmt::new` takes as an argument.
     rmt_hz: u32,
     runtime: EspRuntime,
@@ -1135,6 +1187,41 @@ fn bus_sections(
         }
         out.push(("RMT".to_owned(), body));
     }
+    // PCNT, the same shape again: one `Pcnt::new` for the chip, then one unit
+    // lent to each config module.
+    let pcnt = collect_pcnt(configured);
+    if !pcnt.is_empty() {
+        let mut body = String::from("    let pcnt = Pcnt::new(peripherals.PCNT);\n");
+        for (n, (edge, ctrl)) in &pcnt {
+            let sfx = pcnt_cfg
+                .get(n)
+                .map(|c| module_label_sfx(&c.custom_label))
+                .unwrap_or_default();
+            let ev = esp_binding(edge);
+            body.push_str(&format!(
+                "    let {ev} = peripherals.{gpio}; // {label}\n",
+                gpio = edge.name,
+                label = edge.selected_function.label(),
+            ));
+            let mut args = vec![ev];
+            if let Some(c) = ctrl {
+                let cv = esp_binding(c);
+                body.push_str(&format!(
+                    "    let {cv} = peripherals.{gpio}; // {label}\n",
+                    gpio = c.name,
+                    label = c.selected_function.label(),
+                ));
+                args.push(cv);
+            }
+            body.push_str(&format!(
+                "    let {handle} =\n\
+                 \x20       pins::configs::pcnt{n}::init(pcnt.unit{n}, {});\n",
+                args.join(", "),
+                handle = format!("_pcnt{n}{sfx}"),
+            ));
+        }
+        out.push(("PCNT".to_owned(), body));
+    }
     out
 }
 
@@ -1195,6 +1282,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &timer,
             "",
             "esp32c3",
@@ -1244,6 +1332,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1284,6 +1373,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_pcnt() -> BTreeMap<u8, PcntModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1298,6 +1391,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1324,6 +1418,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1350,6 +1445,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1373,6 +1469,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1391,6 +1488,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1418,6 +1516,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1447,6 +1546,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1484,6 +1584,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1528,6 +1629,7 @@ mod tests {
                 &no_i2c(),
                 &no_i2s(),
                 &no_rmt(),
+                &no_pcnt(),
                 &Default::default(),
                 "",
                 "esp32c3",
@@ -1606,6 +1708,7 @@ mod tests {
             &no_i2c(),
             &no_i2s(),
             &no_rmt(),
+            &no_pcnt(),
             &Default::default(),
             "",
             "esp32c3",

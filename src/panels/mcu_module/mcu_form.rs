@@ -860,6 +860,8 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             .map(|channel| PinFunction::DacOut { dac: n, channel }),
         "i2s" => match tail {
             "rmt" => Some(PinFunction::RmtChannel(n)),
+            "pcnt_edge" => Some(PinFunction::PcntEdge(n)),
+            "pcnt_ctrl" => Some(PinFunction::PcntCtrl(n)),
             "ck" => Some(PinFunction::I2sCk(n)),
             "ws" => Some(PinFunction::I2sWs(n)),
             "sd" => Some(PinFunction::I2sSd(n)),
@@ -954,6 +956,8 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SaiFs { sai, block } => format!("sai{sai}_{}_fs", sai_letter(*block)),
         PinFunction::SaiMclk { sai, block } => format!("sai{sai}_{}_mclk", sai_letter(*block)),
         PinFunction::RmtChannel(n) => format!("rmt{n}"),
+        PinFunction::PcntEdge(n) => format!("pcnt{n}_edge"),
+        PinFunction::PcntCtrl(n) => format!("pcnt{n}_ctrl"),
         PinFunction::I2sCk(n) => format!("i2s{n}_ck"),
         PinFunction::I2sWs(n) => format!("i2s{n}_ws"),
         PinFunction::I2sSd(n) => format!("i2s{n}_sd"),

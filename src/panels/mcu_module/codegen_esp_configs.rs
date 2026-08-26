@@ -38,7 +38,8 @@
 use super::codegen_esp::EspRuntime;
 use super::modules::{
     AsyncBusMode, I2cModuleConfig, I2sDirection, I2sFormat, I2sModuleConfig, I2sStandard, Parity,
-    RmtModuleConfig, SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
+    PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, StopBits, TimerModuleConfig,
+    UsartModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -655,6 +656,130 @@ fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime)
     )
 }
 
+// ── PCNT ────────────────────────────────────────────────────────────────────
+
+/// One PCNT unit: its limits, its filter, and what each edge means.
+///
+/// # It hands the unit back
+///
+/// Unlike the buses, there is no driver object to keep — the unit IS the
+/// handle, and `main.rs` reads the count off it with `.counter.get()`. So
+/// `init` takes the unit, configures it, and returns it.
+///
+/// # Only channel 0
+///
+/// A unit has two channels and wiring both is how a quadrature encoder is
+/// counted four times per cycle instead of twice. The module wires one; the
+/// second is a signal to add, not a limit of the hardware.
+fn pcnt_file(n: u8, has_ctrl: bool, cfg: Option<&PcntModuleConfig>, rt: EspRuntime) -> String {
+    let d = PcntModuleConfig::new(n);
+    let c = cfg.unwrap_or(&d);
+    let consts = format!(
+        "const LOW_LIMIT: i16 = {};\n\
+         const HIGH_LIMIT: i16 = {};\n\
+         {}",
+        c.low_limit,
+        c.high_limit,
+        if c.filter > 0 {
+            format!(
+                "// Pulses shorter than this many APB clocks are ignored.\n\
+                 const FILTER: u16 = {};\n",
+                c.filter,
+            )
+        } else {
+            String::new()
+        },
+    );
+
+    let ctrl_param = if has_ctrl {
+        "\x20   ctrl: impl PeripheralInput<'d>,\n"
+    } else {
+        ""
+    };
+    let mut steps = String::from(
+        "\x20   unit.set_low_limit(Some(LOW_LIMIT)).unwrap();\n\
+         \x20   unit.set_high_limit(Some(HIGH_LIMIT)).unwrap();\n",
+    );
+    if c.filter > 0 {
+        steps.push_str("\x20   unit.set_filter(Some(FILTER)).unwrap();\n");
+    }
+    steps.push_str(
+        "\x20   unit.clear();\n\
+         \n\
+         \x20   let channel = &unit.channel0;\n\
+         \x20   channel.set_edge_signal(edge);\n",
+    );
+    if has_ctrl {
+        steps.push_str("\x20   channel.set_ctrl_signal(ctrl);\n");
+    }
+    // The vendor's own argument order, and it is NOT the obvious one:
+    // `set_input_mode` takes the FALLING edge first.
+    steps.push_str(&format!(
+        "\x20   channel.set_input_mode(EdgeMode::{}, EdgeMode::{}); // (falling, rising)\n",
+        c.neg_edge.esp_hal(),
+        c.pos_edge.esp_hal(),
+    ));
+    if has_ctrl {
+        steps.push_str(&format!(
+            "\x20   channel.set_ctrl_mode(CtrlMode::{}, CtrlMode::{}); // (low, high)\n",
+            c.ctrl_low.esp_hal(),
+            c.ctrl_high.esp_hal(),
+        ));
+    }
+
+    let body = format!(
+        "/// PCNT unit {n} — a hardware pulse counter.\n\
+         ///\n\
+         /// `main.rs` builds the one `Pcnt` and lends this unit in; it comes back\n\
+         /// configured, and the count is read off `.counter`.\n\
+         pub fn init<'d, const U: usize>(\n\
+         \x20   unit: Unit<'d, U>,\n\
+         \x20   edge: impl PeripheralInput<'d>,\n\
+         {ctrl_param}) -> Unit<'d, U> {{\n\
+         {steps}\x20   unit\n\
+         }}\n"
+    );
+
+    let example = example_for(
+        &format!("Using PCNT unit {n}"),
+        &format!("_pcnt{n}"),
+        &[
+            "The counter runs on its own; read it whenever you like:",
+            "",
+            "    let count = {H}.counter.get();",
+            "",
+            "    // Start again from zero - `clear` is on the UNIT",
+            "    {H}.clear();",
+            "",
+            "// Reaching a limit CLEARS the counter and raises an event, so a",
+            "// total wider than 16 bits is accumulated by listening for it.",
+        ],
+        &[
+            "The counter runs on its own; read it between .awaits:",
+            "",
+            "    let count = {H}.counter.get();",
+            "    {H}.clear();",
+        ],
+        rt,
+    );
+
+    file(
+        &format!(
+            "use esp_hal::gpio::interconnect::PeripheralInput;\n\
+             use esp_hal::pcnt::channel::{{{}}};\n\
+             use esp_hal::pcnt::unit::Unit;\n",
+            if has_ctrl {
+                "CtrlMode, EdgeMode"
+            } else {
+                "EdgeMode"
+            },
+        ),
+        &consts,
+        &body,
+        &example,
+    )
+}
+
 // ── RMT ─────────────────────────────────────────────────────────────────────
 
 /// One RMT channel, in the direction that channel has.
@@ -1199,6 +1324,10 @@ pub fn config_files(
     rmt: &[u8],
     rmt_cfg: &BTreeMap<u8, RmtModuleConfig>,
     rmt_hz: u32,
+    // `(unit, has a control pad)` — the second decides whether `init` takes a
+    // ctrl argument at all.
+    pcnt: &[(u8, bool)],
+    pcnt_cfg: &BTreeMap<u8, PcntModuleConfig>,
     // LEDC timer → the channels wired on it, with each channel duty in
     // hundredths of a percent.
     pwm: &[(u8, Vec<(u8, u16)>)],
@@ -1225,6 +1354,12 @@ pub fn config_files(
         out.push((
             format!("rmt{n}.rs"),
             rmt_file(*n, rmt_cfg.get(n), rt, rmt_hz),
+        ));
+    }
+    for (n, has_ctrl) in pcnt {
+        out.push((
+            format!("pcnt{n}.rs"),
+            pcnt_file(*n, *has_ctrl, pcnt_cfg.get(n), rt),
         ));
     }
     for (n, chans) in pwm {
@@ -1486,6 +1621,8 @@ mod tests {
             &[2],
             &BTreeMap::new(),
             80_000_000,
+            &[(1, true)],
+            &BTreeMap::new(),
             &[(0, vec![(1, 2_000)])],
             &BTreeMap::new(),
             EspRuntime::Blocking,
@@ -1494,7 +1631,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "uart1.rs", "spi2.rs", "i2c0.rs", "i2s0.rs", "rmt2.rs", "pwm0.rs"
+                "uart1.rs", "spi2.rs", "i2c0.rs", "i2s0.rs", "rmt2.rs", "pcnt1.rs", "pwm0.rs"
             ]
         );
     }

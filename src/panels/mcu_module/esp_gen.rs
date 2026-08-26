@@ -719,6 +719,22 @@ fn drives(f: &PinFunction) -> bool {
     )
 }
 
+/// How many PCNT units this chip has, or none.
+///
+/// Not in the metadata at any depth: the vendor lists the `PCNT` block and
+/// stops, so the count comes from esp-hal's own `#[cfg]` — `pcnt::Pcnt` has
+/// four units and four more behind `#[cfg(esp32)]`. That is the number the
+/// generated `pcnt.unitN` has to match, which makes it the right source even
+/// though a datasheet would say the same.
+///
+/// Zero without the driver: the C2, C3 and C61 have no `pcnt` module at all.
+pub(crate) fn pcnt_units(chip: &EspChip) -> u8 {
+    if !chip.drivers.iter().any(|d| d == "pcnt") {
+        return 0;
+    }
+    if chip.id == "esp32" { 8 } else { 4 }
+}
+
 /// How many RMT channels this chip has, or none.
 ///
 /// From the vendor's own channel list — see [`EspChip::rmt_channels`].
@@ -844,6 +860,13 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
     // are what the generated code names.
     for ch in 0..rmt_channels(chip) {
         out.push(PinFunction::RmtChannel(ch));
+    }
+
+    // PCNT. The two pads of a unit are both INPUTS, so an input-only pad keeps
+    // them — see the `drives` filter at the end.
+    for u in 0..pcnt_units(chip) {
+        out.push(PinFunction::PcntEdge(u));
+        out.push(PinFunction::PcntCtrl(u));
     }
 
     // TWAI is Espressif's CAN. Unnumbered here because `CanTx`/`CanRx` are, and

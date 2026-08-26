@@ -3021,6 +3021,11 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         // the other push-pull outputs so the match stays total rather than
         // reaching a panic that could never fire.
         PinFunction::RmtChannel(..) => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        // PCNT reads, so its two pads are inputs — again unreachable on an
+        // STM32, and again grouped rather than left to a panic.
+        PinFunction::PcntEdge(..) | PinFunction::PcntCtrl(..) => {
+            format!("into_floating_input(&mut {pv}.{crx})")
+        }
         // The F1 backend has no I2S codegen; the pads still take the alternate
         // function so the pin is at least in the right mode.
         PinFunction::I2sCk(_)

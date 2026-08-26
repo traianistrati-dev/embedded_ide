@@ -423,6 +423,44 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::PcntEdge(n) | PinFunction::PcntCtrl(n) => {
+                let ctrl = matches!(self, PinFunction::PcntCtrl(_));
+                FunctionInfo {
+                    description: format!(
+                        "PCNT unit {n} — {}. A hardware pulse counter: it follows edges on                          its own, with a glitch filter and high/low limits that raise an                          interrupt, so nothing has to be polled. What reads a flow meter, a                          tachometer or a rotary encoder.",
+                        if ctrl {
+                            "the CONTROL input, which modifies the counting"
+                        } else {
+                            "the pulses being counted"
+                        }
+                    ),
+                    specs: vec![
+                        if ctrl {
+                            (
+                                "What it does".into(),
+                                "Its LEVEL decides what an edge means: keep counting the same                                  way, reverse, or ignore it. Wire an encoder's B phase here                                  and its A phase to the edge input, and the unit follows                                  direction by itself."
+                                    .into(),
+                            )
+                        } else {
+                            (
+                                "What it does".into(),
+                                "Every rising or falling edge here moves the counter — up,                                  down or not at all, as the module says. Nothing needs to                                  read the pin."
+                                    .into(),
+                            )
+                        },
+                        (
+                            "Limits".into(),
+                            "The counter is 16-bit and signed. Reaching either limit resets                              it and raises an event, which is how a count larger than 16                              bits gets accumulated."
+                                .into(),
+                        ),
+                        (
+                            "Filter".into(),
+                            "Pulses shorter than the filter are ignored — the difference                              between counting a contact bounce once and counting it eight                              times."
+                                .into(),
+                        ),
+                    ],
+                }
+            }
             PinFunction::RmtChannel(n) => FunctionInfo {
                 description: format!(
                     "RMT channel {n}. A pulse-train engine, not a bus: you hand it a list of                      (level, duration) pairs and the hardware clocks every edge out — or                      samples them in — without the CPU timing anything. This is what drives                      an IR remote, a WS2812 strip or a 1-Wire line."

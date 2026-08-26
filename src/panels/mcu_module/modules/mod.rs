@@ -15,12 +15,13 @@ pub use model::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakInputConfig, BreakPolarity, CanModuleConfig,
     Connection, DacModuleConfig, HspiMode, HspiModuleConfig, I2cModuleConfig, I2sClockPolarity,
     I2sDirection, I2sFormat, I2sMode, I2sModuleConfig, I2sStandard, ModuleConfig, ModuleKind,
-    ModuleSignal, OspiMemoryType, OspiMode, OspiModuleConfig, Parity, PwmChannelConfig,
-    PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize,
-    QspiModuleConfig, RmtDirection, RmtModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode,
-    SaiModuleConfig, SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig,
-    StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig,
-    UsbModuleConfig, VirtualModule, XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,
+    ModuleSignal, OspiMemoryType, OspiMode, OspiModuleConfig, Parity, PcntCtrlMode, PcntEdgeMode,
+    PcntModuleConfig, PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
+    QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, RmtDirection, RmtModuleConfig,
+    SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx,
+    SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection,
+    UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, VirtualModule, XspiMemoryType,
+    XspiMode, XspiModuleConfig, module_signal_of,
 };
 
 use std::collections::BTreeMap;
@@ -69,6 +70,17 @@ pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Spi(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// PCNT module configs keyed by UNIT — the instance is the unit here.
+pub fn pcnt_configs(modules: &[VirtualModule]) -> BTreeMap<u8, PcntModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Pcnt(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

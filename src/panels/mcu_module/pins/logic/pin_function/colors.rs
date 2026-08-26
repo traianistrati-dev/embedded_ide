@@ -26,6 +26,11 @@ impl PinFunction {
             // RMT drives edges, not data — a warm amber of its own, away from
             // both the buses and the PWM orange it is most easily confused with.
             PinFunction::RmtChannel(..) => egui::Color32::from_rgb(200, 150, 60),
+            // PCNT counts edges rather than driving them — a cooler green,
+            // apart from RMT's amber and from the GPIO-input green.
+            PinFunction::PcntEdge(..) | PinFunction::PcntCtrl(..) => {
+                egui::Color32::from_rgb(90, 175, 140)
+            }
             // Audio too, but a deeper blue: SAI is the bigger, multi-block one.
             PinFunction::SaiSck { .. }
             | PinFunction::SaiSd { .. }

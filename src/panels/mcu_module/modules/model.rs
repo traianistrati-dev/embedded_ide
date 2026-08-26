@@ -69,6 +69,17 @@ pub enum ModuleKind {
     /// `GI_SPI 2` and a `GI_I2S 2` describe the same silicon and only one of
     /// them can be built.
     GenericInterfaceI2s,
+    /// A hardware pulse counter — "PCNT".
+    ///
+    /// Espressif only. The instance is a UNIT: a chip has one PCNT block with
+    /// four units (eight on the original ESP32), each an independent counter
+    /// with its own limits and filter. `Pcnt::new` is called once in `main.rs`
+    /// and lends each unit out, the same way the RMT lends a channel.
+    ///
+    /// Only the unit's FIRST channel is wired here. A unit has two, and using
+    /// both is how an encoder is counted four times per cycle instead of twice
+    /// — a later addition, not a limit of the hardware.
+    GenericInterfacePcnt,
     /// A pulse train on one RMT channel — "RMT".
     ///
     /// Espressif only, and unlike every other kind here the instance is a
@@ -99,13 +110,14 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 17] = [
+    pub const ALL: [ModuleKind; 18] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
         ModuleKind::GenericInterfaceI2c,
         ModuleKind::GenericInterfaceI2s,
         ModuleKind::GenericInterfaceRmt,
+        ModuleKind::GenericInterfacePcnt,
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceSdmmc,
         ModuleKind::GenericInterfaceQspi,
@@ -149,6 +161,9 @@ impl ModuleKind {
             // One wire, and it is required: an RMT channel with no pin
             // has nothing to clock a train onto.
             ModuleKind::GenericInterfaceRmt => (&[RmtLine], &[]),
+            // The edge input is the counter; the control input is what
+            // turns it into an encoder, and plenty of uses do not want one.
+            ModuleKind::GenericInterfacePcnt => (&[PcntEdgeSig], &[PcntCtrlSig]),
             // One channel, like the PWM module: taking the second pad by
             // default would spend a pin on a DAC the user added for one.
             ModuleKind::GenericInterfaceDac => (&[DacOut1], &[]),
@@ -204,6 +219,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2c => "I2C",
             ModuleKind::GenericInterfaceI2s => "I2S",
             ModuleKind::GenericInterfaceRmt => "RMT",
+            ModuleKind::GenericInterfacePcnt => "PCNT",
             ModuleKind::GenericInterfaceDac => "DAC",
             ModuleKind::GenericInterfaceSai => "SAI",
             ModuleKind::GenericInterfaceSdmmc => "SDMMC",
@@ -234,6 +250,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceI2s => ModuleConfig::I2s(I2sModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceRmt => ModuleConfig::Rmt(RmtModuleConfig::new(instance)),
+            ModuleKind::GenericInterfacePcnt => ModuleConfig::Pcnt(PcntModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceDac => ModuleConfig::Dac(DacModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceSai => ModuleConfig::Sai(SaiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceSdmmc => {
@@ -307,6 +324,8 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::I2cScl(n) => (GenericInterfaceI2c, *n, Scl),
         PinFunction::I2cSda(n) => (GenericInterfaceI2c, *n, Sda),
         PinFunction::RmtChannel(n) => (GenericInterfaceRmt, *n, RmtLine),
+        PinFunction::PcntEdge(n) => (GenericInterfacePcnt, *n, PcntEdgeSig),
+        PinFunction::PcntCtrl(n) => (GenericInterfacePcnt, *n, PcntCtrlSig),
         PinFunction::I2sCk(n) => (GenericInterfaceI2s, *n, I2sCk),
         PinFunction::I2sWs(n) => (GenericInterfaceI2s, *n, I2sWs),
         PinFunction::I2sSd(n) => (GenericInterfaceI2s, *n, I2sSd),
@@ -502,6 +521,11 @@ pub enum ModuleSignal {
     /// a receive one. One name for both, because it is one pad either way and
     /// the direction belongs to the channel.
     RmtLine,
+    // PCNT
+    /// The pulses being counted.
+    PcntEdgeSig,
+    /// The level that decides what each edge means.
+    PcntCtrlSig,
     // DAC — one pad per channel, nothing shared but the block.
     DacOut1,
     DacOut2,
@@ -623,6 +647,8 @@ impl ModuleSignal {
     pub fn label(self) -> &'static str {
         match self {
             ModuleSignal::RmtLine => "RMT",
+            ModuleSignal::PcntEdgeSig => "EDGE",
+            ModuleSignal::PcntCtrlSig => "CTRL",
             ModuleSignal::Tx => "TX",
             ModuleSignal::Rx => "RX",
             ModuleSignal::Cts => "CTS",
@@ -746,6 +772,8 @@ impl ModuleSignal {
     pub fn pin_function(self, instance: u8) -> PinFunction {
         match self {
             ModuleSignal::RmtLine => PinFunction::RmtChannel(instance),
+            ModuleSignal::PcntEdgeSig => PinFunction::PcntEdge(instance),
+            ModuleSignal::PcntCtrlSig => PinFunction::PcntCtrl(instance),
             ModuleSignal::Tx => PinFunction::UsartTx(instance),
             ModuleSignal::Rx => PinFunction::UsartRx(instance),
             ModuleSignal::Cts => PinFunction::UsartCts(instance),
@@ -3244,6 +3272,121 @@ pub struct RmtModuleConfig {
     pub custom_label: String,
 }
 
+/// What an edge on the counting input does.
+///
+/// esp-hal's own three, from the PAC: hold, count up, count down. Set per EDGE,
+/// so a counter can follow only rising edges, or both for twice the resolution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PcntEdgeMode {
+    /// Ignore this edge.
+    #[default]
+    Hold,
+    Increment,
+    Decrement,
+}
+
+impl PcntEdgeMode {
+    pub const ALL: [Self; 3] = [Self::Hold, Self::Increment, Self::Decrement];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hold => "Ignore",
+            Self::Increment => "Count up",
+            Self::Decrement => "Count down",
+        }
+    }
+
+    /// The esp-hal variant name.
+    pub fn esp_hal(self) -> &'static str {
+        match self {
+            Self::Hold => "Hold",
+            Self::Increment => "Increment",
+            Self::Decrement => "Decrement",
+        }
+    }
+}
+
+/// What the control input's LEVEL does to the counting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PcntCtrlMode {
+    /// Count as the edge modes say.
+    #[default]
+    Keep,
+    /// Swap up for down — this is what makes an encoder follow direction.
+    Reverse,
+    /// Ignore edges entirely while the control input is at this level.
+    Disable,
+}
+
+impl PcntCtrlMode {
+    pub const ALL: [Self; 3] = [Self::Keep, Self::Reverse, Self::Disable];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Keep => "Keep",
+            Self::Reverse => "Reverse",
+            Self::Disable => "Ignore edges",
+        }
+    }
+
+    pub fn esp_hal(self) -> &'static str {
+        match self {
+            Self::Keep => "Keep",
+            Self::Reverse => "Reverse",
+            Self::Disable => "Disable",
+        }
+    }
+}
+
+/// One PCNT unit: what its edges mean, where it wraps, and how much noise it
+/// ignores.
+///
+/// The counter is SIGNED 16-BIT and that is the hardware, not a choice here:
+/// the limits are what an accumulator larger than that is built out of, because
+/// reaching one resets the count and raises an event.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PcntModuleConfig {
+    /// The unit number — `pcnt.unit0` and so on.
+    pub instance: u8,
+    /// Counting bound. Reaching it clears the counter and raises an event.
+    pub low_limit: i16,
+    pub high_limit: i16,
+    /// Pulses shorter than this many APB clocks are ignored. 0 turns the filter
+    /// off; the hardware caps it at 1023.
+    pub filter: u16,
+    pub pos_edge: PcntEdgeMode,
+    pub neg_edge: PcntEdgeMode,
+    /// What the control input does at each level. Ignored when no control pad
+    /// is wired.
+    pub ctrl_low: PcntCtrlMode,
+    pub ctrl_high: PcntCtrlMode,
+    pub rx_model: String,
+    pub tx_model: String,
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl PcntModuleConfig {
+    /// Defaults: count up on the rising edge, +/-32767, no filter — a plain
+    /// pulse counter. Adding a control pad and setting one level to `Reverse`
+    /// is what turns it into an encoder.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            low_limit: -32_768 + 1,
+            high_limit: 32_767,
+            filter: 0,
+            pos_edge: PcntEdgeMode::Increment,
+            neg_edge: PcntEdgeMode::Hold,
+            ctrl_low: PcntCtrlMode::Keep,
+            ctrl_high: PcntCtrlMode::Keep,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+}
+
 impl RmtModuleConfig {
     /// Defaults: transmit, divider 1 (the finest resolution the channel has),
     /// no carrier, and an idle threshold long enough for a typical IR frame.
@@ -3425,6 +3568,7 @@ pub enum ModuleConfig {
     I2c(I2cModuleConfig),
     I2s(I2sModuleConfig),
     Rmt(RmtModuleConfig),
+    Pcnt(PcntModuleConfig),
     Dac(DacModuleConfig),
     Sai(SaiModuleConfig),
     Sdmmc(SdmmcModuleConfig),
@@ -3453,6 +3597,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => c.instance,
             ModuleConfig::Xspi(c) => c.instance,
             ModuleConfig::Hspi(c) => c.instance,
+            ModuleConfig::Pcnt(c) => c.instance,
             ModuleConfig::Rmt(c) => c.instance,
             ModuleConfig::Timer(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
@@ -3474,6 +3619,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.rx_model,
             ModuleConfig::Xspi(c) => &c.rx_model,
             ModuleConfig::Hspi(c) => &c.rx_model,
+            ModuleConfig::Pcnt(c) => &c.rx_model,
             ModuleConfig::Rmt(c) => &c.rx_model,
             ModuleConfig::Timer(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
@@ -3495,6 +3641,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.tx_model,
             ModuleConfig::Xspi(c) => &c.tx_model,
             ModuleConfig::Hspi(c) => &c.tx_model,
+            ModuleConfig::Pcnt(c) => &c.tx_model,
             ModuleConfig::Rmt(c) => &c.tx_model,
             ModuleConfig::Timer(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
@@ -3516,6 +3663,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.rx_model,
             ModuleConfig::Xspi(c) => &mut c.rx_model,
             ModuleConfig::Hspi(c) => &mut c.rx_model,
+            ModuleConfig::Pcnt(c) => &mut c.rx_model,
             ModuleConfig::Rmt(c) => &mut c.rx_model,
             ModuleConfig::Timer(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
@@ -3537,6 +3685,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.tx_model,
             ModuleConfig::Xspi(c) => &mut c.tx_model,
             ModuleConfig::Hspi(c) => &mut c.tx_model,
+            ModuleConfig::Pcnt(c) => &mut c.tx_model,
             ModuleConfig::Rmt(c) => &mut c.tx_model,
             ModuleConfig::Timer(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
@@ -3559,6 +3708,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.custom_label,
             ModuleConfig::Xspi(c) => &c.custom_label,
             ModuleConfig::Hspi(c) => &c.custom_label,
+            ModuleConfig::Pcnt(c) => &c.custom_label,
             ModuleConfig::Rmt(c) => &c.custom_label,
             ModuleConfig::Timer(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
@@ -3580,6 +3730,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.custom_label,
             ModuleConfig::Xspi(c) => &mut c.custom_label,
             ModuleConfig::Hspi(c) => &mut c.custom_label,
+            ModuleConfig::Pcnt(c) => &mut c.custom_label,
             ModuleConfig::Rmt(c) => &mut c.custom_label,
             ModuleConfig::Timer(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
@@ -3594,6 +3745,15 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => format!("USART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Lpuart(c) => format!("LPUART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Timer(c) => format!("TIM{}  ·  {}", c.instance, hz_label(c.freq_hz)),
+            ModuleConfig::Pcnt(c) => format!(
+                "PCNT{}  ·  {}",
+                c.instance,
+                if c.ctrl_low == PcntCtrlMode::Keep && c.ctrl_high == PcntCtrlMode::Keep {
+                    "counter"
+                } else {
+                    "encoder"
+                }
+            ),
             ModuleConfig::Rmt(c) => format!(
                 "RMT CH{}  ·  {}  ·  /{}",
                 c.instance,
@@ -3690,6 +3850,46 @@ impl VirtualModule {
     /// The peripheral instance this module targets.
     pub fn instance(&self) -> u8 {
         self.config.instance()
+    }
+}
+
+#[cfg(test)]
+mod pcnt_tests {
+    use super::{PcntCtrlMode, PcntEdgeMode, PcntModuleConfig};
+
+    /// The mode names must be esp-hal's, because they are pasted into the
+    /// generated `EdgeMode::…` / `CtrlMode::…` verbatim.
+    ///
+    /// The IDE's LABELS are deliberately different — "Count up" reads better in
+    /// a combo than "Increment" — which is exactly why the two are separate
+    /// methods and why this pins the second one.
+    #[test]
+    fn the_mode_names_are_the_ones_esp_hal_spells() {
+        assert_eq!(PcntEdgeMode::Hold.esp_hal(), "Hold");
+        assert_eq!(PcntEdgeMode::Increment.esp_hal(), "Increment");
+        assert_eq!(PcntEdgeMode::Decrement.esp_hal(), "Decrement");
+        assert_eq!(PcntCtrlMode::Keep.esp_hal(), "Keep");
+        assert_eq!(PcntCtrlMode::Reverse.esp_hal(), "Reverse");
+        // The IDE calls it "Ignore edges"; the PAC calls it `Disable`.
+        assert_eq!(PcntCtrlMode::Disable.esp_hal(), "Disable");
+        assert_eq!(PcntCtrlMode::Disable.label(), "Ignore edges");
+    }
+
+    /// A fresh unit is a plain counter, not an encoder.
+    ///
+    /// Counting up on the rising edge and doing nothing with the control input
+    /// is what someone adding a PCNT almost always wants first; turning it into
+    /// an encoder is one setting away, and the summary line says which it is.
+    #[test]
+    fn a_new_unit_counts_up_and_does_not_reverse() {
+        let c = PcntModuleConfig::new(0);
+        assert_eq!(c.pos_edge, PcntEdgeMode::Increment);
+        assert_eq!(c.neg_edge, PcntEdgeMode::Hold);
+        assert_eq!(c.ctrl_low, PcntCtrlMode::Keep);
+        assert_eq!(c.ctrl_high, PcntCtrlMode::Keep);
+        assert_eq!(c.filter, 0, "no filter until asked for");
+        // The counter is signed 16-bit, and the limits must fit in it.
+        assert!(c.low_limit > i16::MIN && c.high_limit == i16::MAX);
     }
 }
 

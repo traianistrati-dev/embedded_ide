@@ -183,6 +183,21 @@ pub enum PinFunction {
     /// I2S{n} master clock out — an oversampled clock for the codec, optional.
     I2sMck(u8),
 
+    // ── PCNT ────────────────────────────────────────────────────────────────
+    /// PCNT unit {n} — the pulses being counted.
+    ///
+    /// Espressif's pulse counter: a hardware counter that follows edges on this
+    /// pin without waking the CPU, with a glitch filter and limits that fire an
+    /// interrupt. What reads a flow meter, a tachometer or a rotary encoder.
+    PcntEdge(u8),
+    /// PCNT unit {n} — the control input that MODIFIES the counting.
+    ///
+    /// Optional, and what turns a counter into an encoder: its level decides
+    /// whether an edge counts up, counts down, or is ignored. Wire an encoder's
+    /// B phase here and its A phase to [`PinFunction::PcntEdge`], and the unit
+    /// follows direction on its own.
+    PcntCtrl(u8),
+
     // ── RMT ─────────────────────────────────────────────────────────────────
     /// RMT channel {n} — Espressif's Remote Control transceiver.
     ///

@@ -250,6 +250,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let i2c = modules::i2c_configs(&mcu.modules);
     let i2s = modules::i2s_configs(&mcu.modules);
     let rmt = modules::rmt_configs(&mcu.modules);
+    let pcnt = modules::pcnt_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::fresh_esp32c3_main_rs(
         &pins_of(mcu),
@@ -261,6 +262,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &i2c,
         &i2s,
         &rmt,
+        &pcnt,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -309,6 +311,8 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         &codegen_esp::rmt_channels_wired(&configured),
         &modules::rmt_configs(&mcu.modules),
         crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(&mcu.family),
+        &codegen_esp::pcnt_units_wired(&configured),
+        &modules::pcnt_configs(&mcu.modules),
         &pwm,
         &timers,
         runtime,
@@ -322,6 +326,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let i2c = modules::i2c_configs(&mcu.modules);
     let i2s = modules::i2s_configs(&mcu.modules);
     let rmt = modules::rmt_configs(&mcu.modules);
+    let pcnt = modules::pcnt_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::update_esp32c3_main_rs(
         existing,
@@ -334,6 +339,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &i2c,
         &i2s,
         &rmt,
+        &pcnt,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -1614,6 +1620,10 @@ mod tests {
             // different pad bound and a different `configure_*` call. Channel 2
             // is an RX channel on every part that splits them.
             PinFunction::RmtChannel(2),
+            // A PCNT unit with BOTH pads: the encoder shape, which is the one
+            // that emits `set_ctrl_signal` and `set_ctrl_mode`.
+            PinFunction::PcntEdge(0),
+            PinFunction::PcntCtrl(0),
         ];
         for p in mcu.iter_all_pins_mut() {
             if p.reserved || p.selected_function != PinFunction::Unset {
@@ -1634,6 +1644,25 @@ mod tests {
             name: "SPI2".into(),
             pos: (0.0, 0.0),
             config: ModuleConfig::Spi(spi_cfg),
+            connections: Vec::new(),
+        });
+        mcu.modules.push(VirtualModule {
+            id: "pcnt_0".into(),
+            kind: ModuleKind::GenericInterfacePcnt,
+            name: "PCNT0".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Pcnt({
+                use crate::panels::mcu_module::modules::{
+                    PcntCtrlMode, PcntEdgeMode, PcntModuleConfig,
+                };
+                let mut c = PcntModuleConfig::new(0);
+                // Both edges, direction from the control input, and a filter —
+                // every optional line the generator can emit.
+                c.neg_edge = PcntEdgeMode::Decrement;
+                c.ctrl_high = PcntCtrlMode::Reverse;
+                c.filter = 100;
+                c
+            }),
             connections: Vec::new(),
         });
         mcu.modules.push(VirtualModule {

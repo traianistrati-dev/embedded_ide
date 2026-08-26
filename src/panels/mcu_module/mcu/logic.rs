@@ -1282,6 +1282,10 @@ mod module_support_tests {
                 let want = !matches!(
                     kind,
                     ModuleKind::GenericInterfaceLpuart
+                        // PCNT is Espressif's, and neither built-in has it: no
+                        // STM32 does, and the ESP32-C3 is one of the three ESP
+                        // parts esp-hal gives no `pcnt` driver.
+                        | ModuleKind::GenericInterfacePcnt
                         | ModuleKind::GenericInterfaceSai
                         | ModuleKind::GenericInterfaceSdmmc
                         | ModuleKind::GenericInterfaceQspi
