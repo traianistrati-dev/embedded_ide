@@ -21,8 +21,9 @@ pub use model::{
     PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig,
     RmtDirection, RmtModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig,
     SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, SpiRole, StopBits,
-    TimerModuleConfig, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig,
-    UsbRole, VirtualModule, XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,
+    TimerModuleConfig, TouchModuleConfig, TouchScan, TouchThreshold, UsartDirection, UsartFlow,
+    UsartMode, UsartModuleConfig, UsbModuleConfig, UsbRole, VirtualModule, XspiMemoryType,
+    XspiMode, XspiModuleConfig, module_signal_of,
 };
 
 use std::collections::BTreeMap;
@@ -93,6 +94,17 @@ pub fn lcd_cam_configs(modules: &[VirtualModule]) -> BTreeMap<u8, LcdCamModuleCo
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::LcdCam(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// The touch module config, keyed by instance — of which there is one.
+pub fn touch_configs(modules: &[VirtualModule]) -> BTreeMap<u8, TouchModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Touch(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

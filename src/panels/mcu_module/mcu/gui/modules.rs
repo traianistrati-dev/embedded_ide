@@ -16,8 +16,8 @@ use crate::panels::mcu_module::modules::{
     ModuleSignal, OspiMemoryType, OspiMode, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoWidth,
     PcntCtrlMode, PcntEdgeMode, PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES,
     QspiAddressSize, RmtDirection, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder,
-    SpiRole, StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbRole,
-    VirtualModule, XspiMemoryType, XspiMode,
+    SpiRole, StopBits, TouchScan, TouchThreshold, UsartDirection, UsartFlow, UsartMode,
+    UsartModuleConfig, UsbRole, VirtualModule, XspiMemoryType, XspiMode,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -285,6 +285,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfacePcnt => PinFunction::PcntEdge(instance),
         ModuleKind::GenericInterfaceParlIo => PinFunction::ParlData { lane: 0 },
         ModuleKind::GenericInterfaceLcdCam => PinFunction::LcdCamData { lane: 0 },
+        ModuleKind::GenericInterfaceTouch => PinFunction::TouchPad(0),
         ModuleKind::GenericInterfaceMcpwm => PinFunction::McpwmA {
             unit: instance,
             operator: 0,
@@ -454,6 +455,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         // The port is one driver, whatever the bus is wide.
         ModuleKind::GenericInterfaceParlIo => format!("_parl{sfx}"),
         ModuleKind::GenericInterfaceLcdCam => format!("_lcd{sfx}"),
+        ModuleKind::GenericInterfaceTouch => format!("_touch{sfx}"),
         // One handle per OUTPUT: each is its own `PwmPin`, and they are set
         // independently. The list is built from what is wired, so an
         // operator with only A gives one name.
@@ -1516,6 +1518,63 @@ pub fn module_config_ui(
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
             match &mut m.config {
+                ModuleConfig::Touch(cfg) => {
+                    ui.label("Scan");
+                    egui::ComboBox::from_id_salt("touchscan")
+                        .selected_text(cfg.scan.label())
+                        .show_ui(ui, |ui| {
+                            for v in TouchScan::ALL {
+                                ui.selectable_value(&mut cfg.scan, v, v.label())
+                                    .on_hover_text(v.hint());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "The two are different TYPES in esp-hal, with different \
+                             methods - not a speed setting.",
+                        );
+                    ui.end_row();
+
+                    ui.label("Touched when");
+                    egui::ComboBox::from_id_salt("touchthr")
+                        .selected_text(cfg.threshold_mode.label())
+                        .show_ui(ui, |ui| {
+                            for v in TouchThreshold::ALL {
+                                ui.selectable_value(&mut cfg.threshold_mode, v, v.label());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "A finger adds capacitance, so the pad charges slower and the \
+                             count usually FALLS. Below-threshold is the normal choice.",
+                        );
+                    ui.end_row();
+
+                    ui.label("Threshold");
+                    ui.add(egui::DragValue::new(&mut cfg.threshold).range(1..=65535))
+                        .on_hover_text(
+                            "There is no right number here: read your own pad untouched, \
+                             then take a margin off it. One value for every pad - the \
+                             generated file takes it per pad if you need to differ.",
+                        );
+                    ui.end_row();
+
+                    ui.label("Measurement")
+                        .on_hover_text("Cycles of the 8 MHz touch clock, per measurement.");
+                    ui.add(
+                        egui::DragValue::new(&mut cfg.measurement_duration).range(1..=0x7fff),
+                    );
+                    ui.end_row();
+
+                    // The sleep timer only exists in continuous mode; showing it
+                    // in one-shot would be a control that changes nothing.
+                    if cfg.scan.is_continuous() {
+                        ui.label("Sleep cycles")
+                            .on_hover_text("Idle time between background measurements.");
+                        ui.add(egui::DragValue::new(&mut cfg.sleep_cycles).range(1..=0xffff));
+                        ui.end_row();
+                    }
+                }
                 ModuleConfig::LcdCam(cfg) => {
                     ui.label("Mode");
                     egui::ComboBox::from_id_salt("lcd_mode")

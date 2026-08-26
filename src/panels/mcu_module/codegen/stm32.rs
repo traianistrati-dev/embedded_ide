@@ -3013,7 +3013,12 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         }
         // An analog OUTPUT pad is still analog mode: the digital buffer is off
         // and the block drives the pin.
-        PinFunction::DacOut { .. } => format!("into_analog(&mut {pv}.{crx})"),
+        // Touch is Espressif's and no STM32 pad has it. Grouped with the
+        // analog pins rather than the outputs: a touch pad SENSES, so if
+        // one ever did, this is the mode it would want.
+        PinFunction::DacOut { .. } | PinFunction::TouchPad(..) => {
+            format!("into_analog(&mut {pv}.{crx})")
+        }
         // A break input is read, not driven — floating input, like any other
         // signal coming in from the board.
         PinFunction::TimerBreak { .. } => format!("into_floating_input(&mut {pv}.{crx})"),

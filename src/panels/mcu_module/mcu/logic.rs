@@ -1293,6 +1293,9 @@ mod module_support_tests {
                         // LCD_CAM is the ESP32-S3's alone, and neither built-in
                         // is one - so neither offers the pads.
                         | ModuleKind::GenericInterfaceLcdCam
+                        // Touch is the original ESP32's alone, for the same
+                        // reason: esp-hal builds no driver for the C3.
+                        | ModuleKind::GenericInterfaceTouch
                         | ModuleKind::GenericInterfaceSai
                         | ModuleKind::GenericInterfaceSdmmc
                         | ModuleKind::GenericInterfaceQspi

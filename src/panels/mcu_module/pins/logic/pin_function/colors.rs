@@ -26,6 +26,9 @@ impl PinFunction {
             // RMT drives edges, not data — a warm amber of its own, away from
             // both the buses and the PWM orange it is most easily confused with.
             PinFunction::RmtChannel(..) => egui::Color32::from_rgb(200, 150, 60),
+            // Touch is an ANALOG sense, so it sits with the analog family
+            // rather than the buses — a soft green, distinct from ADC's.
+            PinFunction::TouchPad(..) => egui::Color32::from_rgb(120, 180, 140),
             // LCD_CAM is a wide parallel bus like PARL_IO, and next to it in
             // kind — a violet, so a board that wires both can still be read.
             PinFunction::LcdCamData { .. }

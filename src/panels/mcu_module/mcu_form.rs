@@ -956,6 +956,7 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SaiFs { sai, block } => format!("sai{sai}_{}_fs", sai_letter(*block)),
         PinFunction::SaiMclk { sai, block } => format!("sai{sai}_{}_mclk", sai_letter(*block)),
         PinFunction::RmtChannel(n) => format!("rmt{n}"),
+        PinFunction::TouchPad(n) => format!("touch{n}"),
         PinFunction::LcdCamData { lane } => format!("lcd_d{lane}"),
         PinFunction::LcdCamDc => "lcd_dc".to_owned(),
         PinFunction::LcdCamWr => "lcd_wr".to_owned(),

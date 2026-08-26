@@ -982,6 +982,28 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
         }
     }
 
+    // Capacitive touch. Ten channels, each WELDED to one GPIO — so this is a
+    // lookup, not a loop: the pad decides the channel. Gated on the driver
+    // because the S2 and S3 have the sensors and no `esp_hal::touch`.
+    if chip.drivers.iter().any(|d| d == "touch") {
+        // `(gpio, channel)`, straight off the ESP32's pin table.
+        const TOUCH_PADS: [(u8, u8); 10] = [
+            (4, 0),
+            (0, 1),
+            (2, 2),
+            (15, 3),
+            (13, 4),
+            (12, 5),
+            (14, 6),
+            (27, 7),
+            (33, 8),
+            (32, 9),
+        ];
+        if let Some((_, n)) = TOUCH_PADS.iter().find(|(g, _)| *g == pad.number) {
+            out.push(PinFunction::TouchPad(*n));
+        }
+    }
+
     // LCD_CAM: the parallel video port. One peripheral, so the pads carry no
     // instance number, and the ESP32-S3 is the only part that has it — the
     // driver module itself is gated on `soc_has_lcd_cam`, which is this

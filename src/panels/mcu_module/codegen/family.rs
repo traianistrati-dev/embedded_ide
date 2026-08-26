@@ -293,6 +293,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let parl_io = modules::parl_io_configs(&mcu.modules);
     let lcd_cam = modules::lcd_cam_configs(&mcu.modules);
     let usb = esp_usb_configs(mcu);
+    let touch = modules::touch_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
     let can = modules::can_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
@@ -311,6 +312,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &parl_io,
         &lcd_cam,
         &usb,
+        &touch,
         &dac,
         &can,
         &timer,
@@ -350,6 +352,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         .collect();
     let can_cfg = modules::can_configs(&mcu.modules);
     let usb_cfg = esp_usb_configs(mcu);
+    let touch_cfg = modules::touch_configs(&mcu.modules);
     let lcd_cam_cfg = modules::lcd_cam_configs(&mcu.modules);
     crate::panels::mcu_module::codegen_esp_configs::config_files(
         &uart,
@@ -378,6 +381,14 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
                 codegen_esp::has_usb_serial_jtag(&mcu.family)
             },
         usb_cfg.get(&1),
+        // The touch channels wired, on a chip whose esp-hal has the driver:
+        // the S2 and S3 have the sensors and no `esp_hal::touch`.
+        &if codegen_esp::has_touch(&mcu.family) {
+            codegen_esp::touch_pads_wired(&configured)
+        } else {
+            Vec::new()
+        },
+        touch_cfg.get(&0),
         // BOTH TWAI pads, on a chip whose esp-hal has the driver. The pads are
         // offered only where it does, so this is belt and braces — but the C5
         // has TWAI silicon and no driver, which is the shape of trap it catches.
@@ -415,6 +426,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let parl_io = modules::parl_io_configs(&mcu.modules);
     let lcd_cam = modules::lcd_cam_configs(&mcu.modules);
     let usb = esp_usb_configs(mcu);
+    let touch = modules::touch_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
     let can = modules::can_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
@@ -434,6 +446,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &parl_io,
         &lcd_cam,
         &usb,
+        &touch,
         &dac,
         &can,
         &timer,
@@ -1762,6 +1775,9 @@ mod tests {
             // is what proves the section at all.
             PinFunction::CanRx,
             PinFunction::CanTx,
+            PinFunction::TouchPad(0),
+            PinFunction::TouchPad(5),
+            PinFunction::TouchPad(9),
             // The video port, in whichever mode `ESP_LCD_MODE` names. The S3
             // is the only part with the pads, so everywhere else these are
             // reported skipped and the project is the same as before.
@@ -1863,6 +1879,24 @@ mod tests {
                 if std::env::var("ESP_TWAI_LISTEN").is_ok() {
                     c.mode = CanMode::ListenOnly;
                     c.transceiver = false;
+                }
+                c
+            }),
+            connections: Vec::new(),
+        });
+        // Three touch pads. Only the original ESP32 has them, so everywhere
+        // else they are reported skipped. `ESP_TOUCH=continuous` picks the
+        // other scan mode, which is also the only one with an async twin.
+        mcu.modules.push(VirtualModule {
+            id: "touch".into(),
+            kind: ModuleKind::GenericInterfaceTouch,
+            name: "TOUCH".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Touch({
+                use crate::panels::mcu_module::modules::{TouchModuleConfig, TouchScan};
+                let mut c = TouchModuleConfig::new(0);
+                if std::env::var("ESP_TOUCH").as_deref() == Ok("continuous") {
+                    c.scan = TouchScan::Continuous;
                 }
                 c
             }),
@@ -3177,5 +3211,164 @@ mod tests {
             !main.contains("peripherals.USB0"),
             "no OTG on a C6:\n{main}"
         );
+    }
+
+    /// Build an ESP32 with `channels` wired to touch pads, and return
+    /// `(main.rs, touch.rs)`.
+    #[cfg(test)]
+    fn esp_touch_project(
+        channels: &[u8],
+        scan: crate::panels::mcu_module::modules::TouchScan,
+        runtime: Runtime,
+    ) -> (String, String) {
+        use crate::panels::mcu_module::modules::{
+            ModuleConfig, ModuleKind, TouchModuleConfig, VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32")
+            .unwrap()
+            .build_mcu();
+        mcu.runtime = runtime;
+        for ch in channels {
+            let f = PinFunction::TouchPad(*ch);
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.available_functions.contains(&f))
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("no pad for touch {ch}"));
+            mcu.apply_pin_function(num, f);
+        }
+        let mut cfg = TouchModuleConfig::new(0);
+        cfg.scan = scan;
+        mcu.modules.push(VirtualModule {
+            id: "touch".into(),
+            kind: ModuleKind::GenericInterfaceTouch,
+            name: "TOUCH".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Touch(cfg),
+            connections: Vec::new(),
+        });
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "touch.rs")
+            .map(|(_, c)| c)
+            .unwrap_or_default();
+        (mcu.fresh_main_rs(), file)
+    }
+
+    /// The channel is welded to the GPIO, so wiring pad 5 gets channel 5 — and
+    /// the CONTROLLER comes back with the pads, because it owns the peripheral
+    /// and dropping it would stop them reading.
+    #[test]
+    fn esp_touch_binds_the_channel_its_pad_carries() {
+        use crate::panels::mcu_module::modules::TouchScan;
+        let (main, file) = esp_touch_project(&[0, 5, 9], TouchScan::OneShot, Runtime::Blocking);
+        for ch in [0u8, 5, 9] {
+            assert!(
+                file.contains(&format!("let touch{ch} = TouchPad::new(pad{ch}, &touch);")),
+                "channel {ch}:\n{file}"
+            );
+        }
+        assert!(!file.contains("pad1:"), "only what was wired:\n{file}");
+        // GPIO12 is touch 5 on this chip, and nothing else is.
+        assert!(
+            main.contains("peripherals.GPIO12; // TOUCH5"),
+            "pad map:\n{main}"
+        );
+        assert!(
+            main.contains("let (mut _touch_ctrl, mut _touch0, mut _touch5, mut _touch9) ="),
+            "the controller is kept:\n{main}"
+        );
+    }
+
+    /// One-shot and continuous are different TYPES in esp-hal, with different
+    /// methods — so the scan mode reaches the signature, not just a register.
+    #[test]
+    fn esp_touch_scan_mode_picks_the_constructor() {
+        use crate::panels::mcu_module::modules::TouchScan;
+        let (_, one) = esp_touch_project(&[0], TouchScan::OneShot, Runtime::Blocking);
+        assert!(one.contains("Touch::one_shot_mode(touch"), "ctor:\n{one}");
+        assert!(one.contains("OneShot, Blocking>"), "marker:\n{one}");
+        assert!(
+            one.contains("sleep_cycles: None"),
+            "no timer in one-shot:\n{one}"
+        );
+
+        let (_, cont) = esp_touch_project(&[0], TouchScan::Continuous, Runtime::Blocking);
+        assert!(
+            cont.contains("Touch::continuous_mode(touch"),
+            "ctor:\n{cont}"
+        );
+        assert!(
+            cont.contains("sleep_cycles: Some(SLEEP_CYCLES)"),
+            "the timer:\n{cont}"
+        );
+    }
+
+    /// esp-hal has `Touch<Continuous, Async>` and no one-shot twin: waiting for
+    /// a touch needs something measuring while you wait. So the async runtime
+    /// gets `init_async` for one scan mode and a note for the other.
+    #[test]
+    fn esp_touch_async_is_continuous_only() {
+        use crate::panels::mcu_module::modules::TouchScan;
+        let (main, cont) = esp_touch_project(&[0], TouchScan::Continuous, Runtime::Async);
+        assert!(cont.contains("pub fn init_async"), "the twin:\n{cont}");
+        assert!(
+            cont.contains("Touch::async_mode(touch, rtc"),
+            "and it takes the RTC:\n{cont}"
+        );
+        assert!(
+            main.contains("Rtc::new(peripherals.LPWR)"),
+            "which main builds:\n{main}"
+        );
+        assert!(main.contains("touch::init_async("), "call:\n{main}");
+
+        let (main, one) = esp_touch_project(&[0], TouchScan::OneShot, Runtime::Async);
+        assert!(
+            !one.contains("pub fn init_async"),
+            "no async one-shot:\n{one}"
+        );
+        assert!(one.contains("No `init_async`"), "and it says why:\n{one}");
+        assert!(
+            main.contains("touch::init("),
+            "falls back to blocking:\n{main}"
+        );
+        assert!(
+            !main.contains("Rtc::new"),
+            "no RTC without the async twin:\n{main}"
+        );
+    }
+
+    /// Only the original ESP32 has a touch driver. The S2 and S3 have the
+    /// sensors in silicon and no `esp_hal::touch`, so they get no pads at all —
+    /// the same trap as the C5's I2S, answered the same way.
+    #[test]
+    fn only_the_original_esp32_offers_touch() {
+        for chip in [
+            "esp32c2", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2", "esp32s2", "esp32s3",
+        ] {
+            assert!(!codegen_esp::has_touch(chip), "{chip} has no touch driver");
+            let mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+                .unwrap()
+                .build_mcu();
+            assert!(
+                !mcu.iter_all_pins()
+                    .any(|p| p.available_functions.contains(&PinFunction::TouchPad(0))),
+                "{chip} must not offer a touch pad"
+            );
+        }
+        assert!(codegen_esp::has_touch("esp32"));
+        let esp32 = crate::panels::mcu_module::builtins::builtin_for("esp32")
+            .unwrap()
+            .build_mcu();
+        let pads = esp32
+            .iter_all_pins()
+            .filter(|p| {
+                p.available_functions
+                    .iter()
+                    .any(|f| matches!(f, PinFunction::TouchPad(_)))
+            })
+            .count();
+        assert_eq!(pads, 10, "ten channels, one pad each");
     }
 }

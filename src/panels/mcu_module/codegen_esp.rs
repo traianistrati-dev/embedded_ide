@@ -44,7 +44,7 @@ use super::mcu_def::DmaDef;
 use super::modules::{
     AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sModuleConfig, LcdCamMode,
     LcdCamModuleConfig, McpwmModuleConfig, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig,
-    SpiModuleConfig, TimerModuleConfig, UsartModuleConfig, UsbModuleConfig,
+    SpiModuleConfig, TimerModuleConfig, TouchModuleConfig, UsartModuleConfig, UsbModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -161,6 +161,8 @@ pub fn fresh_esp32c3_main_rs(
     lcd_cam: &BTreeMap<u8, LcdCamModuleConfig>,
     // One USB module per chip; its ROLE picks the controller.
     usb: &BTreeMap<u8, UsbModuleConfig>,
+    // One touch controller; the numbers on its pins are CHANNELS.
+    touch: &BTreeMap<u8, TouchModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
@@ -186,6 +188,7 @@ pub fn fresh_esp32c3_main_rs(
         parl_io,
         lcd_cam,
         usb,
+        touch,
         dac,
         can,
         timer,
@@ -220,6 +223,8 @@ pub fn update_esp32c3_main_rs(
     lcd_cam: &BTreeMap<u8, LcdCamModuleConfig>,
     // One USB module per chip; its ROLE picks the controller.
     usb: &BTreeMap<u8, UsbModuleConfig>,
+    // One touch controller; the numbers on its pins are CHANNELS.
+    touch: &BTreeMap<u8, TouchModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
@@ -245,6 +250,7 @@ pub fn update_esp32c3_main_rs(
         parl_io,
         lcd_cam,
         usb,
+        touch,
         dac,
         can,
         timer,
@@ -372,6 +378,8 @@ fn make_gen_section(
     lcd_cam: &BTreeMap<u8, LcdCamModuleConfig>,
     // One USB module per chip; its ROLE picks the controller.
     usb: &BTreeMap<u8, UsbModuleConfig>,
+    // One touch controller; the numbers on its pins are CHANNELS.
+    touch: &BTreeMap<u8, TouchModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
     // Keyed by instance like the rest, but there is only ever instance 1: the
     // CAN pin functions carry no number — see `twai_pads`.
@@ -607,6 +615,47 @@ fn make_gen_section(
                 args.join(", ")
             ));
         }
+    }
+
+    // ── Touch ────────────────────────────────────────────────────────────────
+    // The CONTROLLER binding is not decorative: it owns the peripheral, and
+    // dropping it would stop every pad reading — the same trap as the MCPWM
+    // timer's clock guard.
+    let touch_pads = collect_touch(&configured);
+    if !touch_pads.is_empty() {
+        let sfx = touch
+            .get(&0)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        // Async only exists for continuous scanning — see `touch_file`.
+        let asyn =
+            runtime == EspRuntime::Async && touch.get(&0).is_some_and(|c| c.scan.is_continuous());
+        body.push('\n');
+        body.push_str("    // ── Touch ──\n");
+        let mut args = Vec::new();
+        let mut handles = vec![format!("mut _touch_ctrl{sfx}")];
+        for (n, p) in &touch_pads {
+            let var = esp_binding(p);
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
+            args.push(var);
+            handles.push(format!("mut _touch{n}{sfx}"));
+        }
+        if asyn {
+            // The driver hangs its interrupt off the RTC, so one has to exist.
+            body.push_str("    let mut rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);\n");
+        }
+        body.push_str(&format!(
+            "    let ({}) =\n\
+             \x20       pins::configs::touch::{}(peripherals.TOUCH{}, {});\n",
+            handles.join(", "),
+            if asyn { "init_async" } else { "init" },
+            if asyn { ", &mut rtc" } else { "" },
+            args.join(", "),
+        ));
     }
 
     // ── TWAI (CAN) ───────────────────────────────────────────────────────────
@@ -1096,6 +1145,33 @@ pub(crate) fn has_usb_serial_jtag(chip: &str) -> bool {
         chip,
         "esp32c3" | "esp32c5" | "esp32c6" | "esp32h2" | "esp32s3"
     )
+}
+
+/// The touch pads the canvas wires, as `(channel, pad)` in channel order.
+///
+/// The channel is not a choice — it is welded to the GPIO — so this is just the
+/// wired pads, sorted, which is the order both ends of the generated code use.
+fn collect_touch<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, &'a Pin> {
+    let mut out = BTreeMap::new();
+    for p in configured {
+        if let PinFunction::TouchPad(n) = p.selected_function {
+            out.insert(n, *p);
+        }
+    }
+    out
+}
+
+/// The touch channels wired, by number.
+pub(crate) fn touch_pads_wired(configured: &[&Pin]) -> Vec<u8> {
+    collect_touch(configured).into_keys().collect()
+}
+
+/// The parts whose esp-hal builds a touch driver.
+///
+/// The original ESP32 alone. The S2 and S3 have the sensors in silicon and no
+/// `esp_hal::touch` — the same shape of trap as the C5's I2S.
+pub(crate) fn has_touch(chip: &str) -> bool {
+    chip == "esp32"
 }
 
 /// The parts whose esp-hal builds a TWAI driver.
@@ -1824,6 +1900,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &timer,
@@ -1880,6 +1957,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1950,6 +2028,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_touch() -> BTreeMap<u8, TouchModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1969,6 +2051,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2002,6 +2085,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2035,6 +2119,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2065,6 +2150,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2090,6 +2176,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2124,6 +2211,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2160,6 +2248,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2204,6 +2293,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2255,6 +2345,7 @@ mod tests {
                 &no_parl(),
                 &no_lcd(),
                 &no_usb(),
+                &no_touch(),
                 &no_dac(),
                 &no_can(),
                 &Default::default(),
@@ -2340,6 +2431,7 @@ mod tests {
             &no_parl(),
             &no_lcd(),
             &no_usb(),
+            &no_touch(),
             &no_dac(),
             &no_can(),
             &Default::default(),

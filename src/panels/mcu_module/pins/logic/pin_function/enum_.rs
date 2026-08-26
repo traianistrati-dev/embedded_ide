@@ -202,6 +202,15 @@ pub enum PinFunction {
     /// is fine for a continuous stream and wrong for a framed one.
     ParlValid,
 
+    // ── Touch ───────────────────────────────────────────────────────────────
+    /// Capacitive touch channel {0} — a pad that senses a finger.
+    ///
+    /// The channel number is NOT a choice: each one is welded to one GPIO, so
+    /// the pad decides which channel it is. Ten of them, on the original ESP32
+    /// alone — esp-hal builds no touch driver for the S2 or S3, whose silicon
+    /// has the sensors.
+    TouchPad(u8),
+
     // ── LCD_CAM ─────────────────────────────────────────────────────────────
     /// LCD_CAM data line {lane} — one pad of the parallel video bus.
     ///

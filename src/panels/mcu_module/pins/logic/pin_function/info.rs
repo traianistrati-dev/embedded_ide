@@ -423,6 +423,27 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::TouchPad(n) => FunctionInfo {
+                description: format!(
+                    "Capacitive touch channel {n}. The pad measures how long it takes to \
+                     charge; a finger adds capacitance and the count moves. Which channel \
+                     a pad is is fixed in silicon - it is not routable."
+                ),
+                specs: vec![
+                    ("Reading".into(), "a 16-bit count, not a yes/no".into()),
+                    (
+                        "Direction".into(),
+                        "count usually FALLS when touched - hence the threshold mode".into(),
+                    ),
+                    (
+                        "Availability".into(),
+                        "the original ESP32 only; esp-hal builds no touch driver for the \
+                         S2 or S3"
+                            .into(),
+                    ),
+                ],
+            },
+
             PinFunction::LcdCamData { .. }
             | PinFunction::LcdCamDc
             | PinFunction::LcdCamWr

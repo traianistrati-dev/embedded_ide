@@ -90,6 +90,15 @@ pub enum ModuleKind {
     /// Only the ESP32-S3 has it. Everywhere else the kind is not offered at
     /// all, rather than offered and then refusing to generate.
     GenericInterfaceLcdCam,
+    /// Capacitive touch — "TOUCH".
+    ///
+    /// One peripheral with ten channels, and each channel is welded to one
+    /// GPIO: the pad you pick IS the channel. Only the first is auto-wired —
+    /// a keypad's worth of pads would spend most of the chip.
+    ///
+    /// The original ESP32 alone. esp-hal builds no touch driver for the S2 or
+    /// S3, whose silicon has the sensors.
+    GenericInterfaceTouch,
     /// Motor-control PWM on one MCPWM unit — "MCPWM".
     ///
     /// Espressif only, and NOT the same peripheral as the plain PWM module: on
@@ -143,7 +152,7 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 21] = [
+    pub const ALL: [ModuleKind; 22] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
@@ -154,6 +163,7 @@ impl ModuleKind {
         ModuleKind::GenericInterfaceMcpwm,
         ModuleKind::GenericInterfaceParlIo,
         ModuleKind::GenericInterfaceLcdCam,
+        ModuleKind::GenericInterfaceTouch,
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceSdmmc,
         ModuleKind::GenericInterfaceQspi,
@@ -207,6 +217,15 @@ impl ModuleKind {
             // here would be right for one mode and wrong for two. They join
             // by being assigned on the canvas.
             ModuleKind::GenericInterfaceLcdCam => (&[LcdCamD0, LcdCamD1], &[]),
+            // One pad required, the other nine optional. A touch keypad is a
+            // normal use and so is a single button, so wiring ten would be
+            // right for one project and wrong for most.
+            ModuleKind::GenericInterfaceTouch => (
+                &[Touch0],
+                &[
+                    Touch1, Touch2, Touch3, Touch4, Touch5, Touch6, Touch7, Touch8, Touch9,
+                ],
+            ),
             // One output is required and the other five are not: a single
             // operator driving one side is a normal use, and auto-wiring
             // six pads for it would spend the chip.
@@ -260,6 +279,9 @@ impl ModuleKind {
                 // One LCD_CAM on the chip, and its pin functions carry no
                 // instance index either.
                 | ModuleKind::GenericInterfaceLcdCam
+                // One touch controller; the number on its pin functions is the
+                // CHANNEL, not an instance.
+                | ModuleKind::GenericInterfaceTouch
         )
     }
 
@@ -276,6 +298,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceMcpwm => "MCPWM",
             ModuleKind::GenericInterfaceParlIo => "PARL",
             ModuleKind::GenericInterfaceLcdCam => "LCD",
+            ModuleKind::GenericInterfaceTouch => "TOUCH",
             ModuleKind::GenericInterfaceDac => "DAC",
             ModuleKind::GenericInterfaceSai => "SAI",
             ModuleKind::GenericInterfaceSdmmc => "SDMMC",
@@ -312,6 +335,9 @@ impl ModuleKind {
             }
             ModuleKind::GenericInterfaceLcdCam => {
                 ModuleConfig::LcdCam(LcdCamModuleConfig::new(instance))
+            }
+            ModuleKind::GenericInterfaceTouch => {
+                ModuleConfig::Touch(TouchModuleConfig::new(instance))
             }
             ModuleKind::GenericInterfaceMcpwm => {
                 ModuleConfig::Mcpwm(McpwmModuleConfig::new(instance))
@@ -398,6 +424,11 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
             GenericInterfaceLcdCam,
             0,
             LCD_DATA_SIGNALS[(*lane as usize).min(15)],
+        ),
+        PinFunction::TouchPad(n) => (
+            GenericInterfaceTouch,
+            0,
+            TOUCH_SIGNALS[(*n as usize).min(9)],
         ),
         PinFunction::LcdCamDc => (GenericInterfaceLcdCam, 0, LcdCamDcSig),
         PinFunction::LcdCamWr => (GenericInterfaceLcdCam, 0, LcdCamWrSig),
@@ -676,6 +707,18 @@ pub enum ModuleSignal {
     LcdCamDeSig,
     LcdCamHenSig,
     LcdCamMclkSig,
+
+    // ── Touch ───────────────────────────────────────────────────────────
+    Touch0,
+    Touch1,
+    Touch2,
+    Touch3,
+    Touch4,
+    Touch5,
+    Touch6,
+    Touch7,
+    Touch8,
+    Touch9,
     // MCPWM — three operators, each a complementary pair.
     McpwmA0,
     McpwmB0,
@@ -806,6 +849,16 @@ impl ModuleSignal {
             ModuleSignal::RmtLine => "RMT",
             ModuleSignal::PcntEdgeSig => "EDGE",
             ModuleSignal::PcntCtrlSig => "CTRL",
+            ModuleSignal::Touch0 => "T0",
+            ModuleSignal::Touch1 => "T1",
+            ModuleSignal::Touch2 => "T2",
+            ModuleSignal::Touch3 => "T3",
+            ModuleSignal::Touch4 => "T4",
+            ModuleSignal::Touch5 => "T5",
+            ModuleSignal::Touch6 => "T6",
+            ModuleSignal::Touch7 => "T7",
+            ModuleSignal::Touch8 => "T8",
+            ModuleSignal::Touch9 => "T9",
             ModuleSignal::LcdCamD0 => "D0",
             ModuleSignal::LcdCamD1 => "D1",
             ModuleSignal::LcdCamD2 => "D2",
@@ -980,6 +1033,16 @@ impl ModuleSignal {
             ModuleSignal::RmtLine => PinFunction::RmtChannel(instance),
             ModuleSignal::PcntEdgeSig => PinFunction::PcntEdge(instance),
             ModuleSignal::PcntCtrlSig => PinFunction::PcntCtrl(instance),
+            ModuleSignal::Touch0 => PinFunction::TouchPad(0),
+            ModuleSignal::Touch1 => PinFunction::TouchPad(1),
+            ModuleSignal::Touch2 => PinFunction::TouchPad(2),
+            ModuleSignal::Touch3 => PinFunction::TouchPad(3),
+            ModuleSignal::Touch4 => PinFunction::TouchPad(4),
+            ModuleSignal::Touch5 => PinFunction::TouchPad(5),
+            ModuleSignal::Touch6 => PinFunction::TouchPad(6),
+            ModuleSignal::Touch7 => PinFunction::TouchPad(7),
+            ModuleSignal::Touch8 => PinFunction::TouchPad(8),
+            ModuleSignal::Touch9 => PinFunction::TouchPad(9),
             ModuleSignal::LcdCamD0 => PinFunction::LcdCamData { lane: 0 },
             ModuleSignal::LcdCamD1 => PinFunction::LcdCamData { lane: 1 },
             ModuleSignal::LcdCamD2 => PinFunction::LcdCamData { lane: 2 },
@@ -3909,6 +3972,21 @@ impl ParlIoModuleConfig {
     }
 }
 
+/// The ten touch channels, indexed by channel number. Each one is welded to
+/// one GPIO — see [`PinFunction::TouchPad`].
+const TOUCH_SIGNALS: [ModuleSignal; 10] = [
+    ModuleSignal::Touch0,
+    ModuleSignal::Touch1,
+    ModuleSignal::Touch2,
+    ModuleSignal::Touch3,
+    ModuleSignal::Touch4,
+    ModuleSignal::Touch5,
+    ModuleSignal::Touch6,
+    ModuleSignal::Touch7,
+    ModuleSignal::Touch8,
+    ModuleSignal::Touch9,
+];
+
 /// The sixteen data lanes, indexed by lane number — see
 /// [`PinFunction::LcdCamData`].
 const LCD_DATA_SIGNALS: [ModuleSignal; 16] = [
@@ -4245,6 +4323,138 @@ impl LcdCamModuleConfig {
     }
 }
 
+/// How often the pads are measured.
+///
+/// Not a style choice: the two are different types in esp-hal, with different
+/// methods. One-shot pads have `start_measurement` and nothing happens without
+/// it; continuous pads just have a value waiting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TouchScan {
+    /// A measurement per request. Cheapest, and the value is as old as the last
+    /// `start_measurement`.
+    #[default]
+    OneShot,
+    /// A hardware timer keeps measuring in the background, so a read is always
+    /// current. The only mode with an async twin.
+    Continuous,
+}
+
+impl TouchScan {
+    pub const ALL: [Self; 2] = [Self::OneShot, Self::Continuous];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OneShot => "One-shot",
+            Self::Continuous => "Continuous",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::OneShot => {
+                "You ask, it measures. `start_measurement()` then `read()` - nothing \
+                 happens between the two."
+            }
+            Self::Continuous => {
+                "A hardware timer measures in the background, so `read()` always has \
+                 something fresh. This is also the only mode esp-hal gives an `.await`."
+            }
+        }
+    }
+
+    pub fn is_continuous(self) -> bool {
+        matches!(self, Self::Continuous)
+    }
+
+    /// The esp-hal constructor for this scan mode.
+    pub fn ctor(self) -> &'static str {
+        match self {
+            Self::OneShot => "one_shot_mode",
+            Self::Continuous => "continuous_mode",
+        }
+    }
+
+    /// The esp-hal mode marker type.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::OneShot => "OneShot",
+            Self::Continuous => "Continuous",
+        }
+    }
+}
+
+/// Which way the count moves when a pad is touched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TouchThreshold {
+    /// Touched when the reading drops BELOW the threshold. The usual case: a
+    /// finger adds capacitance, the pad charges slower, the count falls.
+    #[default]
+    LessThan,
+    /// Touched when the reading rises above it.
+    GreaterThan,
+}
+
+impl TouchThreshold {
+    pub const ALL: [Self; 2] = [Self::LessThan, Self::GreaterThan];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LessThan => "Below threshold",
+            Self::GreaterThan => "Above threshold",
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::LessThan => "LessThan",
+            Self::GreaterThan => "GreaterThan",
+        }
+    }
+}
+
+/// Capacitive touch settings + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TouchModuleConfig {
+    /// Always 0 — one touch controller on the chip.
+    pub instance: u8,
+    pub scan: TouchScan,
+    pub threshold_mode: TouchThreshold,
+    /// How long one measurement runs, in cycles of the 8 MHz touch clock.
+    /// esp-hal's default is 0x7fff.
+    pub measurement_duration: u16,
+    /// Idle cycles between measurements in continuous mode. esp-hal's default
+    /// is 0x100. Unused in one-shot.
+    pub sleep_cycles: u16,
+    /// The count that counts as a touch. ONE value for every pad: esp-hal takes
+    /// it per pad in `wait_for_touch`, but a keypad's pads are the same size and
+    /// ten sliders would be ten controls saying the same number.
+    pub threshold: u16,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated handle (e.g. `_touch_keypad`).
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl TouchModuleConfig {
+    /// Defaults: one-shot, esp-hal's own timings, and a threshold that is only
+    /// a starting point — the real one is whatever YOUR pad reads untouched,
+    /// minus a margin.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            scan: TouchScan::OneShot,
+            threshold_mode: TouchThreshold::LessThan,
+            measurement_duration: 0x7fff,
+            sleep_cycles: 0x100,
+            threshold: 800,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+}
+
 /// CAN device settings + data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanModuleConfig {
@@ -4470,6 +4680,7 @@ pub enum ModuleConfig {
     Mcpwm(McpwmModuleConfig),
     ParlIo(ParlIoModuleConfig),
     LcdCam(LcdCamModuleConfig),
+    Touch(TouchModuleConfig),
     Dac(DacModuleConfig),
     Sai(SaiModuleConfig),
     Sdmmc(SdmmcModuleConfig),
@@ -4500,6 +4711,7 @@ impl ModuleConfig {
             ModuleConfig::Hspi(c) => c.instance,
             ModuleConfig::ParlIo(c) => c.instance,
             ModuleConfig::LcdCam(c) => c.instance,
+            ModuleConfig::Touch(c) => c.instance,
             ModuleConfig::Mcpwm(c) => c.instance,
             ModuleConfig::Pcnt(c) => c.instance,
             ModuleConfig::Rmt(c) => c.instance,
@@ -4525,6 +4737,7 @@ impl ModuleConfig {
             ModuleConfig::Hspi(c) => &c.rx_model,
             ModuleConfig::ParlIo(c) => &c.rx_model,
             ModuleConfig::LcdCam(c) => &c.rx_model,
+            ModuleConfig::Touch(c) => &c.rx_model,
             ModuleConfig::Mcpwm(c) => &c.rx_model,
             ModuleConfig::Pcnt(c) => &c.rx_model,
             ModuleConfig::Rmt(c) => &c.rx_model,
@@ -4550,6 +4763,7 @@ impl ModuleConfig {
             ModuleConfig::Hspi(c) => &c.tx_model,
             ModuleConfig::ParlIo(c) => &c.tx_model,
             ModuleConfig::LcdCam(c) => &c.tx_model,
+            ModuleConfig::Touch(c) => &c.tx_model,
             ModuleConfig::Mcpwm(c) => &c.tx_model,
             ModuleConfig::Pcnt(c) => &c.tx_model,
             ModuleConfig::Rmt(c) => &c.tx_model,
@@ -4575,6 +4789,7 @@ impl ModuleConfig {
             ModuleConfig::Hspi(c) => &mut c.rx_model,
             ModuleConfig::ParlIo(c) => &mut c.rx_model,
             ModuleConfig::LcdCam(c) => &mut c.rx_model,
+            ModuleConfig::Touch(c) => &mut c.rx_model,
             ModuleConfig::Mcpwm(c) => &mut c.rx_model,
             ModuleConfig::Pcnt(c) => &mut c.rx_model,
             ModuleConfig::Rmt(c) => &mut c.rx_model,
@@ -4600,6 +4815,7 @@ impl ModuleConfig {
             ModuleConfig::Hspi(c) => &mut c.tx_model,
             ModuleConfig::ParlIo(c) => &mut c.tx_model,
             ModuleConfig::LcdCam(c) => &mut c.tx_model,
+            ModuleConfig::Touch(c) => &mut c.tx_model,
             ModuleConfig::Mcpwm(c) => &mut c.tx_model,
             ModuleConfig::Pcnt(c) => &mut c.tx_model,
             ModuleConfig::Rmt(c) => &mut c.tx_model,
@@ -4626,6 +4842,7 @@ impl ModuleConfig {
             ModuleConfig::Hspi(c) => &c.custom_label,
             ModuleConfig::ParlIo(c) => &c.custom_label,
             ModuleConfig::LcdCam(c) => &c.custom_label,
+            ModuleConfig::Touch(c) => &c.custom_label,
             ModuleConfig::Mcpwm(c) => &c.custom_label,
             ModuleConfig::Pcnt(c) => &c.custom_label,
             ModuleConfig::Rmt(c) => &c.custom_label,
@@ -4651,6 +4868,7 @@ impl ModuleConfig {
             ModuleConfig::Hspi(c) => &mut c.custom_label,
             ModuleConfig::ParlIo(c) => &mut c.custom_label,
             ModuleConfig::LcdCam(c) => &mut c.custom_label,
+            ModuleConfig::Touch(c) => &mut c.custom_label,
             ModuleConfig::Mcpwm(c) => &mut c.custom_label,
             ModuleConfig::Pcnt(c) => &mut c.custom_label,
             ModuleConfig::Rmt(c) => &mut c.custom_label,
@@ -4672,6 +4890,11 @@ impl ModuleConfig {
                 c.direction.label(),
                 c.width.label(),
                 hz_label(c.freq_hz)
+            ),
+            ModuleConfig::Touch(c) => format!(
+                "TOUCH  ·  {}  ·  {}",
+                c.scan.label(),
+                c.threshold_mode.label()
             ),
             ModuleConfig::LcdCam(c) => format!(
                 "LCD  ·  {}  ·  {}-bit  ·  {}",

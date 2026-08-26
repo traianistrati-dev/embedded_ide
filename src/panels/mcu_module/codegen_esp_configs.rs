@@ -40,7 +40,7 @@ use super::modules::{
     AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sDirection, I2sFormat,
     I2sModuleConfig, I2sStandard, LcdCamMode, LcdCamModuleConfig, McpwmModuleConfig, Parity,
     ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, StopBits,
-    TimerModuleConfig, UsartModuleConfig, UsbModuleConfig,
+    TimerModuleConfig, TouchModuleConfig, UsartModuleConfig, UsbModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -1807,6 +1807,174 @@ fn lcd_cam_example(cfg: &LcdCamModuleConfig, rt: EspRuntime) -> String {
     example_block(&format!("Using LCD_CAM ({})", cfg.mode.label()), &lines)
 }
 
+// ── Touch ───────────────────────────────────────────────────────────────
+
+/// The capacitive touch controller and the pads wired to it.
+///
+/// # It hands the controller back too
+///
+/// `TouchPad::new` takes a `&Touch` and does not keep it — but the `Touch` owns
+/// the peripheral singleton, and dropping it would put the controller away
+/// while the pads are still being read. So `init` returns it alongside them,
+/// for the same reason the MCPWM one returns its timer.
+///
+/// # The pads are generic
+///
+/// A `TouchPad`'s type names its GPIO, so ten wired pads would be ten different
+/// concrete types to write out. One type parameter each says the same thing and
+/// lets `main.rs` pass whatever pads the canvas chose.
+///
+/// # Async is continuous-only
+///
+/// esp-hal has `Touch<Continuous, Async>` and no one-shot equivalent: waiting
+/// for a touch needs something measuring while you wait. A one-shot module on
+/// the async runtime therefore gets `init` alone, and this file says so.
+fn touch_file(pads: &[u8], cfg: &TouchModuleConfig, rt: EspRuntime) -> String {
+    let consts = format!(
+        "const THRESHOLD_MODE: ThresholdMode = ThresholdMode::{};\n\
+         const MEASUREMENT_DURATION: u16 = {};\n\
+         {}// The count that means \"touched\". There is no right value: read your\n\
+         // own pad untouched and take a margin off it.\n\
+         pub const THRESHOLD: u16 = {};\n\
+         // What the driver is handed. `None` anywhere here means esp-hal's own\n\
+         // default for that field.\n\
+         const CONFIG: TouchConfig = TouchConfig {{\n\
+         \x20   threshold_mode: Some(THRESHOLD_MODE),\n\
+         \x20   measurement_duration: Some(MEASUREMENT_DURATION),\n\
+         \x20   sleep_cycles: {},\n\
+         }};\n",
+        cfg.threshold_mode.token(),
+        cfg.measurement_duration.max(1),
+        if cfg.scan.is_continuous() {
+            format!("const SLEEP_CYCLES: u16 = {};\n", cfg.sleep_cycles.max(1))
+        } else {
+            String::new()
+        },
+        cfg.threshold.max(1),
+        // The sleep timer only exists in continuous mode.
+        if cfg.scan.is_continuous() {
+            "Some(SLEEP_CYCLES)"
+        } else {
+            "None"
+        },
+    );
+
+    // One type parameter and one argument per wired pad, in channel order.
+    let generics: String = pads
+        .iter()
+        .map(|n| format!("P{n}: TouchPin + 'd, "))
+        .collect();
+    let params: String = pads
+        .iter()
+        .map(|n| format!("\x20   pad{n}: P{n},\n"))
+        .collect();
+    let marker = cfg.scan.marker();
+
+    let build = |fname: &str, dm: &str, ctor: &str, extra_arg: &str, extra_param: &str| {
+        let ret: String = pads
+            .iter()
+            .map(|n| format!(", TouchPad<P{n}, {marker}, {dm}>"))
+            .collect();
+        let lets: String = pads
+            .iter()
+            .map(|n| format!("\x20   let touch{n} = TouchPad::new(pad{n}, &touch);\n"))
+            .collect();
+        let names: String = pads.iter().map(|n| format!(", touch{n}")).collect();
+        format!(
+            "pub fn {fname}<'d, {generics}>(\n\
+             \x20   touch: TOUCH<'d>,\n\
+             {extra_param}{params}) -> (Touch<'d, {marker}, {dm}>{ret}) {{\n\
+             \x20   let touch = Touch::{ctor}(touch{extra_arg}, Some(CONFIG));\n\
+             {lets}\
+             \x20   (touch{names})\n\
+             }}\n"
+        )
+    };
+
+    let mut body = format!(
+        "/// The touch controller, and one handle per pad.\n\
+         ///\n\
+         /// The CONTROLLER comes back with the pads on purpose: it owns the\n\
+         /// peripheral, and dropping it would stop the pads reading.\n\
+         {}",
+        build("init", "Blocking", cfg.scan.ctor(), "", ""),
+    );
+    if rt == EspRuntime::Async {
+        if cfg.scan.is_continuous() {
+            body.push_str(&format!(
+                "\n/// The same, async: the pads gain `wait_for_touch(THRESHOLD).await`.\n\
+                 ///\n\
+                 /// Takes the RTC because the driver hangs its interrupt off it.\n\
+                 /// Anything else that installs an RTC handler breaks this.\n\
+                 {}",
+                build(
+                    "init_async",
+                    "Async",
+                    "async_mode",
+                    ", rtc",
+                    "\x20   rtc: &mut Rtc<'_>,\n",
+                ),
+            ));
+        } else {
+            body.push_str(
+                "\n// No `init_async`: esp-hal has `Touch<Continuous, Async>` and no\n\
+                 // one-shot twin - waiting for a touch needs something measuring\n\
+                 // while you wait. Switch the module to Continuous for that.\n",
+            );
+        }
+    }
+
+    let first = pads.first().copied().unwrap_or(0);
+    let mut lines = vec!["A reading is a 16-bit COUNT, not a yes/no:".to_owned()];
+    lines.push(String::new());
+    if cfg.scan.is_continuous() && rt == EspRuntime::Async {
+        lines.push(format!(
+            "    _touch{first}.wait_for_touch(pins::configs::touch::THRESHOLD).await;"
+        ));
+        lines.push("    // No `read()` here: esp-hal puts it on the BLOCKING pad".to_owned());
+        lines.push("    // only, so an async pad waits rather than polls.".to_owned());
+    } else {
+        if !cfg.scan.is_continuous() {
+            lines.push(format!(
+                "    _touch{first}.start_measurement();   // one-shot: nothing without this"
+            ));
+        }
+        lines.push(format!("    let n = _touch{first}.read();"));
+        lines.push(
+            "    let _touched = n < pins::configs::touch::THRESHOLD;   // see THRESHOLD_MODE"
+                .to_owned(),
+        );
+    }
+    lines.push(String::new());
+    lines.push("// Calibrate against YOUR pad: read it untouched, take a margin".to_owned());
+    lines.push("// off, and put that in the module.".to_owned());
+    let example = example_block("Using touch", &lines);
+
+    let rtc_use = if rt == EspRuntime::Async && cfg.scan.is_continuous() {
+        "use esp_hal::rtc_cntl::Rtc;\n"
+    } else {
+        ""
+    };
+    let async_use = if rt == EspRuntime::Async && cfg.scan.is_continuous() {
+        "use esp_hal::Async;\n"
+    } else {
+        ""
+    };
+    file(
+        &format!(
+            "use esp_hal::Blocking;\n\
+             {async_use}\
+             use esp_hal::gpio::TouchPin;\n\
+             use esp_hal::peripherals::TOUCH;\n\
+             {rtc_use}\
+             use esp_hal::touch::{{{marker}, ThresholdMode, Touch, TouchConfig, TouchPad}};\n"
+        ),
+        &consts,
+        &body,
+        &example,
+    )
+}
+
 // ── TWAI (CAN) ──────────────────────────────────────────────────────────
 
 /// The TWAI controller - Espressif's name for CAN 2.0.
@@ -2600,6 +2768,10 @@ pub fn config_files(
     // The USB module, whose ROLE decides which of the two controllers the pads
     // are routed to — see `modules::UsbRole`.
     usb_cfg: Option<&UsbModuleConfig>,
+    // The touch channels wired, and the module that configures them. Empty
+    // means no touch controller on this canvas.
+    touch: &[u8],
+    touch_cfg: Option<&TouchModuleConfig>,
     // True when BOTH TWAI pads are wired and the chip has the driver — a CAN
     // node with one wire is not a node, so a half-wired bus emits nothing.
     twai: bool,
@@ -2672,6 +2844,13 @@ pub fn config_files(
     }
     // TWAI0 alone: `PinFunction::CanTx`/`CanRx` carry no instance number, so
     // the C6's second controller has no way to be wired on the canvas.
+    if !touch.is_empty() {
+        let d = TouchModuleConfig::new(0);
+        out.push((
+            "touch.rs".to_owned(),
+            touch_file(touch, touch_cfg.unwrap_or(&d), rt),
+        ));
+    }
     if twai {
         out.push(("twai0.rs".to_owned(), twai_file(0, can_cfg, rt)));
     }
@@ -2954,6 +3133,9 @@ mod tests {
             true,
             // The USB module left at its defaults — Serial/JTAG, not OTG.
             None,
+            // Two touch pads wired, module at its defaults.
+            &[0, 5],
+            None,
             // TWAI wired, with the module left at its defaults.
             true,
             None,
@@ -2995,6 +3177,7 @@ mod tests {
                 "pcnt1.rs",
                 "usb.rs",
                 "lcd_cam.rs",
+                "touch.rs",
                 "twai0.rs",
                 "dac.rs",
                 "parl_io.rs",

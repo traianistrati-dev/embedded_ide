@@ -31,6 +31,7 @@ impl PinFunction {
             PinFunction::GpioOutput => "out",
             PinFunction::GpioAnalog => "analog",
             PinFunction::AdcChannel { .. } => "adc",
+            PinFunction::TouchPad(..) => "touch",
             PinFunction::LcdCamData { .. } => "lcd_d",
             PinFunction::LcdCamDc => "lcd_dc",
             PinFunction::LcdCamWr => "lcd_wr",
@@ -116,6 +117,7 @@ impl PinFunction {
             PinFunction::GpioOutput => "GPIO Output".into(),
             PinFunction::GpioAnalog => "GPIO Analog".into(),
             PinFunction::AdcChannel { adc, channel } => format!("ADC{adc}  IN{channel}"),
+            PinFunction::TouchPad(n) => format!("TOUCH{n}"),
             PinFunction::LcdCamData { lane } => format!("LCD  D{lane}"),
             PinFunction::LcdCamDc => "LCD  DC".to_owned(),
             PinFunction::LcdCamWr => "LCD  WR".to_owned(),
@@ -404,6 +406,7 @@ impl PinFunction {
             PinFunction::RmtChannel(..) => "RMT",
             PinFunction::PcntEdge(..) | PinFunction::PcntCtrl(..) => "PCNT",
             PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. } => "MCPWM",
+            PinFunction::TouchPad(..) => "TOUCH",
             PinFunction::LcdCamData { .. }
             | PinFunction::LcdCamDc
             | PinFunction::LcdCamWr
