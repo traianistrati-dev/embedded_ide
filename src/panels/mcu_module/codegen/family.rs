@@ -253,6 +253,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let pcnt = modules::pcnt_configs(&mcu.modules);
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
+    let dac = modules::dac_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::fresh_esp32c3_main_rs(
         &pins_of(mcu),
@@ -267,6 +268,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &pcnt,
         &mcpwm,
         &parl_io,
+        &dac,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -330,6 +332,10 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         // The parallel port, and whether a VALID pad went with it.
         &codegen_esp::parl_io_wired(&configured),
         modules::parl_io_configs(&mcu.modules).get(&0),
+        // The DAC channels wired, and the module that holds their levels.
+        &codegen_esp::dac_channels_wired(&configured),
+        modules::dac_configs(&mcu.modules).get(&1),
+        mcu.family == "esp32",
         &pwm,
         &timers,
         runtime,
@@ -346,6 +352,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let pcnt = modules::pcnt_configs(&mcu.modules);
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
+    let dac = modules::dac_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::update_esp32c3_main_rs(
         existing,
@@ -361,6 +368,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &pcnt,
         &mcpwm,
         &parl_io,
+        &dac,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -1669,17 +1677,54 @@ mod tests {
             PinFunction::ParlData { lane: 3 },
             PinFunction::ParlClk,
             PinFunction::ParlValid,
+            // Both DAC channels. Their pads are fixed, so the search below
+            // finds them wherever the chip puts them.
+            PinFunction::DacOut { dac: 1, channel: 1 },
+            PinFunction::DacOut { dac: 1, channel: 2 },
         ];
-        for p in mcu.iter_all_pins_mut() {
-            if p.reserved || p.selected_function != PinFunction::Unset {
-                continue;
-            }
-            let Some(ix) = want.iter().position(|f| p.available_functions.contains(f)) else {
-                continue;
+        // RAREST FIRST, and the DAC is why. On an ESP the GPIO matrix lets
+        // almost any pad be SPI, I2S, RMT or MCPWM, so walking the pins and
+        // taking the first function each can do hands those pads out in pin
+        // order — and by the time `DacOut` came round, GPIO25 and GPIO26 were
+        // already spent on something that could have gone anywhere. The DAC,
+        // the ADC and USB are bonded to one pad each and have no second choice.
+        while !want.is_empty() {
+            let candidates = |f: &PinFunction| {
+                mcu.iter_all_pins()
+                    .filter(|p| {
+                        !p.reserved
+                            && p.selected_function == PinFunction::Unset
+                            && p.available_functions.contains(f)
+                    })
+                    .count()
             };
-            p.selected_function = want.remove(ix);
+            let Some((ix, _)) = want
+                .iter()
+                .map(candidates)
+                .enumerate()
+                .filter(|(_, n)| *n > 0)
+                .min_by_key(|(_, n)| *n)
+            else {
+                break;
+            };
+            let func = want.remove(ix);
+            let pin = mcu
+                .iter_all_pins_mut()
+                .find(|p| {
+                    !p.reserved
+                        && p.selected_function == PinFunction::Unset
+                        && p.available_functions.contains(&func)
+                })
+                .expect("just counted one");
+            pin.selected_function = func;
         }
-        assert!(want.is_empty(), "{id}: no pad for {want:?}");
+        // Not every chip has every peripheral, and that is the POINT of running
+        // this against several: an ESP32 has no USB Serial/JTAG and no PARL_IO,
+        // so those simply do not get wired. Reported rather than asserted, so
+        // the harness works on any part.
+        if !want.is_empty() {
+            println!("{id}: not offered, skipped - {want:?}");
+        }
 
         let mut spi_cfg = SpiModuleConfig::new(2);
         spi_cfg.async_mode = AsyncBusMode::AsyncDma;
@@ -1689,6 +1734,22 @@ mod tests {
             name: "SPI2".into(),
             pos: (0.0, 0.0),
             config: ModuleConfig::Spi(spi_cfg),
+            connections: Vec::new(),
+        });
+        mcu.modules.push(VirtualModule {
+            id: "dac_1".into(),
+            kind: ModuleKind::GenericInterfaceDac,
+            name: "DAC1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Dac({
+                use crate::panels::mcu_module::modules::DacModuleConfig;
+                let mut c = DacModuleConfig::new(1);
+                // Mid-scale in the module's TWELVE bits, which the ESP path
+                // has to scale down to 128 rather than truncate to 0.
+                c.set_value(1, 2048);
+                c.set_value(2, 4095);
+                c
+            }),
             connections: Vec::new(),
         });
         mcu.modules.push(VirtualModule {
@@ -1811,6 +1872,13 @@ mod tests {
             project_gen::gen_config(ConfigFile::CargoConfig, &def.project, &def.toolchain),
         )
         .unwrap();
+        // Xtensa parts need the pinned fork, and a real project gets one — see
+        // `project_gen::rust_toolchain_for`. Without it an ESP32 or S2 here
+        // fails inside `core` with an error that names no toolchain.
+        let toolchain = project_gen::rust_toolchain_for(&def.project.target);
+        if !toolchain.is_empty() {
+            fs::write(out.join("rust-toolchain.toml"), toolchain).unwrap();
+        }
         fs::write(out.join("src/main.rs"), &main_rs).unwrap();
         let mut mods = String::new();
         for (name, body) in &files {

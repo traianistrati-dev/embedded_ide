@@ -719,6 +719,26 @@ fn drives(f: &PinFunction) -> bool {
     )
 }
 
+/// `(channel, pad)` for each DAC output this chip has.
+///
+/// Fixed in silicon and different per part, which is why esp-hal spells them
+/// out as `type Dac1Gpio` rather than taking a pin: `Dac::new` accepts
+/// `T::Pin` and nothing else, so a `DacOut` on any other pad would not compile.
+///
+/// Only two parts have a DAC at all, and both are Xtensa. Gated on the driver
+/// like everything else here, so a chip that gains one is picked up by
+/// rerunning the generator rather than by editing this list.
+pub(crate) fn dac_pads(chip: &EspChip) -> Vec<(u8, u8)> {
+    if !chip.drivers.iter().any(|d| d == "dac") {
+        return Vec::new();
+    }
+    match chip.id.as_str() {
+        "esp32" => vec![(1, 25), (2, 26)],
+        "esp32s2" => vec![(1, 17), (2, 18)],
+        _ => Vec::new(),
+    }
+}
+
 /// True when this chip has a PARL_IO its `esp-hal` can drive.
 pub(crate) fn has_parl_io(chip: &EspChip) -> bool {
     chip.drivers.iter().any(|d| d == "parl_io")
@@ -790,6 +810,17 @@ pub(crate) fn rmt_channels(chip: &EspChip) -> u8 {
     chip.rmt_channels
 }
 
+/// Chips whose I2S master clock is bonded to particular pads.
+///
+/// Only one, and it is the original ESP32: `esp_hal::i2s::master::ClkPin` is
+/// implemented there for GPIO0, GPIO1 and GPIO3 alone. Everywhere else
+/// `with_mclk` takes any output pad, so the GPIO matrix answers and this table
+/// says nothing about them.
+///
+/// A chip that is absent here is UNRESTRICTED — see the `is_none_or` at the
+/// call site, which is the difference between "no rule" and "an empty rule".
+const I2S_MCLK_PADS: &[(&str, &[u8])] = &[("esp32", &[0, 1, 3])];
+
 /// The I2S blocks this chip has, by instance number.
 ///
 /// Read off the peripheral singletons rather than from a macro of its own: the
@@ -835,6 +866,17 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
         }
         if gpio == dp {
             out.push(PinFunction::UsbDp);
+        }
+    }
+    // The DAC is analog too, so like the ADC and USB it is bonded to ONE pad
+    // per channel and named per chip rather than routed. Offering it on every
+    // pad would be sixteen pads that `Dac::new` refuses by type.
+    for (channel, pad) in dac_pads(chip) {
+        if pad == gpio {
+            // One DAC BLOCK with two channels, which is how the module reads
+            // it too. esp-hal names them `DAC1`/`DAC2` as separate peripheral
+            // singletons, and the channel number is what picks between them.
+            out.push(PinFunction::DacOut { dac: 1, channel });
         }
     }
     for (channel, pad) in &chip.adc {
@@ -893,7 +935,17 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
         out.push(PinFunction::I2sCk(i));
         out.push(PinFunction::I2sWs(i));
         out.push(PinFunction::I2sSd(i));
-        out.push(PinFunction::I2sMck(i));
+        // MCLK is the one I2S line that is not always routable. On the ESP32
+        // esp-hal implements its `ClkPin` for GPIO0, GPIO1 and GPIO3 and for
+        // nothing else, so offering it elsewhere is a pad the generated
+        // `with_mclk` refuses BY TYPE — a trait error in the user's project.
+        if I2S_MCLK_PADS
+            .iter()
+            .find(|(id, _)| *id == chip.id)
+            .is_none_or(|(_, pads)| pads.contains(&gpio))
+        {
+            out.push(PinFunction::I2sMck(i));
+        }
     }
 
     // RMT. Gated on the DRIVER, and the channel count comes from the singleton
@@ -1263,6 +1315,55 @@ mod tests {
             );
         }
         out
+    }
+
+    /// The pads that are NOT routable must sit exactly where esp-hal expects.
+    ///
+    /// Three of them, and every one is a trait bound in the user's project
+    /// rather than an error here: `Dac::new` takes `T::Pin`, and the ESP32's
+    /// `with_mclk` takes `impl ClkPin`. Offering any of these on the wrong pad
+    /// compiles in the IDE and fails in the generated project — which is how
+    /// the MCLK one survived two releases until an ESP32 build caught it.
+    #[test]
+    #[ignore]
+    fn the_bonded_pads_are_where_esp_hal_puts_them() {
+        let dir = esp_metadata::vendor_dir().expect("esp-metadata");
+        let esp32 = esp_metadata::load(&dir, "esp32").expect("parses");
+        let s2 = esp_metadata::load(&dir, "esp32s2").expect("parses");
+
+        // `type Dac1Gpio = GPIO25` / `GPIO26` on the ESP32, 17/18 on the S2.
+        assert_eq!(dac_pads(&esp32), vec![(1, 25), (2, 26)]);
+        assert_eq!(dac_pads(&s2), vec![(1, 17), (2, 18)]);
+        // And nowhere else has one at all.
+        for id in RISCV_CHIPS {
+            let c = esp_metadata::load(&dir, id).expect("parses");
+            assert!(dac_pads(&c).is_empty(), "{id}");
+        }
+
+        // `impl ClkPin for GPIO0 / GPIO1 / GPIO3`, and only on the ESP32.
+        let mclk = |c: &EspChip| {
+            let def = definition(c).expect("generates");
+            let mut pads: Vec<String> = def
+                .pins
+                .left
+                .iter()
+                .chain(&def.pins.bottom)
+                .chain(&def.pins.right)
+                .chain(&def.pins.top)
+                .filter(|p| {
+                    p.functions
+                        .iter()
+                        .any(|f| matches!(f, PinFunction::I2sMck(_)))
+                })
+                .map(|p| p.name.clone())
+                .collect();
+            pads.sort();
+            pads
+        };
+        assert_eq!(mclk(&esp32), ["GPIO0", "GPIO1", "GPIO3"]);
+        // Everywhere else the GPIO matrix answers, so every usable pad has it.
+        let c6 = esp_metadata::load(&dir, "esp32c6").expect("parses");
+        assert!(mclk(&c6).len() > 20, "the C6 routes MCLK anywhere");
     }
 
     /// The width the UI offers and the pads the chip has must be the same claim.

@@ -37,8 +37,8 @@
 
 use super::codegen_esp::EspRuntime;
 use super::modules::{
-    AsyncBusMode, I2cModuleConfig, I2sDirection, I2sFormat, I2sModuleConfig, I2sStandard,
-    McpwmModuleConfig, Parity, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig,
+    AsyncBusMode, DacModuleConfig, I2cModuleConfig, I2sDirection, I2sFormat, I2sModuleConfig,
+    I2sStandard, McpwmModuleConfig, Parity, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig,
     SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
 };
 use std::collections::BTreeMap;
@@ -508,7 +508,17 @@ fn i2s_data_format(fmt: I2sFormat) -> &'static str {
 /// the one the caller passes to `write_dma_circular` on every transfer, so it
 /// has to come back out. Returning it is what keeps the whole allocation in one
 /// place instead of asking the user to declare a matching `static` by hand.
-fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime) -> String {
+fn i2s_file(
+    n: u8,
+    sigs: &[&str],
+    cfg: Option<&I2sModuleConfig>,
+    rt: EspRuntime,
+    // The ESP32 alone restricts MCLK to three pads, and says so in the TYPE:
+    // its `with_mclk` takes `impl ClkPin`, not `impl PeripheralOutput`. The
+    // wrong bound is a trait error in the USER's project, not here - which is
+    // how it survived until a DAC pushed the harness onto an Xtensa part.
+    esp32_mclk: bool,
+) -> String {
     let tx = cfg.is_none_or(|c| c.direction == I2sDirection::Transmit);
     let (unit, data_method, data_bound) = if tx {
         ("i2s_tx", "with_dout", "impl PeripheralOutput<'d>")
@@ -536,7 +546,14 @@ fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime)
                 ("ck", "impl PeripheralOutput<'d>"),
                 ("ws", "impl PeripheralOutput<'d>"),
                 ("sd", data_bound),
-                ("mck", "impl PeripheralOutput<'d>"),
+                (
+                    "mck",
+                    if esp32_mclk {
+                        "impl ClkPin<'d>"
+                    } else {
+                        "impl PeripheralOutput<'d>"
+                    },
+                ),
             ],
         )
     );
@@ -638,9 +655,15 @@ fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime)
              use esp_hal::dma_buffers;\n\
              use esp_hal::gpio::interconnect::{{{pads}}};\n\
              use esp_hal::i2s::AnyI2s;\n\
-             use esp_hal::i2s::master::{{Channels, Config, DataFormat, I2s, {ty}, Instance}};\n\
+             use esp_hal::i2s::master::{{Channels, {clk_pin}Config, DataFormat, I2s, {ty}, Instance}};\n\
              use esp_hal::time::Rate;\n",
             mode_import(rt),
+            // Imported only where it is both needed and used.
+            clk_pin = if esp32_mclk && sigs.contains(&"mck") {
+                "ClkPin, "
+            } else {
+                ""
+            },
             // Only the direction actually used: an unused import is a
             // warning in the user's project, and a generated file must
             // not raise one.
@@ -654,6 +677,119 @@ fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime)
         &body,
         &example,
     )
+}
+
+// ── DAC ─────────────────────────────────────────────────────────────────────
+
+/// The chip's DAC channels — an 8-bit level per pad.
+///
+/// # Two channels, two peripherals
+///
+/// esp-hal names them `DAC1` and `DAC2`, each with a `T::Pin` fixed by type:
+/// `GPIO25`/`GPIO26` on the ESP32, `GPIO17`/`GPIO18` on the S2. So `init` takes
+/// the pad, but passing a different one does not compile — which is the whole
+/// reason the canvas offers `DacOut` on those two pads and nowhere else.
+///
+/// # Eight bits, not twelve
+///
+/// `Dac::write` takes a `u8`. The module stores its resting value the way the
+/// STM32's DAC needs it — twelve bits — so it is scaled here rather than
+/// clamped, or every value above 255 would land at full scale.
+fn dac_file(channels: &[u8], cfg: Option<&DacModuleConfig>, rt: EspRuntime) -> String {
+    let d = DacModuleConfig::new(1);
+    let c = cfg.unwrap_or(&d);
+    let mut consts = String::new();
+    for ch in channels {
+        consts.push_str(&format!(
+            "// The level the pad holds once `init` returns.\n\
+             const START_OUT{ch}: u8 = {};\n",
+            esp_dac_value(c.value_of(*ch)),
+        ));
+    }
+
+    let params: String = channels
+        .iter()
+        .map(|ch| {
+            format!("    dac{ch}: DAC{ch}<'d>,\n    pin{ch}: <DAC{ch}<'d> as Instance>::Pin,\n")
+        })
+        .collect();
+    let ret: String = channels
+        .iter()
+        .map(|ch| format!("Dac<'d, DAC{ch}<'d>>"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut steps = String::new();
+    for ch in channels {
+        steps.push_str(&format!(
+            "\x20   let mut out{ch} = Dac::new(dac{ch}, pin{ch});\n\
+             \x20   out{ch}.write(START_OUT{ch});\n"
+        ));
+    }
+    let handles = channels
+        .iter()
+        .map(|ch| format!("out{ch}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ret = if channels.len() == 1 {
+        ret
+    } else {
+        format!("({ret})")
+    };
+    let handles = if channels.len() == 1 {
+        handles
+    } else {
+        format!("({handles})")
+    };
+
+    let body = format!(
+        "/// The DAC — {} channel{}, eight bits each.\n\
+         ///\n\
+         /// Each pad is fixed in silicon; `Dac::new` takes no other.\n\
+         pub fn init<'d>(\n\
+         {params}) -> {ret} {{\n\
+         {steps}\x20   {handles}\n\
+         }}\n",
+        channels.len(),
+        if channels.len() == 1 { "" } else { "s" },
+    );
+
+    let first = channels.first().copied().unwrap_or(1);
+    let example = example_block(
+        "Using the DAC",
+        &[
+            "One byte in, one voltage out — 0 is ground, 255 is the supply:".to_owned(),
+            String::new(),
+            format!("    _dac_out{first}.write(128);   // half scale"),
+            String::new(),
+            "// There is no ramp and no buffer: the pad follows the last value".to_owned(),
+            "// written, and holds it.".to_owned(),
+        ],
+    );
+
+    let _ = rt; // the DAC has no async surface: `write` is a register store.
+    file(
+        &format!(
+            "use esp_hal::analog::dac::{{Dac, Instance}};\n\
+             use esp_hal::peripherals::{{{}}};\n",
+            channels
+                .iter()
+                .map(|ch| format!("DAC{ch}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        &consts,
+        &body,
+        &example,
+    )
+}
+
+/// The module's 12-bit resting value, as the eight bits an ESP DAC takes.
+///
+/// Scaled, not truncated: the field is shared with the STM32 path, where the
+/// converter really is twelve bits, so a mid-scale 2048 has to come out as 128
+/// rather than as the low byte of 2048 (which is 0).
+fn esp_dac_value(v12: u16) -> u8 {
+    (u32::from(v12.min(4095)) * 255 / 4095) as u8
 }
 
 // ── PARL_IO ─────────────────────────────────────────────────────────────────
@@ -845,7 +981,7 @@ fn parl_io_file(cfg: Option<&ParlIoModuleConfig>, has_valid: bool, rt: EspRuntim
         "{}\
          use esp_hal::dma::{{DmaChannelFor, {buf_ty}}};\n\
          use esp_hal::dma_buffers;\n",
-        mode_import(rt)
+        mode_import(rt),
     );
     uses.push_str(&format!(
         "use esp_hal::gpio::interconnect::{};\n",
@@ -1821,6 +1957,12 @@ pub fn config_files(
     // `Some(has a valid pad)` when the parallel port is wired at all.
     parl_io: &Option<bool>,
     parl_io_cfg: Option<&ParlIoModuleConfig>,
+    // The DAC channels wired, and the module they belong to.
+    dac: &[u8],
+    dac_cfg: Option<&DacModuleConfig>,
+    // True on the ESP32 alone, whose I2S restricts MCLK to three pads and says
+    // so in the type — see `i2s_file`.
+    esp32_mclk: bool,
     // LEDC timer → the channels wired on it, with each channel duty in
     // hundredths of a percent.
     pwm: &[(u8, Vec<(u8, u16)>)],
@@ -1841,7 +1983,10 @@ pub fn config_files(
         out.push((format!("i2c{n}.rs"), i2c_file(*n, sigs, i2c_cfg.get(n), rt)));
     }
     for (n, sigs) in i2s {
-        out.push((format!("i2s{n}.rs"), i2s_file(*n, sigs, i2s_cfg.get(n), rt)));
+        out.push((
+            format!("i2s{n}.rs"),
+            i2s_file(*n, sigs, i2s_cfg.get(n), rt, esp32_mclk),
+        ));
     }
     for n in rmt {
         out.push((
@@ -1857,6 +2002,9 @@ pub fn config_files(
     }
     if usb {
         out.push(("usb.rs".to_owned(), usb_file(rt)));
+    }
+    if !dac.is_empty() {
+        out.push(("dac.rs".to_owned(), dac_file(dac, dac_cfg, rt)));
     }
     if let Some(has_valid) = parl_io {
         out.push((
@@ -2137,6 +2285,9 @@ mod tests {
             40,
             &Some(false),
             None,
+            &[1, 2],
+            None,
+            false,
             &[(0, vec![(1, 2_000)])],
             &BTreeMap::new(),
             EspRuntime::Blocking,
@@ -2152,6 +2303,7 @@ mod tests {
                 "rmt2.rs",
                 "pcnt1.rs",
                 "usb.rs",
+                "dac.rs",
                 "parl_io.rs",
                 "mcpwm0.rs",
                 "pwm0.rs"

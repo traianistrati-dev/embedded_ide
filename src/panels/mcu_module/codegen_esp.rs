@@ -42,8 +42,9 @@ use super::codegen::dma_map::DmaUse;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
 use super::mcu_def::DmaDef;
 use super::modules::{
-    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, McpwmModuleConfig, ParlIoModuleConfig,
-    PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
+    AsyncBusMode, DacModuleConfig, I2cModuleConfig, I2sModuleConfig, McpwmModuleConfig,
+    ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, TimerModuleConfig,
+    UsartModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -156,6 +157,7 @@ pub fn fresh_esp32c3_main_rs(
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
+    dac: &BTreeMap<u8, DacModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -177,6 +179,7 @@ pub fn fresh_esp32c3_main_rs(
         pcnt,
         mcpwm,
         parl_io,
+        dac,
         timer,
         custom_inits,
         chip,
@@ -205,6 +208,7 @@ pub fn update_esp32c3_main_rs(
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
+    dac: &BTreeMap<u8, DacModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -226,6 +230,7 @@ pub fn update_esp32c3_main_rs(
         pcnt,
         mcpwm,
         parl_io,
+        dac,
         timer,
         custom_inits,
         chip,
@@ -347,6 +352,7 @@ fn make_gen_section(
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
+    dac: &BTreeMap<u8, DacModuleConfig>,
     // PWM (LEDC) module settings, keyed by LEDC timer.
     timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
@@ -530,6 +536,7 @@ fn make_gen_section(
         pcnt,
         mcpwm,
         parl_io.get(&0),
+        dac.get(&1),
         crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(chip),
         runtime,
         &dma_plan,
@@ -823,6 +830,26 @@ fn collect_rmt<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, &'a Pin> {
             _ => None,
         })
         .collect()
+}
+
+/// The DAC channels the canvas wires, with the pad each drives.
+///
+/// The pad is fixed per channel, so this is really a "which channels did the
+/// user turn on" — but the binding still names the GPIO, because `main.rs`
+/// hands the pad to `Dac::new` and the reader wants to see which one.
+fn collect_dac<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, &'a Pin> {
+    configured
+        .iter()
+        .filter_map(|p| match p.selected_function {
+            PinFunction::DacOut { channel, .. } => Some((channel, *p)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The DAC channels wired, in channel order.
+pub(crate) fn dac_channels_wired(configured: &[&Pin]) -> Vec<u8> {
+    collect_dac(configured).into_keys().collect()
 }
 
 /// The parallel port's pads, in the order `init` takes them.
@@ -1154,6 +1181,7 @@ fn bus_sections(
     pcnt_cfg: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io_cfg: Option<&ParlIoModuleConfig>,
+    dac_cfg: Option<&DacModuleConfig>,
     // The RMT source clock, which `Rmt::new` takes as an argument.
     rmt_hz: u32,
     runtime: EspRuntime,
@@ -1362,6 +1390,40 @@ fn bus_sections(
         }
         out.push(("PCNT".to_owned(), body));
     }
+    // DAC. No DMA and no settings beyond the resting level: two peripheral
+    // singletons and two pads that no other function can take.
+    let dac = collect_dac(configured);
+    if !dac.is_empty() {
+        let sfx = dac_cfg
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        let mut body = String::new();
+        let mut args = Vec::new();
+        for (ch, p) in &dac {
+            let var = esp_binding(p);
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
+            args.push(format!("peripherals.DAC{ch}, {var}"));
+        }
+        let handles = dac
+            .keys()
+            .map(|ch| format!("mut _dac_out{ch}{sfx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        body.push_str(&format!(
+            "    let {} =\n\x20       pins::configs::dac::init({});\n",
+            if dac.len() == 1 {
+                handles.clone()
+            } else {
+                format!("({handles})")
+            },
+            args.join(", "),
+        ));
+        out.push(("DAC".to_owned(), body));
+    }
     // PARL_IO. Like the I2S it is DMA-only, so a port with no channel left
     // produces a note rather than a call that could not be written.
     if let Some((data, clk, valid)) = collect_parl_io(configured) {
@@ -1508,6 +1570,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &timer,
             "",
             "esp32c3",
@@ -1560,6 +1623,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1612,6 +1676,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_dac() -> BTreeMap<u8, DacModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1629,6 +1697,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1658,6 +1727,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1687,6 +1757,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1713,6 +1784,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1734,6 +1806,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1764,6 +1837,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1796,6 +1870,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1836,6 +1911,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1883,6 +1959,7 @@ mod tests {
                 &no_pcnt(),
                 &no_mcpwm(),
                 &no_parl(),
+                &no_dac(),
                 &Default::default(),
                 "",
                 "esp32c3",
@@ -1964,6 +2041,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_dac(),
             &Default::default(),
             "",
             "esp32c3",

@@ -1266,6 +1266,10 @@ McuDefinition(
                 functions: [
                     GpioInput,
                     GpioOutput,
+                    DacOut(
+                        dac: 1,
+                        channel: 1,
+                    ),
                     AdcChannel(
                         adc: 2,
                         channel: 6,
@@ -1345,6 +1349,10 @@ McuDefinition(
                 functions: [
                     GpioInput,
                     GpioOutput,
+                    DacOut(
+                        dac: 1,
+                        channel: 2,
+                    ),
                     AdcChannel(
                         adc: 2,
                         channel: 7,

@@ -3024,15 +3024,28 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    // An ESP's DAC is EIGHT bits (`Dac::write` takes a u8);
+                    // the STM32's is twelve. The field stores twelve either
+                    // way and the ESP codegen scales, so the slider only has
+                    // to stop offering steps the hardware cannot land on.
+                    let esp = crate::panels::mcu_module::codegen::family::is_esp(family);
+                    let (top, mid) = if esp { (255u16, 128u16) } else { (4095, 2048) };
                     for (ch, pin) in &chans {
                         ui.label(format!("OUT{ch} start  ({pin})"));
-                        let mut v = cfg.value_of(*ch);
+                        let mut v = cfg.value_of(*ch).min(top);
                         ui.horizontal(|ui| {
-                            if ui.add(egui::Slider::new(&mut v, 0..=4095)).changed() {
+                            if ui.add(egui::Slider::new(&mut v, 0..=top)).changed() {
                                 cfg.set_value(*ch, v);
                             }
                             if ui.small_button("mid").clicked() {
-                                cfg.set_value(*ch, 2048);
+                                cfg.set_value(*ch, mid);
+                            }
+                            if esp {
+                                ui.label(
+                                    egui::RichText::new("8-bit")
+                                        .size(10.5)
+                                        .color(egui::Color32::GRAY),
+                                );
                             }
                         })
                         .response
