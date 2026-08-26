@@ -4298,11 +4298,74 @@ pub struct UsbModuleConfig {
     pub pid: u16,
     /// Product string shown to the host.
     pub product: String,
+    /// Which controller the pads go to — see [`UsbRole`]. Ignored off the ESP,
+    /// where there is only one USB peripheral to route them to.
+    #[serde(default)]
+    pub role: UsbRole,
     pub rx_model: String,
     pub tx_model: String,
     /// User label appended to the generated handles (e.g. `usb_dev_logger`).
     #[serde(default)]
     pub custom_label: String,
+}
+
+/// Which USB controller the D-/D+ pads are routed to.
+///
+/// NOT a new module kind, and the PADS are the reason: on an ESP32-S3 both
+/// controllers land on GPIO19/20, so a Serial/JTAG module and an OTG module
+/// would be two modules claiming one pair of pins. One module with a role
+/// makes that impossible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UsbRole {
+    /// The chip's built-in console. No descriptors, no stack, no dependencies —
+    /// it enumerates as Espressif's fixed identity and just works.
+    #[default]
+    SerialJtag,
+    /// The full OTG full-speed controller, driving a `usb-device` stack. This
+    /// is what makes the chip a USB device of your own design.
+    Otg,
+}
+
+impl UsbRole {
+    pub const ALL: [Self; 2] = [Self::SerialJtag, Self::Otg];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SerialJtag => "Serial/JTAG",
+            Self::Otg => "OTG full-speed",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::SerialJtag => {
+                "The built-in console: a second serial port on the same cable, with \
+                 Espressif's fixed identity. Nothing to configure and nothing to add."
+            }
+            Self::Otg => {
+                "A USB device of your own: your VID/PID, your product string, and a \
+                 `usb-device` stack to hang classes off. Adds two crates."
+            }
+        }
+    }
+
+    pub fn is_otg(self) -> bool {
+        matches!(self, Self::Otg)
+    }
+
+    /// The controllers this chip actually has.
+    ///
+    /// The two are separate silicon that share one pad pair. The S3 has both;
+    /// the S2 has only OTG (no Serial/JTAG at all); the RISC-V parts have only
+    /// Serial/JTAG. Everywhere else this is not an ESP, and the STM32 path
+    /// builds its own `usb-device` stack that answers to neither name.
+    pub fn options(family: &str) -> &'static [Self] {
+        match family {
+            "esp32s3" => &Self::ALL,
+            "esp32s2" => &[Self::Otg],
+            _ => &[Self::SerialJtag],
+        }
+    }
 }
 
 impl UsbModuleConfig {
@@ -4313,6 +4376,7 @@ impl UsbModuleConfig {
             vid: 0x16c0,
             pid: 0x27dd,
             product: "Serial port".to_owned(),
+            role: UsbRole::default(),
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),

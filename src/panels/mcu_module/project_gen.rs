@@ -476,6 +476,35 @@ pub fn ensure_peripheral_deps(
     s
 }
 
+/// The ESP's OTG stack: `usb-device` + `usbd-serial`, at the versions
+/// `esp-synopsys-usb-otg` targets.
+///
+/// A SEPARATE function from [`ensure_usb_deps`] and not a flag on it, because
+/// almost nothing is shared. That one is the STM32F1 story: `usb-device` 0.2,
+/// `usbd-serial` 0.1, and a `stm32-usbd` feature toggled on the HAL line. The
+/// ESP bus is on `usb-device` **0.3**, whose `.strings()` builder replaced 0.2's
+/// `.product()`, so the two versions are not interchangeable and a project can
+/// only ever want one of them.
+///
+/// No esp-hal feature to toggle: the chip feature (`esp32s3`) already turns on
+/// esp-hal's own `__usb_otg`, which pulls the bus crate in.
+pub fn ensure_esp_usb_deps(cargo_toml: &str, needs_otg: bool, sources: &[&str]) -> String {
+    let s = ensure_dep(
+        cargo_toml,
+        "usb-device",
+        needs_otg,
+        &format!("usb-device  = \"0.3\"   {DEP_MARKER}"),
+        sources,
+    );
+    ensure_dep(
+        &s,
+        "usbd-serial",
+        needs_otg,
+        &format!("usbd-serial = \"0.2\"   {DEP_MARKER}"),
+        sources,
+    )
+}
+
 /// Add or remove the `usb-device` + `usbd-serial` dependencies AND the
 /// `stm32-usbd` feature on the `stm32f1xx-hal` line, driven by whether a USB
 /// peripheral is configured. Like [`ensure_can_deps`], idempotent and called

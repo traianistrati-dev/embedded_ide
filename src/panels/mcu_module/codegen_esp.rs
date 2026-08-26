@@ -44,7 +44,7 @@ use super::mcu_def::DmaDef;
 use super::modules::{
     AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sModuleConfig, LcdCamMode,
     LcdCamModuleConfig, McpwmModuleConfig, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig,
-    SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
+    SpiModuleConfig, TimerModuleConfig, UsartModuleConfig, UsbModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -159,6 +159,8 @@ pub fn fresh_esp32c3_main_rs(
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
     // One LCD_CAM per chip, so this is keyed by 0 and never anything else.
     lcd_cam: &BTreeMap<u8, LcdCamModuleConfig>,
+    // One USB module per chip; its ROLE picks the controller.
+    usb: &BTreeMap<u8, UsbModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
@@ -183,6 +185,7 @@ pub fn fresh_esp32c3_main_rs(
         mcpwm,
         parl_io,
         lcd_cam,
+        usb,
         dac,
         can,
         timer,
@@ -215,6 +218,8 @@ pub fn update_esp32c3_main_rs(
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
     // One LCD_CAM per chip, so this is keyed by 0 and never anything else.
     lcd_cam: &BTreeMap<u8, LcdCamModuleConfig>,
+    // One USB module per chip; its ROLE picks the controller.
+    usb: &BTreeMap<u8, UsbModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
@@ -239,6 +244,7 @@ pub fn update_esp32c3_main_rs(
         mcpwm,
         parl_io,
         lcd_cam,
+        usb,
         dac,
         can,
         timer,
@@ -364,6 +370,8 @@ fn make_gen_section(
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
     // One LCD_CAM per chip, so this is keyed by 0 and never anything else.
     lcd_cam: &BTreeMap<u8, LcdCamModuleConfig>,
+    // One USB module per chip; its ROLE picks the controller.
+    usb: &BTreeMap<u8, UsbModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
     // Keyed by instance like the rest, but there is only ever instance 1: the
     // CAN pin functions carry no number — see `twai_pads`.
@@ -646,8 +654,53 @@ fn make_gen_section(
     // alone. The two pads still carry `UsbDm`/`UsbDp` on the canvas — that is
     // what makes the pair visible and unassignable to anything else.
     if has_usb {
+        let want_otg = usb.get(&1).is_some_and(|c| c.role.is_otg());
         body.push('\n');
-        if has_usb_serial_jtag(chip) {
+        if want_otg && has_usb_otg(chip) {
+            // The OTG device is built HERE rather than behind one `init`: the
+            // serial port and the device both BORROW the bus allocator, and no
+            // function can hand back a value and a borrow of it at once. So the
+            // config file returns the allocator and the three live in one scope.
+            let sfx = usb
+                .get(&1)
+                .map(|c| module_label_sfx(&c.custom_label))
+                .unwrap_or_default();
+            let (dp, dm) = usb_pads(&configured);
+            body.push_str("    // ── USB OTG (CDC ACM serial) ──\n");
+            for p in [dp, dm].into_iter().flatten() {
+                body.push_str(&format!(
+                    "    let {var} = peripherals.{gpio}; // {label}\n",
+                    var = esp_binding(p),
+                    gpio = p.name,
+                    label = p.selected_function.label(),
+                ));
+            }
+            // D+ BEFORE D-, which is the constructor's order — see `usb_otg_file`.
+            body.push_str(&format!(
+                "    let _usb_bus{sfx} = pins::configs::usb::init(peripherals.USB0, {}, {});\n",
+                dp.map(esp_binding).unwrap_or_default(),
+                dm.map(esp_binding).unwrap_or_default(),
+            ));
+            body.push_str(&format!(
+                "    // These two ARE the device. They must be `mut` for `poll`, and\n\
+                 \x20   // they stay unused until you write that poll into your loop.\n\
+                 \x20   #[allow(unused_mut, unused_variables)]\n\
+                 \x20   let mut _usb_serial{sfx} = usbd_serial::SerialPort::new(&_usb_bus{sfx});\n\
+                 \x20   #[allow(unused_mut, unused_variables)]\n\
+                 \x20   let mut _usb_dev{sfx} = usb_device::device::UsbDeviceBuilder::new(\n\
+                 \x20       &_usb_bus{sfx},\n\
+                 \x20       usb_device::device::UsbVidPid(\n\
+                 \x20           pins::configs::usb::VID,\n\
+                 \x20           pins::configs::usb::PID,\n\
+                 \x20       ),\n\
+                 \x20   )\n\
+                 \x20   .strings(&[usb_device::device::StringDescriptors::default()\n\
+                 \x20       .product(pins::configs::usb::PRODUCT)])\n\
+                 \x20   .unwrap()\n\
+                 \x20   .device_class(usbd_serial::USB_CLASS_CDC)\n\
+                 \x20   .build();\n"
+            ));
+        } else if !want_otg && has_usb_serial_jtag(chip) {
             body.push_str("    // ── USB Serial/JTAG ──\n");
             body.push_str(&format!(
                 "    let mut _usb = pins::configs::usb::{}(peripherals.USB_DEVICE);\n",
@@ -662,8 +715,9 @@ fn make_gen_section(
             // "automatically configured" line that configures nothing.
             body.push_str(
                 "    // ── USB — pads only ──\n\
-                 \x20   // This chip has the USB pads, and its esp-hal has no\n\
-                 \x20   // usb_serial_jtag driver. Nothing is generated for them.\n",
+                 \x20   // This chip has the USB pads and its esp-hal has no driver\n\
+                 \x20   // for the controller this module asked for. Nothing is\n\
+                 \x20   // generated for them.\n",
             );
         }
     }
@@ -1016,6 +1070,27 @@ pub(crate) fn mcpwm_outputs_wired(configured: &[&Pin]) -> Vec<(u8, Vec<(u8, bool
 /// reason [`super::esp_clocks::max_mhz`] is a table keyed on the chip id.
 /// Checked against the metadata by
 /// [`tests::the_usb_serial_jtag_list_matches_esp_hal`].
+/// The parts whose esp-hal builds the OTG full-speed driver.
+///
+/// From `usb_otg_driver_supported`. The two USB controllers are separate
+/// silicon that share one pad pair: the S3 has both, the S2 has only this one,
+/// and the RISC-V parts have only Serial/JTAG.
+pub(crate) fn has_usb_otg(chip: &str) -> bool {
+    matches!(chip, "esp32s2" | "esp32s3")
+}
+
+/// The USB pads, as `(dp, dm)` — the order `Usb::new` takes them in, which is
+/// the opposite of how they are usually named.
+fn usb_pads<'a>(configured: &[&'a Pin]) -> (Option<&'a Pin>, Option<&'a Pin>) {
+    let find = |f: PinFunction| {
+        configured
+            .iter()
+            .copied()
+            .find(|p| p.selected_function == f)
+    };
+    (find(PinFunction::UsbDp), find(PinFunction::UsbDm))
+}
+
 pub(crate) fn has_usb_serial_jtag(chip: &str) -> bool {
     matches!(
         chip,
@@ -1748,6 +1823,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &timer,
@@ -1803,6 +1879,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1869,6 +1946,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_usb() -> BTreeMap<u8, UsbModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1887,6 +1968,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1919,6 +2001,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1951,6 +2034,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1980,6 +2064,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2004,6 +2089,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2037,6 +2123,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2072,6 +2159,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2115,6 +2203,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2165,6 +2254,7 @@ mod tests {
                 &no_mcpwm(),
                 &no_parl(),
                 &no_lcd(),
+                &no_usb(),
                 &no_dac(),
                 &no_can(),
                 &Default::default(),
@@ -2249,6 +2339,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_lcd(),
+            &no_usb(),
             &no_dac(),
             &no_can(),
             &Default::default(),

@@ -40,7 +40,7 @@ use super::modules::{
     AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sDirection, I2sFormat,
     I2sModuleConfig, I2sStandard, LcdCamMode, LcdCamModuleConfig, McpwmModuleConfig, Parity,
     ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, StopBits,
-    TimerModuleConfig, UsartModuleConfig,
+    TimerModuleConfig, UsartModuleConfig, UsbModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -1286,6 +1286,88 @@ fn mcpwm_file(
 
 // ── USB Serial/JTAG ─────────────────────────────────────────────────────────
 
+/// The OTG full-speed controller — a USB device of the project's own design.
+///
+/// # Not the same peripheral as Serial/JTAG
+///
+/// They share the pads and nothing else. Serial/JTAG is a fixed console with
+/// Espressif's identity; this is a controller you hang a `usb-device` stack on,
+/// which is why the VID, PID and product string mean something here and mean
+/// nothing there. Only the S2 and S3 have it.
+///
+/// # DP comes first
+///
+/// `Usb::new` takes D+ BEFORE D-, the opposite of how the pads are usually
+/// listed. Swapping them compiles and enumerates nothing.
+///
+/// # The allocator cannot come back with its classes
+///
+/// `UsbBus::new` hands back a `UsbBusAllocator` that everything else BORROWS —
+/// the serial port and the device both hold a reference to it. A function
+/// cannot return a value and a borrow of that value, so this one returns the
+/// allocator alone and `main.rs` builds the rest around it, in one scope.
+fn usb_otg_file(cfg: Option<&UsbModuleConfig>) -> String {
+    let d = UsbModuleConfig::new(1);
+    let c = cfg.unwrap_or(&d);
+    let consts = format!(
+        "// The host sees these. `0x16c0:0x27dd` is pid.codes' test pair - fine on\n\
+         // a bench, not for anything shipped.\n\
+         pub const VID: u16 = 0x{:04x};\n\
+         pub const PID: u16 = 0x{:04x};\n\
+         pub const PRODUCT: &str = {:?};\n\
+         // Endpoint scratch, in 32-bit words. 256 is enough for a CDC serial\n\
+         // port; a composite device with more endpoints needs more.\n\
+         const EP_WORDS: usize = 256;\n",
+        c.vid, c.pid, c.product,
+    );
+
+    let body = "/// The OTG bus, ready for `usb-device` classes.\n\
+         ///\n\
+         /// D+ FIRST: `Usb::new` takes them in that order. The wrong way round\n\
+         /// still compiles and enumerates nothing.\n\
+         pub fn init<'d>(\n\
+         \x20   usb0: USB0<'d>,\n\
+         \x20   dp: impl UsbDp + 'd,\n\
+         \x20   dm: impl UsbDm + 'd,\n\
+         ) -> UsbBusAllocator<UsbBus<Usb<'d>>> {\n\
+         \x20   // The endpoint scratch has to be `'static`, and `init` can only\n\
+         \x20   // run once because it takes the USB0 singleton BY VALUE - which\n\
+         \x20   // is what makes this handout sound.\n\
+         \x20   static mut EP_MEMORY: [u32; EP_WORDS] = [0; EP_WORDS];\n\
+         \x20   // SAFETY: see above - one call, one borrow, no other name for it.\n\
+         \x20   let ep = unsafe { &mut *(&raw mut EP_MEMORY) };\n\
+         \x20   UsbBus::new(Usb::new(usb0, dp, dm), ep)\n\
+         }\n"
+    .to_owned();
+
+    let example = example_block(
+        "Using the USB OTG port",
+        &[
+            "`main.rs` already builds the device around this bus. Poll it in".to_owned(),
+            "your loop - nothing enumerates until you do:".to_owned(),
+            String::new(),
+            "    if _usb_dev.poll(&mut [&mut _usb_serial]) {".to_owned(),
+            "        let mut buf = [0u8; 64];".to_owned(),
+            "        if let Ok(n) = _usb_serial.read(&mut buf) {".to_owned(),
+            "            _usb_serial.write(&buf[..n]).ok();".to_owned(),
+            "        }".to_owned(),
+            "    }".to_owned(),
+            String::new(),
+            "// `poll` must be called often - faster than once a millisecond, or".to_owned(),
+            "// the host gives up on the device.".to_owned(),
+        ],
+    );
+
+    file(
+        "use esp_hal::otg_fs::{Usb, UsbBus, UsbDm, UsbDp};\n\
+         use esp_hal::peripherals::USB0;\n\
+         use usb_device::bus::UsbBusAllocator;\n",
+        &consts,
+        &body,
+        &example,
+    )
+}
+
 /// The USB Serial/JTAG peripheral: a CDC serial port over the chip's own USB.
 ///
 /// # No pins, and no VID/PID either
@@ -1304,7 +1386,10 @@ fn mcpwm_file(
 /// A board with a USB-UART bridge chip exposes that instead; this is the port
 /// the chip provides itself, on parts that have one. Both can be present, and
 /// they are different devices to the host.
-fn usb_file(rt: EspRuntime) -> String {
+fn usb_file(rt: EspRuntime, cfg: Option<&UsbModuleConfig>) -> String {
+    if cfg.is_some_and(|c| c.role.is_otg()) {
+        return usb_otg_file(cfg);
+    }
     let body_for = |name: &str, mode: &str, extra: &str| {
         format!(
             "pub fn {name}<'d>(usb: USB_DEVICE<'d>) -> UsbSerialJtag<'d, {mode}> {{\n\
@@ -2512,6 +2597,9 @@ pub fn config_files(
     // True when the USB pads are wired AND this chip's esp-hal has the driver
     // — see `codegen_esp::has_usb_serial_jtag`.
     usb: bool,
+    // The USB module, whose ROLE decides which of the two controllers the pads
+    // are routed to — see `modules::UsbRole`.
+    usb_cfg: Option<&UsbModuleConfig>,
     // True when BOTH TWAI pads are wired and the chip has the driver — a CAN
     // node with one wire is not a node, so a half-wired bus emits nothing.
     twai: bool,
@@ -2572,7 +2660,7 @@ pub fn config_files(
         ));
     }
     if usb {
-        out.push(("usb.rs".to_owned(), usb_file(rt)));
+        out.push(("usb.rs".to_owned(), usb_file(rt, usb_cfg)));
     }
     if !lcd_cam.is_empty() {
         let d = LcdCamModuleConfig::new(0);
@@ -2864,6 +2952,8 @@ mod tests {
             &[(1, true)],
             &BTreeMap::new(),
             true,
+            // The USB module left at its defaults — Serial/JTAG, not OTG.
+            None,
             // TWAI wired, with the module left at its defaults.
             true,
             None,

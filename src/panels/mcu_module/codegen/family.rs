@@ -17,7 +17,8 @@ use crate::panels::mcu_module::codegen_esp::{self, EspRuntime};
 use crate::panels::mcu_module::comparator;
 use crate::panels::mcu_module::mcu::{Mcu, Runtime};
 use crate::panels::mcu_module::modules::{
-    self, ApiStyle, I2cModuleConfig, SpiModuleConfig, SpiRole, UsartModuleConfig,
+    self, ApiStyle, I2cModuleConfig, SpiModuleConfig, SpiRole, UsartModuleConfig, UsbModuleConfig,
+    UsbRole,
 };
 use crate::panels::mcu_module::pins::logic::pin::{GpioMode, Pin};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -262,6 +263,23 @@ fn esp_spi_configs(mcu: &Mcu) -> BTreeMap<u8, SpiModuleConfig> {
     spi
 }
 
+/// The USB module, with a controller this chip does not have put back.
+///
+/// The same hole as [`esp_spi_configs`], and it bites hardest on the ESP32-S2:
+/// the role DEFAULTS to Serial/JTAG, which the S2 has no driver for, so a
+/// project that never opened the panel would emit "pads only" for a chip whose
+/// OTG controller is sitting right there.
+fn esp_usb_configs(mcu: &Mcu) -> BTreeMap<u8, UsbModuleConfig> {
+    let roles = UsbRole::options(&mcu.family);
+    let mut usb = modules::usb_configs(&mcu.modules);
+    for cfg in usb.values_mut() {
+        if !roles.is_empty() && !roles.contains(&cfg.role) {
+            cfg.role = roles[0];
+        }
+    }
+    usb
+}
+
 /// A fresh ESP `main.rs` on `runtime` — shared by the blocking and async ESP
 /// backends, which differ only in that argument.
 fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
@@ -274,6 +292,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
     let lcd_cam = modules::lcd_cam_configs(&mcu.modules);
+    let usb = esp_usb_configs(mcu);
     let dac = modules::dac_configs(&mcu.modules);
     let can = modules::can_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
@@ -291,6 +310,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &mcpwm,
         &parl_io,
         &lcd_cam,
+        &usb,
         &dac,
         &can,
         &timer,
@@ -329,6 +349,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         })
         .collect();
     let can_cfg = modules::can_configs(&mcu.modules);
+    let usb_cfg = esp_usb_configs(mcu);
     let lcd_cam_cfg = modules::lcd_cam_configs(&mcu.modules);
     crate::panels::mcu_module::codegen_esp_configs::config_files(
         &uart,
@@ -345,11 +366,18 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(&mcu.family),
         &codegen_esp::pcnt_units_wired(&configured),
         &modules::pcnt_configs(&mcu.modules),
-        // The USB pads wired, and a chip whose esp-hal can drive them.
+        // The USB pads wired, and a chip whose esp-hal can drive them AS THE
+        // ROLE ASKS: the two controllers share the pads and not the support, so
+        // which one is wanted decides whether there is a file to write.
         configured
             .iter()
             .any(|p| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp))
-            && codegen_esp::has_usb_serial_jtag(&mcu.family),
+            && if usb_cfg.get(&1).is_some_and(|c| c.role.is_otg()) {
+                codegen_esp::has_usb_otg(&mcu.family)
+            } else {
+                codegen_esp::has_usb_serial_jtag(&mcu.family)
+            },
+        usb_cfg.get(&1),
         // BOTH TWAI pads, on a chip whose esp-hal has the driver. The pads are
         // offered only where it does, so this is belt and braces — but the C5
         // has TWAI silicon and no driver, which is the shape of trap it catches.
@@ -386,6 +414,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
     let lcd_cam = modules::lcd_cam_configs(&mcu.modules);
+    let usb = esp_usb_configs(mcu);
     let dac = modules::dac_configs(&mcu.modules);
     let can = modules::can_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
@@ -404,6 +433,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &mcpwm,
         &parl_io,
         &lcd_cam,
+        &usb,
         &dac,
         &can,
         &timer,
@@ -1838,6 +1868,25 @@ mod tests {
             }),
             connections: Vec::new(),
         });
+        // `ESP_USB_OTG=1` routes the USB pads to the OTG controller instead of
+        // the built-in console: a different peripheral, two extra crates, and a
+        // device built in `main.rs` rather than behind one `init`.
+        mcu.modules.push(VirtualModule {
+            id: "usb_1".into(),
+            kind: ModuleKind::GenericInterfaceUsb,
+            name: "USB".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Usb({
+                use crate::panels::mcu_module::modules::{UsbModuleConfig, UsbRole};
+                let mut c = UsbModuleConfig::new(1);
+                if std::env::var("ESP_USB_OTG").is_ok() {
+                    c.role = UsbRole::Otg;
+                    c.product = "IDE test device".into();
+                }
+                c
+            }),
+            connections: Vec::new(),
+        });
         // `ESP_LCD_MODE=dpi|camera` picks the other two shapes — a different
         // driver, different pads and, for DPI, a whole timing block.
         mcu.modules.push(VirtualModule {
@@ -3009,6 +3058,124 @@ mod tests {
             s3.iter_all_pins()
                 .any(|p| p.available_functions.contains(&PinFunction::LcdCamDc)),
             "the S3 has it"
+        );
+    }
+
+    /// Build an ESP with the USB pads wired and a USB module, and return
+    /// `(main.rs, usb.rs)` — the file empty when none was emitted.
+    #[cfg(test)]
+    fn esp_usb_project(
+        chip: &str,
+        role: crate::panels::mcu_module::modules::UsbRole,
+        runtime: Runtime,
+    ) -> (String, String) {
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind, VirtualModule};
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+            .unwrap()
+            .build_mcu();
+        mcu.runtime = runtime;
+        for f in [PinFunction::UsbDp, PinFunction::UsbDm] {
+            // Assigning one pad of a fixed pair wires the other, so the second
+            // pass usually finds its work already done.
+            if mcu.iter_all_pins().any(|p| p.selected_function == f) {
+                continue;
+            }
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(&f)
+                })
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("{chip}: no pad for {f:?}"));
+            mcu.apply_pin_function(num, f);
+        }
+        let mut cfg = UsbModuleConfig::new(1);
+        cfg.role = role;
+        cfg.product = "Test device".into();
+        mcu.modules.push(VirtualModule {
+            id: "usb_1".into(),
+            kind: ModuleKind::GenericInterfaceUsb,
+            name: "USB".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Usb(cfg),
+            connections: Vec::new(),
+        });
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "usb.rs")
+            .map(|(_, c)| c)
+            .unwrap_or_default();
+        (mcu.fresh_main_rs(), file)
+    }
+
+    /// The OTG role reaches the OTHER controller: a different esp-hal module, a
+    /// bus rather than a console, and the descriptors actually used.
+    #[test]
+    fn esp_usb_otg_builds_a_device_of_its_own() {
+        let (main, file) = esp_usb_project("esp32s3", UsbRole::Otg, Runtime::Blocking);
+        assert!(file.contains("esp_hal::otg_fs"), "driver:\n{file}");
+        assert!(file.contains("UsbBusAllocator"), "the bus:\n{file}");
+        assert!(
+            file.contains(r#"pub const PRODUCT: &str = "Test device";"#),
+            "descriptors:\n{file}"
+        );
+        assert!(!file.contains("UsbSerialJtag"), "not the console:\n{file}");
+
+        // D+ goes in FIRST — the wrong way round compiles and enumerates nothing.
+        let call = main
+            .lines()
+            .find(|l| l.contains("configs::usb::init(peripherals.USB0"))
+            .expect("the call");
+        let dp = call.find("_usb_dp").expect("dp arg");
+        let dm = call.find("_usb_dm").expect("dm arg");
+        assert!(dp < dm, "D+ must come first: {call}");
+
+        // The device is built in main.rs, not behind `init`: the serial port and
+        // the device both borrow the bus, so all three live in one scope.
+        assert!(
+            main.contains("usbd_serial::SerialPort::new(&_usb_bus)"),
+            "class:\n{main}"
+        );
+        assert!(main.contains("UsbDeviceBuilder::new("), "device:\n{main}");
+    }
+
+    /// Serial/JTAG is untouched: the same one-line console it always was.
+    #[test]
+    fn esp_usb_serial_jtag_is_unchanged() {
+        let (main, file) = esp_usb_project("esp32c6", UsbRole::SerialJtag, Runtime::Async);
+        assert!(file.contains("UsbSerialJtag"), "driver:\n{file}");
+        assert!(
+            main.contains("configs::usb::init_async(peripherals.USB_DEVICE)"),
+            "call:\n{main}"
+        );
+        assert!(!main.contains("UsbDeviceBuilder"), "no stack:\n{main}");
+    }
+
+    /// The two controllers are separate silicon sharing one pad pair, and not
+    /// every part has both. A role the chip cannot host is put back before
+    /// codegen — which is what makes the S2 work without opening the panel,
+    /// since its default role is one it does not have.
+    #[test]
+    fn esp_usb_role_falls_back_to_what_the_chip_has() {
+        assert_eq!(UsbRole::options("esp32s3"), &UsbRole::ALL);
+        assert_eq!(UsbRole::options("esp32s2"), &[UsbRole::Otg]);
+        assert_eq!(UsbRole::options("esp32c6"), &[UsbRole::SerialJtag]);
+
+        // The S2 asked for the console it does not have…
+        let (main, file) = esp_usb_project("esp32s2", UsbRole::SerialJtag, Runtime::Blocking);
+        assert!(file.contains("esp_hal::otg_fs"), "…and got OTG:\n{file}");
+        assert!(main.contains("peripherals.USB0"), "…and got OTG:\n{main}");
+
+        // …and a C6 asked for OTG it does not have.
+        let (main, file) = esp_usb_project("esp32c6", UsbRole::Otg, Runtime::Blocking);
+        assert!(
+            file.contains("UsbSerialJtag"),
+            "…and got the console:\n{file}"
+        );
+        assert!(
+            !main.contains("peripherals.USB0"),
+            "no OTG on a C6:\n{main}"
         );
     }
 }

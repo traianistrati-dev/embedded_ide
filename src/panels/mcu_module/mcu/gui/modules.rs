@@ -16,8 +16,8 @@ use crate::panels::mcu_module::modules::{
     ModuleSignal, OspiMemoryType, OspiMode, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoWidth,
     PcntCtrlMode, PcntEdgeMode, PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES,
     QspiAddressSize, RmtDirection, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder,
-    SpiRole, StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
-    XspiMemoryType, XspiMode,
+    SpiRole, StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbRole,
+    VirtualModule, XspiMemoryType, XspiMode,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -3530,12 +3530,38 @@ pub fn module_config_ui(
                     }
                 }
                 ModuleConfig::Usb(cfg) => {
-                    // The three descriptor fields belong to the `usb-device`
-                    // stack the STM32 path builds, where they really are a
-                    // choice. An ESP's USB Serial/JTAG enumerates as Espressif's
-                    // fixed `303a:1001` and has no descriptors to set, so
-                    // showing them would be three controls that change nothing.
-                    if crate::panels::mcu_module::codegen::family::is_esp(family) {
+                    // Two controllers on one pad pair: which one the pads go to
+                    // is the first question, and it decides every row below.
+                    let roles = UsbRole::options(family);
+                    if roles.len() > 1 {
+                        ui.label("Controller");
+                        egui::ComboBox::from_id_salt("usbrole")
+                            .selected_text(cfg.role.label())
+                            .show_ui(ui, |ui| {
+                                for v in roles.iter().copied() {
+                                    ui.selectable_value(&mut cfg.role, v, v.label())
+                                        .on_hover_text(v.hint());
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Both land on the same two pads, so only one can have them. \
+                                 Serial/JTAG is the built-in console; OTG is a device of \
+                                 your own design.",
+                            );
+                        ui.end_row();
+                    } else if !roles.is_empty() && cfg.role != roles[0] {
+                        // Carried over from a chip that HAD the other controller.
+                        // Put it back rather than offer one this chip lacks.
+                        cfg.role = roles[0];
+                    }
+                    // The three descriptor fields belong to a `usb-device` stack
+                    // — the STM32 path's, or the ESP's own OTG. Serial/JTAG
+                    // enumerates as Espressif's fixed `303a:1001` and has no
+                    // descriptors, so there they would change nothing.
+                    if crate::panels::mcu_module::codegen::family::is_esp(family)
+                        && !cfg.role.is_otg()
+                    {
                         ui.label("Identity");
                         ui.label(
                             egui::RichText::new("303a:1001  ·  fixed in silicon")
@@ -3571,6 +3597,21 @@ pub fn module_config_ui(
                     ui.label("Product ID");
                     ui.add(egui::DragValue::new(&mut cfg.pid).hexadecimal(4, false, true));
                     ui.end_row();
+                    if cfg.role.is_otg() {
+                        ui.label("Stack");
+                        ui.label(
+                            egui::RichText::new("usb-device + usbd-serial")
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        )
+                        .on_hover_text(
+                            "Added to Cargo.toml for you. `main.rs` builds a CDC serial \
+                             device on the bus; poll it in your loop, or swap the class \
+                             for any other the crate offers.",
+                        );
+                        ui.end_row();
+                        return;
+                    }
                     // Not a HAL constraint like the four above — the USB init
                     // takes PA11/PA12 directly, so one pad would spend the other
                     // uninvited.

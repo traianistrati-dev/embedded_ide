@@ -22,7 +22,7 @@ pub use model::{
     RmtDirection, RmtModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig,
     SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, SpiRole, StopBits,
     TimerModuleConfig, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig,
-    VirtualModule, XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,
+    UsbRole, VirtualModule, XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,
 };
 
 use std::collections::BTreeMap;

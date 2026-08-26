@@ -2668,7 +2668,24 @@ impl AppIde {
             // BOTH pads, matching what `gen_parts` will actually emit: one pad
             // alone generates no USB init, so the crates would be unused.
             let usb_pad = |want: PinFunction| all_pins.iter().any(|(_, _, f)| *f == want);
-            let needs_usb = !is_async && usb_pad(PinFunction::UsbDm) && usb_pad(PinFunction::UsbDp);
+            let is_esp_family = self
+                .mcu
+                .as_ref()
+                .is_some_and(|m| crate::panels::mcu_module::codegen::family::is_esp(&m.family));
+            let both_usb_pads = usb_pad(PinFunction::UsbDm) && usb_pad(PinFunction::UsbDp);
+            // The STM32F1 `usb-device` 0.2 stack. It used to fire on an ESP too:
+            // both pads wired on a blocking project added two crates nothing
+            // referenced, at versions the ESP bus cannot even use.
+            let needs_usb = !is_async && !is_esp_family && both_usb_pads;
+            // …and the ESP's own stack, which only the OTG role wants.
+            let needs_esp_otg = is_esp_family
+                && both_usb_pads
+                && self.mcu.as_ref().is_some_and(|m| {
+                    crate::panels::mcu_module::codegen_esp::has_usb_otg(&m.family)
+                        && crate::panels::mcu_module::modules::usb_configs(&m.modules)
+                            .get(&1)
+                            .is_some_and(|c| c.role.is_otg())
+                });
             // The user's own sources — a dependency referenced by THIS code is
             // never stripped, whatever the feature flags say (a Runtime switch
             // used to silently delete a hand-added `embedded-hal`). See
@@ -2699,6 +2716,7 @@ impl AppIde {
                 &sources,
             );
             let new_toml = project_gen::ensure_usb_deps(&new_toml, needs_usb, &sources);
+            let new_toml = project_gen::ensure_esp_usb_deps(&new_toml, needs_esp_otg, &sources);
             // Async runtime (embassy-executor + embassy-time + the HAL time
             // driver), plus — when the respective config files were emitted —
             // embedded-io-async + static_cell (USART) and embedded-hal /
