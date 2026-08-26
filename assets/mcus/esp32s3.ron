@@ -253,8 +253,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -443,8 +494,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -633,8 +735,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -823,8 +976,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -1013,8 +1217,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -1203,8 +1458,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -1399,8 +1705,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -1589,8 +1946,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -1779,8 +2187,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -1975,8 +2434,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -2169,8 +2679,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -2363,8 +2924,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -2557,8 +3169,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -2751,8 +3414,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -2951,8 +3665,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -3145,8 +3910,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -3339,8 +4155,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -3533,8 +4400,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -3728,8 +4646,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -3923,8 +4892,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -4113,8 +5133,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -4303,8 +5374,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -4519,8 +5641,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -4713,8 +5886,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -4907,8 +6131,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -5101,8 +6376,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -5295,8 +6621,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -5489,8 +6866,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -5683,8 +7111,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -5877,8 +7356,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -6071,8 +7601,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -6265,8 +7846,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -6457,8 +8089,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -6647,8 +8330,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -6837,8 +8571,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -7027,8 +8812,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -7217,8 +9053,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -7407,8 +9294,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -7597,8 +9535,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -7787,8 +9776,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -7977,8 +10017,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -8167,8 +10258,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -8357,8 +10499,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -8547,8 +10740,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],
@@ -8737,8 +10981,59 @@ McuDefinition(
                     LcdCamVsync,
                     LcdCamHsync,
                     LcdCamDe,
-                    LcdCamHenable,
-                    LcdCamMclk,
+                    CamData(
+                        lane: 0,
+                    ),
+                    CamData(
+                        lane: 1,
+                    ),
+                    CamData(
+                        lane: 2,
+                    ),
+                    CamData(
+                        lane: 3,
+                    ),
+                    CamData(
+                        lane: 4,
+                    ),
+                    CamData(
+                        lane: 5,
+                    ),
+                    CamData(
+                        lane: 6,
+                    ),
+                    CamData(
+                        lane: 7,
+                    ),
+                    CamData(
+                        lane: 8,
+                    ),
+                    CamData(
+                        lane: 9,
+                    ),
+                    CamData(
+                        lane: 10,
+                    ),
+                    CamData(
+                        lane: 11,
+                    ),
+                    CamData(
+                        lane: 12,
+                    ),
+                    CamData(
+                        lane: 13,
+                    ),
+                    CamData(
+                        lane: 14,
+                    ),
+                    CamData(
+                        lane: 15,
+                    ),
+                    CamPclk,
+                    CamVsync,
+                    CamHsync,
+                    CamHenable,
+                    CamMclk,
                     CanTx,
                     CanRx,
                 ],

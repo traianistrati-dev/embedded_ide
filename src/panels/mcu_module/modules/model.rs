@@ -90,6 +90,16 @@ pub enum ModuleKind {
     /// Only the ESP32-S3 has it. Everywhere else the kind is not offered at
     /// all, rather than offered and then refusing to generate.
     GenericInterfaceLcdCam,
+    /// The camera half of the parallel video port — "CAM".
+    ///
+    /// A SECOND kind on the same peripheral, and the silicon is the reason:
+    /// `LcdCam` hands back `.lcd` and `.cam` as separate halves that run at the
+    /// same time. An ESP32-S3 reading a sensor while driving a display is the
+    /// whole point of the block, and one module with one mode could not say it.
+    ///
+    /// The two halves share nothing but the peripheral: their own pads, their
+    /// own settings, their own DMA channel — TX for the display, RX for this.
+    GenericInterfaceCamera,
     /// Capacitive touch — "TOUCH".
     ///
     /// One peripheral with ten channels, and each channel is welded to one
@@ -152,7 +162,7 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 22] = [
+    pub const ALL: [ModuleKind; 23] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
@@ -163,6 +173,7 @@ impl ModuleKind {
         ModuleKind::GenericInterfaceMcpwm,
         ModuleKind::GenericInterfaceParlIo,
         ModuleKind::GenericInterfaceLcdCam,
+        ModuleKind::GenericInterfaceCamera,
         ModuleKind::GenericInterfaceTouch,
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceSdmmc,
@@ -217,6 +228,9 @@ impl ModuleKind {
             // here would be right for one mode and wrong for two. They join
             // by being assigned on the canvas.
             ModuleKind::GenericInterfaceLcdCam => (&[LcdCamD0, LcdCamD1], &[]),
+            // Two data lines, like the LCD half. Which control pads a sensor
+            // needs depends on its sync mode, so none is auto-wired.
+            ModuleKind::GenericInterfaceCamera => (&[CamD0, CamD1], &[]),
             // One pad required, the other nine optional. A touch keypad is a
             // normal use and so is a single button, so wiring ten would be
             // right for one project and wrong for most.
@@ -277,8 +291,10 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceCan
                 | ModuleKind::GenericInterfaceUsb
                 // One LCD_CAM on the chip, and its pin functions carry no
-                // instance index either.
+                // instance index either. Each HALF is its own kind, so a second
+                // module on the other half is still allowed.
                 | ModuleKind::GenericInterfaceLcdCam
+                | ModuleKind::GenericInterfaceCamera
                 // One touch controller; the number on its pin functions is the
                 // CHANNEL, not an instance.
                 | ModuleKind::GenericInterfaceTouch
@@ -298,6 +314,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceMcpwm => "MCPWM",
             ModuleKind::GenericInterfaceParlIo => "PARL",
             ModuleKind::GenericInterfaceLcdCam => "LCD",
+            ModuleKind::GenericInterfaceCamera => "CAM",
             ModuleKind::GenericInterfaceTouch => "TOUCH",
             ModuleKind::GenericInterfaceDac => "DAC",
             ModuleKind::GenericInterfaceSai => "SAI",
@@ -335,6 +352,9 @@ impl ModuleKind {
             }
             ModuleKind::GenericInterfaceLcdCam => {
                 ModuleConfig::LcdCam(LcdCamModuleConfig::new(instance))
+            }
+            ModuleKind::GenericInterfaceCamera => {
+                ModuleConfig::LcdCam(LcdCamModuleConfig::new_camera())
             }
             ModuleKind::GenericInterfaceTouch => {
                 ModuleConfig::Touch(TouchModuleConfig::new(instance))
@@ -430,6 +450,16 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
             0,
             TOUCH_SIGNALS[(*n as usize).min(9)],
         ),
+        PinFunction::CamData { lane } => (
+            GenericInterfaceCamera,
+            1,
+            CAM_DATA_SIGNALS[(*lane as usize).min(15)],
+        ),
+        PinFunction::CamPclk => (GenericInterfaceCamera, 1, CamPclkSig),
+        PinFunction::CamVsync => (GenericInterfaceCamera, 1, CamVsyncSig),
+        PinFunction::CamHsync => (GenericInterfaceCamera, 1, CamHsyncSig),
+        PinFunction::CamHenable => (GenericInterfaceCamera, 1, CamHenSig),
+        PinFunction::CamMclk => (GenericInterfaceCamera, 1, CamMclkSig),
         PinFunction::LcdCamDc => (GenericInterfaceLcdCam, 0, LcdCamDcSig),
         PinFunction::LcdCamWr => (GenericInterfaceLcdCam, 0, LcdCamWrSig),
         PinFunction::LcdCamCs => (GenericInterfaceLcdCam, 0, LcdCamCsSig),
@@ -437,8 +467,6 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::LcdCamVsync => (GenericInterfaceLcdCam, 0, LcdCamVsyncSig),
         PinFunction::LcdCamHsync => (GenericInterfaceLcdCam, 0, LcdCamHsyncSig),
         PinFunction::LcdCamDe => (GenericInterfaceLcdCam, 0, LcdCamDeSig),
-        PinFunction::LcdCamHenable => (GenericInterfaceLcdCam, 0, LcdCamHenSig),
-        PinFunction::LcdCamMclk => (GenericInterfaceLcdCam, 0, LcdCamMclkSig),
         PinFunction::ParlClk => (GenericInterfaceParlIo, 0, ParlClkSig),
         PinFunction::ParlValid => (GenericInterfaceParlIo, 0, ParlValidSig),
         PinFunction::McpwmA { unit, operator } => (
@@ -705,8 +733,29 @@ pub enum ModuleSignal {
     LcdCamVsyncSig,
     LcdCamHsyncSig,
     LcdCamDeSig,
-    LcdCamHenSig,
-    LcdCamMclkSig,
+
+    // ── LCD_CAM, camera half ────────────────────────────────────────────
+    CamD0,
+    CamD1,
+    CamD2,
+    CamD3,
+    CamD4,
+    CamD5,
+    CamD6,
+    CamD7,
+    CamD8,
+    CamD9,
+    CamD10,
+    CamD11,
+    CamD12,
+    CamD13,
+    CamD14,
+    CamD15,
+    CamPclkSig,
+    CamVsyncSig,
+    CamHsyncSig,
+    CamHenSig,
+    CamMclkSig,
 
     // ── Touch ───────────────────────────────────────────────────────────
     Touch0,
@@ -859,6 +908,27 @@ impl ModuleSignal {
             ModuleSignal::Touch7 => "T7",
             ModuleSignal::Touch8 => "T8",
             ModuleSignal::Touch9 => "T9",
+            ModuleSignal::CamD0 => "D0",
+            ModuleSignal::CamD1 => "D1",
+            ModuleSignal::CamD2 => "D2",
+            ModuleSignal::CamD3 => "D3",
+            ModuleSignal::CamD4 => "D4",
+            ModuleSignal::CamD5 => "D5",
+            ModuleSignal::CamD6 => "D6",
+            ModuleSignal::CamD7 => "D7",
+            ModuleSignal::CamD8 => "D8",
+            ModuleSignal::CamD9 => "D9",
+            ModuleSignal::CamD10 => "D10",
+            ModuleSignal::CamD11 => "D11",
+            ModuleSignal::CamD12 => "D12",
+            ModuleSignal::CamD13 => "D13",
+            ModuleSignal::CamD14 => "D14",
+            ModuleSignal::CamD15 => "D15",
+            ModuleSignal::CamPclkSig => "PCLK",
+            ModuleSignal::CamVsyncSig => "VSYNC",
+            ModuleSignal::CamHsyncSig => "HSYNC",
+            ModuleSignal::CamHenSig => "HREF",
+            ModuleSignal::CamMclkSig => "MCLK",
             ModuleSignal::LcdCamD0 => "D0",
             ModuleSignal::LcdCamD1 => "D1",
             ModuleSignal::LcdCamD2 => "D2",
@@ -882,8 +952,6 @@ impl ModuleSignal {
             ModuleSignal::LcdCamVsyncSig => "VSYNC",
             ModuleSignal::LcdCamHsyncSig => "HSYNC",
             ModuleSignal::LcdCamDeSig => "DE",
-            ModuleSignal::LcdCamHenSig => "HREF",
-            ModuleSignal::LcdCamMclkSig => "MCLK",
             ModuleSignal::ParlD0 => "D0",
             ModuleSignal::ParlD1 => "D1",
             ModuleSignal::ParlD2 => "D2",
@@ -1043,6 +1111,27 @@ impl ModuleSignal {
             ModuleSignal::Touch7 => PinFunction::TouchPad(7),
             ModuleSignal::Touch8 => PinFunction::TouchPad(8),
             ModuleSignal::Touch9 => PinFunction::TouchPad(9),
+            ModuleSignal::CamD0 => PinFunction::CamData { lane: 0 },
+            ModuleSignal::CamD1 => PinFunction::CamData { lane: 1 },
+            ModuleSignal::CamD2 => PinFunction::CamData { lane: 2 },
+            ModuleSignal::CamD3 => PinFunction::CamData { lane: 3 },
+            ModuleSignal::CamD4 => PinFunction::CamData { lane: 4 },
+            ModuleSignal::CamD5 => PinFunction::CamData { lane: 5 },
+            ModuleSignal::CamD6 => PinFunction::CamData { lane: 6 },
+            ModuleSignal::CamD7 => PinFunction::CamData { lane: 7 },
+            ModuleSignal::CamD8 => PinFunction::CamData { lane: 8 },
+            ModuleSignal::CamD9 => PinFunction::CamData { lane: 9 },
+            ModuleSignal::CamD10 => PinFunction::CamData { lane: 10 },
+            ModuleSignal::CamD11 => PinFunction::CamData { lane: 11 },
+            ModuleSignal::CamD12 => PinFunction::CamData { lane: 12 },
+            ModuleSignal::CamD13 => PinFunction::CamData { lane: 13 },
+            ModuleSignal::CamD14 => PinFunction::CamData { lane: 14 },
+            ModuleSignal::CamD15 => PinFunction::CamData { lane: 15 },
+            ModuleSignal::CamPclkSig => PinFunction::CamPclk,
+            ModuleSignal::CamVsyncSig => PinFunction::CamVsync,
+            ModuleSignal::CamHsyncSig => PinFunction::CamHsync,
+            ModuleSignal::CamHenSig => PinFunction::CamHenable,
+            ModuleSignal::CamMclkSig => PinFunction::CamMclk,
             ModuleSignal::LcdCamD0 => PinFunction::LcdCamData { lane: 0 },
             ModuleSignal::LcdCamD1 => PinFunction::LcdCamData { lane: 1 },
             ModuleSignal::LcdCamD2 => PinFunction::LcdCamData { lane: 2 },
@@ -1066,8 +1155,6 @@ impl ModuleSignal {
             ModuleSignal::LcdCamVsyncSig => PinFunction::LcdCamVsync,
             ModuleSignal::LcdCamHsyncSig => PinFunction::LcdCamHsync,
             ModuleSignal::LcdCamDeSig => PinFunction::LcdCamDe,
-            ModuleSignal::LcdCamHenSig => PinFunction::LcdCamHenable,
-            ModuleSignal::LcdCamMclkSig => PinFunction::LcdCamMclk,
             ModuleSignal::ParlD0 => PinFunction::ParlData { lane: 0 },
             ModuleSignal::ParlD1 => PinFunction::ParlData { lane: 1 },
             ModuleSignal::ParlD2 => PinFunction::ParlData { lane: 2 },
@@ -3987,6 +4074,26 @@ const TOUCH_SIGNALS: [ModuleSignal; 10] = [
     ModuleSignal::Touch9,
 ];
 
+/// The camera half's sixteen data lanes — see [`PinFunction::CamData`].
+const CAM_DATA_SIGNALS: [ModuleSignal; 16] = [
+    ModuleSignal::CamD0,
+    ModuleSignal::CamD1,
+    ModuleSignal::CamD2,
+    ModuleSignal::CamD3,
+    ModuleSignal::CamD4,
+    ModuleSignal::CamD5,
+    ModuleSignal::CamD6,
+    ModuleSignal::CamD7,
+    ModuleSignal::CamD8,
+    ModuleSignal::CamD9,
+    ModuleSignal::CamD10,
+    ModuleSignal::CamD11,
+    ModuleSignal::CamD12,
+    ModuleSignal::CamD13,
+    ModuleSignal::CamD14,
+    ModuleSignal::CamD15,
+];
+
 /// The sixteen data lanes, indexed by lane number — see
 /// [`PinFunction::LcdCamData`].
 const LCD_DATA_SIGNALS: [ModuleSignal; 16] = [
@@ -4310,6 +4417,15 @@ impl LcdCamModuleConfig {
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
+        }
+    }
+
+    /// The camera half's defaults: 8-bit DVP at 20 MHz with a master clock,
+    /// and `instance: 1` so the two halves never collide in a config map.
+    pub fn new_camera() -> Self {
+        Self {
+            mode: LcdCamMode::Camera,
+            ..Self::new(1)
         }
     }
 

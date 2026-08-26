@@ -1019,8 +1019,16 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
         out.push(PinFunction::LcdCamVsync);
         out.push(PinFunction::LcdCamHsync);
         out.push(PinFunction::LcdCamDe);
-        out.push(PinFunction::LcdCamHenable);
-        out.push(PinFunction::LcdCamMclk);
+        // The camera half gets its OWN pads: both halves can run at once, so a
+        // display's data lines and a sensor's cannot be the same wires.
+        for lane in 0..16 {
+            out.push(PinFunction::CamData { lane });
+        }
+        out.push(PinFunction::CamPclk);
+        out.push(PinFunction::CamVsync);
+        out.push(PinFunction::CamHsync);
+        out.push(PinFunction::CamHenable);
+        out.push(PinFunction::CamMclk);
     }
 
     // TWAI is Espressif's CAN. Gated on the DRIVER, like everything else here:

@@ -40,8 +40,12 @@ impl PinFunction {
             PinFunction::LcdCamVsync => "lcd_vsync",
             PinFunction::LcdCamHsync => "lcd_hsync",
             PinFunction::LcdCamDe => "lcd_de",
-            PinFunction::LcdCamHenable => "lcd_href",
-            PinFunction::LcdCamMclk => "lcd_mclk",
+            PinFunction::CamData { .. } => "cam_d",
+            PinFunction::CamPclk => "cam_pclk",
+            PinFunction::CamVsync => "cam_vsync",
+            PinFunction::CamHsync => "cam_hsync",
+            PinFunction::CamHenable => "cam_href",
+            PinFunction::CamMclk => "cam_mclk",
             PinFunction::ParlData { .. } => "parl_d",
             PinFunction::ParlClk => "parl_clk",
             PinFunction::ParlValid => "parl_valid",
@@ -126,8 +130,12 @@ impl PinFunction {
             PinFunction::LcdCamVsync => "LCD  VSYNC".to_owned(),
             PinFunction::LcdCamHsync => "LCD  HSYNC".to_owned(),
             PinFunction::LcdCamDe => "LCD  DE".to_owned(),
-            PinFunction::LcdCamHenable => "LCD  HREF".to_owned(),
-            PinFunction::LcdCamMclk => "LCD  MCLK".to_owned(),
+            PinFunction::CamData { lane } => format!("CAM  D{lane}"),
+            PinFunction::CamPclk => "CAM  PCLK".to_owned(),
+            PinFunction::CamVsync => "CAM  VSYNC".to_owned(),
+            PinFunction::CamHsync => "CAM  HSYNC".to_owned(),
+            PinFunction::CamHenable => "CAM  HREF".to_owned(),
+            PinFunction::CamMclk => "CAM  MCLK".to_owned(),
             PinFunction::ParlData { lane } => format!("PARL  D{lane}"),
             PinFunction::ParlClk => "PARL  CLK".to_owned(),
             PinFunction::ParlValid => "PARL  VALID".to_owned(),
@@ -414,9 +422,13 @@ impl PinFunction {
             | PinFunction::LcdCamPclk
             | PinFunction::LcdCamVsync
             | PinFunction::LcdCamHsync
-            | PinFunction::LcdCamDe
-            | PinFunction::LcdCamHenable
-            | PinFunction::LcdCamMclk => "LCD",
+            | PinFunction::LcdCamDe => "LCD",
+            PinFunction::CamData { .. }
+            | PinFunction::CamPclk
+            | PinFunction::CamVsync
+            | PinFunction::CamHsync
+            | PinFunction::CamHenable
+            | PinFunction::CamMclk => "CAM",
             PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => "PARL",
             PinFunction::TimerBreak { .. } => "BRK",
             PinFunction::DacOut { .. } => "DAC",

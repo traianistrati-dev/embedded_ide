@@ -3037,8 +3037,12 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         | PinFunction::LcdCamVsync
         | PinFunction::LcdCamHsync
         | PinFunction::LcdCamDe
-        | PinFunction::LcdCamHenable
-        | PinFunction::LcdCamMclk
+        | PinFunction::CamData { .. }
+        | PinFunction::CamPclk
+        | PinFunction::CamVsync
+        | PinFunction::CamHsync
+        | PinFunction::CamHenable
+        | PinFunction::CamMclk
         | PinFunction::ParlData { .. }
         | PinFunction::ParlClk
         | PinFunction::ParlValid

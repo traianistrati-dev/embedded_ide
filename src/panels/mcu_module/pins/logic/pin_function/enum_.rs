@@ -247,15 +247,31 @@ pub enum PinFunction {
     /// Marks the clocks inside the active area. The blanking porches have no
     /// pixels on them, and this is what says so.
     LcdCamDe,
-    /// LCD_CAM h-enable / "data enable" (camera mode).
-    ///
-    /// The sensor's HREF: high while a line carries pixels.
-    LcdCamHenable,
-    /// LCD_CAM master clock — the clock this chip GIVES the camera.
+
+    // ── LCD_CAM, camera half ────────────────────────────────────────────────
+    // A SECOND family, and the reason is that both halves can run at once: an
+    // S3 driving a display while reading a sensor needs two sets of pads, so a
+    // pad has to say which half it belongs to. The LCD half above keeps the
+    // `LcdCam` names; everything the camera reads is `Cam`.
+    /// Camera data line {lane} — one pad of the DVP bus, coming IN.
+    CamData {
+        lane: u8,
+    },
+    /// Camera pixel clock, driven by the SENSOR. An input, unlike the RGB
+    /// panel's pixel clock, which this chip drives.
+    CamPclk,
+    /// Camera vertical sync — start of frame, from the sensor.
+    CamVsync,
+    /// Camera horizontal sync — start of line, from the sensor. Optional: a
+    /// sensor in Vsync/DE mode uses HREF alone.
+    CamHsync,
+    /// Camera h-enable, the sensor's HREF: high while a line carries pixels.
+    CamHenable,
+    /// Camera master clock — the clock this chip GIVES the sensor.
     ///
     /// Unwired means slave mode: the sensor is clocked from somewhere else and
     /// this chip just reads what arrives.
-    LcdCamMclk,
+    CamMclk,
 
     // ── MCPWM ───────────────────────────────────────────────────────────────
     /// MCPWM{unit} operator {operator}, output A.

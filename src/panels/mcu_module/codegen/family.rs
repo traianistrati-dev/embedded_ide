@@ -17,8 +17,8 @@ use crate::panels::mcu_module::codegen_esp::{self, EspRuntime};
 use crate::panels::mcu_module::comparator;
 use crate::panels::mcu_module::mcu::{Mcu, Runtime};
 use crate::panels::mcu_module::modules::{
-    self, ApiStyle, I2cModuleConfig, SpiModuleConfig, SpiRole, UsartModuleConfig, UsbModuleConfig,
-    UsbRole,
+    self, ApiStyle, I2cModuleConfig, LcdCamMode, LcdCamModuleConfig, SpiModuleConfig, SpiRole,
+    UsartModuleConfig, UsbModuleConfig, UsbRole,
 };
 use crate::panels::mcu_module::pins::logic::pin::{GpioMode, Pin};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -263,6 +263,24 @@ fn esp_spi_configs(mcu: &Mcu) -> BTreeMap<u8, SpiModuleConfig> {
     spi
 }
 
+/// The video-port modules, with each half's mode forced to what that half is.
+///
+/// The halves used to be ONE module with a three-way mode, so a project saved
+/// before the split can hold `mode: Camera` on the DISPLAY half — which would
+/// build a `Camera` on `lcd_cam.lcd` and not compile. Keyed by instance: 0 is
+/// the display, 1 is the camera. The same net as [`esp_spi_configs`].
+fn esp_lcd_configs(mcu: &Mcu) -> BTreeMap<u8, LcdCamModuleConfig> {
+    let mut v = modules::lcd_cam_configs(&mcu.modules);
+    for (instance, cfg) in v.iter_mut() {
+        if *instance == 1 {
+            cfg.mode = LcdCamMode::Camera;
+        } else if cfg.mode == LcdCamMode::Camera {
+            cfg.mode = LcdCamMode::I8080;
+        }
+    }
+    v
+}
+
 /// The USB module, with a controller this chip does not have put back.
 ///
 /// The same hole as [`esp_spi_configs`], and it bites hardest on the ESP32-S2:
@@ -291,7 +309,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let pcnt = modules::pcnt_configs(&mcu.modules);
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
-    let lcd_cam = modules::lcd_cam_configs(&mcu.modules);
+    let lcd_cam = esp_lcd_configs(mcu);
     let usb = esp_usb_configs(mcu);
     let touch = modules::touch_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
@@ -353,7 +371,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
     let can_cfg = modules::can_configs(&mcu.modules);
     let usb_cfg = esp_usb_configs(mcu);
     let touch_cfg = modules::touch_configs(&mcu.modules);
-    let lcd_cam_cfg = modules::lcd_cam_configs(&mcu.modules);
+    let lcd_cam_cfg = esp_lcd_configs(mcu);
     crate::panels::mcu_module::codegen_esp_configs::config_files(
         &uart,
         &spi_n,
@@ -402,8 +420,11 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         // The parallel port, and whether a VALID pad went with it.
         &codegen_esp::parl_io_wired(&configured),
         modules::parl_io_configs(&mcu.modules).get(&0),
-        &codegen_esp::lcd_cam_wired(&configured),
+        &codegen_esp::lcd_wired(&configured),
         lcd_cam_cfg.get(&0),
+        // The camera half, wired and configured independently of the display.
+        &codegen_esp::cam_wired(&configured),
+        lcd_cam_cfg.get(&1),
         // The DAC channels wired, and the module that holds their levels.
         &codegen_esp::dac_channels_wired(&configured),
         modules::dac_configs(&mcu.modules).get(&1),
@@ -424,7 +445,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let pcnt = modules::pcnt_configs(&mcu.modules);
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
-    let lcd_cam = modules::lcd_cam_configs(&mcu.modules);
+    let lcd_cam = esp_lcd_configs(mcu);
     let usb = esp_usb_configs(mcu);
     let touch = modules::touch_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
@@ -982,7 +1003,8 @@ pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
             &modules::spi_configs(&mcu.modules),
             &codegen_esp::i2s_instances_wired(&pins_of(mcu)),
             codegen_esp::parl_io_wired(&pins_of(mcu)).is_some(),
-            !codegen_esp::lcd_cam_wired(&pins_of(mcu)).is_empty(),
+            !codegen_esp::lcd_wired(&pins_of(mcu)).is_empty(),
+            !codegen_esp::cam_wired(&pins_of(mcu)).is_empty(),
         )
         .uses(),
         Runtime::Async if async_supported(&mcu.family) => async_periphs(mcu).dma_uses,
@@ -1722,6 +1744,11 @@ mod tests {
 
         let rx_chan: u8 = if id == "esp32s3" { 4 } else { 2 };
 
+        // `ESP_LCD_HALF=lcd|cam` wires ONE half of the video port instead of
+        // both — the single-half files, which are the common case. A half is
+        // present because its PADS are, so that is what this changes.
+        let lcd_half = std::env::var("ESP_LCD_HALF").unwrap_or_default();
+
         // By search, not by name: GPIO4 is a JTAG pad on one part and a plain
         // pad on the next, and the pin NUMBERS differ between packages.
         let mut want = vec![
@@ -1798,13 +1825,49 @@ mod tests {
             PinFunction::LcdCamVsync,
             PinFunction::LcdCamHsync,
             PinFunction::LcdCamDe,
-            PinFunction::LcdCamHenable,
-            PinFunction::LcdCamMclk,
+            // …and the CAMERA half's own pads, so the project exercises the two
+            // halves running at once — the thing the block exists for.
+            PinFunction::CamData { lane: 0 },
+            PinFunction::CamData { lane: 1 },
+            PinFunction::CamData { lane: 2 },
+            PinFunction::CamData { lane: 3 },
+            PinFunction::CamData { lane: 4 },
+            PinFunction::CamData { lane: 5 },
+            PinFunction::CamData { lane: 6 },
+            PinFunction::CamData { lane: 7 },
+            PinFunction::CamPclk,
+            PinFunction::CamVsync,
+            PinFunction::CamHsync,
+            PinFunction::CamHenable,
+            PinFunction::CamMclk,
             // Both DAC channels. Their pads are fixed, so the search below
             // finds them wherever the chip puts them.
             PinFunction::DacOut { dac: 1, channel: 1 },
             PinFunction::DacOut { dac: 1, channel: 2 },
         ];
+        want.retain(|f| match lcd_half.as_str() {
+            "lcd" => !matches!(
+                f,
+                PinFunction::CamData { .. }
+                    | PinFunction::CamPclk
+                    | PinFunction::CamVsync
+                    | PinFunction::CamHsync
+                    | PinFunction::CamHenable
+                    | PinFunction::CamMclk
+            ),
+            "cam" => !matches!(
+                f,
+                PinFunction::LcdCamData { .. }
+                    | PinFunction::LcdCamDc
+                    | PinFunction::LcdCamWr
+                    | PinFunction::LcdCamCs
+                    | PinFunction::LcdCamPclk
+                    | PinFunction::LcdCamVsync
+                    | PinFunction::LcdCamHsync
+                    | PinFunction::LcdCamDe
+            ),
+            _ => true,
+        });
         // RAREST FIRST, and the DAC is why. On an ESP the GPIO matrix lets
         // almost any pad be SPI, I2S, RMT or MCPWM, so walking the pins and
         // taking the first function each can do hands those pads out in pin
@@ -1921,8 +1984,9 @@ mod tests {
             }),
             connections: Vec::new(),
         });
-        // `ESP_LCD_MODE=dpi|camera` picks the other two shapes — a different
-        // driver, different pads and, for DPI, a whole timing block.
+        // `ESP_LCD_MODE=dpi` picks the RGB display instead of the i8080 one.
+        // The camera below is a SECOND module on the other half, and both are
+        // built by one `init` — see `lcd_cam_file`.
         mcu.modules.push(VirtualModule {
             id: "lcd_cam".into(),
             kind: ModuleKind::GenericInterfaceLcdCam,
@@ -1933,10 +1997,20 @@ mod tests {
                 let mut c = LcdCamModuleConfig::new(0);
                 c.mode = match std::env::var("ESP_LCD_MODE").as_deref() {
                     Ok("dpi") => LcdCamMode::Dpi,
-                    Ok("camera") => LcdCamMode::Camera,
                     _ => LcdCamMode::I8080,
                 };
                 c
+            }),
+            connections: Vec::new(),
+        });
+        mcu.modules.push(VirtualModule {
+            id: "camera".into(),
+            kind: ModuleKind::GenericInterfaceCamera,
+            name: "CAM".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::LcdCam({
+                use crate::panels::mcu_module::modules::LcdCamModuleConfig;
+                LcdCamModuleConfig::new_camera()
             }),
             connections: Vec::new(),
         });
@@ -2940,9 +3014,21 @@ mod tests {
             PinFunction::LcdCamVsync,
             PinFunction::LcdCamHsync,
             PinFunction::LcdCamDe,
-            PinFunction::LcdCamHenable,
-            PinFunction::LcdCamMclk,
         ]);
+        if mode == crate::panels::mcu_module::modules::LcdCamMode::Camera {
+            // The camera half has its OWN pads now — a display's data lines and
+            // a sensor's cannot be the same wires when both run at once.
+            want = (0..width)
+                .map(|lane| PinFunction::CamData { lane })
+                .collect();
+            want.extend([
+                PinFunction::CamPclk,
+                PinFunction::CamVsync,
+                PinFunction::CamHsync,
+                PinFunction::CamHenable,
+                PinFunction::CamMclk,
+            ]);
+        }
         for f in &want {
             let num = mcu
                 .iter_all_pins()
@@ -2954,12 +3040,21 @@ mod tests {
             mcu.apply_pin_function(num, f.clone());
         }
 
-        let mut cfg = LcdCamModuleConfig::new(0);
+        let camera = mode == crate::panels::mcu_module::modules::LcdCamMode::Camera;
+        let mut cfg = if camera {
+            LcdCamModuleConfig::new_camera()
+        } else {
+            LcdCamModuleConfig::new(0)
+        };
         cfg.mode = mode;
         cfg.width = width;
         mcu.modules.push(VirtualModule {
             id: "lcd_cam".into(),
-            kind: ModuleKind::GenericInterfaceLcdCam,
+            kind: if camera {
+                ModuleKind::GenericInterfaceCamera
+            } else {
+                ModuleKind::GenericInterfaceLcdCam
+            },
             name: "LCD".into(),
             pos: (0.0, 0.0),
             config: ModuleConfig::LcdCam(cfg),
@@ -2993,14 +3088,18 @@ mod tests {
         let (_, dpi) = esp_lcd_project(LcdCamMode::Dpi, 8, Runtime::Blocking);
         assert!(dpi.contains("lcd::dpi"), "driver:\n{dpi}");
         assert!(dpi.contains("FrameTiming {"), "the timings:\n{dpi}");
-        assert!(dpi.contains("horizontal_active_width: H_ACTIVE"));
+        assert!(dpi.contains("horizontal_active_width: LCD_H_ACTIVE"));
         assert!(
             !dpi.contains("with_dc("),
             "no command line on an RGB panel:\n{dpi}"
         );
 
         let (_, cam) = esp_lcd_project(LcdCamMode::Camera, 8, Runtime::Blocking);
-        assert!(cam.contains("lcd_cam::{LcdCam, cam::"), "driver:\n{cam}");
+        assert!(
+            cam.contains("esp_hal::lcd_cam::cam::"),
+            "driver:{}{cam}",
+            "\n"
+        );
         assert!(cam.contains(".with_master_clock(mclk)"), "mclk:\n{cam}");
         assert!(cam.contains(".with_h_enable(href)"), "href:\n{cam}");
         // A camera READS: its data pads take the input bound.
@@ -3370,5 +3469,110 @@ mod tests {
             })
             .count();
         assert_eq!(pads, 10, "ten channels, one pad each");
+    }
+
+    /// Both halves at once: one `init`, two drivers, two DMA channels — the
+    /// arrangement the peripheral exists for and the one a single module with a
+    /// single mode could not express.
+    #[test]
+    fn esp_lcd_cam_runs_both_halves_together() {
+        use crate::panels::mcu_module::modules::{
+            LcdCamMode, LcdCamModuleConfig, ModuleConfig, ModuleKind, VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32s3")
+            .unwrap()
+            .build_mcu();
+
+        // The display half's pads…
+        let mut want: Vec<PinFunction> = (0..8u8)
+            .map(|lane| PinFunction::LcdCamData { lane })
+            .collect();
+        want.extend([PinFunction::LcdCamDc, PinFunction::LcdCamWr]);
+        // …and the camera's OWN, which is what makes "at once" possible.
+        want.extend((0..8u8).map(|lane| PinFunction::CamData { lane }));
+        want.extend([
+            PinFunction::CamPclk,
+            PinFunction::CamVsync,
+            PinFunction::CamHenable,
+            PinFunction::CamMclk,
+        ]);
+        for f in &want {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(f)
+                })
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("no S3 pad for {f:?}"));
+            mcu.apply_pin_function(num, f.clone());
+        }
+        for (kind, cfg) in [
+            (
+                ModuleKind::GenericInterfaceLcdCam,
+                LcdCamModuleConfig::new(0),
+            ),
+            (
+                ModuleKind::GenericInterfaceCamera,
+                LcdCamModuleConfig::new_camera(),
+            ),
+        ] {
+            mcu.modules.push(VirtualModule {
+                id: format!("{kind:?}"),
+                kind,
+                name: "V".into(),
+                pos: (0.0, 0.0),
+                config: ModuleConfig::LcdCam(cfg),
+                connections: Vec::new(),
+            });
+        }
+
+        let main = mcu.fresh_main_rs();
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "lcd_cam.rs")
+            .map(|(_, c)| c)
+            .expect("one file for both halves");
+
+        // ONE file, ONE init, both drivers built from the same `LcdCam`.
+        assert_eq!(file.matches("LcdCam::new(lcd_cam)").count(), 1, "{file}");
+        assert!(
+            file.contains("-> (I8080<'d, Blocking>, Camera<'d>)"),
+            "pair:\n{file}"
+        );
+        assert!(
+            file.contains("I8080::new(lcd_cam.lcd,"),
+            "display half:\n{file}"
+        );
+        assert!(
+            file.contains("Camera::new(lcd_cam.cam,"),
+            "camera half:\n{file}"
+        );
+
+        // Two channels: TX for the display, RX for the camera.
+        assert!(file.contains("dma_lcd: impl TxChannelFor"), "tx:\n{file}");
+        assert!(file.contains("dma_cam: impl RxChannelFor"), "rx:\n{file}");
+        let call = main
+            .lines()
+            .find(|l| l.contains("configs::lcd_cam::init"))
+            .expect("the call");
+        assert_eq!(
+            call.matches("peripherals.DMA_CH").count(),
+            2,
+            "two channels: {call}"
+        );
+
+        // Their settings are namespaced, because both live in one file.
+        assert!(file.contains("const LCD_FREQUENCY"), "{file}");
+        assert!(file.contains("const CAM_FREQUENCY"), "{file}");
+        assert!(
+            main.contains("let (mut _lcd, mut _cam) ="),
+            "both handles:\n{main}"
+        );
+
+        // The display half is i8080 or RGB, never the camera: that is the other
+        // half's module now.
+        assert_ne!(LcdCamModuleConfig::new(0).mode, LcdCamMode::Camera);
+        assert_eq!(LcdCamModuleConfig::new_camera().mode, LcdCamMode::Camera);
     }
 }

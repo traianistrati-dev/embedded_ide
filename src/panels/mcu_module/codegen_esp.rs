@@ -556,7 +556,8 @@ fn make_gen_section(
         spi,
         &i2s_wired,
         collect_parl_io(&configured).is_some(),
-        !collect_lcd_cam(&configured).is_empty(),
+        !collect_lcd(&configured).is_empty(),
+        !collect_cam(&configured).is_empty(),
     );
     for (label, calls) in bus_sections(
         &configured,
@@ -569,6 +570,7 @@ fn make_gen_section(
         mcpwm,
         parl_io.get(&0),
         lcd_cam.get(&0),
+        lcd_cam.get(&1),
         dac.get(&1),
         crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(chip),
         runtime,
@@ -1037,13 +1039,12 @@ fn collect_parl_io<'a>(
     Some((data, clk, valid))
 }
 
-/// Every LCD_CAM pad the canvas wires, keyed by the name `lcd_cam_file` gives
-/// it in the generated signature.
+/// Every pad of the LCD half, keyed by the name the config file gives it.
 ///
-/// The names are the CONTRACT between this and the config file: a pad that is
+/// The names are the CONTRACT between this and `lcd_cam_file`: a pad that is
 /// wired but whose name the mode's table does not mention is simply not passed,
-/// which is how one pad set serves three drivers.
-fn collect_lcd_cam<'a>(configured: &[&'a Pin]) -> BTreeMap<String, &'a Pin> {
+/// which is how one pad set serves both display modes.
+fn collect_lcd<'a>(configured: &[&'a Pin]) -> BTreeMap<String, &'a Pin> {
     let mut out = BTreeMap::new();
     for p in configured {
         let name = match p.selected_function {
@@ -1055,8 +1056,6 @@ fn collect_lcd_cam<'a>(configured: &[&'a Pin]) -> BTreeMap<String, &'a Pin> {
             PinFunction::LcdCamVsync => "vsync".to_owned(),
             PinFunction::LcdCamHsync => "hsync".to_owned(),
             PinFunction::LcdCamDe => "de".to_owned(),
-            PinFunction::LcdCamHenable => "href".to_owned(),
-            PinFunction::LcdCamMclk => "mclk".to_owned(),
             _ => continue,
         };
         out.insert(name, *p);
@@ -1064,9 +1063,35 @@ fn collect_lcd_cam<'a>(configured: &[&'a Pin]) -> BTreeMap<String, &'a Pin> {
     out
 }
 
-/// The LCD_CAM signal names wired, for `config_files`.
-pub(crate) fn lcd_cam_wired(configured: &[&Pin]) -> Vec<String> {
-    collect_lcd_cam(configured).into_keys().collect()
+/// Every pad of the CAMERA half, keyed the same way.
+///
+/// A separate family from the LCD half's, because both can run at once: a
+/// display's data lines and a sensor's are different wires.
+fn collect_cam<'a>(configured: &[&'a Pin]) -> BTreeMap<String, &'a Pin> {
+    let mut out = BTreeMap::new();
+    for p in configured {
+        let name = match p.selected_function {
+            PinFunction::CamData { lane } => format!("cd{lane}"),
+            PinFunction::CamPclk => "cam_pclk".to_owned(),
+            PinFunction::CamVsync => "cam_vsync".to_owned(),
+            PinFunction::CamHsync => "cam_hsync".to_owned(),
+            PinFunction::CamHenable => "href".to_owned(),
+            PinFunction::CamMclk => "mclk".to_owned(),
+            _ => continue,
+        };
+        out.insert(name, *p);
+    }
+    out
+}
+
+/// The LCD-half signal names wired, for `config_files`.
+pub(crate) fn lcd_wired(configured: &[&Pin]) -> Vec<String> {
+    collect_lcd(configured).into_keys().collect()
+}
+
+/// The camera-half signal names wired, for `config_files`.
+pub(crate) fn cam_wired(configured: &[&Pin]) -> Vec<String> {
+    collect_cam(configured).into_keys().collect()
 }
 
 /// `Some(has a valid pad)` when the parallel port is wired.
@@ -1324,16 +1349,19 @@ pub(crate) struct DmaPlan {
     pub i2s: BTreeMap<u8, DmaUse>,
     /// The parallel port, which is one per chip and also DMA-only.
     pub parl_io: Option<DmaUse>,
-    /// The video port. One per chip, DMA-only, and it takes a TX channel for a
-    /// display and an RX one for a camera — the same pool either way.
+    /// The video port's DISPLAY half — a TX channel.
     pub lcd_cam: Option<DmaUse>,
+    /// Its CAMERA half — an RX channel. Both halves can run at once, so this is
+    /// a second claim on the same pool rather than an alternative to the first.
+    pub cam: Option<DmaUse>,
 }
 
 impl DmaPlan {
     /// Every channel taken, for the Configuration tab's DMA card.
     pub fn uses(&self) -> Vec<DmaUse> {
-        self.lcd_cam
+        self.cam
             .iter()
+            .chain(self.lcd_cam.iter())
             .chain(self.parl_io.iter())
             .chain(self.i2s.values())
             .chain(self.spi.values())
@@ -1351,14 +1379,18 @@ pub(crate) fn dma_plan(
     i2s_wired: &[u8],
     // True when the canvas wires the parallel port.
     parl_io_wired: bool,
-    // True when the canvas wires the video port.
+    // True when the canvas wires the display half of the video port.
     lcd_cam_wired: bool,
+    // …and the camera half, which is independent of it: both can run at once,
+    // and then the block takes TWO channels.
+    cam_wired: bool,
 ) -> DmaPlan {
     let mut plan = DmaPlan {
         spi: BTreeMap::new(),
         i2s: BTreeMap::new(),
         parl_io: None,
         lcd_cam: None,
+        cam: None,
     };
     let Some(dma) = dma else {
         return plan;
@@ -1430,6 +1462,9 @@ pub(crate) fn dma_plan(
     if lcd_cam_wired {
         plan.lcd_cam = claim("LCD_CAM".to_owned(), "");
     }
+    if cam_wired {
+        plan.cam = claim("LCD_CAM".to_owned(), "");
+    }
     // Slaves first among the SPIs, for the same reason the I2S goes before the
     // masters: a master that loses the race still generates, blocking.
     let mut order = on_dma;
@@ -1456,6 +1491,7 @@ fn bus_sections(
     mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io_cfg: Option<&ParlIoModuleConfig>,
     lcd_cam_cfg: Option<&LcdCamModuleConfig>,
+    cam_cfg: Option<&LcdCamModuleConfig>,
     dac_cfg: Option<&DacModuleConfig>,
     // The RMT source clock, which `Rmt::new` takes as an argument.
     rmt_hz: u32,
@@ -1760,47 +1796,105 @@ fn bus_sections(
         }
         out.push(("PARL_IO".to_owned(), body));
     }
-    // LCD_CAM. The pads are passed in the ORDER the config file names them:
+    // LCD_CAM. Pads are passed in the ORDER the config file names them —
     // control pads first, in the mode's own order, then the data lanes. Getting
-    // that wrong compiles and mis-wires the display, so the order lives in one
-    // place — `LCD_CAM_ORDER` here mirrors the tables in `lcd_cam_file`.
-    let lcd_pads = collect_lcd_cam(configured);
-    if !lcd_pads.is_empty() {
-        let default_cfg = LcdCamModuleConfig::new(0);
-        let c = lcd_cam_cfg.unwrap_or(&default_cfg);
-        let sfx = module_label_sfx(&c.custom_label);
+    // that wrong compiles and mis-wires the display.
+    //
+    // ONE call for both halves, because `LcdCam::new` consumes the peripheral
+    // once and hands back `.lcd` and `.cam` together. A board driving a display
+    // while reading a sensor is the whole point of this peripheral, and two
+    // independent `init`s could not express it.
+    let lcd_pads = collect_lcd(configured);
+    let cam_pads = collect_cam(configured);
+    if !lcd_pads.is_empty() || !cam_pads.is_empty() {
+        let lcd_default = LcdCamModuleConfig::new(0);
+        let cam_default = LcdCamModuleConfig::new_camera();
         let mut body = String::new();
         let mut args = Vec::new();
-        let ctl: &[&str] = match c.mode {
-            LcdCamMode::I8080 => &["dc", "wr", "cs"],
-            LcdCamMode::Dpi => &["vsync", "hsync", "de", "pclk"],
-            LcdCamMode::Camera => &["mclk", "pclk", "vsync", "hsync", "href"],
-        };
-        let lanes = usize::from(c.width.min(16)).max(8);
-        let data: Vec<String> = (0..lanes).map(|n| format!("d{n}")).collect();
-        for name in ctl.iter().map(|s| (*s).to_owned()).chain(data) {
-            let Some(p) = lcd_pads.get(&name) else {
-                continue;
+        let mut handles = Vec::new();
+        let mut want_dma = Vec::new();
+
+        if !lcd_pads.is_empty() {
+            let c = lcd_cam_cfg.unwrap_or(&lcd_default);
+            let ctl: &[&str] = match c.mode {
+                LcdCamMode::Dpi => &["vsync", "hsync", "de", "pclk"],
+                // Camera is not a LCD-half mode; a config carried from before
+                // the halves were split reads as i8080 — see `esp_lcd_configs`.
+                _ => &["dc", "wr", "cs"],
             };
-            let var = esp_binding(p);
-            body.push_str(&format!(
-                "    let {var} = peripherals.{gpio}; // {label}\n",
-                gpio = p.name,
-                label = p.selected_function.label(),
-            ));
-            args.push(var);
+            let lanes = usize::from(c.width.min(16)).max(8);
+            let names = ctl
+                .iter()
+                .map(|s| (*s).to_owned())
+                .chain((0..lanes).map(|n| format!("d{n}")));
+            handles.push(format!("mut _lcd{}", module_label_sfx(&c.custom_label)));
+            want_dma.push("lcd");
+            for name in names {
+                let Some(p) = lcd_pads.get(&name) else {
+                    continue;
+                };
+                let var = esp_binding(p);
+                body.push_str(&format!(
+                    "    let {var} = peripherals.{gpio}; // {label}\n",
+                    gpio = p.name,
+                    label = p.selected_function.label(),
+                ));
+                args.push(var);
+            }
         }
-        match dma_plan.lcd_cam.as_ref() {
-            Some(u) => body.push_str(&format!(
-                "    let mut _lcd{sfx} =\n\
-                 \x20       pins::configs::lcd_cam::{init_fn}(peripherals.LCD_CAM, peripherals.{}, {});\n",
-                u.peri,
-                args.join(", "),
-            )),
-            None => body.push_str(
+        if !cam_pads.is_empty() {
+            let c = cam_cfg.unwrap_or(&cam_default);
+            let lanes = usize::from(c.width.min(16)).max(8);
+            let names = ["mclk", "cam_pclk", "cam_vsync", "cam_hsync", "href"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .chain((0..lanes).map(|n| format!("cd{n}")));
+            handles.push(format!("mut _cam{}", module_label_sfx(&c.custom_label)));
+            want_dma.push("cam");
+            for name in names {
+                let Some(p) = cam_pads.get(&name) else {
+                    continue;
+                };
+                let var = esp_binding(p);
+                body.push_str(&format!(
+                    "    let {var} = peripherals.{gpio}; // {label}\n",
+                    gpio = p.name,
+                    label = p.selected_function.label(),
+                ));
+                args.push(var);
+            }
+        }
+
+        // The LCD half wants a TX channel and the camera an RX one, so two
+        // halves means two channels — served in the order the file takes them.
+        let mut dma_args: Vec<String> = Vec::new();
+        let mut missing = false;
+        for half in &want_dma {
+            match if *half == "lcd" {
+                dma_plan.lcd_cam.as_ref()
+            } else {
+                dma_plan.cam.as_ref()
+            } {
+                Some(u) => dma_args.push(format!("peripherals.{}", u.peri)),
+                None => missing = true,
+            }
+        }
+        if missing {
+            body.push_str(
                 "    // TODO: the video port has no DMA channel left - every one is\n\
                  \x20   // taken. Free one in another module, or pin this one by hand.\n",
-            ),
+            );
+        } else {
+            let all: Vec<String> = std::iter::once("peripherals.LCD_CAM".to_owned())
+                .chain(dma_args)
+                .chain(args)
+                .collect();
+            body.push_str(&format!(
+                "    let ({}) =\n\
+                 \x20       pins::configs::lcd_cam::{init_fn}({});\n",
+                handles.join(", "),
+                all.join(", "),
+            ));
         }
         out.push(("LCD_CAM".to_owned(), body));
     }
@@ -2516,7 +2610,15 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> =
             [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false);
+        let plan = dma_plan(
+            Some(&dma),
+            EspRuntime::Async,
+            &spi,
+            &[],
+            false,
+            false,
+            false,
+        );
         assert_eq!(plan.spi[&2].peri, "DMA_CH0");
         assert_eq!(plan.spi[&3].peri, "DMA_CH1");
         assert!(plan.spi.values().all(|u| !u.manual && u.irq.is_empty()));
@@ -2530,7 +2632,15 @@ mod tests {
         let mut later = spi_on_dma(3);
         later.dma_tx = "DMA_CH0".into();
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2)), (3u8, later)].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false);
+        let plan = dma_plan(
+            Some(&dma),
+            EspRuntime::Async,
+            &spi,
+            &[],
+            false,
+            false,
+            false,
+        );
         assert_eq!(plan.spi[&3].peri, "DMA_CH0", "the pinned one is honoured");
         assert!(plan.spi[&3].manual);
         assert_eq!(
@@ -2560,7 +2670,15 @@ mod tests {
             ],
         };
         let spi: BTreeMap<u8, SpiModuleConfig> = [(3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false);
+        let plan = dma_plan(
+            Some(&dma),
+            EspRuntime::Async,
+            &spi,
+            &[],
+            false,
+            false,
+            false,
+        );
         assert_eq!(plan.spi[&3].peri, "DMA_SPI3");
     }
 
@@ -2571,7 +2689,15 @@ mod tests {
         let dma = gdma(1);
         let spi: BTreeMap<u8, SpiModuleConfig> =
             [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false);
+        let plan = dma_plan(
+            Some(&dma),
+            EspRuntime::Async,
+            &spi,
+            &[],
+            false,
+            false,
+            false,
+        );
         assert_eq!(plan.spi[&2].peri, "DMA_CH0");
         assert!(!plan.spi.contains_key(&3));
     }
@@ -2589,7 +2715,7 @@ mod tests {
         slave.async_mode = AsyncBusMode::Blocking;
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, slave)].into();
         for rt in [EspRuntime::Blocking, EspRuntime::Async] {
-            let plan = dma_plan(Some(&dma), rt, &spi, &[0], true, false);
+            let plan = dma_plan(Some(&dma), rt, &spi, &[0], true, false, false);
             assert!(plan.spi.contains_key(&2), "slave on {rt:?}: {plan:?}");
             assert!(plan.i2s.contains_key(&0), "i2s on {rt:?}: {plan:?}");
             assert!(plan.parl_io.is_some(), "parl_io on {rt:?}: {plan:?}");
@@ -2604,13 +2730,21 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2))].into();
         assert!(
-            dma_plan(Some(&dma), EspRuntime::Blocking, &spi, &[], false, false)
-                .uses()
-                .is_empty()
+            dma_plan(
+                Some(&dma),
+                EspRuntime::Blocking,
+                &spi,
+                &[],
+                false,
+                false,
+                false
+            )
+            .uses()
+            .is_empty()
         );
         // …and a chip with no channel data cannot be served on any runtime.
         assert!(
-            dma_plan(None, EspRuntime::Async, &spi, &[], false, false)
+            dma_plan(None, EspRuntime::Async, &spi, &[], false, false, false)
                 .uses()
                 .is_empty()
         );
@@ -2623,9 +2757,17 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, SpiModuleConfig::new(2))].into();
         assert!(
-            dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false)
-                .uses()
-                .is_empty()
+            dma_plan(
+                Some(&dma),
+                EspRuntime::Async,
+                &spi,
+                &[],
+                false,
+                false,
+                false
+            )
+            .uses()
+            .is_empty()
         );
     }
 }

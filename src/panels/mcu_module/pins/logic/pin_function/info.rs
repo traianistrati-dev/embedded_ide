@@ -452,8 +452,12 @@ impl PinFunction {
             | PinFunction::LcdCamVsync
             | PinFunction::LcdCamHsync
             | PinFunction::LcdCamDe
-            | PinFunction::LcdCamHenable
-            | PinFunction::LcdCamMclk => {
+            | PinFunction::CamData { .. }
+            | PinFunction::CamPclk
+            | PinFunction::CamVsync
+            | PinFunction::CamHsync
+            | PinFunction::CamHenable
+            | PinFunction::CamMclk => {
                 let role = match self {
                     PinFunction::LcdCamDc => {
                         "the data/command select - low says the byte on the bus is a command"
@@ -466,8 +470,12 @@ impl PinFunction {
                     PinFunction::LcdCamVsync => "vertical sync, the start of a frame",
                     PinFunction::LcdCamHsync => "horizontal sync, the start of a line",
                     PinFunction::LcdCamDe => "data enable, marking the clocks inside the active area",
-                    PinFunction::LcdCamHenable => "the sensor's HREF - high while a line carries pixels",
-                    PinFunction::LcdCamMclk => {
+                    PinFunction::CamPclk => "the sensor's pixel clock, read IN",
+                    PinFunction::CamVsync => "the sensor's frame sync",
+                    PinFunction::CamHsync => "the sensor's line sync",
+                    PinFunction::CamData { .. } => "one data line of the camera bus, coming in",
+                    PinFunction::CamHenable => "the sensor's HREF - high while a line carries pixels",
+                    PinFunction::CamMclk => {
                         "the master clock this chip GIVES the camera; unwired means slave mode"
                     }
                     _ => "one data line of the parallel video bus",

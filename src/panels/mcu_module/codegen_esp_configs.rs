@@ -1489,8 +1489,8 @@ fn usb_file(rt: EspRuntime, cfg: Option<&UsbModuleConfig>) -> String {
 /// appears in the middle of `init` rather than at the end of the chain, and why
 /// the camera's type does not change with it: `Camera` has no mode parameter,
 /// only its transfer has an `await`.
-/// What one LCD_CAM mode needs, so the three arms below can be read side by
-/// side instead of as a five-place tuple.
+/// What one LCD_CAM half needs, so the arms below read side by side instead of
+/// as a five-place tuple.
 struct LcdCamShape<'a> {
     /// The control pads, as `(name, bound)` — the data lanes are appended after.
     ctl_params: Vec<(&'a str, &'a str)>,
@@ -1502,27 +1502,18 @@ struct LcdCamShape<'a> {
     ty: String,
     /// The esp-hal module under `lcd_cam::` that holds it.
     driver_mod: &'a str,
+    /// The data pads' prefix. The two halves need DIFFERENT names in one
+    /// signature, because both can appear in it.
+    data_prefix: &'a str,
+    /// The bound every data pad takes.
+    data_dir: &'a str,
+    /// `Tx` or `Rx` — which kind of DMA channel this half asks for.
+    dma_dir: &'a str,
 }
 
-fn lcd_cam_file(sigs: &[&str], cfg: &LcdCamModuleConfig, rt: EspRuntime) -> String {
-    let asyn = rt == EspRuntime::Async;
-    let dm = if asyn { "Async" } else { "Blocking" };
-    let into_async = if asyn { ".into_async()" } else { "" };
-    let lanes = usize::from(cfg.width.min(16)).max(8);
-
-    // The data pads, however many the width binds. Named `d0..` in the
-    // signature and bound with `with_data0..` — one table drives both.
-    let data: Vec<(String, String)> = (0..lanes)
-        .map(|n| (format!("d{n}"), format!("with_data{n}")))
-        .collect();
-
-    let LcdCamShape {
-        ctl_params,
-        ctl_chain,
-        half,
-        ty,
-        driver_mod,
-    } = match cfg.mode {
+/// The shape of one half, given its mode.
+fn lcd_cam_shape<'a>(mode: LcdCamMode, dm: &str) -> LcdCamShape<'a> {
+    match mode {
         LcdCamMode::I8080 => LcdCamShape {
             ctl_params: vec![
                 ("dc", "impl PeripheralOutput<'d>"),
@@ -1532,7 +1523,10 @@ fn lcd_cam_file(sigs: &[&str], cfg: &LcdCamModuleConfig, rt: EspRuntime) -> Stri
             ctl_chain: vec![("dc", "with_dc"), ("wr", "with_wrx"), ("cs", "with_cs")],
             half: "lcd",
             ty: format!("I8080<'d, {dm}>"),
-            driver_mod: "i8080",
+            driver_mod: "lcd::i8080",
+            data_prefix: "d",
+            data_dir: "impl PeripheralOutput<'d>",
+            dma_dir: "Tx",
         },
         LcdCamMode::Dpi => LcdCamShape {
             ctl_params: vec![
@@ -1549,81 +1543,170 @@ fn lcd_cam_file(sigs: &[&str], cfg: &LcdCamModuleConfig, rt: EspRuntime) -> Stri
             ],
             half: "lcd",
             ty: format!("Dpi<'d, {dm}>"),
-            driver_mod: "dpi",
+            driver_mod: "lcd::dpi",
+            data_prefix: "d",
+            data_dir: "impl PeripheralOutput<'d>",
+            dma_dir: "Tx",
         },
-        // The camera READS: every one of these is an input except the master
-        // clock, which is the one thing this chip gives the sensor.
+        // The camera READS: every pad is an input except the master clock,
+        // which is the one thing this chip gives the sensor. Its control pads
+        // are prefixed too, so a display's `pclk` and a sensor's never collide.
         LcdCamMode::Camera => LcdCamShape {
             ctl_params: vec![
                 ("mclk", "impl PeripheralOutput<'d>"),
-                ("pclk", "impl PeripheralInput<'d>"),
-                ("vsync", "impl PeripheralInput<'d>"),
-                ("hsync", "impl PeripheralInput<'d>"),
+                ("cam_pclk", "impl PeripheralInput<'d>"),
+                ("cam_vsync", "impl PeripheralInput<'d>"),
+                ("cam_hsync", "impl PeripheralInput<'d>"),
                 ("href", "impl PeripheralInput<'d>"),
             ],
             ctl_chain: vec![
                 ("mclk", "with_master_clock"),
-                ("pclk", "with_pixel_clock"),
-                ("vsync", "with_vsync"),
-                ("hsync", "with_hsync"),
+                ("cam_pclk", "with_pixel_clock"),
+                ("cam_vsync", "with_vsync"),
+                ("cam_hsync", "with_hsync"),
                 ("href", "with_h_enable"),
             ],
             half: "cam",
             // `Camera` carries no driver mode at all.
             ty: "Camera<'d>".to_owned(),
             driver_mod: "cam",
+            data_prefix: "cd",
+            data_dir: "impl PeripheralInput<'d>",
+            dma_dir: "Rx",
         },
-    };
+    }
+}
 
-    // The data pads go last, after the control pads, in both lists.
-    let data_dir = if cfg.mode.is_camera() {
-        "impl PeripheralInput<'d>"
-    } else {
-        "impl PeripheralOutput<'d>"
-    };
-    let mut param_spec: Vec<(&str, &str)> = ctl_params;
-    let mut chain_spec: Vec<(&str, &str)> = ctl_chain;
-    for (name, method) in &data {
-        param_spec.push((name.as_str(), data_dir));
-        chain_spec.push((name.as_str(), method.as_str()));
+/// The parallel video port: the display half, the camera half, or BOTH.
+///
+/// # One constructor, two halves
+///
+/// `LcdCam::new` consumes the peripheral once and hands back `.lcd` and `.cam`
+/// together. They then run independently — an ESP32-S3 driving a display while
+/// reading a sensor is what the block is for — so this file has ONE `init` that
+/// builds whichever halves the canvas wired, rather than two that would each
+/// want the same peripheral.
+///
+/// # Two channels when both are live
+///
+/// The display half takes a TX channel and the camera an RX one. Neither has a
+/// non-DMA form, so a project short of channels gets no video port at all
+/// rather than a slower one.
+///
+/// # Async is on the PERIPHERAL
+///
+/// `into_async` sits on `LcdCam`, before either half is taken. That is why it
+/// appears in the middle of `init` rather than at the end of a chain, and why
+/// the camera's type does not change with it: `Camera` has no mode parameter.
+fn lcd_cam_file(
+    lcd_sigs: &[&str],
+    lcd_cfg: Option<&LcdCamModuleConfig>,
+    cam_sigs: &[&str],
+    cam_cfg: Option<&LcdCamModuleConfig>,
+    rt: EspRuntime,
+) -> String {
+    let asyn = rt == EspRuntime::Async;
+    let dm = if asyn { "Async" } else { "Blocking" };
+    let into_async = if asyn { ".into_async()" } else { "" };
+
+    // `(prefix, shape, config, the signal names wired)` per half, display first
+    // — the order `main.rs` passes them in.
+    let mut halves: Vec<(&str, LcdCamShape, &LcdCamModuleConfig, &[&str])> = Vec::new();
+    if !lcd_sigs.is_empty() {
+        let c = lcd_cfg.expect("a wired display half has a module");
+        halves.push(("LCD", lcd_cam_shape(c.mode, dm), c, lcd_sigs));
+    }
+    if !cam_sigs.is_empty() {
+        let c = cam_cfg.expect("a wired camera half has a module");
+        halves.push(("CAM", lcd_cam_shape(LcdCamMode::Camera, dm), c, cam_sigs));
     }
 
-    let params = format!(
-        "    lcd_cam: LCD_CAM<'d>,\n\
-         \x20   dma: impl {}ChannelFor<LCD_CAM<'d>>,\n\
-         {}",
-        if cfg.mode.is_camera() { "Rx" } else { "Tx" },
-        params_for(sigs, &param_spec),
-    );
-    let chain = chain_for(sigs, &chain_spec);
+    let mut consts = String::new();
+    let mut params = String::new();
+    let mut dma_params = String::new();
+    let mut body_lines = String::new();
+    let mut rets: Vec<String> = Vec::new();
+    let mut handles: Vec<String> = Vec::new();
+    let mut driver_mods: Vec<String> = Vec::new();
+    let mut dma_dirs: Vec<&str> = Vec::new();
 
-    let consts = lcd_cam_consts(cfg);
-    let config_expr = lcd_cam_config_expr(cfg);
+    for (prefix, shape, c, sigs) in &halves {
+        let lower = prefix.to_lowercase();
+        consts.push_str(&lcd_cam_consts(prefix, c));
+        dma_params.push_str(&format!(
+            "\x20   dma_{lower}: impl {}ChannelFor<LCD_CAM<'d>>,\n",
+            shape.dma_dir
+        ));
+        dma_dirs.push(shape.dma_dir);
+        driver_mods.push(shape.driver_mod.to_owned());
+
+        let lanes = usize::from(c.width.min(16)).max(8);
+        let data: Vec<(String, String)> = (0..lanes)
+            .map(|n| (format!("{}{n}", shape.data_prefix), format!("with_data{n}")))
+            .collect();
+        let mut param_spec: Vec<(&str, &str)> = shape.ctl_params.clone();
+        let mut chain_spec: Vec<(&str, &str)> = shape.ctl_chain.clone();
+        for (name, method) in &data {
+            param_spec.push((name.as_str(), shape.data_dir));
+            chain_spec.push((name.as_str(), method.as_str()));
+        }
+        params.push_str(&params_for(sigs, &param_spec));
+
+        body_lines.push_str(&lcd_cam_config_expr(prefix, c));
+        // The chain must END the statement, not sit above a lone semicolon.
+        let mut chain = chain_for(sigs, &chain_spec);
+        if chain.ends_with('\n') {
+            chain.pop();
+        }
+        chain.push_str(";\n");
+        body_lines.push_str(&format!(
+            "\x20   let {lower} = {}::new(lcd_cam.{}, dma_{lower}, {lower}_config)\n\
+             \x20       .unwrap()\n\
+             {chain}",
+            c.mode.driver(),
+            shape.half,
+        ));
+        rets.push(shape.ty.clone());
+        handles.push(lower);
+    }
+
+    // A single half is returned bare; two come back as a pair.
+    let ret = if rets.len() == 1 {
+        rets[0].clone()
+    } else {
+        format!("({})", rets.join(", "))
+    };
+    let give = if handles.len() == 1 {
+        handles[0].clone()
+    } else {
+        format!("({})", handles.join(", "))
+    };
 
     let body = format!(
-        "/// The parallel video port as {}.\n\
+        "/// The video port: {}.\n\
          ///\n\
          /// Every pad here is routed through the GPIO matrix, so which one it\n\
          /// is was decided on the canvas rather than by the silicon.\n\
          pub fn {fname}<'d>(\n\
-         {params}) -> {ty} {{\n\
+         \x20   lcd_cam: LCD_CAM<'d>,\n\
+         {dma_params}{params}) -> {ret} {{\n\
          \x20   let lcd_cam = LcdCam::new(lcd_cam){into_async};\n\
-         {config_expr}\
-         \x20   {driver}::new(lcd_cam.{half}, dma, config)\n\
-         \x20       .unwrap()\n\
-         {chain}\
+         {body_lines}\
+         \x20   {give}\n\
          }}\n",
-        cfg.mode.label(),
+        halves
+            .iter()
+            .map(|(_, _, c, _)| c.mode.label())
+            .collect::<Vec<_>>()
+            .join(" + "),
         fname = if asyn { "init_async" } else { "init" },
-        driver = cfg.mode.driver(),
     );
 
-    let example = lcd_cam_example(cfg, rt);
+    let example = lcd_cam_example(&halves, rt);
 
-    // Which imports a file needs is not the MODE's answer. A camera with no
-    // master clock binds no output; a display never binds an input; and
-    // `Camera` carries no driver mode, so the mode marker itself is unused
-    // there. Each line is decided by what the code below actually says.
+    // Which imports a file needs is decided by what the code below actually
+    // says, not by the modes: a camera with no master clock binds no output,
+    // a display never binds an input, and `Camera` carries no mode marker.
     let mut traits = Vec::new();
     if params.contains("PeripheralInput") {
         traits.push("PeripheralInput");
@@ -1631,39 +1714,53 @@ fn lcd_cam_file(sigs: &[&str], cfg: &LcdCamModuleConfig, rt: EspRuntime) -> Stri
     if params.contains("PeripheralOutput") {
         traits.push("PeripheralOutput");
     }
-    let mode_use = if ty.contains(dm) {
+    let mode_use = if ret.contains(dm) {
         format!("use esp_hal::{dm};\n")
     } else {
         String::new()
     };
+    let mut dma_use: Vec<String> = dma_dirs
+        .iter()
+        .map(|d| format!("use esp_hal::dma::{d}ChannelFor;\n"))
+        .collect();
+    dma_use.sort();
+    dma_use.dedup();
+
+    let mut driver_use: Vec<String> = halves
+        .iter()
+        .map(|(_, shape, c, _)| {
+            format!(
+                "use esp_hal::lcd_cam::{}::{{Config as {}Config, {}{}}};\n",
+                shape.driver_mod,
+                c.mode.driver(),
+                c.mode.driver(),
+                if c.mode == LcdCamMode::Dpi {
+                    ", Format, FrameTiming"
+                } else {
+                    ""
+                },
+            )
+        })
+        .collect();
+    driver_use.sort();
+    driver_use.dedup();
+    let _ = driver_mods;
 
     file(
         &format!(
-            "{mode_use}\
-             use esp_hal::dma::{}ChannelFor;\n\
+            "{mode_use}{}\
              use esp_hal::gpio::interconnect::{};\n\
-             use esp_hal::lcd_cam::{{LcdCam, {}::{{Config, {}{}}}}};\n\
+             use esp_hal::lcd_cam::LcdCam;\n\
+             {}\
              use esp_hal::peripherals::LCD_CAM;\n\
              use esp_hal::time::Rate;\n",
-            if cfg.mode.is_camera() { "Rx" } else { "Tx" },
-            // One import needs no braces around it.
+            dma_use.join(""),
             if traits.len() == 1 {
                 traits[0].to_owned()
             } else {
                 format!("{{{}}}", traits.join(", "))
             },
-            if cfg.mode.is_camera() {
-                "cam".to_owned()
-            } else {
-                format!("lcd::{driver_mod}")
-            },
-            cfg.mode.driver(),
-            // The RGB config expression names two more types.
-            if cfg.mode == LcdCamMode::Dpi {
-                ", Format, FrameTiming"
-            } else {
-                ""
-            },
+            driver_use.join(""),
         ),
         &consts,
         &body,
@@ -1671,27 +1768,30 @@ fn lcd_cam_file(sigs: &[&str], cfg: &LcdCamModuleConfig, rt: EspRuntime) -> Stri
     )
 }
 
-/// The editable half of an LCD_CAM config file.
+/// The editable constants for ONE half, namespaced by its prefix.
+///
+/// `LCD_` and `CAM_`: both halves can be in one file, and both have a
+/// frequency and a width, so unprefixed names would collide.
 ///
 /// The RGB timings are constants rather than literals buried in a builder
 /// chain: they come off a panel datasheet, they are the numbers most likely to
 /// need one more nudge, and a rolling picture is what a wrong one looks like.
-fn lcd_cam_consts(cfg: &LcdCamModuleConfig) -> String {
+fn lcd_cam_consts(prefix: &str, cfg: &LcdCamModuleConfig) -> String {
     let mut s = format!(
-        "const FREQUENCY: Rate = Rate::from_hz({});\n",
+        "const {prefix}_FREQUENCY: Rate = Rate::from_hz({});\n",
         cfg.clock_hz.max(1)
     );
     if cfg.mode == LcdCamMode::Dpi {
         s.push_str(&format!(
             "// Straight off the panel's datasheet. Total = active + blanking.\n\
-             const H_ACTIVE: usize = {};\n\
-             const V_ACTIVE: usize = {};\n\
-             const H_TOTAL: usize = {};\n\
-             const V_TOTAL: usize = {};\n\
-             const H_FRONT_PORCH: usize = {};\n\
-             const V_FRONT_PORCH: usize = {};\n\
-             const HSYNC_WIDTH: usize = {};\n\
-             const VSYNC_WIDTH: usize = {};\n",
+             const {prefix}_H_ACTIVE: usize = {};\n\
+             const {prefix}_V_ACTIVE: usize = {};\n\
+             const {prefix}_H_TOTAL: usize = {};\n\
+             const {prefix}_V_TOTAL: usize = {};\n\
+             const {prefix}_H_FRONT_PORCH: usize = {};\n\
+             const {prefix}_V_FRONT_PORCH: usize = {};\n\
+             const {prefix}_HSYNC_WIDTH: usize = {};\n\
+             const {prefix}_VSYNC_WIDTH: usize = {};\n",
             cfg.h_active,
             cfg.v_active,
             cfg.h_total,
@@ -1704,107 +1804,130 @@ fn lcd_cam_consts(cfg: &LcdCamModuleConfig) -> String {
     }
     if cfg.mode != LcdCamMode::I8080 {
         s.push_str(&format!(
-            "const TWO_BYTE_MODE: bool = {};\n",
+            "const {prefix}_TWO_BYTE_MODE: bool = {};\n",
             cfg.width >= 16
         ));
     }
     s
 }
 
-/// The `let config = ...;` line, which differs enough per mode to be worth its
-/// own function rather than three branches inside the body format.
-fn lcd_cam_config_expr(cfg: &LcdCamModuleConfig) -> String {
+/// The `let <half>_config = ...;` line, which differs enough per mode to be
+/// worth its own function rather than three branches inside the body format.
+fn lcd_cam_config_expr(prefix: &str, cfg: &LcdCamModuleConfig) -> String {
+    let lower = prefix.to_lowercase();
+    let ty = format!("{}Config", cfg.mode.driver());
     match cfg.mode {
         // The i8080 driver takes its width from how many data pads are bound,
         // so there is nothing to set here beyond the clock.
-        LcdCamMode::I8080 => {
-            "    let config = Config::default().with_frequency(FREQUENCY);\n".to_owned()
-        }
-        LcdCamMode::Camera => "    let config = Config::default()\n\
-             \x20       .with_frequency(FREQUENCY)\n\
-             \x20       .with_enable_2byte_mode(TWO_BYTE_MODE);\n"
-            .to_owned(),
-        LcdCamMode::Dpi => "    let config = Config::default()\n\
-             \x20       .with_frequency(FREQUENCY)\n\
-             \x20       .with_format(Format {\n\
-             \x20           enable_2byte_mode: TWO_BYTE_MODE,\n\
+        LcdCamMode::I8080 => format!(
+            "\x20   let {lower}_config = {ty}::default().with_frequency({prefix}_FREQUENCY);\n"
+        ),
+        LcdCamMode::Camera => format!(
+            "\x20   let {lower}_config = {ty}::default()\n\
+             \x20       .with_frequency({prefix}_FREQUENCY)\n\
+             \x20       .with_enable_2byte_mode({prefix}_TWO_BYTE_MODE);\n"
+        ),
+        LcdCamMode::Dpi => format!(
+            "\x20   let {lower}_config = {ty}::default()\n\
+             \x20       .with_frequency({prefix}_FREQUENCY)\n\
+             \x20       .with_format(Format {{\n\
+             \x20           enable_2byte_mode: {prefix}_TWO_BYTE_MODE,\n\
              \x20           ..Default::default()\n\
-             \x20       })\n\
-             \x20       .with_timing(FrameTiming {\n\
-             \x20           horizontal_active_width: H_ACTIVE,\n\
-             \x20           horizontal_total_width: H_TOTAL,\n\
-             \x20           horizontal_blank_front_porch: H_FRONT_PORCH,\n\
-             \x20           vertical_active_height: V_ACTIVE,\n\
-             \x20           vertical_total_height: V_TOTAL,\n\
-             \x20           vertical_blank_front_porch: V_FRONT_PORCH,\n\
-             \x20           hsync_width: HSYNC_WIDTH,\n\
-             \x20           vsync_width: VSYNC_WIDTH,\n\
+             \x20       }})\n\
+             \x20       .with_timing(FrameTiming {{\n\
+             \x20           horizontal_active_width: {prefix}_H_ACTIVE,\n\
+             \x20           horizontal_total_width: {prefix}_H_TOTAL,\n\
+             \x20           horizontal_blank_front_porch: {prefix}_H_FRONT_PORCH,\n\
+             \x20           vertical_active_height: {prefix}_V_ACTIVE,\n\
+             \x20           vertical_total_height: {prefix}_V_TOTAL,\n\
+             \x20           vertical_blank_front_porch: {prefix}_V_FRONT_PORCH,\n\
+             \x20           hsync_width: {prefix}_HSYNC_WIDTH,\n\
+             \x20           vsync_width: {prefix}_VSYNC_WIDTH,\n\
              \x20           hsync_position: 0,\n\
-             \x20       });\n"
-            .to_owned(),
+             \x20       }});\n"
+        ),
     }
 }
 
-/// What to do with the handle, per mode. Each of the three moves data a
-/// different way, and none of them looks like a bus.
+/// What to do with each handle. The three modes move data three different ways,
+/// and none of them looks like a bus.
 ///
 /// Two things here are not symmetric, and both come from esp-hal rather than
 /// from choice: every `send`/`receive` reports failure as a TUPLE that carries
 /// the driver and the buffer back (so `.unwrap()` alone will not compile), and
 /// `wait_for_done` exists on the i8080 transfer ALONE — the RGB and camera
 /// transfers have `is_done`, `stop` and a blocking `wait`, on either runtime.
-fn lcd_cam_example(cfg: &LcdCamModuleConfig, rt: EspRuntime) -> String {
+fn lcd_cam_example(
+    halves: &[(&str, LcdCamShape, &LcdCamModuleConfig, &[&str])],
+    rt: EspRuntime,
+) -> String {
     let asyn = rt == EspRuntime::Async;
-    let lines: Vec<String> = match cfg.mode {
-        LcdCamMode::I8080 => {
-            let mut v = vec![
-                "A command, then its pixels, out of a DMA buffer:".to_owned(),
-                String::new(),
-                "    use esp_hal::dma_tx_buffer;".to_owned(),
-                "    let mut buf = dma_tx_buffer!(32768).unwrap();".to_owned(),
-                "    buf.fill(&[0x55; 32]);".to_owned(),
-                "    // 0x3A is MIPI's COLMOD; the 0 is the dummy-cycle count.".to_owned(),
-                "    let mut transfer = _lcd.send(0x3Au8, 0, buf).map_err(|e| e.0).unwrap();"
-                    .to_owned(),
-            ];
-            if asyn {
-                v.push("    transfer.wait_for_done().await;".to_owned());
-            }
-            // `wait` hands the driver and the buffer back, which is the only
-            // way to send a second frame.
-            v.push("    let (result, _lcd, _buf) = transfer.wait();".to_owned());
-            v.push("    result.unwrap();".to_owned());
-            v
+    let mut lines: Vec<String> = Vec::new();
+    for (i, (_, _, c, _)) in halves.iter().enumerate() {
+        if i > 0 {
+            lines.push(String::new());
+            lines.push("// …and the other half, at the same time:".to_owned());
+            lines.push(String::new());
         }
-        LcdCamMode::Dpi => vec![
-            "An RGB panel is fed forever, so the buffer LOOPS: the driver keeps".to_owned(),
-            "sending it until the transfer is stopped.".to_owned(),
-            String::new(),
-            "    use esp_hal::dma_loop_buffer;".to_owned(),
-            "    let mut buf = dma_loop_buffer!(32);".to_owned(),
-            "    buf.fill(0xFF);   // a solid frame".to_owned(),
-            "    let transfer = _lcd.send(true, buf).map_err(|e| e.0).unwrap();".to_owned(),
-            "    let (_lcd, _buf) = transfer.stop();".to_owned(),
-            String::new(),
-            "// `true` loops it. The panel needs a frame on every clock, so".to_owned(),
-            "// stopping the transfer blanks the screen.".to_owned(),
-        ],
-        LcdCamMode::Camera => vec![
-            "The sensor streams; this side just supplies somewhere to put it:".to_owned(),
-            String::new(),
-            "    use esp_hal::dma_rx_stream_buffer;".to_owned(),
-            "    let buf = dma_rx_stream_buffer!(20 * 1000, 1000);".to_owned(),
-            "    let transfer = _lcd.receive(buf).map_err(|e| e.0).unwrap();".to_owned(),
-            "    while !transfer.is_done() {}".to_owned(),
-            "    let (_lcd, _buf) = transfer.stop();".to_owned(),
-            String::new(),
-            "// No `await` even on the async runtime: esp-hal gives the camera".to_owned(),
-            "// transfer `is_done` and `stop`, and nothing to wait on.".to_owned(),
-            "// Nothing arrives until the sensor is sending, and with the master".to_owned(),
-            "// clock off it also needs a clock from somewhere else.".to_owned(),
-        ],
+        match c.mode {
+            LcdCamMode::I8080 => {
+                lines.push("A command, then its pixels, out of a DMA buffer:".to_owned());
+                lines.push(String::new());
+                lines.push("    use esp_hal::dma_tx_buffer;".to_owned());
+                lines.push("    let mut buf = dma_tx_buffer!(32768).unwrap();".to_owned());
+                lines.push("    buf.fill(&[0x55; 32]);".to_owned());
+                lines.push(
+                    "    // 0x3A is MIPI's COLMOD; the 0 is the dummy-cycle count.".to_owned(),
+                );
+                lines.push(
+                    "    let mut t = _lcd.send(0x3Au8, 0, buf).map_err(|e| e.0).unwrap();"
+                        .to_owned(),
+                );
+                if asyn {
+                    lines.push("    t.wait_for_done().await;".to_owned());
+                }
+                lines.push("    let (result, _lcd, _buf) = t.wait();".to_owned());
+                lines.push("    result.unwrap();".to_owned());
+            }
+            LcdCamMode::Dpi => {
+                lines.push("An RGB panel is fed forever, so the buffer LOOPS:".to_owned());
+                lines.push(String::new());
+                lines.push("    use esp_hal::dma_loop_buffer;".to_owned());
+                lines.push("    let mut buf = dma_loop_buffer!(32);".to_owned());
+                lines.push("    buf.fill(0xFF);   // a solid frame".to_owned());
+                lines
+                    .push("    let t = _lcd.send(true, buf).map_err(|e| e.0).unwrap();".to_owned());
+                lines.push("    let (_lcd, _buf) = t.stop();".to_owned());
+                lines.push(
+                    "    // `true` loops it: stopping the transfer blanks the screen.".to_owned(),
+                );
+            }
+            LcdCamMode::Camera => {
+                lines
+                    .push("The sensor streams; this side supplies somewhere to put it:".to_owned());
+                lines.push(String::new());
+                lines.push("    use esp_hal::dma_rx_stream_buffer;".to_owned());
+                lines.push("    let buf = dma_rx_stream_buffer!(20 * 1000, 1000);".to_owned());
+                lines.push("    let t = _cam.receive(buf).map_err(|e| e.0).unwrap();".to_owned());
+                lines.push("    while !t.is_done() {}".to_owned());
+                lines.push("    let (_cam, _buf) = t.stop();".to_owned());
+                lines.push("    // No `await` even on async: esp-hal gives the camera".to_owned());
+                lines.push("    // transfer `is_done` and `stop`, nothing to wait on.".to_owned());
+            }
+        }
+    }
+    let title = if halves.len() > 1 {
+        "Using LCD_CAM (both halves)".to_owned()
+    } else {
+        format!(
+            "Using LCD_CAM ({})",
+            halves
+                .first()
+                .map(|(_, _, c, _)| c.mode.label())
+                .unwrap_or("")
+        )
     };
-    example_block(&format!("Using LCD_CAM ({})", cfg.mode.label()), &lines)
+    example_block(&title, &lines)
 }
 
 // ── Touch ───────────────────────────────────────────────────────────────
@@ -2784,10 +2907,14 @@ pub fn config_files(
     // `Some(has a valid pad)` when the parallel port is wired at all.
     parl_io: &Option<bool>,
     parl_io_cfg: Option<&ParlIoModuleConfig>,
-    // The LCD_CAM signal names wired, and the module that gives them meaning.
-    // Empty means no video port on this canvas.
+    // The DISPLAY half's signal names wired, and the module that gives them
+    // meaning. Empty means no display on this canvas.
     lcd_cam: &[String],
     lcd_cam_cfg: Option<&LcdCamModuleConfig>,
+    // The CAMERA half, wired and configured on its own: the two halves run at
+    // the same time, so one file has to build whichever of them exist.
+    cam: &[String],
+    cam_cfg: Option<&LcdCamModuleConfig>,
     // The DAC channels wired, and the module they belong to.
     dac: &[u8],
     dac_cfg: Option<&DacModuleConfig>,
@@ -2834,12 +2961,22 @@ pub fn config_files(
     if usb {
         out.push(("usb.rs".to_owned(), usb_file(rt, usb_cfg)));
     }
-    if !lcd_cam.is_empty() {
-        let d = LcdCamModuleConfig::new(0);
-        let sigs: Vec<&str> = lcd_cam.iter().map(String::as_str).collect();
+    // One file for both halves: `LcdCam::new` consumes the peripheral once, so
+    // two independent `init`s could not exist even if they read better.
+    if !lcd_cam.is_empty() || !cam.is_empty() {
+        let lcd_default = LcdCamModuleConfig::new(0);
+        let cam_default = LcdCamModuleConfig::new_camera();
+        let lcd_sigs: Vec<&str> = lcd_cam.iter().map(String::as_str).collect();
+        let cam_sigs: Vec<&str> = cam.iter().map(String::as_str).collect();
         out.push((
             "lcd_cam.rs".to_owned(),
-            lcd_cam_file(&sigs, lcd_cam_cfg.unwrap_or(&d), rt),
+            lcd_cam_file(
+                &lcd_sigs,
+                Some(lcd_cam_cfg.unwrap_or(&lcd_default)),
+                &cam_sigs,
+                Some(cam_cfg.unwrap_or(&cam_default)),
+                rt,
+            ),
         ));
     }
     // TWAI0 alone: `PinFunction::CanTx`/`CanRx` carry no instance number, so
@@ -3157,6 +3294,10 @@ mod tests {
                 "d6".to_owned(),
                 "d7".to_owned(),
             ],
+            None,
+            // …and a camera on the other half at the same time, which is the
+            // arrangement this peripheral exists for.
+            &["cd0".to_owned(), "cd1".to_owned(), "href".to_owned()],
             None,
             &[1, 2],
             None,

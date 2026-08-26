@@ -38,9 +38,15 @@ impl PinFunction {
             | PinFunction::LcdCamPclk
             | PinFunction::LcdCamVsync
             | PinFunction::LcdCamHsync
-            | PinFunction::LcdCamDe
-            | PinFunction::LcdCamHenable
-            | PinFunction::LcdCamMclk => egui::Color32::from_rgb(150, 120, 195),
+            | PinFunction::LcdCamDe => egui::Color32::from_rgb(150, 120, 195),
+            // The camera half is the same peripheral and a different bus, so a
+            // neighbouring violet: a board wiring both can still tell them apart.
+            PinFunction::CamData { .. }
+            | PinFunction::CamPclk
+            | PinFunction::CamVsync
+            | PinFunction::CamHsync
+            | PinFunction::CamHenable
+            | PinFunction::CamMclk => egui::Color32::from_rgb(185, 125, 190),
             // PARL_IO is a bus, so it sits with the buses — a slate blue
             // distinct from SPI's teal, since a pad can rarely be both.
             PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => {

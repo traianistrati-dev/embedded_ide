@@ -285,6 +285,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfacePcnt => PinFunction::PcntEdge(instance),
         ModuleKind::GenericInterfaceParlIo => PinFunction::ParlData { lane: 0 },
         ModuleKind::GenericInterfaceLcdCam => PinFunction::LcdCamData { lane: 0 },
+        ModuleKind::GenericInterfaceCamera => PinFunction::CamData { lane: 0 },
         ModuleKind::GenericInterfaceTouch => PinFunction::TouchPad(0),
         ModuleKind::GenericInterfaceMcpwm => PinFunction::McpwmA {
             unit: instance,
@@ -455,6 +456,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         // The port is one driver, whatever the bus is wide.
         ModuleKind::GenericInterfaceParlIo => format!("_parl{sfx}"),
         ModuleKind::GenericInterfaceLcdCam => format!("_lcd{sfx}"),
+        ModuleKind::GenericInterfaceCamera => format!("_cam{sfx}"),
         ModuleKind::GenericInterfaceTouch => format!("_touch{sfx}"),
         // One handle per OUTPUT: each is its own `PwmPin`, and they are set
         // independently. The list is built from what is wired, so an
@@ -1576,22 +1578,27 @@ pub fn module_config_ui(
                     }
                 }
                 ModuleConfig::LcdCam(cfg) => {
-                    ui.label("Mode");
-                    egui::ComboBox::from_id_salt("lcd_mode")
-                        .selected_text(cfg.mode.label())
-                        .show_ui(ui, |ui| {
-                            for v in LcdCamMode::ALL {
-                                ui.selectable_value(&mut cfg.mode, v, v.label())
-                                    .on_hover_text(v.hint());
-                            }
-                        })
-                        .response
-                        .on_hover_text(
-                            "One peripheral, three shapes - and only one at a time. The \
-                             mode decides what the control pads mean and which of them \
-                             the driver needs.",
-                        );
-                    ui.end_row();
+                    // The camera is the OTHER half and its own module, so this
+                    // one chooses only between the two display shapes.
+                    let camera = cfg.mode.is_camera();
+                    if !camera {
+                        ui.label("Mode");
+                        egui::ComboBox::from_id_salt("lcd_mode")
+                            .selected_text(cfg.mode.label())
+                            .show_ui(ui, |ui| {
+                                for v in [LcdCamMode::I8080, LcdCamMode::Dpi] {
+                                    ui.selectable_value(&mut cfg.mode, v, v.label())
+                                        .on_hover_text(v.hint());
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "The display half is one or the other, never both - they \
+                                 are two drivers over the same pads. The camera half runs \
+                                 alongside either, as its own module.",
+                            );
+                        ui.end_row();
+                    }
 
                     ui.label("Bus width");
                     egui::ComboBox::from_id_salt("lcd_width")
