@@ -17,7 +17,7 @@ use crate::panels::mcu_module::codegen_esp::{self, EspRuntime};
 use crate::panels::mcu_module::comparator;
 use crate::panels::mcu_module::mcu::{Mcu, Runtime};
 use crate::panels::mcu_module::modules::{
-    self, ApiStyle, I2cModuleConfig, SpiModuleConfig, UsartModuleConfig,
+    self, ApiStyle, I2cModuleConfig, SpiModuleConfig, SpiRole, UsartModuleConfig,
 };
 use crate::panels::mcu_module::pins::logic::pin::{GpioMode, Pin};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -242,11 +242,31 @@ impl FamilyBackend for Esp32Backend {
     }
 }
 
+/// The SPI modules, with any role or mode this chip cannot build put back.
+///
+/// The panel already refuses both — but a project moved from an ESP32-C6 to a
+/// C5 carries its `.config` with it and never passes through the panel again.
+/// Without this, that project would emit a slave file for a chip whose esp-hal
+/// has no `with_dma`, and it would not compile.
+fn esp_spi_configs(mcu: &Mcu) -> BTreeMap<u8, SpiModuleConfig> {
+    let mut spi = modules::spi_configs(&mcu.modules);
+    for cfg in spi.values_mut() {
+        if !SpiRole::options(&mcu.family).contains(&cfg.role) {
+            cfg.role = SpiRole::Master;
+        }
+        let modes = cfg.role.modes(&mcu.family);
+        if !modes.contains(&cfg.mode) {
+            cfg.mode = modes[0];
+        }
+    }
+    spi
+}
+
 /// A fresh ESP `main.rs` on `runtime` — shared by the blocking and async ESP
 /// backends, which differ only in that argument.
 fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let usart = modules::usart_configs(&mcu.modules);
-    let spi = modules::spi_configs(&mcu.modules);
+    let spi = esp_spi_configs(mcu);
     let i2c = modules::i2c_configs(&mcu.modules);
     let i2s = modules::i2s_configs(&mcu.modules);
     let rmt = modules::rmt_configs(&mcu.modules);
@@ -310,7 +330,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         &i2c_n,
         &i2s_n,
         &modules::usart_configs(&mcu.modules),
-        &modules::spi_configs(&mcu.modules),
+        &esp_spi_configs(mcu),
         &modules::i2c_configs(&mcu.modules),
         &modules::i2s_configs(&mcu.modules),
         // The RMT channels the canvas wires, by number.
@@ -345,7 +365,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
 /// Re-splice an existing ESP `main.rs` on `runtime` (see [`esp_fresh_main_rs`]).
 fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String {
     let usart = modules::usart_configs(&mcu.modules);
-    let spi = modules::spi_configs(&mcu.modules);
+    let spi = esp_spi_configs(mcu);
     let i2c = modules::i2c_configs(&mcu.modules);
     let i2s = modules::i2s_configs(&mcu.modules);
     let rmt = modules::rmt_configs(&mcu.modules);
@@ -1629,7 +1649,15 @@ mod tests {
         let def =
             crate::panels::mcu_module::builtins::builtin_for(&id).expect("a bundled ESP chip");
         let mut mcu = def.build_mcu();
-        mcu.runtime = Runtime::Async;
+        // `ESP_ASYNC_RUNTIME=blocking` writes the blocking project instead. It
+        // is not the same project with fewer `await`s: a blocking one still has
+        // to serve the peripherals that take a DMA channel in their only
+        // constructor, so this A/B is the one that covers them.
+        mcu.runtime = if std::env::var("ESP_ASYNC_RUNTIME").as_deref() == Ok("blocking") {
+            Runtime::Blocking
+        } else {
+            Runtime::Async
+        };
 
         // By search, not by name: GPIO4 is a JTAG pad on one part and a plain
         // pad on the next, and the pin NUMBERS differ between packages.
@@ -1728,6 +1756,12 @@ mod tests {
 
         let mut spi_cfg = SpiModuleConfig::new(2);
         spi_cfg.async_mode = AsyncBusMode::AsyncDma;
+        // `ESP_SPI_SLAVE=1` builds the other end of the bus instead: a
+        // different driver module, reversed pin bounds, no frequency, and DMA
+        // whether or not the async switch is on.
+        if std::env::var("ESP_SPI_SLAVE").is_ok() {
+            spi_cfg.role = crate::panels::mcu_module::modules::SpiRole::Slave;
+        }
         mcu.modules.push(VirtualModule {
             id: "spi_2".into(),
             kind: ModuleKind::GenericInterfaceSpi,
@@ -2367,5 +2401,127 @@ mod tests {
         assert!(code.contains("embassy_stm32::init"));
         assert!(code.contains(crate::panels::mcu_module::codegen::GEN_BEGIN));
         assert!(code.contains(crate::panels::mcu_module::codegen::GEN_END));
+    }
+
+    /// Build an ESP `Mcu` with SPI2 wired and a role, and return
+    /// `(main.rs, spi2.rs)`.
+    #[cfg(test)]
+    fn esp_spi_role_project(
+        chip: &str,
+        role: crate::panels::mcu_module::modules::SpiRole,
+        mode: u8,
+        runtime: Runtime,
+    ) -> (String, String) {
+        use crate::panels::mcu_module::modules::{
+            ModuleConfig, ModuleKind, SpiModuleConfig, VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+            .unwrap()
+            .build_mcu();
+        mcu.runtime = runtime;
+        for f in [
+            PinFunction::SpiSck(2),
+            PinFunction::SpiMosi(2),
+            PinFunction::SpiMiso(2),
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(&f)
+                })
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("{chip}: no pin for {f:?}"));
+            mcu.apply_pin_function(num, f);
+        }
+        let mut cfg = SpiModuleConfig::new(2);
+        cfg.role = role;
+        cfg.mode = mode;
+        mcu.modules.push(VirtualModule {
+            id: "spi_2".into(),
+            kind: ModuleKind::GenericInterfaceSpi,
+            name: "SPI2".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Spi(cfg),
+            connections: Vec::new(),
+        });
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "spi2.rs")
+            .map(|(_, c)| c)
+            .unwrap_or_default();
+        (mcu.fresh_main_rs(), file)
+    }
+
+    /// A slave module emits the OTHER driver: `spi::slave`, no frequency, and a
+    /// DMA channel even though the project is Blocking — esp-hal's slave has no
+    /// CPU path at all, so the channel is not the runtime's choice.
+    #[test]
+    fn esp_spi_slave_emits_the_slave_driver_on_dma() {
+        use crate::panels::mcu_module::modules::SpiRole;
+        let (main, file) = esp_spi_role_project("esp32c6", SpiRole::Slave, 0, Runtime::Blocking);
+        assert!(file.contains("esp_hal::spi::slave"), "driver:\n{file}");
+        assert!(file.contains(".with_dma(dma)"), "dma:\n{file}");
+        assert!(
+            !file.contains("with_frequency"),
+            "a slave sets no frequency:\n{file}"
+        );
+        // `init`, never `init_async`: there is no async twin to call.
+        assert!(
+            main.contains("configs::spi2::init(peripherals.SPI2,"),
+            "call:\n{main}"
+        );
+        assert!(
+            main.contains("peripherals.DMA_"),
+            "the slave takes a channel on Blocking too:\n{main}"
+        );
+    }
+
+    /// The same wiring as Master is the ordinary master file — the role is what
+    /// changes, not the pins.
+    #[test]
+    fn esp_spi_master_is_unchanged() {
+        use crate::panels::mcu_module::modules::SpiRole;
+        let (_, file) = esp_spi_role_project("esp32c6", SpiRole::Master, 0, Runtime::Blocking);
+        assert!(file.contains("esp_hal::spi::master"), "driver:\n{file}");
+        assert!(file.contains("with_frequency"), "master clocks it:\n{file}");
+    }
+
+    /// A project carried from a C6 to a C5 keeps `role: Slave` in its `.config`
+    /// and never reopens the panel. The C5's esp-hal has no `with_dma` for the
+    /// slave, so the emitter puts the role back rather than emit a file that
+    /// cannot compile.
+    #[test]
+    fn esp_spi_slave_falls_back_to_master_where_it_cannot_build() {
+        use crate::panels::mcu_module::modules::SpiRole;
+        assert!(!SpiRole::options("esp32c5").contains(&SpiRole::Slave));
+        assert!(!SpiRole::options("esp32c61").contains(&SpiRole::Slave));
+        assert!(!SpiRole::options("stm32f4").contains(&SpiRole::Slave));
+        assert!(SpiRole::options("esp32c6").contains(&SpiRole::Slave));
+
+        let (_, file) = esp_spi_role_project("esp32c5", SpiRole::Slave, 0, Runtime::Blocking);
+        assert!(
+            file.contains("esp_hal::spi::master"),
+            "the C5 has no usable slave:\n{file}"
+        );
+    }
+
+    /// The ESP32's slave takes modes 1 and 3 only, and a mode 0 carried over
+    /// from another chip is clamped rather than emitted.
+    #[test]
+    fn esp32_spi_slave_clamps_the_mode() {
+        use crate::panels::mcu_module::modules::SpiRole;
+        assert_eq!(SpiRole::Slave.modes("esp32"), &[1, 3]);
+        assert_eq!(SpiRole::Master.modes("esp32"), &[0, 1, 2, 3]);
+        assert_eq!(SpiRole::Slave.modes("esp32c6"), &[0, 1, 2, 3]);
+
+        let (_, file) = esp_spi_role_project("esp32", SpiRole::Slave, 0, Runtime::Blocking);
+        assert!(file.contains("Mode::_1"), "clamped:\n{file}");
+        // Mode 2 is out too, and clamps to the same place.
+        let (_, two) = esp_spi_role_project("esp32", SpiRole::Slave, 2, Runtime::Blocking);
+        assert!(two.contains("Mode::_1"), "clamped:\n{two}");
+        // A mode it CAN take survives untouched.
+        let (_, three) = esp_spi_role_project("esp32", SpiRole::Slave, 3, Runtime::Blocking);
+        assert!(three.contains("Mode::_3"), "kept:\n{three}");
     }
 }

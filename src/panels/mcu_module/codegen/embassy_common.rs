@@ -1925,9 +1925,10 @@ mod emit_for_manual_compile {
             .into_iter()
             .find_map(|s| s.db)
             .expect("a source with clock trees");
-        let (gc, _) =
-            crate::panels::mcu_module::clock::graph::cubemx::graph_for_chip_xml(&db, &xml, "stm32n6")
-                .expect("the N6 clock tree");
+        let (gc, _) = crate::panels::mcu_module::clock::graph::cubemx::graph_for_chip_xml(
+            &db, &xml, "stm32n6",
+        )
+        .expect("the N6 clock tree");
         def.clock = crate::panels::mcu_module::mcu_def::ClockDef::Graph(gc);
 
         let mcu = def.build_mcu();
@@ -1949,14 +1950,23 @@ mod emit_for_manual_compile {
         // never produces - and fails on the one file it forgot.
         let configs = mcu.config_files();
         let mut user: Vec<(String, String)> = vec![
-            ("src/pins/mod.rs".into(), "pub mod configs;
-".into()),
+            (
+                "src/pins/mod.rs".into(),
+                "pub mod configs;
+"
+                .into(),
+            ),
             (
                 "src/pins/configs/mod.rs".into(),
                 configs
                     .iter()
-                    .map(|(n, _)| format!("pub mod {};
-", n.trim_end_matches(".rs")))
+                    .map(|(n, _)| {
+                        format!(
+                            "pub mod {};
+",
+                            n.trim_end_matches(".rs")
+                        )
+                    })
                     .collect(),
             ),
         ];

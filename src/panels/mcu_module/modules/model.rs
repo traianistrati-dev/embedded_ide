@@ -1798,6 +1798,10 @@ pub struct SpiModuleConfig {
     pub instance: u8,
     /// SPI mode 0..=3 (CPOL/CPHA).
     pub mode: u8,
+    /// Which end of the bus this is. Master everywhere the IDE cannot build
+    /// a slave — see [`SpiRole::options`].
+    #[serde(default)]
+    pub role: SpiRole,
     /// Bus clock in Hz.
     pub clock_hz: u32,
     pub rx_model: String,
@@ -1848,12 +1852,74 @@ pub struct SpiModuleConfig {
     pub bit_order: SpiBitOrder,
 }
 
+/// Which end of the SPI bus this chip is.
+///
+/// NOT a new module kind, and the hardware is the reason: SPI2 is ONE
+/// peripheral that can be either, so a master module and a slave module on the
+/// same instance would describe a chip that cannot exist. One module per
+/// instance, with a role, makes that impossible by construction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpiRole {
+    /// This chip drives the clock and the chip select.
+    #[default]
+    Master,
+    /// Something else drives them, and this chip answers.
+    Slave,
+}
+
+impl SpiRole {
+    pub const ALL: [Self; 2] = [Self::Master, Self::Slave];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Master => "Master",
+            Self::Slave => "Slave",
+        }
+    }
+
+    pub fn is_slave(self) -> bool {
+        matches!(self, Self::Slave)
+    }
+
+    /// The roles this family's HAL can actually build.
+    ///
+    /// esp-hal's slave driver "can only be used with DMA" and gates `with_dma`
+    /// on `spi_slave_supports_dma` — which the ESP32-C5 and C61 do not have.
+    /// So the driver exists there and has no usable transfer path, which is the
+    /// same as not having it.
+    ///
+    /// Everything else is Master only: this IDE's embassy path builds
+    /// `Spi::new` masters, and an STM32 slave is work that has not been done
+    /// rather than a limit of the chip.
+    pub fn options(family: &str) -> &'static [Self] {
+        let esp = crate::panels::mcu_module::codegen::family::is_esp(family);
+        if esp && !matches!(family, "esp32c5" | "esp32c61") {
+            &Self::ALL
+        } else {
+            &[Self::Master]
+        }
+    }
+
+    /// The SPI modes this role can use on `family`.
+    ///
+    /// The ESP32's slave supports modes 1 and 3 only — its own driver says so
+    /// in a doc note. Its master, and every other part, takes all four.
+    pub fn modes(self, family: &str) -> &'static [u8] {
+        if self.is_slave() && family == "esp32" {
+            &[1, 3]
+        } else {
+            &[0, 1, 2, 3]
+        }
+    }
+}
+
 impl SpiModuleConfig {
     /// Defaults: mode 0, 1 MHz.
     pub fn new(instance: u8) -> Self {
         Self {
             instance,
             mode: 0,
+            role: SpiRole::default(),
             clock_hz: 1_000_000,
             rx_model: String::new(),
             tx_model: String::new(),

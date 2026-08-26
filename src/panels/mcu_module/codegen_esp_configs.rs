@@ -296,9 +296,115 @@ fn uart_file(n: u8, sigs: &[&str], cfg: Option<&UsartModuleConfig>, rt: EspRunti
     )
 }
 
+// ── SPI (slave) ─────────────────────────────────────────────────────────────
+
+/// One SPI instance as the SLAVE end of the bus.
+///
+/// # A different driver, not a flag
+///
+/// `esp_hal::spi::slave::Spi` is its own type in its own module. It takes no
+/// frequency — the master supplies the clock — and its pin directions are the
+/// mirror of the master's: SCK, MOSI and CS come IN, MISO goes out.
+///
+/// # DMA is not optional here
+///
+/// esp-hal's slave "can only be used with DMA": there is no CPU path and no
+/// blocking transfer, because the master decides when bytes move. So this file
+/// always takes a channel, and a project with none left gets no slave at all.
+///
+/// # No async twin
+///
+/// The driver has no `into_async`. Waiting is done on the TRANSFER — `wait()`
+/// or `is_done()` — which is the same on either runtime.
+fn spi_slave_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime) -> String {
+    let mode = cfg.map_or(1, |c| c.mode).min(3);
+    let consts = format!(
+        "const MODE: Mode = Mode::_{mode}; // CPOL/CPHA - the MASTER's choice\n\
+         // Both directions move at once on a full-duplex bus, so one size.\n\
+         const BUFFER_BYTES: usize = 4096;\n"
+    );
+    // The mirror image of the master's bounds: only MISO is driven.
+    let params = format!(
+        "    spi: impl Instance + 'd,\n\
+         {}\
+         \x20   dma: impl DmaChannelFor<AnySpi<'d>>,\n",
+        params_for(
+            sigs,
+            &[
+                ("sck", "impl PeripheralInput<'d>"),
+                ("mosi", "impl PeripheralInput<'d>"),
+                ("miso", "impl PeripheralOutput<'d>"),
+                ("cs", "impl PeripheralInput<'d>"),
+            ],
+        )
+    );
+    let chain = chain_for(
+        sigs,
+        &[
+            ("sck", "with_sck"),
+            ("mosi", "with_mosi"),
+            ("miso", "with_miso"),
+            ("cs", "with_cs"),
+        ],
+    );
+
+    let body = format!(
+        "/// SPI{n} — the SLAVE end, on DMA.\n\
+         ///\n\
+         /// No frequency: the master clocks this bus. Nothing moves until the\n\
+         /// master asserts CS, which is why there is no blocking transfer.\n\
+         ///\n\
+         /// The BUFFERS come back with the driver: unlike the master's, this\n\
+         /// driver takes them per transfer rather than holding them, so they\n\
+         /// have to live somewhere the caller can reach.\n\
+         pub fn init<'d>(\n\
+         {params}) -> (SpiDma<'d, Blocking>, DmaRxBuf, DmaTxBuf) {{\n\
+         \x20   let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =\n\
+         \x20       dma_buffers!(BUFFER_BYTES);\n\
+         \x20   let dma_rx = DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();\n\
+         \x20   let dma_tx = DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();\n\
+         \x20   let spi = Spi::new(spi, MODE)\n\
+         {chain}\x20       .with_dma(dma);\n\
+         \x20   (spi, dma_rx, dma_tx)\n\
+         }}\n"
+    );
+
+    let example = example_block(
+        &format!("Using SPI{n} (slave)"),
+        &[
+            "The master drives it. `transfer` takes BOTH buffers and hands them".to_owned(),
+            "back with the driver when the master has clocked the bytes through:".to_owned(),
+            String::new(),
+            format!("    let (spi, rx, mut tx) = _spi{n};   // as generated above"),
+            "    tx.as_mut_slice().fill(0xA5);".to_owned(),
+            "    let transfer = spi.transfer(8, rx, 8, tx).unwrap();".to_owned(),
+            "    let (spi, (rx, tx)) = transfer.wait();".to_owned(),
+            String::new(),
+            "// Nothing happens at all until the master asserts CS.".to_owned(),
+        ],
+    );
+
+    let _ = rt; // the slave driver has no async twin - see the note above.
+    file(
+        "use esp_hal::Blocking;\n\
+         use esp_hal::dma::{DmaChannelFor, DmaRxBuf, DmaTxBuf};\n\
+         use esp_hal::dma_buffers;\n\
+         use esp_hal::gpio::interconnect::{PeripheralInput, PeripheralOutput};\n\
+         use esp_hal::spi::Mode;\n\
+         use esp_hal::spi::slave::dma::SpiDma;\n\
+         use esp_hal::spi::slave::{AnySpi, Instance, Spi};\n",
+        &consts,
+        &body,
+        &example,
+    )
+}
+
 // ── SPI ──────────────────────────────────────────────────────────────────────
 
 fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime) -> String {
+    if cfg.is_some_and(|c| c.role.is_slave()) {
+        return spi_slave_file(n, sigs, cfg, rt);
+    }
     let mut consts = format!(
         "const FREQUENCY_HZ: u32 = {};\nconst MODE: Mode = Mode::_{}; // CPOL/CPHA, 0..=3\n",
         cfg.map_or(1_000_000, |c| c.clock_hz),

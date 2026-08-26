@@ -234,31 +234,61 @@ mod tests {
                 nodes: vec![
                     n(
                         "a",
-                        NodeKind::Source { min_hz: 0, max_hz: 0, gated: false },
-                        NodeState::Source { enabled: true, hz: 8_000_000 },
+                        NodeKind::Source {
+                            min_hz: 0,
+                            max_hz: 0,
+                            gated: false,
+                        },
+                        NodeState::Source {
+                            enabled: true,
+                            hz: 8_000_000,
+                        },
                     ),
                     n(
                         "b",
-                        NodeKind::Source { min_hz: 0, max_hz: 0, gated: false },
-                        NodeState::Source { enabled: true, hz: 12_000_000 },
+                        NodeKind::Source {
+                            min_hz: 0,
+                            max_hz: 0,
+                            gated: false,
+                        },
+                        NodeState::Source {
+                            enabled: true,
+                            hz: 12_000_000,
+                        },
                     ),
                     n("m", NodeKind::Mux { inputs: 2 }, NodeState::Index(sel)),
                 ],
                 edges: inputs
                     .into_iter()
-                    .map(|(input, from)| Edge { from: from.into(), to: "m".into(), input })
+                    .map(|(input, from)| Edge {
+                        from: from.into(),
+                        to: "m".into(),
+                        input,
+                    })
                     .collect(),
             };
             evaluate(&g).get("m").copied().unwrap_or(0)
         };
 
         // Both edges at index 0 - the broken shape.
-        assert_eq!(mux(0, vec![(0, "a"), (0, "b")]), 8_000_000, "first still works");
-        assert_eq!(mux(1, vec![(0, "a"), (0, "b")]), 0, "and the second is unreachable");
+        assert_eq!(
+            mux(0, vec![(0, "a"), (0, "b")]),
+            8_000_000,
+            "first still works"
+        );
+        assert_eq!(
+            mux(1, vec![(0, "a"), (0, "b")]),
+            0,
+            "and the second is unreachable"
+        );
 
         // Real indices - the shape the converter now produces.
         assert_eq!(mux(0, vec![(0, "a"), (1, "b")]), 8_000_000);
-        assert_eq!(mux(1, vec![(0, "a"), (1, "b")]), 12_000_000, "now it reaches it");
+        assert_eq!(
+            mux(1, vec![(0, "a"), (1, "b")]),
+            12_000_000,
+            "now it reaches it"
+        );
     }
 
     /// Mux selects between two sources; Choice applies a non-integer ratio.

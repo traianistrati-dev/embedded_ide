@@ -1063,6 +1063,7 @@ pub const I2C_ORDER: &[&str] = &["scl", "sda"];
 ///
 /// Hand-pinned channels are reserved before either, exactly as on the STM32
 /// path, so a choice made in one module is never handed to another.
+#[derive(Debug)]
 pub(crate) struct DmaPlan {
     /// Keyed by SPI instance. Only the buses whose module asked for Async-DMA.
     pub spi: BTreeMap<u8, DmaUse>,
@@ -1099,15 +1100,21 @@ pub(crate) fn dma_plan(
         i2s: BTreeMap::new(),
         parl_io: None,
     };
-    if runtime != EspRuntime::Async {
-        return plan;
-    }
     let Some(dma) = dma else {
         return plan;
     };
+    // The runtime decides for the SPI masters alone. Their DMA is an opt-in on
+    // top of a driver that works without it, and esp-hal puts that surface on
+    // the async side — so a blocking master simply does not ask.
+    //
+    // Everything else here has no second form to fall back to: `I2s::new` and
+    // the parallel port take a channel in their only constructor, and esp-hal's
+    // SPI SLAVE has no CPU path at all. Withholding a channel from those on a
+    // blocking project does not make them blocking, it makes them absent.
+    let async_rt = runtime == EspRuntime::Async;
     let on_dma: Vec<u8> = spi_cfg
         .iter()
-        .filter(|(_, c)| c.async_mode == AsyncBusMode::AsyncDma)
+        .filter(|(_, c)| c.role.is_slave() || (async_rt && c.async_mode == AsyncBusMode::AsyncDma))
         .map(|(n, _)| *n)
         .collect();
 
@@ -1160,7 +1167,11 @@ pub(crate) fn dma_plan(
     if parl_io_wired {
         plan.parl_io = claim("PARL_IO".to_owned(), "");
     }
-    for n in on_dma {
+    // Slaves first among the SPIs, for the same reason the I2S goes before the
+    // masters: a master that loses the race still generates, blocking.
+    let mut order = on_dma;
+    order.sort_by_key(|n| !spi_cfg[n].role.is_slave());
+    for n in order {
         let manual = spi_cfg[&n].dma_tx.trim().to_owned();
         if let Some(u) = claim(format!("SPI{n}"), &manual) {
             plan.spi.insert(n, u);
@@ -1201,6 +1212,9 @@ fn bus_sections(
 
     // One `let` per wired pin, in `init`'s parameter order, returning the
     // binding names to pass along.
+    // A SLAVE has no `init_async`: esp-hal's slave driver has no async twin
+    // at all, because the master decides when bytes move. So the SPI section
+    // picks its entry point per BUS rather than per runtime.
     let section = |pins: &BTreeMap<&'static str, &Pin>,
                    order: &[&'static str],
                    handle: String,
@@ -1208,7 +1222,9 @@ fn bus_sections(
                    periph: String,
                    // Appended after the pins, because that is where `init`
                    // takes it: the DMA channel, on a bus that asked for one.
-                   tail: Option<String>| {
+                   tail: Option<String>,
+                   // Overrides the runtime's choice - see the note above.
+                   force_blocking: bool| {
         let mut body = String::new();
         let mut args = Vec::new();
         for sig in order.iter().filter(|s| pins.contains_key(*s)) {
@@ -1223,7 +1239,8 @@ fn bus_sections(
         }
         args.extend(tail);
         body.push_str(&format!(
-            "    let mut {handle} = pins::configs::{module}::{init_fn}({periph}, {});\n",
+            "    let mut {handle} = pins::configs::{module}::{}({periph}, {});\n",
+            if force_blocking { "init" } else { init_fn },
             args.join(", ")
         ));
         body
@@ -1243,6 +1260,7 @@ fn bus_sections(
                 format!("uart{n}"),
                 format!("peripherals.UART{n}"),
                 None,
+                false,
             ),
         ));
     }
@@ -1266,6 +1284,7 @@ fn bus_sections(
                     .spi
                     .get(n)
                     .map(|u| format!("peripherals.{}", u.peri)),
+                spi_cfg.get(n).is_some_and(|c| c.role.is_slave()),
             ),
         ));
     }
@@ -1283,6 +1302,7 @@ fn bus_sections(
                 format!("i2c{n}"),
                 format!("peripherals.I2C{n}"),
                 None,
+                false,
             ),
         ));
     }
@@ -2185,9 +2205,30 @@ mod tests {
     }
 
     /// The switch is an ASYNC one. A blocking project ignores it entirely —
-    /// esp-hal's DMA surface is on the async drivers.
+    /// A slave, an I2S and the parallel port are served on EITHER runtime:
+    /// none of the three has a constructor that does without a channel, so a
+    /// blocking project that withheld one would emit nothing at all for them.
     #[test]
-    fn the_blocking_runtime_allocates_nothing() {
+    fn a_slave_is_served_on_either_runtime() {
+        let dma = gdma(3);
+        let mut slave = spi_on_dma(2);
+        slave.role = crate::panels::mcu_module::modules::SpiRole::Slave;
+        // Not `AsyncDma`: the role alone is what claims the channel.
+        slave.async_mode = AsyncBusMode::Blocking;
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, slave)].into();
+        for rt in [EspRuntime::Blocking, EspRuntime::Async] {
+            let plan = dma_plan(Some(&dma), rt, &spi, &[0], true);
+            assert!(plan.spi.contains_key(&2), "slave on {rt:?}: {plan:?}");
+            assert!(plan.i2s.contains_key(&0), "i2s on {rt:?}: {plan:?}");
+            assert!(plan.parl_io.is_some(), "parl_io on {rt:?}: {plan:?}");
+        }
+    }
+
+    /// esp-hal's DMA surface is on the async drivers — for the MASTERS, which
+    /// have a blocking driver to fall back to. See `a_slave_is_served_on_either
+    /// _runtime` for the peripherals that do not.
+    #[test]
+    fn the_blocking_runtime_allocates_nothing_for_a_master() {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2))].into();
         assert!(

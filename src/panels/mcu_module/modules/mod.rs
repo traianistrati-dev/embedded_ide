@@ -20,9 +20,9 @@ pub use model::{
     PcntModuleConfig, PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
     QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, RmtDirection, RmtModuleConfig,
     SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx,
-    SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection,
-    UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, VirtualModule, XspiMemoryType,
-    XspiMode, XspiModuleConfig, module_signal_of,
+    SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, SpiRole, StopBits, TimerModuleConfig,
+    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, VirtualModule,
+    XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,
 };
 
 use std::collections::BTreeMap;

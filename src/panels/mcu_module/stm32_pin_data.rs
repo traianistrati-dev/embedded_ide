@@ -1762,8 +1762,14 @@ mod tests {
         assert_eq!(embassy_chip_feature("STM32WL30KBVx"), "stm32wl30kb");
 
         // Armv8.1-M has no stable triple; v8-M Main is what it builds as.
-        assert_eq!(core_to_target("Arm Cortex-M55"), "thumbv8m.main-none-eabihf");
-        assert_eq!(core_to_target("Arm Cortex-M85"), "thumbv8m.main-none-eabihf");
+        assert_eq!(
+            core_to_target("Arm Cortex-M55"),
+            "thumbv8m.main-none-eabihf"
+        );
+        assert_eq!(
+            core_to_target("Arm Cortex-M85"),
+            "thumbv8m.main-none-eabihf"
+        );
         // And it must not fall through to the M3 default any more.
         assert_ne!(core_to_target("Arm Cortex-M55"), "thumbv7m-none-eabi");
     }

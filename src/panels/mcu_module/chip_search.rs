@@ -855,7 +855,9 @@ mod tests {
         let mut parts_of: std::collections::BTreeMap<&str, usize> =
             std::collections::BTreeMap::new();
         for &ix in &c.unified {
-            *parts_of.entry(c.rows[ix].entry.family.as_str()).or_default() += 1;
+            *parts_of
+                .entry(c.rows[ix].entry.family.as_str())
+                .or_default() += 1;
         }
         let (mut yes, mut no) = (Vec::new(), Vec::new());
         for (family, row) in &per_family {
@@ -873,9 +875,16 @@ mod tests {
                 None => ClockConfig::None,
             };
             if generates_clock_code_for(family, &clock) {
-                yes.push(format!("{family}	{}", parts_of.get(family.as_str()).copied().unwrap_or(0)));
+                yes.push(format!(
+                    "{family}	{}",
+                    parts_of.get(family.as_str()).copied().unwrap_or(0)
+                ));
             } else {
-                no.push(format!("{family}	{}	(e.g. {})", parts_of.get(family.as_str()).copied().unwrap_or(0), row.entry.ref_name));
+                no.push(format!(
+                    "{family}	{}	(e.g. {})",
+                    parts_of.get(family.as_str()).copied().unwrap_or(0),
+                    row.entry.ref_name
+                ));
             }
         }
         println!(
@@ -1009,7 +1018,8 @@ KEEPS THE COMMENTED SKELETON ({}):",
         };
         let src = &c.sources[row.source];
         let xml = std::fs::read_to_string(src.chip_file(&row.entry)).expect("read");
-        let (gc, _) = graph_for_chip_xml(src.db.as_deref().unwrap(), &xml, "stm32n6").expect("tree");
+        let (gc, _) =
+            graph_for_chip_xml(src.db.as_deref().unwrap(), &xml, "stm32n6").expect("tree");
         let clock = ClockConfig::Graph(gc);
 
         assert!(
@@ -1017,8 +1027,11 @@ KEEPS THE COMMENTED SKELETON ({}):",
             "N6 must now count as generating clock code"
         );
         let block = graph_clock_block("stm32n6", &clock, false);
-        println!("--- {} ---
-{block}", row.entry.ref_name);
+        println!(
+            "--- {} ---
+{block}",
+            row.entry.ref_name
+        );
 
         // The subset this emitter promises, and nothing silently missing from it.
         for want in [
@@ -1034,8 +1047,11 @@ KEEPS THE COMMENTED SKELETON ({}):",
             "config.rcc.apb5 = ApbPrescaler::DIV",
             "embassy_stm32::init(config)",
         ] {
-            assert!(block.contains(want), "missing `{want}` in:
-{block}");
+            assert!(
+                block.contains(want),
+                "missing `{want}` in:
+{block}"
+            );
         }
         // And NOT the commented skeleton it used to emit.
         assert!(

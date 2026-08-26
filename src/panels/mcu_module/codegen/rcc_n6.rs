@@ -139,29 +139,55 @@ pub fn block(g: &ClockGraph) -> Option<String> {
     plls.dedup();
 
     let mut s = String::new();
-    s.push_str("    use embassy_stm32::rcc::*;
-");
-    s.push_str("    let mut config = embassy_stm32::Config::default();
-");
+    s.push_str(
+        "    use embassy_stm32::rcc::*;
+",
+    );
+    s.push_str(
+        "    let mut config = embassy_stm32::Config::default();
+",
+    );
     for &i in &plls {
         let p = n.pll[i];
         let src = PLL_SOURCE.get(p.src).copied().unwrap_or("HSI");
-        s.push_str(&format!("    config.rcc.pll{} = Some(Pll::Oscillator {{
-", i + 1));
-        s.push_str(&format!("        source: Pllsel::{src},
-"));
-        s.push_str(&format!("        divm: Plldivm::DIV{},
-", p.divm));
-        s.push_str(&format!("        divn: {},
-", p.divn));
-        s.push_str(&format!("        fractional: {},
-", p.frac));
-        s.push_str(&format!("        divp1: Pllpdiv::DIV{},
-", p.divp1));
-        s.push_str(&format!("        divp2: Pllpdiv::DIV{},
-", p.divp2));
-        s.push_str("    });
-");
+        s.push_str(&format!(
+            "    config.rcc.pll{} = Some(Pll::Oscillator {{
+",
+            i + 1
+        ));
+        s.push_str(&format!(
+            "        source: Pllsel::{src},
+"
+        ));
+        s.push_str(&format!(
+            "        divm: Plldivm::DIV{},
+",
+            p.divm
+        ));
+        s.push_str(&format!(
+            "        divn: {},
+",
+            p.divn
+        ));
+        s.push_str(&format!(
+            "        fractional: {},
+",
+            p.frac
+        ));
+        s.push_str(&format!(
+            "        divp1: Pllpdiv::DIV{},
+",
+            p.divp1
+        ));
+        s.push_str(&format!(
+            "        divp2: Pllpdiv::DIV{},
+",
+            p.divp2
+        ));
+        s.push_str(
+            "    });
+",
+        );
     }
     for &i in &ics {
         let c = n.ic[i];
@@ -173,14 +199,27 @@ pub fn block(g: &ClockGraph) -> Option<String> {
             c.div
         ));
     }
-    let cpu = ["Hsi", "Msi", "Hse", "Ic1"].get(n.cpu).copied().unwrap_or("Hsi");
-    let sys = ["Hsi", "Msi", "Hse", "Ic2"].get(n.sys).copied().unwrap_or("Hsi");
-    s.push_str(&format!("    config.rcc.cpu = CpuClk::{cpu};
-"));
-    s.push_str(&format!("    config.rcc.sys = SysClk::{sys};
-"));
-    s.push_str(&format!("    config.rcc.ahb = AhbPrescaler::DIV{};
-", n.ahb));
+    let cpu = ["Hsi", "Msi", "Hse", "Ic1"]
+        .get(n.cpu)
+        .copied()
+        .unwrap_or("Hsi");
+    let sys = ["Hsi", "Msi", "Hse", "Ic2"]
+        .get(n.sys)
+        .copied()
+        .unwrap_or("Hsi");
+    s.push_str(&format!(
+        "    config.rcc.cpu = CpuClk::{cpu};
+"
+    ));
+    s.push_str(&format!(
+        "    config.rcc.sys = SysClk::{sys};
+"
+    ));
+    s.push_str(&format!(
+        "    config.rcc.ahb = AhbPrescaler::DIV{};
+",
+        n.ahb
+    ));
     for (i, field) in ["apb1", "apb2", "apb4", "apb5"].iter().enumerate() {
         s.push_str(&format!(
             "    config.rcc.{field} = ApbPrescaler::DIV{};
@@ -188,7 +227,9 @@ pub fn block(g: &ClockGraph) -> Option<String> {
             n.apb[i]
         ));
     }
-    s.push_str("    let p = embassy_stm32::init(config);
-");
+    s.push_str(
+        "    let p = embassy_stm32::init(config);
+",
+    );
     Some(s)
 }

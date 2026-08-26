@@ -15,8 +15,8 @@ use crate::panels::mcu_module::modules::{
     I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType,
     OspiMode, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoWidth, PcntCtrlMode, PcntEdgeMode,
     PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, RmtDirection,
-    SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder, StopBits, UsartDirection, UsartFlow,
-    UsartMode, UsartModuleConfig, VirtualModule, XspiMemoryType, XspiMode,
+    SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder, SpiRole, StopBits, UsartDirection,
+    UsartFlow, UsartMode, UsartModuleConfig, VirtualModule, XspiMemoryType, XspiMode,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -2006,13 +2006,47 @@ pub fn module_config_ui(
                     }
                 }
                 ModuleConfig::Spi(cfg) => {
+                    let roles = SpiRole::options(family);
+                    if roles.len() > 1 {
+                        ui.label("Role");
+                        egui::ComboBox::from_id_salt("spirole")
+                            .selected_text(cfg.role.label())
+                            .show_ui(ui, |ui| {
+                                for v in roles.iter().copied() {
+                                    ui.selectable_value(&mut cfg.role, v, v.label());
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "One peripheral, either end of the bus. As a SLAVE this chip \
+                                 does not drive the clock or the chip select - the other side \
+                                 does, and nothing moves until it asserts CS.",
+                            );
+                        ui.end_row();
+                    }
+                    let slave = cfg.role.is_slave();
+                    // The ESP32's slave takes modes 1 and 3 only, and its own
+                    // driver says so. Offering 0 and 2 there would be two
+                    // settings that configure the peripheral wrong.
+                    let modes = cfg.role.modes(family);
+                    if !modes.contains(&cfg.mode) {
+                        cfg.mode = modes[0];
+                    }
                     ui.label("SPI mode");
                     egui::ComboBox::from_id_salt("spimode")
                         .selected_text(format!("Mode {}", cfg.mode))
                         .show_ui(ui, |ui| {
-                            for md in 0u8..=3 {
+                            for md in modes.iter().copied() {
                                 ui.selectable_value(&mut cfg.mode, md, format!("Mode {md}"));
                             }
+                        })
+                        .response
+                        .on_hover_text(if modes.len() < 4 {
+                            "This chip's SPI slave supports modes 1 and 3 only."
+                        } else if slave {
+                            "Must match what the master drives."
+                        } else {
+                            "CPOL/CPHA. The device on the other end states which it wants."
                         });
                     ui.end_row();
                     // Async only: the STM32F1 HAL's SPI takes no bit-order
@@ -2044,6 +2078,31 @@ pub fn module_config_ui(
                                 );
                             });
                         ui.end_row();
+                    }
+                    // A slave has no clock of its own: the master supplies it.
+                    // Shown as a line rather than hidden, or the row would just
+                    // vanish and leave the reader wondering.
+                    if slave {
+                        ui.label("Clock");
+                        ui.label(
+                            egui::RichText::new("driven by the master")
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        );
+                        ui.end_row();
+                        ui.label("Transfers");
+                        ui.label(
+                            egui::RichText::new("DMA, always")
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        )
+                        .on_hover_text(
+                            "esp-hal's slave driver has no CPU path and no blocking transfer: \
+                             the master decides when bytes move, so a channel is taken \
+                             whatever the runtime. The Configuration tab shows which.",
+                        );
+                        ui.end_row();
+                        return;
                     }
                     ui.label("Clock");
                     egui::ComboBox::from_id_salt("spiclk")
