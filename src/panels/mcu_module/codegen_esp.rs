@@ -42,9 +42,9 @@ use super::codegen::dma_map::DmaUse;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
 use super::mcu_def::DmaDef;
 use super::modules::{
-    AsyncBusMode, DacModuleConfig, I2cModuleConfig, I2sModuleConfig, McpwmModuleConfig,
-    ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, TimerModuleConfig,
-    UsartModuleConfig,
+    AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sModuleConfig,
+    McpwmModuleConfig, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig, SpiModuleConfig,
+    TimerModuleConfig, UsartModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -158,6 +158,7 @@ pub fn fresh_esp32c3_main_rs(
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
+    can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -180,6 +181,7 @@ pub fn fresh_esp32c3_main_rs(
         mcpwm,
         parl_io,
         dac,
+        can,
         timer,
         custom_inits,
         chip,
@@ -209,6 +211,7 @@ pub fn update_esp32c3_main_rs(
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
+    can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -231,6 +234,7 @@ pub fn update_esp32c3_main_rs(
         mcpwm,
         parl_io,
         dac,
+        can,
         timer,
         custom_inits,
         chip,
@@ -353,6 +357,9 @@ fn make_gen_section(
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
+    // Keyed by instance like the rest, but there is only ever instance 1: the
+    // CAN pin functions carry no number — see `twai_pads`.
+    can: &BTreeMap<u8, CanModuleConfig>,
     // PWM (LEDC) module settings, keyed by LEDC timer.
     timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
@@ -584,22 +591,42 @@ fn make_gen_section(
         }
     }
 
-    // ── TWAI (CAN-compatible) — comment only ─────────────────────────────────
-    if has_twai {
-        let twai_tx = configured
-            .iter()
-            .find(|p| p.selected_function == PinFunction::CanTx);
-        let twai_rx = configured
-            .iter()
-            .find(|p| p.selected_function == PinFunction::CanRx);
+    // ── TWAI (CAN) ───────────────────────────────────────────────────────────
+    // A node needs both wires. One pad on its own used to emit a comment naming
+    // it, which read like progress and was not: there is no constructor that
+    // takes half a bus.
+    if let Some((rx, tx)) = twai_pads(&configured) {
+        let sfx = can
+            .get(&1)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        let rx_var = esp_binding(rx);
+        let tx_var = esp_binding(tx);
         body.push('\n');
-        body.push_str("    // ── TWAI (CAN) — add esp-hal twai feature to Cargo.toml ──\n");
-        if let Some(tx) = twai_tx {
-            body.push_str(&format!("    // TX: peripherals.{}\n", tx.name));
+        body.push_str("    // ── TWAI0 (CAN) ──\n");
+        for (p, var) in [(tx, &tx_var), (rx, &rx_var)] {
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
         }
-        if let Some(rx) = twai_rx {
-            body.push_str(&format!("    // RX: peripherals.{}\n", rx.name));
-        }
+        // RX before TX, which is the constructor's order and not the one the
+        // pads are usually named in — see `codegen_esp_configs::twai_file`.
+        body.push_str(&format!(
+            "    let mut _twai0{sfx} = pins::configs::twai0::{}(peripherals.TWAI0, {rx_var}, {tx_var});\n",
+            if runtime == EspRuntime::Async {
+                "init_async"
+            } else {
+                "init"
+            },
+        ));
+    } else if has_twai {
+        body.push('\n');
+        body.push_str(
+            "    // TODO: TWAI needs BOTH pads. Wire the other one (CAN TX / CAN RX)\n\
+             \x20   // on the Pins canvas and this becomes a real controller.\n",
+        );
     }
 
     // ── USB Serial/JTAG ──────────────────────────────────────────────────────
@@ -762,6 +789,22 @@ fn pin_var(pin_name: &str) -> String {
 /// Binding (variable) name for a pin: `<gpio>_<type>[_<label>]`, e.g.
 /// `gpio2_out`, `gpio0_adc1_in0`, or `gpio2_out_led` with a user label — the
 /// ESP analogue of the STM32 `<pin>_<type>` format.
+/// The TWAI pads, but only when BOTH are wired — returned as `(rx, tx)`, the
+/// order the constructor takes them in.
+///
+/// `PinFunction::CanTx`/`CanRx` carry no instance number, so this is TWAI0 by
+/// construction: the ESP32-C6's second controller cannot be expressed on the
+/// canvas at all.
+fn twai_pads<'a>(configured: &[&'a Pin]) -> Option<(&'a Pin, &'a Pin)> {
+    let find = |f: PinFunction| {
+        configured
+            .iter()
+            .copied()
+            .find(|p| p.selected_function == f)
+    };
+    Some((find(PinFunction::CanRx)?, find(PinFunction::CanTx)?))
+}
+
 fn esp_binding(p: &Pin) -> String {
     pin_binding(&pin_var(&p.name), &p.selected_function, &p.custom_label)
 }
@@ -936,6 +979,23 @@ pub(crate) fn has_usb_serial_jtag(chip: &str) -> bool {
         chip,
         "esp32c3" | "esp32c5" | "esp32c6" | "esp32h2" | "esp32s3"
     )
+}
+
+/// The parts whose esp-hal builds a TWAI driver.
+///
+/// From `twai_driver_supported` in esp-metadata, not from the peripheral list:
+/// the ESP32-C5 HAS the TWAI silicon and its esp-hal has no driver for it, so
+/// a peripheral-based answer would offer a bus this IDE cannot write a line of.
+pub(crate) fn has_twai(chip: &str) -> bool {
+    matches!(
+        chip,
+        "esp32" | "esp32c3" | "esp32c6" | "esp32h2" | "esp32s2" | "esp32s3"
+    )
+}
+
+/// True when BOTH TWAI pads are wired — see [`twai_pads`].
+pub(crate) fn twai_wired(configured: &[&Pin]) -> bool {
+    twai_pads(configured).is_some()
 }
 
 /// The PCNT units the canvas wires: the edge pad, and the ctrl pad if there is
@@ -1591,6 +1651,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &timer,
             "",
             "esp32c3",
@@ -1644,6 +1705,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1700,6 +1762,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_can() -> BTreeMap<u8, CanModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1718,6 +1784,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1748,6 +1815,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1778,6 +1846,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1805,6 +1874,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1827,6 +1897,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1858,6 +1929,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1891,6 +1963,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1932,6 +2005,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1980,6 +2054,7 @@ mod tests {
                 &no_mcpwm(),
                 &no_parl(),
                 &no_dac(),
+                &no_can(),
                 &Default::default(),
                 "",
                 "esp32c3",
@@ -2062,6 +2137,7 @@ mod tests {
             &no_mcpwm(),
             &no_parl(),
             &no_dac(),
+            &no_can(),
             &Default::default(),
             "",
             "esp32c3",

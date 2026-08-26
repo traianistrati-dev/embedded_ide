@@ -37,9 +37,9 @@
 
 use super::codegen_esp::EspRuntime;
 use super::modules::{
-    AsyncBusMode, DacModuleConfig, I2cModuleConfig, I2sDirection, I2sFormat, I2sModuleConfig,
-    I2sStandard, McpwmModuleConfig, Parity, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig,
-    SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
+    AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sDirection, I2sFormat,
+    I2sModuleConfig, I2sStandard, McpwmModuleConfig, Parity, ParlIoModuleConfig, PcntModuleConfig,
+    RmtModuleConfig, SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -1380,6 +1380,121 @@ fn usb_file(rt: EspRuntime) -> String {
     )
 }
 
+// ── TWAI (CAN) ──────────────────────────────────────────────────────────
+
+/// The TWAI controller - Espressif's name for CAN 2.0.
+///
+/// # Two steps, not one
+///
+/// `TwaiConfiguration::new` does not give you a driver: it gives you a
+/// CONFIGURATION, which `start()` then turns into a `Twai`. Everything that can
+/// only be set while the controller is off the bus - the acceptance filter
+/// above all - happens in between, which is why `init` is two statements.
+///
+/// # RX comes first
+///
+/// The constructor takes `(rx, tx)` in that order, the opposite of how the pads
+/// are usually spoken about. Swapping them compiles perfectly and produces a
+/// node that never hears anything, so both ends name their parameters.
+///
+/// # Only four bit rates
+///
+/// esp-hal ships timings for 125k, 250k, 500k and 1M. `BaudRate::Custom` takes
+/// a five-field `TimingConfig` computed against the APB clock - real work, and
+/// wrong in a way that shows up only as bus errors, so the module offers the
+/// four presets and leaves the rest to whoever edits this file.
+fn twai_file(n: u8, cfg: Option<&CanModuleConfig>, rt: EspRuntime) -> String {
+    let d = CanModuleConfig::new(1);
+    let c = cfg.unwrap_or(&d);
+    let baud = match c.bitrate {
+        125_000 => "B125K",
+        250_000 => "B250K",
+        1_000_000 => "B1000K",
+        // 500k is the default, and the fall-back for anything the presets do
+        // not name - see the note above.
+        _ => "B500K",
+    };
+    let consts = format!(
+        "const BAUD: BaudRate = BaudRate::{baud};\n\
+         const MODE: TwaiMode = TwaiMode::{};\n",
+        c.mode.esp_token(),
+    );
+
+    // Two boards wired pad-to-pad have no transceiver to hold the recessive
+    // level, and esp-hal has a separate constructor that accounts for it.
+    let (ctor, ctor_note) = if c.transceiver {
+        (
+            "TwaiConfiguration::new",
+            "    // A transceiver sits between these pads and the bus.\n",
+        )
+    } else {
+        (
+            "TwaiConfiguration::new_no_transceiver",
+            "    // No transceiver: two boards wired TX-to-RX directly.\n",
+        )
+    };
+    // `into_async` sits on the CONFIGURATION, so it goes in before `start`.
+    let (fname, dm, tail) = match rt {
+        EspRuntime::Async => ("init_async", "Async", ".into_async()"),
+        EspRuntime::Blocking => ("init", "Blocking", ""),
+    };
+
+    let body = format!(
+        "/// TWAI{n} - CAN 2.0 on two pads.\n\
+         ///\n\
+         /// RX FIRST: the constructor takes the receiving pad before the\n\
+         /// transmitting one. The wrong way round still compiles.\n\
+         ///\n\
+         /// The filter is left at accept-all, which is what `new` installs. To\n\
+         /// narrow it, call `cfg.set_filter(..)` below before `start()` - it\n\
+         /// cannot be changed once the controller is on the bus.\n\
+         pub fn {fname}<'d>(\n\
+         \x20   twai: impl Instance + 'd,\n\
+         \x20   rx: impl PeripheralInput<'d>,\n\
+         \x20   tx: impl PeripheralOutput<'d>,\n\
+         ) -> Twai<'d, {dm}> {{\n\
+         {ctor_note}\
+         \x20   let cfg = {ctor}(twai, rx, tx, BAUD, MODE){tail};\n\
+         \x20   cfg.start()\n\
+         }}\n"
+    );
+
+    let traffic = match rt {
+        EspRuntime::Async => vec![
+            format!("    _twai{n}.transmit_async(&frame).await.unwrap();"),
+            format!("    let _got = _twai{n}.receive_async().await.unwrap();"),
+        ],
+        EspRuntime::Blocking => vec![
+            "    // Both are `nb`: Err(WouldBlock) rather than a wait.".to_owned(),
+            format!("    while _twai{n}.transmit(&frame).is_err() {{}}"),
+            format!("    if let Ok(_got) = _twai{n}.receive() {{ /* a frame arrived */ }}"),
+        ],
+    };
+    let mut lines = vec![
+        "A frame carries an id and up to 8 bytes:".to_owned(),
+        String::new(),
+        "    use esp_hal::twai::{EspTwaiFrame, StandardId};".to_owned(),
+        "    let id = StandardId::new(0x123).unwrap();".to_owned(),
+        "    let frame = EspTwaiFrame::new(id, &[1, 2, 3]).unwrap();".to_owned(),
+    ];
+    lines.extend(traffic);
+    lines.push(String::new());
+    lines.push("// Nothing leaves the controller until another node acknowledges".to_owned());
+    lines.push("// it - one board alone on the bus needs Self-test mode instead.".to_owned());
+    let example = example_block(&format!("Using TWAI{n}"), &lines);
+
+    file(
+        &format!(
+            "use esp_hal::{dm};\n\
+             use esp_hal::gpio::interconnect::{{PeripheralInput, PeripheralOutput}};\n\
+             use esp_hal::twai::{{BaudRate, Instance, Twai, TwaiConfiguration, TwaiMode}};\n"
+        ),
+        &consts,
+        &body,
+        &example,
+    )
+}
+
 // ── PCNT ────────────────────────────────────────────────────────────────────
 
 /// One PCNT unit: its limits, its filter, and what each edge means.
@@ -2055,6 +2170,10 @@ pub fn config_files(
     // True when the USB pads are wired AND this chip's esp-hal has the driver
     // — see `codegen_esp::has_usb_serial_jtag`.
     usb: bool,
+    // True when BOTH TWAI pads are wired and the chip has the driver — a CAN
+    // node with one wire is not a node, so a half-wired bus emits nothing.
+    twai: bool,
+    can_cfg: Option<&CanModuleConfig>,
     // `(unit, its wired outputs as (operator, is B))`.
     mcpwm: &[(u8, Vec<(u8, bool)>)],
     mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
@@ -2108,6 +2227,11 @@ pub fn config_files(
     }
     if usb {
         out.push(("usb.rs".to_owned(), usb_file(rt)));
+    }
+    // TWAI0 alone: `PinFunction::CanTx`/`CanRx` carry no instance number, so
+    // the C6's second controller has no way to be wired on the canvas.
+    if twai {
+        out.push(("twai0.rs".to_owned(), twai_file(0, can_cfg, rt)));
     }
     if !dac.is_empty() {
         out.push(("dac.rs".to_owned(), dac_file(dac, dac_cfg, rt)));
@@ -2386,6 +2510,9 @@ mod tests {
             &[(1, true)],
             &BTreeMap::new(),
             true,
+            // TWAI wired, with the module left at its defaults.
+            true,
+            None,
             &[(0, vec![(0, false), (0, true)])],
             &BTreeMap::new(),
             40,
@@ -2409,6 +2536,7 @@ mod tests {
                 "rmt2.rs",
                 "pcnt1.rs",
                 "usb.rs",
+                "twai0.rs",
                 "dac.rs",
                 "parl_io.rs",
                 "mcpwm0.rs",

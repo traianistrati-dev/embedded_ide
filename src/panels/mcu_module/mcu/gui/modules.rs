@@ -11,12 +11,13 @@ use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::BlockingDma;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
-    ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, HspiMode, I2sClockPolarity, I2sDirection,
-    I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType,
-    OspiMode, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoWidth, PcntCtrlMode, PcntEdgeMode,
-    PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, RmtDirection,
-    SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder, SpiRole, StopBits, UsartDirection,
-    UsartFlow, UsartMode, UsartModuleConfig, VirtualModule, XspiMemoryType, XspiMode,
+    ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, CanMode, HspiMode, I2sClockPolarity,
+    I2sDirection, I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal,
+    OspiMemoryType, OspiMode, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoWidth, PcntCtrlMode,
+    PcntEdgeMode, PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize,
+    RmtDirection, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder, SpiRole, StopBits,
+    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule, XspiMemoryType,
+    XspiMode,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -3347,6 +3348,7 @@ pub fn module_config_ui(
                     }
                 }
                 ModuleConfig::Can(cfg) => {
+                    let esp = crate::panels::mcu_module::codegen::family::is_esp(family);
                     ui.label("Bit rate");
                     egui::ComboBox::from_id_salt("canbr")
                         .selected_text(format!("{} kbit", cfg.bitrate / 1_000))
@@ -3358,8 +3360,41 @@ pub fn module_config_ui(
                                     format!("{} kbit", br / 1_000),
                                 );
                             }
+                        })
+                        .response
+                        .on_hover_text(if esp {
+                            "esp-hal ships timings for these four only. Anything else \
+                             needs a hand-computed `BaudRate::Custom` in the generated \
+                             file."
+                        } else {
+                            "Every node on the bus must agree on this."
                         });
                     ui.end_row();
+
+                    let modes = CanMode::options(family);
+                    if modes.len() > 1 {
+                        ui.label("Mode");
+                        egui::ComboBox::from_id_salt("canmode")
+                            .selected_text(cfg.mode.label())
+                            .show_ui(ui, |ui| {
+                                for v in modes.iter().copied() {
+                                    ui.selectable_value(&mut cfg.mode, v, v.label())
+                                        .on_hover_text(v.hint());
+                                }
+                            });
+                        ui.end_row();
+
+                        // Only the ESP has the second constructor. Everywhere
+                        // else this row would be a switch that changes nothing.
+                        ui.label("Transceiver");
+                        ui.checkbox(&mut cfg.transceiver, "on the pads")
+                            .on_hover_text(
+                                "A real CAN bus needs one. Clear this only for two boards \
+                                 wired TX-to-RX directly, which esp-hal builds with a \
+                                 different constructor.",
+                            );
+                        ui.end_row();
+                    }
                     // Third pair on this family — see the USART and I2C above.
                     if family == "stm32f1" {
                         f1_half_bus_note(

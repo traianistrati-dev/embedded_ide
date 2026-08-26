@@ -274,6 +274,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
+    let can = modules::can_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::fresh_esp32c3_main_rs(
         &pins_of(mcu),
@@ -289,6 +290,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &mcpwm,
         &parl_io,
         &dac,
+        &can,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -324,6 +326,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
             (t, duties)
         })
         .collect();
+    let can_cfg = modules::can_configs(&mcu.modules);
     crate::panels::mcu_module::codegen_esp_configs::config_files(
         &uart,
         &spi_n,
@@ -344,6 +347,11 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
             .iter()
             .any(|p| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp))
             && codegen_esp::has_usb_serial_jtag(&mcu.family),
+        // BOTH TWAI pads, on a chip whose esp-hal has the driver. The pads are
+        // offered only where it does, so this is belt and braces — but the C5
+        // has TWAI silicon and no driver, which is the shape of trap it catches.
+        codegen_esp::twai_wired(&configured) && codegen_esp::has_twai(&mcu.family),
+        can_cfg.get(&1),
         // The MCPWM outputs wired, their unit's settings, and the peripheral
         // clock esp-hal's own examples pass - 32 MHz on the H2, 40 elsewhere.
         &codegen_esp::mcpwm_outputs_wired(&configured),
@@ -373,6 +381,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
+    let can = modules::can_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::update_esp32c3_main_rs(
         existing,
@@ -389,6 +398,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &mcpwm,
         &parl_io,
         &dac,
+        &can,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -1659,6 +1669,8 @@ mod tests {
             Runtime::Async
         };
 
+        let rx_chan: u8 = if id == "esp32s3" { 4 } else { 2 };
+
         // By search, not by name: GPIO4 is a JTAG pad on one part and a plain
         // pad on the next, and the pin NUMBERS differ between packages.
         let mut want = vec![
@@ -1675,9 +1687,12 @@ mod tests {
             // Channel 0 transmits on every part that has an RMT at all.
             PinFunction::RmtChannel(0),
             // …and a receiving one, which is a different config type, a
-            // different pad bound and a different `configure_*` call. Channel 2
-            // is an RX channel on every part that splits them.
-            PinFunction::RmtChannel(2),
+            // different pad bound and a different `configure_*` call. WHICH
+            // channel receives differs: the S3 splits 0-3 TX / 4-7 RX, the
+            // RISC-V parts split 0-1 / 2-3, and the esp32 and S2 let any
+            // channel go either way. Asking for a channel the panel would
+            // refuse tests this harness, not the generator.
+            PinFunction::RmtChannel(rx_chan),
             // A PCNT unit with BOTH pads: the encoder shape, which is the one
             // that emits `set_ctrl_signal` and `set_ctrl_mode`.
             PinFunction::PcntEdge(0),
@@ -1705,6 +1720,10 @@ mod tests {
             PinFunction::ParlData { lane: 3 },
             PinFunction::ParlClk,
             PinFunction::ParlValid,
+            // Both TWAI pads. A node with one wire emits nothing, so the pair
+            // is what proves the section at all.
+            PinFunction::CanRx,
+            PinFunction::CanTx,
             // Both DAC channels. Their pads are fixed, so the search below
             // finds them wherever the chip puts them.
             PinFunction::DacOut { dac: 1, channel: 1 },
@@ -1770,6 +1789,25 @@ mod tests {
             config: ModuleConfig::Spi(spi_cfg),
             connections: Vec::new(),
         });
+        // `ESP_TWAI_LISTEN=1` builds the listen-only, no-transceiver variant:
+        // the other constructor and the other `TwaiMode`.
+        mcu.modules.push(VirtualModule {
+            id: "can_1".into(),
+            kind: ModuleKind::GenericInterfaceCan,
+            name: "CAN".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Can({
+                use crate::panels::mcu_module::modules::{CanMode, CanModuleConfig};
+                let mut c = CanModuleConfig::new(1);
+                c.bitrate = 250_000;
+                if std::env::var("ESP_TWAI_LISTEN").is_ok() {
+                    c.mode = CanMode::ListenOnly;
+                    c.transceiver = false;
+                }
+                c
+            }),
+            connections: Vec::new(),
+        });
         mcu.modules.push(VirtualModule {
             id: "dac_1".into(),
             kind: ModuleKind::GenericInterfaceDac,
@@ -1832,12 +1870,12 @@ mod tests {
             connections: Vec::new(),
         });
         mcu.modules.push(VirtualModule {
-            id: "rmt_2".into(),
+            id: format!("rmt_{rx_chan}"),
             kind: ModuleKind::GenericInterfaceRmt,
-            name: "RMT2".into(),
+            name: format!("RMT{rx_chan}"),
             pos: (0.0, 0.0),
             config: ModuleConfig::Rmt({
-                let mut c = crate::panels::mcu_module::modules::RmtModuleConfig::new(2);
+                let mut c = crate::panels::mcu_module::modules::RmtModuleConfig::new(rx_chan);
                 c.direction = crate::panels::mcu_module::modules::RmtDirection::Receive;
                 c
             }),
@@ -2523,5 +2561,222 @@ mod tests {
         // A mode it CAN take survives untouched.
         let (_, three) = esp_spi_role_project("esp32", SpiRole::Slave, 3, Runtime::Blocking);
         assert!(three.contains("Mode::_3"), "kept:\n{three}");
+    }
+
+    /// Build an ESP `Mcu` with the given TWAI pads wired and a CAN module, and
+    /// return `(main.rs, twai0.rs)` — the file empty when none was emitted.
+    #[cfg(test)]
+    fn esp_twai_project(
+        chip: &str,
+        pads: &[PinFunction],
+        // `None` drops no module at all — the only way a single pad survives,
+        // since dropping one auto-wires its partner.
+        edit: Option<impl FnOnce(&mut crate::panels::mcu_module::modules::CanModuleConfig)>,
+        runtime: Runtime,
+    ) -> (String, String) {
+        use crate::panels::mcu_module::modules::{
+            CanModuleConfig, ModuleConfig, ModuleKind, VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+            .unwrap()
+            .build_mcu();
+        mcu.runtime = runtime;
+        for f in pads {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(f)
+                })
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("{chip}: no pin for {f:?}"));
+            mcu.apply_pin_function(num, f.clone());
+        }
+        if let Some(edit) = edit {
+            let mut cfg = CanModuleConfig::new(1);
+            edit(&mut cfg);
+            mcu.modules.push(VirtualModule {
+                id: "can_1".into(),
+                kind: ModuleKind::GenericInterfaceCan,
+                name: "CAN".into(),
+                pos: (0.0, 0.0),
+                config: ModuleConfig::Can(cfg),
+                connections: Vec::new(),
+            });
+        }
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "twai0.rs")
+            .map(|(_, c)| c)
+            .unwrap_or_default();
+        (mcu.fresh_main_rs(), file)
+    }
+
+    /// Both pads wired emit the real driver — and RX goes in FIRST, which is the
+    /// constructor's order and the opposite of how the pads are named.
+    #[test]
+    fn esp_twai_emits_the_driver_with_rx_first() {
+        let (main, file) = esp_twai_project(
+            "esp32c6",
+            &[PinFunction::CanTx, PinFunction::CanRx],
+            Some(|_: &mut crate::panels::mcu_module::modules::CanModuleConfig| {}),
+            Runtime::Blocking,
+        );
+        assert!(file.contains("TwaiConfiguration::new("), "ctor:\n{file}");
+        assert!(file.contains("cfg.start()"), "started:\n{file}");
+        assert!(
+            main.contains("configs::twai0::init(peripherals.TWAI0,"),
+            "call:\n{main}"
+        );
+
+        // The argument order is the whole point: the wrong way round compiles
+        // and produces a node that never hears anything.
+        let call = main
+            .lines()
+            .find(|l| l.contains("configs::twai0::init"))
+            .expect("the call");
+        let rx = call.find("_can_rx").expect("rx arg");
+        let tx = call.find("_can_tx").expect("tx arg");
+        assert!(rx < tx, "rx must come first: {call}");
+    }
+
+    /// A module wires the partner pad by itself: one pad in, both pads out.
+    #[test]
+    fn esp_twai_module_wires_the_missing_pad() {
+        let (main, _) = esp_twai_project(
+            "esp32c6",
+            &[PinFunction::CanTx],
+            Some(|_: &mut crate::panels::mcu_module::modules::CanModuleConfig| {}),
+            Runtime::Blocking,
+        );
+        assert!(main.contains("// CAN  RX"), "auto-wired:{main}");
+        assert!(main.contains("twai0::init("), "and built:{main}");
+    }
+
+    /// One pad is not a bus. It used to emit a comment naming the pad, which
+    /// read like progress; there is no constructor that takes half a node.
+    ///
+    /// Getting here takes work, and that is the point: assigning either pad
+    /// wires the other, so the way a node loses half of itself is a pad being
+    /// taken for something ELSE afterwards.
+    #[test]
+    fn esp_twai_needs_both_pads() {
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32c6")
+            .unwrap()
+            .build_mcu();
+        let num = mcu
+            .iter_all_pins()
+            .find(|p| p.available_functions.contains(&PinFunction::CanTx))
+            .map(|p| p.number)
+            .expect("a TWAI pad");
+        mcu.apply_pin_function(num, PinFunction::CanTx);
+
+        // …which wired RX too. Take that pad back for a plain output.
+        let rx = mcu
+            .iter_all_pins()
+            .find(|p| p.selected_function == PinFunction::CanRx)
+            .map(|p| p.number)
+            .expect("the partner pad");
+        mcu.apply_pin_function(rx, PinFunction::GpioOutput);
+        assert!(
+            mcu.iter_all_pins()
+                .any(|p| p.selected_function == PinFunction::CanTx),
+            "TX must survive its partner being taken"
+        );
+
+        let main = mcu.fresh_main_rs();
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "twai0.rs")
+            .map(|(_, c)| c)
+            .unwrap_or_default();
+        assert!(file.is_empty(), "no file for half a bus:\n{file}");
+        assert!(!main.contains("twai0::init"), "no call:\n{main}");
+        assert!(
+            main.contains("TODO: TWAI needs BOTH pads"),
+            "the note:\n{main}"
+        );
+    }
+
+    /// The mode and the transceiver switch reach the generated file, and the
+    /// no-transceiver case is a DIFFERENT constructor rather than an argument.
+    #[test]
+    fn esp_twai_mode_and_transceiver_reach_the_file() {
+        use crate::panels::mcu_module::modules::CanMode;
+        let (_, file) = esp_twai_project(
+            "esp32c3",
+            &[PinFunction::CanTx, PinFunction::CanRx],
+            Some(
+                |c: &mut crate::panels::mcu_module::modules::CanModuleConfig| {
+                    c.mode = CanMode::ListenOnly;
+                    c.transceiver = false;
+                    c.bitrate = 125_000;
+                },
+            ),
+            Runtime::Async,
+        );
+        assert!(file.contains("TwaiMode::ListenOnly"), "mode:\n{file}");
+        assert!(
+            file.contains("TwaiConfiguration::new_no_transceiver("),
+            "ctor:\n{file}"
+        );
+        assert!(file.contains("BaudRate::B125K"), "baud:\n{file}");
+        // `into_async` sits on the configuration, so it lands before `start`.
+        assert!(
+            file.contains(".into_async();"),
+            "async goes in before start:\n{file}"
+        );
+    }
+
+    /// esp-hal ships four sets of timings. A bit rate it does not name falls
+    /// back to 500k rather than emitting a `BaudRate` variant that is not there.
+    #[test]
+    fn esp_twai_bitrate_falls_back_to_a_preset() {
+        for (hz, want) in [
+            (125_000u32, "B125K"),
+            (250_000, "B250K"),
+            (500_000, "B500K"),
+            (1_000_000, "B1000K"),
+            (800_000, "B500K"),
+        ] {
+            let (_, file) = esp_twai_project(
+                "esp32c6",
+                &[PinFunction::CanTx, PinFunction::CanRx],
+                Some(|c: &mut crate::panels::mcu_module::modules::CanModuleConfig| c.bitrate = hz),
+                Runtime::Blocking,
+            );
+            assert!(
+                file.contains(&format!("BaudRate::{want}")),
+                "{hz} -> {want}:\n{file}"
+            );
+        }
+    }
+
+    /// The C5 has TWAI silicon and no esp-hal driver, so it gets no pads and no
+    /// file — the same trap the I2S hit, answered the same way.
+    #[test]
+    fn a_chip_without_the_driver_offers_no_twai() {
+        use crate::panels::mcu_module::modules::CanMode;
+        for chip in ["esp32c2", "esp32c5", "esp32c61"] {
+            assert!(!codegen_esp::has_twai(chip), "{chip} has no driver");
+            let mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+                .unwrap()
+                .build_mcu();
+            assert!(
+                !mcu.iter_all_pins()
+                    .any(|p| p.available_functions.contains(&PinFunction::CanTx)),
+                "{chip} must not offer a TWAI pad"
+            );
+        }
+        for chip in [
+            "esp32", "esp32c3", "esp32c6", "esp32h2", "esp32s2", "esp32s3",
+        ] {
+            assert!(codegen_esp::has_twai(chip), "{chip} has the driver");
+        }
+        // All three modes on an ESP; Normal alone where the generator builds a
+        // plain `Can::new`.
+        assert_eq!(CanMode::options("esp32c6").len(), 3);
+        assert_eq!(CanMode::options("stm32f1"), &[CanMode::Normal]);
     }
 }

@@ -982,9 +982,13 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
         }
     }
 
-    // TWAI is Espressif's CAN. Unnumbered here because `CanTx`/`CanRx` are, and
-    // no RISC-V part has a second one.
-    if chip.peripherals.iter().any(|p| p == "TWAI0") {
+    // TWAI is Espressif's CAN. Gated on the DRIVER, like everything else here:
+    // the C5 has TWAI0 in silicon and no `esp_hal::twai`, so a peripheral-based
+    // gate would offer pads for a bus nothing can be generated for.
+    //
+    // Unnumbered because `CanTx`/`CanRx` are, which also means the C6's second
+    // controller cannot be reached — see `codegen_esp::twai_pads`.
+    if chip.drivers.iter().any(|d| d == "twai") {
         out.push(PinFunction::CanTx);
         out.push(PinFunction::CanRx);
     }

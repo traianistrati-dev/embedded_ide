@@ -12,14 +12,14 @@ pub mod model;
 pub mod persist;
 
 pub use model::{
-    ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakInputConfig, BreakPolarity, CanModuleConfig,
-    Connection, DacModuleConfig, HspiMode, HspiModuleConfig, I2cModuleConfig, I2sClockPolarity,
-    I2sDirection, I2sFormat, I2sMode, I2sModuleConfig, I2sStandard, McpwmModuleConfig,
-    ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType, OspiMode, OspiModuleConfig, Parity,
-    ParlIoBitOrder, ParlIoDirection, ParlIoModuleConfig, ParlIoWidth, PcntCtrlMode, PcntEdgeMode,
-    PcntModuleConfig, PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
-    QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, RmtDirection, RmtModuleConfig,
-    SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx,
+    ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakInputConfig, BreakPolarity, CanMode,
+    CanModuleConfig, Connection, DacModuleConfig, HspiMode, HspiModuleConfig, I2cModuleConfig,
+    I2sClockPolarity, I2sDirection, I2sFormat, I2sMode, I2sModuleConfig, I2sStandard,
+    McpwmModuleConfig, ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType, OspiMode,
+    OspiModuleConfig, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoModuleConfig, ParlIoWidth,
+    PcntCtrlMode, PcntEdgeMode, PcntModuleConfig, PwmChannelConfig, PwmCounting, PwmMode,
+    PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, RmtDirection,
+    RmtModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx,
     SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, SpiRole, StopBits, TimerModuleConfig,
     UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, VirtualModule,
     XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,

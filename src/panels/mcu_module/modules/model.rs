@@ -3908,17 +3908,95 @@ impl I2sModuleConfig {
     }
 }
 
+/// How the controller sits on the bus.
+///
+/// Espressif calls this peripheral TWAI — Two-Wire Automotive Interface — and
+/// it is CAN 2.0 on the wire, which is why it shares this module rather than
+/// getting one of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CanMode {
+    /// Transmits, receives, and acknowledges — an ordinary node.
+    #[default]
+    Normal,
+    /// Transmits without needing anyone to acknowledge, so a single board on a
+    /// bench talks to itself instead of erroring out.
+    SelfTest,
+    /// Receives only, and never puts a bit on the wire — not even an ack.
+    ListenOnly,
+}
+
+impl CanMode {
+    pub const ALL: [Self; 3] = [Self::Normal, Self::SelfTest, Self::ListenOnly];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::SelfTest => "Self-test",
+            Self::ListenOnly => "Listen only",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Normal => "An ordinary node: sends, receives, and acknowledges.",
+            Self::SelfTest => {
+                "Sends without waiting for an acknowledgement, so one board alone                  on the bus does not fault. For bench work."
+            }
+            Self::ListenOnly => {
+                "Never drives the wire, not even to acknowledge - the bus cannot                  tell this node is there. For sniffing traffic."
+            }
+        }
+    }
+
+    /// The esp-hal `TwaiMode` variant, or `None` where this is not an ESP.
+    pub fn esp_token(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::SelfTest => "SelfTest",
+            Self::ListenOnly => "ListenOnly",
+        }
+    }
+
+    /// The modes this family's generator can build.
+    ///
+    /// All three on an ESP, where `TwaiConfiguration::new` takes the mode as an
+    /// argument. Everything else gets Normal alone: the STM32 path builds a
+    /// plain `Can::new`, and silent/loopback there is work not yet done rather
+    /// than a limit of the silicon.
+    pub fn options(family: &str) -> &'static [Self] {
+        if crate::panels::mcu_module::codegen::family::is_esp(family) {
+            &Self::ALL
+        } else {
+            &[Self::Normal]
+        }
+    }
+}
+
 /// CAN device settings + data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanModuleConfig {
     pub instance: u8,
     /// Bus bit rate in bits/s (e.g. 125000 / 250000 / 500000 / 1000000).
     pub bitrate: u32,
+    /// How the controller sits on the bus — see [`CanMode`].
+    #[serde(default)]
+    pub mode: CanMode,
+    /// False wires two boards TX-to-RX with no transceiver between them, which
+    /// esp-hal builds with a different constructor. True — a real CAN
+    /// transceiver on the pads — is both the default and the normal case, so an
+    /// older config that predates this field reads back as `true`.
+    #[serde(default = "yes")]
+    pub transceiver: bool,
     pub rx_model: String,
     pub tx_model: String,
     /// User label appended to the generated `_canN` handle (e.g. `_can1_obd`).
     #[serde(default)]
     pub custom_label: String,
+}
+
+/// `serde` default for [`CanModuleConfig::transceiver`] — see the field.
+fn yes() -> bool {
+    true
 }
 
 impl CanModuleConfig {
@@ -3927,6 +4005,8 @@ impl CanModuleConfig {
         Self {
             instance,
             bitrate: 500_000,
+            mode: CanMode::Normal,
+            transceiver: true,
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
