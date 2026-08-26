@@ -178,6 +178,40 @@ impl Mcu {
     ///
     /// Static: independent of what's currently wired. Use it to hide kinds the
     /// chip simply doesn't have.
+    /// Why a peripheral this chip HAS is still not offered.
+    ///
+    /// [`supports_module`](Self::supports_module) answers from the pins, which
+    /// is the right question almost always: no pins, no module. But a pin is
+    /// only offered when something can be GENERATED for it, so a peripheral the
+    /// silicon has and the HAL cannot drive disappears from the palette with no
+    /// explanation — and someone holding the datasheet is left wondering.
+    ///
+    /// This returns the sentence to show instead. The palette keeps the entry
+    /// visible and disabled, the same as it does for an exhausted instance.
+    pub fn hardware_only_reason(
+        &self,
+        kind: crate::panels::mcu_module::modules::ModuleKind,
+    ) -> Option<&'static str> {
+        use crate::panels::mcu_module::modules::ModuleKind;
+        match kind {
+            // The S2 and S3 carry the touch sensors — their pads are in
+            // Espressif's own pin tables — but esp-hal builds `touch` only for
+            // the original ESP32, and does not even expose `peripherals::TOUCH`
+            // on the other two. There is nothing to hand a constructor.
+            ModuleKind::GenericInterfaceTouch
+                if matches!(self.family.as_str(), "esp32s2" | "esp32s3") =>
+            {
+                Some(
+                    "This chip HAS capacitive touch, but esp-hal builds no touch driver \
+                     for it - only for the original ESP32. Nothing could be generated, so \
+                     the pads are not offered either. An external touch controller over \
+                     I2C works today.",
+                )
+            }
+            _ => None,
+        }
+    }
+
     pub fn supports_module(&self, kind: crate::panels::mcu_module::modules::ModuleKind) -> bool {
         use crate::panels::mcu_module::modules::autowire;
         // A custom module needs no particular peripheral — any chip can host it.
@@ -1259,6 +1293,63 @@ mod module_support_tests {
     use crate::panels::mcu_module::modules::ModuleKind;
     use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
     use crate::panels::mcu_module::{create_esp32c3, create_stm32f103c8tx};
+
+    /// The S2 and S3 have the touch sensors and esp-hal has no driver for them,
+    /// so the palette keeps the entry and says why instead of dropping it.
+    ///
+    /// The distinction that matters: a chip with no touch AT ALL gets no
+    /// sentence, because there is nothing to explain — the module is simply not
+    /// its. Claiming otherwise would be worse than silence.
+    #[test]
+    fn a_peripheral_without_a_driver_says_so_instead_of_vanishing() {
+        let touch = ModuleKind::GenericInterfaceTouch;
+        for chip in ["esp32s2", "esp32s3"] {
+            let mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+                .unwrap()
+                .build_mcu();
+            assert!(!mcu.supports_module(touch), "{chip}: no pads, so no module");
+            let why = mcu
+                .hardware_only_reason(touch)
+                .unwrap_or_else(|| panic!("{chip} should explain itself"));
+            assert!(why.contains("esp-hal"), "{chip}: names the real limit");
+        }
+
+        // The original ESP32 has the driver, so it is offered outright.
+        let esp32 = crate::panels::mcu_module::builtins::builtin_for("esp32")
+            .unwrap()
+            .build_mcu();
+        assert!(esp32.supports_module(touch));
+        assert!(esp32.hardware_only_reason(touch).is_none());
+
+        // …and a chip with no touch silicon says nothing at all.
+        for chip in ["esp32c6", "stm32f103c8t6"] {
+            let mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+                .unwrap()
+                .build_mcu();
+            assert!(
+                mcu.hardware_only_reason(touch).is_none(),
+                "{chip} has no touch to explain"
+            );
+        }
+
+        // Nothing else claims to be hardware-only anywhere, so the palette is
+        // unchanged for every kind but this one.
+        for kind in ModuleKind::ALL {
+            if kind == touch {
+                continue;
+            }
+            for chip in ["esp32", "esp32s2", "esp32s3", "esp32c6", "stm32f103c8t6"] {
+                let mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+                    .unwrap()
+                    .build_mcu();
+                assert!(
+                    mcu.hardware_only_reason(kind).is_none(),
+                    "{chip} vs {}",
+                    kind.short()
+                );
+            }
+        }
+    }
 
     /// Both bundled chips genuinely expose all five interfaces, so a fresh
     /// palette offers everything.

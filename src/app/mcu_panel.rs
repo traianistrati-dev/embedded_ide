@@ -505,11 +505,17 @@ impl AppIde {
                                 // is more confusing than one that explains.
                                 let mut any_supported = false;
                                 for kind in ModuleKind::ALL {
-                                    if !mcu.supports_module(kind) {
+                                    // A peripheral the silicon HAS but no driver
+                                    // can reach stays visible and disabled, with
+                                    // the reason — same as an exhausted one. It
+                                    // used to vanish, which reads as a bug to
+                                    // anyone holding the chip's datasheet.
+                                    let hw_only = mcu.hardware_only_reason(kind);
+                                    if !mcu.supports_module(kind) && hw_only.is_none() {
                                         continue; // this chip has no such pins
                                     }
                                     any_supported = true;
-                                    let can_add = mcu.can_add_module(kind);
+                                    let can_add = hw_only.is_none() && mcu.can_add_module(kind);
                                     let hover = match kind {
                                         ModuleKind::GenericInterfaceUsart => "Add a virtual USART device and auto-wire it to a free USART TX/RX pin pair",
                                         ModuleKind::GenericInterfaceLpuart => "Add a virtual LPUART device and auto-wire it to a free LPUART TX/RX pin pair (a peripheral of its own, not a USART instance)",
@@ -556,7 +562,9 @@ impl AppIde {
                                     if ui
                                         .add_enabled(can_add, egui::Button::new(text))
                                         .on_hover_text(hover)
-                                        .on_disabled_hover_text(if kind.is_single_instance() {
+                                        .on_disabled_hover_text(if let Some(why) = hw_only {
+                                            why
+                                        } else if kind.is_single_instance() {
                                             "this chip has only one such peripheral and it's already used"
                                         } else {
                                             "every instance of this peripheral is already wired to a module — remove one to free it"
