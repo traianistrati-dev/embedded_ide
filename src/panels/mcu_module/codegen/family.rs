@@ -248,6 +248,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let usart = modules::usart_configs(&mcu.modules);
     let spi = modules::spi_configs(&mcu.modules);
     let i2c = modules::i2c_configs(&mcu.modules);
+    let i2s = modules::i2s_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::fresh_esp32c3_main_rs(
         &pins_of(mcu),
@@ -257,6 +258,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &usart,
         &spi,
         &i2c,
+        &i2s,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -277,7 +279,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         .copied()
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
         .collect();
-    let (uart, spi_n, i2c_n) = codegen_esp::bus_instances(&configured);
+    let (uart, spi_n, i2c_n, i2s_n) = codegen_esp::bus_instances(&configured);
     // The config file needs the duty per channel, not the pin: the pins stay in
     // `main.rs` (they are the only record of the wiring) and arrive as `init`
     // arguments.
@@ -296,9 +298,11 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         &uart,
         &spi_n,
         &i2c_n,
+        &i2s_n,
         &modules::usart_configs(&mcu.modules),
         &modules::spi_configs(&mcu.modules),
         &modules::i2c_configs(&mcu.modules),
+        &modules::i2s_configs(&mcu.modules),
         &pwm,
         &timers,
         runtime,
@@ -310,6 +314,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let usart = modules::usart_configs(&mcu.modules);
     let spi = modules::spi_configs(&mcu.modules);
     let i2c = modules::i2c_configs(&mcu.modules);
+    let i2s = modules::i2s_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::update_esp32c3_main_rs(
         existing,
@@ -320,6 +325,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &usart,
         &spi,
         &i2c,
+        &i2s,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -851,9 +857,9 @@ pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
             mcu.dma.as_ref(),
             EspRuntime::Async,
             &modules::spi_configs(&mcu.modules),
+            &codegen_esp::i2s_instances_wired(&pins_of(mcu)),
         )
-        .into_values()
-        .collect(),
+        .uses(),
         Runtime::Async if async_supported(&mcu.family) => async_periphs(mcu).dma_uses,
         // Only the F1 backend has a blocking DMA transport; every other family
         // reaches DMA through embassy, i.e. through the async runtime.
@@ -1565,7 +1571,7 @@ mod tests {
     fn write_esp_dma_project() {
         use crate::panels::mcu_module::mcu::Runtime;
         use crate::panels::mcu_module::modules::{
-            AsyncBusMode, ModuleConfig, ModuleKind, SpiModuleConfig, VirtualModule,
+            AsyncBusMode, I2sModuleConfig, ModuleConfig, ModuleKind, SpiModuleConfig, VirtualModule,
         };
         use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
         use crate::panels::mcu_module::project_gen::{self, AsyncFlavor, ConfigFile};
@@ -1587,6 +1593,13 @@ mod tests {
             PinFunction::SpiSck(2),
             PinFunction::SpiMosi(2),
             PinFunction::SpiMiso(2),
+            // The I2S goes on the same project on purpose: it and the SPI draw
+            // from one pool of channels, so this also proves they do not both
+            // get handed DMA_CH0.
+            PinFunction::I2sCk(0),
+            PinFunction::I2sWs(0),
+            PinFunction::I2sSd(0),
+            PinFunction::I2sMck(0),
         ];
         for p in mcu.iter_all_pins_mut() {
             if p.reserved || p.selected_function != PinFunction::Unset {
@@ -1607,6 +1620,22 @@ mod tests {
             name: "SPI2".into(),
             pos: (0.0, 0.0),
             config: ModuleConfig::Spi(spi_cfg),
+            connections: Vec::new(),
+        });
+        mcu.modules.push(VirtualModule {
+            id: "i2s_0".into(),
+            kind: ModuleKind::GenericInterfaceI2s,
+            name: "I2S0".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::I2s({
+                let mut c = I2sModuleConfig::new(0);
+                // `ESP_I2S_RX=1` builds the receiving half instead: a different
+                // return type, a different pad bound and a different import.
+                if std::env::var("ESP_I2S_RX").is_ok() {
+                    c.direction = crate::panels::mcu_module::modules::I2sDirection::Receive;
+                }
+                c
+            }),
             connections: Vec::new(),
         });
 

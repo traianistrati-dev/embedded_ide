@@ -98,6 +98,20 @@ struct Package {
     /// never needed and `cargo build --release` does.
     #[cfg_attr(not(test), allow(dead_code))]
     off_package: &'static [u8],
+    /// Pads the package really has and `esp-hal` cannot NAME.
+    ///
+    /// A third case, and the ESP32-C5 is the one that has it: its datasheet
+    /// gives pins 25-32 as `GPIO15`-`GPIO22`, but the `esp-metadata` release
+    /// esp-hal pins has no `peripherals.GPIO15` for the part, so
+    /// `Output::new(peripherals.GPIO15)` does not compile. They stay on the
+    /// drawing — they are real pins of a real package — and come out RESERVED,
+    /// which is what `package_layout` already does for any pad the metadata
+    /// does not know.
+    ///
+    /// Declared rather than inferred, so the list is a claim someone made:
+    /// when a later esp-hal fills the gap in, the test fails and the entry goes.
+    #[cfg_attr(not(test), allow(dead_code))]
+    no_singleton: &'static [u8],
 }
 
 /// The parts whose datasheet has been read. The rest keep the LOGICAL layout of
@@ -112,48 +126,57 @@ const PACKAGES: &[Package] = &[
         name: "QFN48",
         pads: ESP32_QFN48,
         off_package: &[20],
+        no_singleton: &[],
     },
     Package {
         chip: "esp32c2",
         name: "QFN24",
         pads: ESP32C2_QFN24,
         off_package: &[11, 12, 13, 14, 15, 16, 17],
+        no_singleton: &[],
     },
     Package {
         chip: "esp32c5",
         name: "QFN48",
         pads: ESP32C5_QFN48,
-        off_package: &[19],
+        off_package: &[],
+        // The flash bus: on the package, absent from esp-hal.
+        no_singleton: &[15, 16, 17, 18, 20, 21, 22],
     },
     Package {
         chip: "esp32c6",
         name: "QFN40",
         pads: ESP32C6_QFN40,
         off_package: &[14, 27],
+        no_singleton: &[],
     },
     Package {
         chip: "esp32c61",
         name: "QFN40",
         pads: ESP32C61_QFN40,
         off_package: &[18],
+        no_singleton: &[],
     },
     Package {
         chip: "esp32h2",
         name: "QFN32",
         pads: ESP32H2_QFN32,
         off_package: &[6, 7],
+        no_singleton: &[],
     },
     Package {
         chip: "esp32s2",
         name: "QFN56",
         pads: ESP32S2_QFN56,
         off_package: &[],
+        no_singleton: &[],
     },
     Package {
         chip: "esp32s3",
         name: "QFN56",
         pads: ESP32S3_QFN56,
         off_package: &[],
+        no_singleton: &[],
     },
 ];
 
@@ -632,18 +655,12 @@ fn dma_def(chip: &EspChip) -> Option<McuDma> {
             irq: String::new(),
         })
         .collect();
-    let mut requests: Vec<(String, Vec<String>)> = Vec::new();
-    if !chip.dma_shared {
-        for c in &chip.dma {
-            for peri in &c.compatible {
-                match requests.iter_mut().find(|(p, _)| p == peri) {
-                    Some((_, chans)) => chans.push(c.name.clone()),
-                    None => requests.push((peri.clone(), vec![c.name.clone()])),
-                }
-            }
-        }
-        requests.sort();
-    }
+    let mut requests: Vec<(String, Vec<String>)> = chip
+        .dma
+        .iter()
+        .filter_map(|c| Some((c.serves.clone()?, vec![c.name.clone()])))
+        .collect();
+    requests.sort();
     Some(McuDma {
         mux: chip.dma_shared,
         channels,
@@ -700,6 +717,28 @@ fn drives(f: &PinFunction) -> bool {
             | PinFunction::CanRx
             | PinFunction::AdcChannel { .. }
     )
+}
+
+/// The I2S blocks this chip has, by instance number.
+///
+/// Read off the peripheral singletons rather than from a macro of its own: the
+/// vendor's `for_each_i2s` describes the SIGNALS (`I2SO_BCK`, `I2SI_SD`, …),
+/// which the GPIO matrix makes irrelevant — any pad can carry any of them. What
+/// the codegen actually needs is which `peripherals.I2Sn` exist, and that is
+/// the singleton list.
+pub(crate) fn i2s_instances(chip: &EspChip) -> Vec<u8> {
+    // The DRIVER, not the silicon. An ESP32-C5 has `peripherals.I2S0` and no
+    // `esp_hal::i2s` module to hand it to — see [`EspChip::drivers`].
+    if !chip.drivers.iter().any(|d| d == "i2s") {
+        return Vec::new();
+    }
+    let mut out: Vec<u8> = chip
+        .peripherals
+        .iter()
+        .filter_map(|p| p.strip_prefix("I2S")?.parse().ok())
+        .collect();
+    out.sort();
+    out
 }
 
 fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunction> {
@@ -769,6 +808,21 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
     for i in &chip.i2c {
         out.push(PinFunction::I2cScl(i.id));
         out.push(PinFunction::I2cSda(i.id));
+    }
+
+    // I2S, gated on the peripheral list exactly as TWAI is below: an ESP32-C2
+    // has no I2S block at all, and every other part has `I2S0` (the original
+    // ESP32 and the S3 have `I2S1` too). That list is also what `esp-hal` gates
+    // its driver on, so the gate and the driver cannot disagree.
+    //
+    // MCLK is offered on every pad like the rest. It is genuinely optional —
+    // most codecs generate their own — and the module leaves it unwired unless
+    // you ask, but the pad that CAN carry it is any of them.
+    for i in i2s_instances(chip) {
+        out.push(PinFunction::I2sCk(i));
+        out.push(PinFunction::I2sWs(i));
+        out.push(PinFunction::I2sSd(i));
+        out.push(PinFunction::I2sMck(i));
     }
 
     // TWAI is Espressif's CAN. Unnumbered here because `CanTx`/`CanRx` are, and
@@ -1170,11 +1224,14 @@ mod tests {
                 .filter_map(|(_, n)| n.strip_prefix("GPIO")?.parse().ok())
                 .collect();
             let on_die: BTreeSet<u8> = c.gpios.iter().map(|g| g.number).collect();
-            assert!(
-                on_package.is_subset(&on_die),
-                "{}: the table names a GPIO the chip does not have: {:?}",
+            // A pad the metadata cannot name is not an error — it is the
+            // third case, and it has to be DECLARED. See `no_singleton`.
+            assert_eq!(
+                on_package.difference(&on_die).copied().collect::<Vec<_>>(),
+                pkg.no_singleton.to_vec(),
+                "{} ({}): pads esp-hal cannot name do not match no_singleton",
                 pkg.chip,
-                on_package.difference(&on_die).collect::<Vec<_>>()
+                pkg.name
             );
             assert_eq!(
                 on_die.difference(&on_package).copied().collect::<Vec<_>>(),
@@ -1214,18 +1271,22 @@ mod tests {
             assert_eq!(def.pins.bottom[0].number, per + 1, "{}", pkg.chip);
             assert_eq!(def.pins.right[0].number, 3 * per, "{}", pkg.chip);
             assert_eq!(def.pins.top[0].number, 4 * per, "{}", pkg.chip);
-            // A supply rail is on the drawing and unassignable; every GPIO the
-            // package does bond stays assignable.
+            // A supply rail is on the drawing and unassignable, and so is a
+            // GPIO esp-hal cannot name; every other GPIO stays assignable.
             for p in sides.iter().flat_map(|s| s.iter()) {
-                let is_gpio = p.name.starts_with("GPIO");
+                let nameable = p
+                    .name
+                    .strip_prefix("GPIO")
+                    .and_then(|n| n.parse::<u8>().ok())
+                    .is_some_and(|n| !pkg.no_singleton.contains(&n));
                 assert_eq!(
-                    p.reserved, !is_gpio,
+                    p.reserved, !nameable,
                     "{}: pin {} ({}) has the wrong reserved flag",
                     pkg.chip, p.number, p.name
                 );
                 assert_eq!(
                     p.functions.is_empty(),
-                    !is_gpio,
+                    !nameable,
                     "{}: pin {} ({}) has the wrong function list",
                     pkg.chip,
                     p.number,
@@ -1255,7 +1316,13 @@ mod tests {
         assert_eq!(pad("GPIO0").number, 9, "GPIO0 is package pin 9");
         assert!(pad("VDD_SPI").reserved && pad("VDD_SPI").functions.is_empty());
         assert!(pad("ANT_5G").reserved);
-        assert!(!pad("GPIO16").reserved, "the flash bus stays usable");
+        // The flash bus is on the package and NOT offered: the esp-metadata
+        // release esp-hal pins has no `peripherals.GPIO16` for this part.
+        assert!(pad("GPIO16").reserved, "no singleton, so nothing to assign");
+        assert!(pad("GPIO23").functions.iter().any(|f| matches!(
+            f,
+            crate::panels::mcu_module::pins::logic::pin_function::PinFunction::GpioOutput
+        )));
     }
 
     #[test]

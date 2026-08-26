@@ -37,8 +37,8 @@
 
 use super::codegen_esp::EspRuntime;
 use super::modules::{
-    AsyncBusMode, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, TimerModuleConfig,
-    UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, I2sDirection, I2sFormat, I2sModuleConfig, I2sStandard, Parity,
+    SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -460,6 +460,201 @@ fn spi_dma_twin(n: u8, params: &str, ctor: &str, chain: &str) -> String {
     )
 }
 
+// ── I2S ──────────────────────────────────────────────────────────────────────
+
+/// esp-hal's `Config` constructor for the standard the module asked for.
+///
+/// `LsbFirst` has no constructor at all: esp-hal builds Philips, MSB-first and
+/// the two PCM sync widths, and nothing else. The UI does not offer it on an
+/// ESP — see `I2sStandard::options` — so reaching the fallback here means the
+/// project carries a setting made for another chip, and Philips is the one to
+/// land on rather than silently emitting something that will not compile.
+fn i2s_standard_ctor(std: I2sStandard) -> &'static str {
+    match std {
+        I2sStandard::Philips | I2sStandard::LsbFirst => "new_tdm_philips",
+        I2sStandard::MsbFirst => "new_tdm_msb",
+        I2sStandard::PcmShortSync => "new_tdm_pcm_short",
+        I2sStandard::PcmLongSync => "new_tdm_pcm_long",
+    }
+}
+
+/// The `DataFormat` variant, for the two widths esp-hal and the IDE both have.
+///
+/// esp-hal's list is `Data{8,16,32}Channel{8,16,24,32}`-ish and the IDE's is the
+/// STM32's four; the overlap is 16-in-16 and 32-in-32. The other two are not
+/// offered on an ESP, so this fallback is the same "setting from another chip"
+/// case as [`i2s_standard_ctor`].
+fn i2s_data_format(fmt: I2sFormat) -> &'static str {
+    match fmt {
+        I2sFormat::Data32Channel32 | I2sFormat::Data24Channel32 => "Data32Channel32",
+        _ => "Data16Channel16",
+    }
+}
+
+/// One I2S instance as an esp-hal driver, in the direction the module asked for.
+///
+/// # It is a DMA peripheral, and only a DMA peripheral
+///
+/// Unlike the UART/SPI/I2C files beside it, there is no non-DMA form to fall
+/// back to: `I2s::new` TAKES a channel. So this file always needs one, and
+/// `main.rs` always passes one — a project with no channel left does not get a
+/// half-working I2S, it gets none (see `dma_plan`).
+///
+/// # Why `init` hands back the buffer
+///
+/// `dma_buffers!` makes a `&'static mut [u8]` and a descriptor list. The
+/// descriptors go into `.build()` and disappear into the driver; the BUFFER is
+/// the one the caller passes to `write_dma_circular` on every transfer, so it
+/// has to come back out. Returning it is what keeps the whole allocation in one
+/// place instead of asking the user to declare a matching `static` by hand.
+fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime) -> String {
+    let tx = cfg.is_none_or(|c| c.direction == I2sDirection::Transmit);
+    let (unit, data_method, data_bound) = if tx {
+        ("i2s_tx", "with_dout", "impl PeripheralOutput<'d>")
+    } else {
+        ("i2s_rx", "with_din", "impl PeripheralInput<'d>")
+    };
+    let ty = if tx { "I2sTx" } else { "I2sRx" };
+    let samples = cfg.map_or(256, |c| c.buffer_len) as usize;
+    let consts = format!(
+        "const SAMPLE_RATE_HZ: u32 = {};\n\
+         // Samples are 32-bit at the widest, and the ring holds both channels.\n\
+         const BUFFER_BYTES: usize = {} * 4 * 2;\n",
+        cfg.map_or(48_000, |c| c.sample_rate_hz),
+        samples,
+    );
+    // The signal names the canvas uses are the STM32's (ck/ws/sd/mck); esp-hal
+    // calls the first two bclk/ws and the third dout or din by direction.
+    let params = format!(
+        "    i2s: impl Instance + 'd,\n\
+         \x20   dma: impl DmaChannelFor<AnyI2s<'d>>,\n\
+         {}",
+        params_for(
+            sigs,
+            &[
+                ("ck", "impl PeripheralOutput<'d>"),
+                ("ws", "impl PeripheralOutput<'d>"),
+                ("sd", data_bound),
+                ("mck", "impl PeripheralOutput<'d>"),
+            ],
+        )
+    );
+    let chain = chain_for(
+        sigs,
+        &[("ck", "with_bclk"), ("ws", "with_ws"), ("sd", data_method)],
+    );
+    // MCLK is set on the I2S itself, before it is split into its two halves —
+    // it belongs to the block, not to a direction.
+    let mclk = if sigs.contains(&"mck") {
+        "\n\x20       .with_mclk(mck)"
+    } else {
+        ""
+    };
+    let (buffers, descriptors) = if tx {
+        ("(_, _, buffer, descriptors)", "0, BUFFER_BYTES")
+    } else {
+        ("(buffer, descriptors, _, _)", "BUFFER_BYTES, 0")
+    };
+    let body_for = |name: &str, mode: &str, extra: &str| {
+        format!(
+            "pub fn {name}<'d>(\n\
+             {params}) -> ({ty}<'d, {mode}>, &'static mut [u8]) {{\n\
+             \x20   let {buffers} = dma_buffers!({descriptors});\n\
+             \x20   let config = Config::{ctor}()\n\
+             \x20       .with_sample_rate(Rate::from_hz(SAMPLE_RATE_HZ))\n\
+             \x20       .with_data_format(DataFormat::{fmt})\n\
+             \x20       .with_channels(Channels::STEREO);\n\
+             \x20   let i2s = I2s::new(i2s, dma, config)\n\
+             \x20       .unwrap(){mclk}{extra};\n\
+             \x20   let driver = i2s\n\
+             \x20       .{unit}\n\
+             {chain}\x20       .build(descriptors);\n\
+             \x20   (driver, buffer)\n\
+             }}\n",
+            ctor = i2s_standard_ctor(cfg.map_or(I2sStandard::Philips, |c| c.standard)),
+            fmt = i2s_data_format(cfg.map_or(I2sFormat::Data16Channel16, |c| c.format)),
+        )
+    };
+    let mut body = format!(
+        "/// I2S{n} — blocking driver, {} on DMA.\n\
+         ///\n\
+         /// Returns the driver AND the ring buffer it moves: the descriptors go\n\
+         /// into the driver, the buffer is what every transfer reads or writes.\n\
+         {}",
+        if tx { "transmitting" } else { "receiving" },
+        body_for("init", "Blocking", ""),
+    );
+    if rt == EspRuntime::Async {
+        body.push_str(&format!(
+            "\n/// I2S{n} — async driver.\n\
+             ///\n\
+             /// Same construction, then `.into_async()`: the transfer methods\n\
+             /// become `*_async` and `.await`-able on the executor.\n\
+             {}",
+            body_for("init_async", "Async", "\n\x20       .into_async()"),
+        ));
+    }
+    let example = example_for(
+        &format!("Using I2S{n}"),
+        &format!("_i2s{n}"),
+        &[
+            "main.rs hands back the driver and its ring buffer:",
+            "",
+            "    let (mut {H}, buf) = …;   // as generated above",
+            if tx {
+                "    let mut transfer = {H}.write_dma_circular(buf).unwrap();"
+            } else {
+                "    let mut transfer = {H}.read_dma_circular(buf).unwrap();"
+            },
+            "    loop {",
+            "        let n = transfer.available().unwrap();",
+            if tx {
+                "        if n > 0 { transfer.push(&samples[..n]).ok(); }"
+            } else {
+                "        if n > 0 { transfer.pop(&mut samples[..n]).ok(); }"
+            },
+            "    }",
+        ],
+        &[
+            "main.rs calls `init_async`, so the transfer is .await-able:",
+            "",
+            "    let (mut {H}, buf) = …;   // as generated above",
+            if tx {
+                "    let mut transfer = {H}.write_dma_circular_async(buf).unwrap();"
+            } else {
+                "    let mut transfer = {H}.read_dma_circular_async(buf).unwrap();"
+            },
+            "    transfer.available().await.ok();",
+            "",
+            "    // `init` is still there if you want this one blocking instead.",
+        ],
+        rt,
+    );
+    file(
+        &format!(
+            "{}\
+             use esp_hal::dma::DmaChannelFor;\n\
+             use esp_hal::dma_buffers;\n\
+             use esp_hal::gpio::interconnect::{{{pads}}};\n\
+             use esp_hal::i2s::AnyI2s;\n\
+             use esp_hal::i2s::master::{{Channels, Config, DataFormat, I2s, {ty}, Instance}};\n\
+             use esp_hal::time::Rate;\n",
+            mode_import(rt),
+            // Only the direction actually used: an unused import is a
+            // warning in the user's project, and a generated file must
+            // not raise one.
+            pads = if tx {
+                "PeripheralOutput"
+            } else {
+                "PeripheralInput, PeripheralOutput"
+            },
+        ),
+        &consts,
+        &body,
+        &example,
+    )
+}
+
 // ── I2C ──────────────────────────────────────────────────────────────────────
 
 fn i2c_file(n: u8, sigs: &[&str], cfg: Option<&I2cModuleConfig>, rt: EspRuntime) -> String {
@@ -797,9 +992,11 @@ pub fn config_files(
     uart: &[(u8, Vec<&'static str>)],
     spi: &[(u8, Vec<&'static str>)],
     i2c: &[(u8, Vec<&'static str>)],
+    i2s: &[(u8, Vec<&'static str>)],
     usart_cfg: &BTreeMap<u8, UsartModuleConfig>,
     spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
     i2c_cfg: &BTreeMap<u8, I2cModuleConfig>,
+    i2s_cfg: &BTreeMap<u8, I2sModuleConfig>,
     // LEDC timer → the channels wired on it, with each channel duty in
     // hundredths of a percent.
     pwm: &[(u8, Vec<(u8, u16)>)],
@@ -818,6 +1015,9 @@ pub fn config_files(
     }
     for (n, sigs) in i2c {
         out.push((format!("i2c{n}.rs"), i2c_file(*n, sigs, i2c_cfg.get(n), rt)));
+    }
+    for (n, sigs) in i2s {
+        out.push((format!("i2s{n}.rs"), i2s_file(*n, sigs, i2s_cfg.get(n), rt)));
     }
     for (n, chans) in pwm {
         out.push((format!("pwm{n}.rs"), pwm_file(*n, chans, timer_cfg.get(n))));
@@ -1070,6 +1270,8 @@ mod tests {
             &[(1, vec!["rx", "tx"])],
             &[(2, vec!["sck", "mosi"])],
             &[(0, vec!["scl", "sda"])],
+            &[(0, vec!["ck", "ws", "sd"])],
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -1078,7 +1280,10 @@ mod tests {
             EspRuntime::Blocking,
         );
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["uart1.rs", "spi2.rs", "i2c0.rs", "pwm0.rs"]);
+        assert_eq!(
+            names,
+            vec!["uart1.rs", "spi2.rs", "i2c0.rs", "i2s0.rs", "pwm0.rs"]
+        );
     }
 }
 

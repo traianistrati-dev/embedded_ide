@@ -126,6 +126,10 @@ fn matrix_fns() -> Vec<PinFunction> {
         PinFunction::I2cScl(0),
         PinFunction::I2cSda(0),
         // ── TWAI (CAN-compatible, ISO 11898-1) — matrix-routed ────────────────
+        PinFunction::I2sCk(0),
+        PinFunction::I2sWs(0),
+        PinFunction::I2sSd(0),
+        PinFunction::I2sMck(0),
         PinFunction::CanTx,
         PinFunction::CanRx,
     ]

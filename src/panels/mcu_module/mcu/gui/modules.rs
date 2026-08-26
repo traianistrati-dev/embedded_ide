@@ -2662,6 +2662,8 @@ pub fn module_config_ui(
                 // field of embassy's `i2s::Config`, plus the ring buffer the
                 // DMA owns — there is no blocking I2S to fall back on.
                 ModuleConfig::I2s(cfg) => {
+                    let is_esp =
+                        crate::panels::mcu_module::codegen::family::is_esp(family);
                     ui.label("Sample rate");
                     ui.horizontal(|ui| {
                         ui.add(
@@ -2699,7 +2701,7 @@ pub fn module_config_ui(
                     egui::ComboBox::from_id_salt("i2s_mode")
                         .selected_text(cfg.mode.label())
                         .show_ui(ui, |ui| {
-                            for v in I2sMode::ALL {
+                            for v in I2sMode::options(family).iter().copied() {
                                 ui.selectable_value(&mut cfg.mode, v, v.label());
                             }
                         });
@@ -2709,7 +2711,7 @@ pub fn module_config_ui(
                     egui::ComboBox::from_id_salt("i2s_std")
                         .selected_text(cfg.standard.label())
                         .show_ui(ui, |ui| {
-                            for v in I2sStandard::ALL {
+                            for v in I2sStandard::options(family).iter().copied() {
                                 ui.selectable_value(&mut cfg.standard, v, v.label());
                             }
                         });
@@ -2720,17 +2722,26 @@ pub fn module_config_ui(
                         egui::ComboBox::from_id_salt("i2s_fmt")
                             .selected_text(cfg.format.label())
                             .show_ui(ui, |ui| {
-                                for v in I2sFormat::ALL {
+                                for v in I2sFormat::options(family).iter().copied() {
                                     ui.selectable_value(&mut cfg.format, v, v.label());
                                 }
                             });
-                        egui::ComboBox::from_id_salt("i2s_pol")
-                            .selected_text(cfg.clock_polarity.label())
-                            .show_ui(ui, |ui| {
-                                for v in I2sClockPolarity::ALL {
-                                    ui.selectable_value(&mut cfg.clock_polarity, v, v.label());
-                                }
-                            });
+                        // esp-hal's master config has no bit-clock polarity
+                        // knob — only a word-select one, which is a different
+                        // signal. Hidden rather than shown doing nothing.
+                        if !is_esp {
+                            egui::ComboBox::from_id_salt("i2s_pol")
+                                .selected_text(cfg.clock_polarity.label())
+                                .show_ui(ui, |ui| {
+                                    for v in I2sClockPolarity::ALL {
+                                        ui.selectable_value(
+                                            &mut cfg.clock_polarity,
+                                            v,
+                                            v.label(),
+                                        );
+                                    }
+                                });
+                        }
                     });
                     ui.end_row();
 

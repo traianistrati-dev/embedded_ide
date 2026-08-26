@@ -42,7 +42,8 @@ use super::codegen::dma_map::DmaUse;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
 use super::mcu_def::DmaDef;
 use super::modules::{
-    AsyncBusMode, I2cModuleConfig, SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, SpiModuleConfig, TimerModuleConfig,
+    UsartModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -150,6 +151,7 @@ pub fn fresh_esp32c3_main_rs(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    i2s: &BTreeMap<u8, I2sModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -166,6 +168,7 @@ pub fn fresh_esp32c3_main_rs(
         usart,
         spi,
         i2c,
+        i2s,
         timer,
         custom_inits,
         chip,
@@ -189,6 +192,7 @@ pub fn update_esp32c3_main_rs(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    i2s: &BTreeMap<u8, I2sModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -205,6 +209,7 @@ pub fn update_esp32c3_main_rs(
         usart,
         spi,
         i2c,
+        i2s,
         timer,
         custom_inits,
         chip,
@@ -321,6 +326,7 @@ fn make_gen_section(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    i2s: &BTreeMap<u8, I2sModuleConfig>,
     // PWM (LEDC) module settings, keyed by LEDC timer.
     timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
@@ -477,8 +483,11 @@ fn make_gen_section(
     // code, and it is the ONLY record a reopened project has — `parse_main_rs`
     // rebuilds the diagram from these lines (`mcu.config` stores no pin
     // functions). Moving them into the config module would lose the pins.
-    let dma_plan = dma_plan(dma, runtime, spi);
-    for (label, calls) in bus_sections(&configured, usart, spi, i2c, runtime, &dma_plan) {
+    // The I2S instances the canvas wires, so the allocator can serve them
+    // first — an I2S without a channel cannot be generated at all.
+    let i2s_wired: Vec<u8> = collect_buses(&configured).3.keys().copied().collect();
+    let dma_plan = dma_plan(dma, runtime, spi, &i2s_wired);
+    for (label, calls) in bus_sections(&configured, usart, spi, i2c, i2s, runtime, &dma_plan) {
         body.push('\n');
         body.push_str(&format!("    // ── {label} ──\n"));
         body.push_str(&calls);
@@ -689,8 +698,11 @@ pub fn pwm_channels<'a>(configured: &[&'a Pin]) -> Vec<(u8, Vec<(u8, &'a Pin)>)>
 /// pass over the pins instead of three near-identical ones.
 type BusPins<'a> = BTreeMap<u8, BTreeMap<&'static str, &'a Pin>>;
 
-fn collect_buses<'a>(configured: &[&'a Pin]) -> (BusPins<'a>, BusPins<'a>, BusPins<'a>) {
-    let (mut uart, mut spi, mut i2c): (BusPins, BusPins, BusPins) = Default::default();
+fn collect_buses<'a>(
+    configured: &[&'a Pin],
+) -> (BusPins<'a>, BusPins<'a>, BusPins<'a>, BusPins<'a>) {
+    let (mut uart, mut spi, mut i2c, mut i2s): (BusPins, BusPins, BusPins, BusPins) =
+        Default::default();
     for p in configured {
         let (bus, n, sig) = match p.selected_function {
             PinFunction::UsartRx(n) => (&mut uart, n, "rx"),
@@ -701,12 +713,36 @@ fn collect_buses<'a>(configured: &[&'a Pin]) -> (BusPins<'a>, BusPins<'a>, BusPi
             PinFunction::SpiNss(n) => (&mut spi, n, "cs"),
             PinFunction::I2cScl(n) => (&mut i2c, n, "scl"),
             PinFunction::I2cSda(n) => (&mut i2c, n, "sda"),
+            // The canvas keeps the STM32 signal names; the esp-hal method each
+            // maps to is chosen in `i2s_file`, where the direction is known.
+            PinFunction::I2sCk(n) => (&mut i2s, n, "ck"),
+            PinFunction::I2sWs(n) => (&mut i2s, n, "ws"),
+            PinFunction::I2sSd(n) => (&mut i2s, n, "sd"),
+            PinFunction::I2sMck(n) => (&mut i2s, n, "mck"),
             _ => continue,
         };
         bus.entry(n).or_default().insert(sig, p);
     }
-    (uart, spi, i2c)
+    (uart, spi, i2c, i2s)
 }
+
+/// The I2S instances a set of pins wires, in instance order.
+///
+/// Public because the Configuration tab needs the same answer the code
+/// generator gets: an I2S takes a DMA channel simply by being wired, with no
+/// switch to consult, so the card and the generated project must count them the
+/// same way or the card lies.
+pub(crate) fn i2s_instances_wired(pins: &[&Pin]) -> Vec<u8> {
+    let configured: Vec<&Pin> = pins
+        .iter()
+        .copied()
+        .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
+        .collect();
+    collect_buses(&configured).3.keys().copied().collect()
+}
+
+/// The order `i2s_file`'s `init` takes its pins in.
+const I2S_ORDER: &[&str] = &["ck", "ws", "sd", "mck"];
 
 /// `(instance, wired signals)` for each bus, in the order `init` takes them.
 ///
@@ -716,8 +752,8 @@ fn collect_buses<'a>(configured: &[&'a Pin]) -> (BusPins<'a>, BusPins<'a>, BusPi
 /// the user's `main.rs`, and no pretending a pin is used when it is not. The
 /// call site and the module are built from this same list, so they cannot
 /// disagree.
-pub fn bus_instances(configured: &[&Pin]) -> (BusWiring, BusWiring, BusWiring) {
-    let (uart, spi, i2c) = collect_buses(configured);
+pub fn bus_instances(configured: &[&Pin]) -> (BusWiring, BusWiring, BusWiring, BusWiring) {
+    let (uart, spi, i2c, i2s_pins) = collect_buses(configured);
     let flatten = |b: BusPins, order: &[&'static str]| -> BusWiring {
         b.into_iter()
             .map(|(n, pins)| {
@@ -734,6 +770,7 @@ pub fn bus_instances(configured: &[&Pin]) -> (BusWiring, BusWiring, BusWiring) {
         flatten(uart, UART_ORDER),
         flatten(spi, SPI_ORDER),
         flatten(i2c, I2C_ORDER),
+        flatten(i2s_pins, I2S_ORDER),
     )
 }
 
@@ -751,35 +788,60 @@ pub const I2C_ORDER: &[&str] = &["scl", "sda"];
 ///
 /// Signals the canvas did not wire are simply absent — `init` takes only what
 /// its template declares (SCK+MOSI for SPI, both lines for UART/I2C), so a
-/// Which GDMA channel each DMA-enabled bus gets, and who has it.
+/// Which GDMA channel each DMA-driven bus gets, and who has it.
 ///
 /// # One channel, not two
 ///
 /// Everywhere else in this IDE a bus on DMA takes a TX channel and an RX
-/// channel. esp-hal does not work that way: `with_dma` takes ONE channel, whose
-/// two halves (`DMA_IN_CHn` / `DMA_OUT_CHn`) the driver drives together. So a
-/// SPI here consumes a single entry, and a module's hand-pinned `dma_tx` is
-/// read as "the channel" — `dma_rx` is not consulted at all.
+/// channel. esp-hal does not work that way: `with_dma` (SPI) and `I2s::new`
+/// take ONE channel, whose two halves (`DMA_IN_CHn` / `DMA_OUT_CHn`) the driver
+/// drives together. So a bus here consumes a single entry, and a module's
+/// hand-pinned `dma_tx` is read as "the channel" — `dma_rx` is not consulted.
 ///
-/// # Allocation
+/// # Order, and why I2S goes first
 ///
-/// Hand-pinned channels are reserved first, exactly as on the STM32 path, so a
-/// choice made in one module is never handed to another. After that the buses
-/// take free channels in instance order. On a pool chip (`mux`) any channel
-/// serves any peripheral; on the original ESP32 and the S2 the `requests` table
-/// says which ones a peripheral may have, and a bus whose channels are all
-/// taken gets none — the config file is still written, and main.rs says so.
+/// A SPI that gets no channel still generates: it falls back to the plain
+/// blocking bus, and the config file written beside it agrees. An I2S that gets
+/// no channel generates NOTHING — `I2s::new` takes a channel, there is no other
+/// constructor — so it has the first claim on what is free.
+///
+/// Hand-pinned channels are reserved before either, exactly as on the STM32
+/// path, so a choice made in one module is never handed to another.
+pub(crate) struct DmaPlan {
+    /// Keyed by SPI instance. Only the buses whose module asked for Async-DMA.
+    pub spi: BTreeMap<u8, DmaUse>,
+    /// Keyed by I2S instance. Every wired one, since I2S has no non-DMA form.
+    pub i2s: BTreeMap<u8, DmaUse>,
+}
+
+impl DmaPlan {
+    /// Every channel taken, for the Configuration tab's DMA card.
+    pub fn uses(&self) -> Vec<DmaUse> {
+        self.i2s
+            .values()
+            .chain(self.spi.values())
+            .cloned()
+            .collect()
+    }
+}
+
 pub(crate) fn dma_plan(
     dma: Option<&DmaDef>,
     runtime: EspRuntime,
     spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
-) -> BTreeMap<u8, DmaUse> {
-    let mut out = BTreeMap::new();
+    // Every I2S instance the canvas wires. Unlike SPI there is nothing to opt
+    // into: `I2s::new` takes a channel, so a wired I2S always wants one.
+    i2s_wired: &[u8],
+) -> DmaPlan {
+    let mut plan = DmaPlan {
+        spi: BTreeMap::new(),
+        i2s: BTreeMap::new(),
+    };
     if runtime != EspRuntime::Async {
-        return out;
+        return plan;
     }
     let Some(dma) = dma else {
-        return out;
+        return plan;
     };
     let on_dma: Vec<u8> = spi_cfg
         .iter()
@@ -796,41 +858,48 @@ pub(crate) fn dma_plan(
         .filter(|c| !c.is_empty())
         .collect();
 
-    for n in on_dma {
-        let cfg = &spi_cfg[&n];
-        let manual = cfg.dma_tx.trim();
+    // A pool offers every channel; a bolted DMA offers only the ones its
+    // request table names for that peripheral.
+    let mut claim = |request: String, manual: &str| -> Option<DmaUse> {
         let peri = if !manual.is_empty() {
             manual.to_owned()
         } else {
-            // A pool offers every channel; a bolted DMA offers only the ones
-            // its request table names for this peripheral.
             let allowed: Vec<&str> = if dma.mux {
                 dma.channels.iter().map(|c| c.peri.as_str()).collect()
             } else {
                 dma.requests
                     .iter()
-                    .find(|(req, _)| *req == format!("SPI{n}"))
+                    .find(|(req, _)| *req == request)
                     .map(|(_, chans)| chans.iter().map(String::as_str).collect())
                     .unwrap_or_default()
             };
-            let Some(free) = allowed.into_iter().find(|c| !taken.iter().any(|t| t == c)) else {
-                continue;
-            };
+            let free = allowed
+                .into_iter()
+                .find(|c| !taken.iter().any(|t| t == c))?;
             taken.push(free.to_owned());
             free.to_owned()
         };
-        out.insert(
-            n,
-            DmaUse {
-                peri,
-                // esp-hal owns the DMA interrupt; no generated line names it.
-                irq: String::new(),
-                user: format!("SPI{n}"),
-                manual: !manual.is_empty(),
-            },
-        );
+        Some(DmaUse {
+            peri,
+            // esp-hal owns the DMA interrupt; no generated line names it.
+            irq: String::new(),
+            user: request,
+            manual: !manual.is_empty(),
+        })
+    };
+
+    for n in i2s_wired {
+        if let Some(u) = claim(format!("I2S{n}"), "") {
+            plan.i2s.insert(*n, u);
+        }
     }
-    out
+    for n in on_dma {
+        let manual = spi_cfg[&n].dma_tx.trim().to_owned();
+        if let Some(u) = claim(format!("SPI{n}"), &manual) {
+            plan.spi.insert(n, u);
+        }
+    }
+    plan
 }
 
 /// half-wired bus is reported as a TODO comment rather than emitting a call
@@ -840,11 +909,12 @@ fn bus_sections(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
     i2c_cfg: &BTreeMap<u8, I2cModuleConfig>,
+    i2s_cfg: &BTreeMap<u8, I2sModuleConfig>,
     runtime: EspRuntime,
-    // The channel each DMA-enabled bus was given — see [`dma_plan`].
-    dma_plan: &BTreeMap<u8, DmaUse>,
+    // The channel each DMA-driven bus was given — see [`dma_plan`].
+    dma_plan: &DmaPlan,
 ) -> Vec<(String, String)> {
-    let (uart, spi, i2c) = collect_buses(configured);
+    let (uart, spi, i2c, i2s_pins) = collect_buses(configured);
     let mut out = Vec::new();
     // Async runtime → call the `init_async` twin, so the handles are the
     // `.await`-able esp-hal drivers. `init` stays in the file for a bus the user
@@ -918,7 +988,10 @@ fn bus_sections(
                 // A bus the allocator could not serve gets no channel and no
                 // argument - and `init_async` without DMA is what the config
                 // file then holds, so the two always agree.
-                dma_plan.get(n).map(|u| format!("peripherals.{}", u.peri)),
+                dma_plan
+                    .spi
+                    .get(n)
+                    .map(|u| format!("peripherals.{}", u.peri)),
             ),
         ));
     }
@@ -938,6 +1011,45 @@ fn bus_sections(
                 None,
             ),
         ));
+    }
+    // I2S last, and not through `section`: its `init` hands back a PAIR — the
+    // driver and the ring buffer the DMA moves — so the binding is a tuple, and
+    // a bus the allocator could not serve is skipped with a note rather than
+    // called with an argument that does not exist.
+    for (n, pins) in &i2s_pins {
+        let sfx = i2s_cfg
+            .get(n)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        let handle = format!("_i2s{n}{sfx}");
+        let mut body = String::new();
+        let mut args = Vec::new();
+        for sig in I2S_ORDER.iter().filter(|s| pins.contains_key(*s)) {
+            let p = pins[sig];
+            let var = esp_binding(p);
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
+            args.push(var);
+        }
+        match dma_plan.i2s.get(n) {
+            Some(u) => body.push_str(&format!(
+                "    let (mut {handle}, {handle}_buf) =\n\
+                 \x20       pins::configs::i2s{n}::{init_fn}(peripherals.I2S{n}, peripherals.{}, {});\n",
+                u.peri,
+                args.join(", "),
+            )),
+            // No `init` call at all, because there is no constructor to call:
+            // esp-hal's `I2s::new` takes a channel and there is no other form.
+            None => body.push_str(&format!(
+                "    // TODO: I2S{n} has no DMA channel left - every one is taken.\n\
+                 \x20   // Free one in another module (Configuration tab shows who has what),\n\
+                 \x20   // or pin this one by hand in the I2S module.\n"
+            )),
+        }
+        out.push((format!("I2S{n}"), body));
     }
     out
 }
@@ -997,6 +1109,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &timer,
             "",
             "esp32c3",
@@ -1044,6 +1157,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1076,6 +1190,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_i2s() -> BTreeMap<u8, I2sModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1088,6 +1206,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1112,6 +1231,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1136,6 +1256,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1157,6 +1278,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1173,6 +1295,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1198,6 +1321,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1225,6 +1349,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1260,6 +1385,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1302,6 +1428,7 @@ mod tests {
                 &no_usart(),
                 &no_spi(),
                 &no_i2c(),
+                &no_i2s(),
                 &Default::default(),
                 "",
                 "esp32c3",
@@ -1378,6 +1505,7 @@ mod tests {
             &usart,
             &no_spi(),
             &no_i2c(),
+            &no_i2s(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1432,10 +1560,10 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> =
             [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi);
-        assert_eq!(plan[&2].peri, "DMA_CH0");
-        assert_eq!(plan[&3].peri, "DMA_CH1");
-        assert!(plan.values().all(|u| !u.manual && u.irq.is_empty()));
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[]);
+        assert_eq!(plan.spi[&2].peri, "DMA_CH0");
+        assert_eq!(plan.spi[&3].peri, "DMA_CH1");
+        assert!(plan.spi.values().all(|u| !u.manual && u.irq.is_empty()));
     }
 
     /// A hand-pinned channel is reserved BEFORE anything is allocated, so the
@@ -1446,10 +1574,13 @@ mod tests {
         let mut later = spi_on_dma(3);
         later.dma_tx = "DMA_CH0".into();
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2)), (3u8, later)].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi);
-        assert_eq!(plan[&3].peri, "DMA_CH0", "the pinned one is honoured");
-        assert!(plan[&3].manual);
-        assert_eq!(plan[&2].peri, "DMA_CH1", "and SPI2 had to take the next");
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[]);
+        assert_eq!(plan.spi[&3].peri, "DMA_CH0", "the pinned one is honoured");
+        assert!(plan.spi[&3].manual);
+        assert_eq!(
+            plan.spi[&2].peri, "DMA_CH1",
+            "and SPI2 had to take the next"
+        );
     }
 
     /// On the original ESP32 a channel is bolted to one peripheral, so SPI3 may
@@ -1473,8 +1604,8 @@ mod tests {
             ],
         };
         let spi: BTreeMap<u8, SpiModuleConfig> = [(3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi);
-        assert_eq!(plan[&3].peri, "DMA_SPI3");
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[]);
+        assert_eq!(plan.spi[&3].peri, "DMA_SPI3");
     }
 
     /// More DMA buses than channels: the ones that fit are served and the rest
@@ -1484,9 +1615,9 @@ mod tests {
         let dma = gdma(1);
         let spi: BTreeMap<u8, SpiModuleConfig> =
             [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi);
-        assert_eq!(plan[&2].peri, "DMA_CH0");
-        assert!(!plan.contains_key(&3));
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[]);
+        assert_eq!(plan.spi[&2].peri, "DMA_CH0");
+        assert!(!plan.spi.contains_key(&3));
     }
 
     /// The switch is an ASYNC one. A blocking project ignores it entirely —
@@ -1495,9 +1626,17 @@ mod tests {
     fn the_blocking_runtime_allocates_nothing() {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2))].into();
-        assert!(dma_plan(Some(&dma), EspRuntime::Blocking, &spi).is_empty());
+        assert!(
+            dma_plan(Some(&dma), EspRuntime::Blocking, &spi, &[])
+                .uses()
+                .is_empty()
+        );
         // …and a chip with no channel data cannot be served on any runtime.
-        assert!(dma_plan(None, EspRuntime::Async, &spi).is_empty());
+        assert!(
+            dma_plan(None, EspRuntime::Async, &spi, &[])
+                .uses()
+                .is_empty()
+        );
     }
 
     /// A SPI that did NOT ask for DMA takes no channel, so the two paths never
@@ -1506,6 +1645,10 @@ mod tests {
     fn a_bus_that_did_not_ask_for_dma_takes_no_channel() {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, SpiModuleConfig::new(2))].into();
-        assert!(dma_plan(Some(&dma), EspRuntime::Async, &spi).is_empty());
+        assert!(
+            dma_plan(Some(&dma), EspRuntime::Async, &spi, &[])
+                .uses()
+                .is_empty()
+        );
     }
 }

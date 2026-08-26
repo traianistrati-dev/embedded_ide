@@ -65,6 +65,14 @@ pub fn reserved_role(name: &str) -> &'static str {
         "Radio antenna feed. It reaches the antenna through a matching network, and nothing else may load it."
     } else if n.starts_with("CAP") {
         "Filter capacitor for an on-chip supply. It takes the part its datasheet specifies and no signal."
+    } else if n.starts_with("GPIO") {
+        // A GPIO that is nonetheless RESERVED. On an ESP32-C5 the datasheet
+        // gives pins 25-32 as GPIO15-GPIO22, and the esp-metadata release
+        // esp-hal pins has no `peripherals.GPIO15` for the part — so the pad is
+        // on the package and there is nothing the generated code could name.
+        // Without this arm those seven pads read "Reserved - fixed by the
+        // package", which says nothing about why a numbered GPIO is greyed out.
+        "On the package, but this chip's HAL has no singleton for it - most often the in-package flash bus. Nothing generated can name it."
     } else {
         "Reserved - fixed by the package, not configurable here."
     }

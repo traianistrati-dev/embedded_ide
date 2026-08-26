@@ -161,25 +161,19 @@ impl SpiMaster {
 /// * **Per-peripheral DMA** (the original ESP32 and the S2) — `DMA_SPI2` is
 ///   wired to SPI2 and to nothing else. Handing it to an I2S would not compile.
 ///
-/// Which it is comes from [`DmaChannel::compatible`], not from the vendor's bare
-/// `((shared))` / `((split))` marker: the marker is one token that could change
-/// spelling, while the compatibility lists ARE the answer and are checkable.
+/// Which it is comes from the channel's NAME, which every release of the crate
+/// spells the same way — see [`DmaChannel::serves`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DmaChannel {
-    /// `AHB_GDMA`, `SPI_DMA`, `I2S_DMA`, `CRYPTO_DMA`, `COPY_DMA`.
-    pub engine: String,
     /// The `esp_hal::peripherals` singleton — `DMA_CH0`, `DMA_SPI2`.
     pub name: String,
-    /// Every peripheral this channel may serve, as the vendor's
-    /// `compatible = [...]` states it: `[SPI2, UHCI0, I2S0, AES, SHA,
-    /// APB_SARADC, PARL_IO]` on an ESP32-C5, `[SPI2]` alone on an ESP32's
-    /// `DMA_SPI2`. Empty is real too — the S2's `DMA_COPY` serves nothing that
-    /// has a driver.
+    /// The one peripheral this channel is bolted to, or `None` when it is a
+    /// GDMA pool channel any peripheral may draw from.
     ///
-    /// This is the same list the C5 datasheet gives in prose ("shared by
-    /// peripherals with the GDMA feature, consisting of SPI2, UHCI0, I2S, AES,
-    /// SHA, ADC, and PARLIO"), which is how it was checked.
-    pub compatible: Vec<String>,
+    /// `DMA_SPI2` serves SPI2 and nothing else; `DMA_CH0` serves whatever asks.
+    /// Handing an ESP32's `DMA_SPI2` to an I2S would not compile, which is why
+    /// the distinction is carried rather than assumed.
+    pub serves: Option<String>,
 }
 
 /// One chip, as the vendor's metadata describes it.
@@ -211,15 +205,26 @@ pub struct EspChip {
     pub adc: Vec<(String, u8)>,
     /// Every peripheral singleton the chip has, GPIOs excluded.
     pub peripherals: Vec<String>,
+    /// The esp-hal DRIVERS this chip has — `i2s`, `ledc`, `twai`, `spi_master`.
+    ///
+    /// A different question from [`EspChip::peripherals`], and the ESP32-C5
+    /// proves it: `peripherals.I2S0` exists there, but esp-hal 1.1.2 sets no
+    /// `i2s_driver_supported` for the part, so `esp_hal::i2s` is not a module
+    /// and code naming it does not compile. The singleton says what the SILICON
+    /// has; this says what the HAL can drive, and only the second one decides
+    /// what the IDE may offer.
+    ///
+    /// Read from `_build_script_utils.rs`, not from the per-chip file — it is
+    /// the same crate, and it is what esp-hal's build script turns into `cfg`s.
+    /// Empty when a chip is parsed without its sibling file (see [`load`]).
+    pub drivers: Vec<String>,
     /// The chip's DMA channels. Empty for a part with no DMA at all.
     pub dma: Vec<DmaChannel>,
     /// True when the channels are a POOL any peripheral may draw from (GDMA),
     /// false when each is bolted to one peripheral.
     ///
-    /// DERIVED, not read: every channel offering the same non-empty set of
-    /// peripherals is what "pool" means. Not a detail — it is exactly the
-    /// question [`DmaDef::mux`] asks, and getting it backwards would let the
-    /// allocator hand an ESP32's `DMA_SPI2` to an I2S.
+    /// Exactly the question [`DmaDef::mux`] asks, and getting it backwards would
+    /// let the allocator hand an ESP32's `DMA_SPI2` to an I2S.
     ///
     /// [`DmaDef::mux`]: crate::panels::mcu_module::mcu_def::DmaDef::mux
     pub dma_shared: bool,
@@ -586,40 +591,30 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
     peripherals.sort();
     peripherals.dedup();
 
-    // DMA. The macro emits each channel FOUR times — a bare name, an
-    // `any_channel` alias, the full entry, and the whole list again under a
-    // `shared(...)` / `split(...)` heading. Only the full entry carries
-    // `compatible =`, and only it starts with the engine's quoted name, so
-    // those two conditions together pick each channel exactly once.
-    let dma_body = body_of("for_each_dma_channel");
-    let dma: Vec<DmaChannel> = instances(&dma_body, "dma_channel")
+    // DMA, from the peripheral SINGLETONS rather than from a macro.
+    //
+    // `for_each_dma_channel` carries more — an interrupt name per half, and a
+    // `compatible = […]` list — but it does not exist in every release of the
+    // crate, and the release that matters is whichever one `esp-hal` pins (see
+    // [`vendor_dir`]). The singletons are in both, and they are also what the
+    // generated code names, so they are the honest source.
+    //
+    // The NAME answers the pool question: an `AHB_GDMA` part numbers its
+    // channels `DMA_CH0…`, while the original ESP32 and the S2 name each after
+    // the one peripheral it is bolted to — `DMA_SPI2`, `DMA_I2S0`.
+    let dma: Vec<DmaChannel> = peripherals
         .iter()
-        .filter(|t| t.starts_with('"') && t.contains("compatible ="))
-        .filter_map(|t| {
-            let f = fields(t);
-            let engine = f.first()?.trim_matches('"').to_owned();
-            let name = f.get(1)?.trim().to_owned();
-            let compatible = f
-                .iter()
-                .find_map(|x| x.trim().strip_prefix("compatible ="))
-                .map(bracket_list)
-                .unwrap_or_default();
-            Some(DmaChannel {
-                engine,
-                name,
-                compatible,
-            })
+        .filter(|p| p.starts_with("DMA_"))
+        .map(|name| DmaChannel {
+            name: name.clone(),
+            // `DMA_CH2` -> the pool, anything else -> that peripheral.
+            serves: name
+                .strip_prefix("DMA_")
+                .filter(|r| !r.starts_with("CH"))
+                .map(str::to_owned),
         })
         .collect();
-    // A pool is "every channel serves the same peripherals, and more than one
-    // of them". An ESP32's four channels each name a single different one, so
-    // this is false there — which is the whole difference.
-    //
-    // Deliberately NOT "more than one channel": the ESP32-C2's GDMA has exactly
-    // one, and it still serves either of two peripherals. Counting channels
-    // would have described that single pool channel as bolted to a peripheral.
-    let dma_shared = dma.first().is_some_and(|first| first.compatible.len() > 1)
-        && dma.iter().all(|c| c.compatible == dma[0].compatible);
+    let dma_shared = !dma.is_empty() && dma.iter().all(|c| c.serves.is_none());
 
     // `pub fn <node>_frequency(…) -> u32 { 480000000 }`, keeping only the
     // bodies that ARE a literal: the rest are computed from the live
@@ -706,6 +701,7 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
         spi,
         adc,
         peripherals,
+        drivers: Vec::new(),
         dma,
         dma_shared,
         analog,
@@ -743,34 +739,98 @@ pub fn vendor_dir() -> Option<PathBuf> {
                 .map(|h| PathBuf::from(h).join(".cargo"))
         })?;
     let src = home.join("registry").join("src");
-    // Newest version wins, so a refreshed toolchain is picked up by rerunning
-    // the generator rather than by editing a path.
-    let mut found: Vec<PathBuf> = std::fs::read_dir(&src)
-        .ok()?
-        .flatten()
-        .flat_map(|reg| {
-            std::fs::read_dir(reg.path())
-                .into_iter()
-                .flatten()
-                .flatten()
-        })
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("esp-metadata-generated-"))
-        })
-        .collect();
-    found.sort();
-    found.pop().map(|p| p.join("src"))
+    let unpacked = |prefix: &str| -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(&src)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .flat_map(|reg| {
+                std::fs::read_dir(reg.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+            })
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(prefix))
+            })
+            .collect();
+        found.sort();
+        found
+    };
+
+    let all = unpacked("esp-metadata-generated-");
+    // The version `esp-hal` itself depends on — NOT the newest on disk. They
+    // are different questions and the answers really do differ: 0.5.0 gives the
+    // ESP32-C5 an I2S driver and 0.4.0, which esp-hal 1.1.2 pins, does not.
+    // Reading the newer one made the IDE offer a peripheral whose `esp_hal::i2s`
+    // module the user's project does not have, and only a real compile caught
+    // it. Whatever the generated projects build against is the only version
+    // whose word counts.
+    let pinned = unpacked("esp-hal-").into_iter().rev().find_map(|hal| {
+        let toml = std::fs::read_to_string(hal.join("Cargo.toml")).ok()?;
+        let at = toml.find("[dependencies.esp-metadata-generated]")?;
+        let line = toml[at..].lines().find(|l| l.starts_with("version"))?;
+        let want = line.split('"').nth(1)?.trim_start_matches(['~', '^', '=']);
+        all.iter()
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n == format!("esp-metadata-generated-{want}"))
+            })
+            .cloned()
+    });
+    // Falling back to the newest is still better than nothing: it means esp-hal
+    // is not unpacked yet, and the generator is being run before any ESP project
+    // has ever been built.
+    pinned
+        .or_else(|| all.last().cloned())
+        .map(|p| p.join("src"))
+}
+
+/// The esp-hal driver cfgs the build script sets for `chip`.
+///
+/// One `Self::Esp32c5 => Config { … symbols: &["esp32c5", "riscv", …] }` arm per
+/// part, and the `*_driver_supported` entries in it are exactly the `#[cfg]`s
+/// that decide whether `esp_hal::i2s`, `esp_hal::ledc` and the rest are modules
+/// at all. Every symbol is kept, with the suffix stripped, so the caller asks
+/// `drivers.contains("i2s")`.
+pub fn driver_cfgs(utils_src: &str, chip: &str) -> Vec<String> {
+    // `esp32c5` -> `Self::Esp32c5 => Config {`. The ` => Config {` matters:
+    // without it `Self::Esp32 =>` also matches the start of `Self::Esp32c5 =>`.
+    let arm = format!("Self::Esp32{} => Config {{", &chip[5..]);
+    let Some(at) = utils_src.find(&arm) else {
+        return Vec::new();
+    };
+    let rest = &utils_src[at + arm.len()..];
+    // The arm ends where the next one begins; the last one ends at the brace.
+    let end = rest.find("Self::Esp32").unwrap_or(rest.len());
+    rest[..end]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|sym| sym.strip_suffix("_driver_supported"))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Read and parse one chip from a vendor directory.
+///
+/// Two files, not one: the per-chip macros describe the silicon, and
+/// `_build_script_utils.rs` says which of it esp-hal actually drives. A chip
+/// read without the second would offer peripherals whose driver module the
+/// user's project does not have — see [`EspChip::drivers`].
 pub fn load(dir: &std::path::Path, chip: &str) -> Result<EspChip, String> {
     let path = dir.join(format!("_generated_{chip}.rs"));
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("could not read {}: {e}", path.display()))?;
-    parse(&text)
+    let mut out = parse(&text)?;
+    if let Ok(utils) = std::fs::read_to_string(dir.join("_build_script_utils.rs")) {
+        out.drivers = driver_cfgs(&utils, chip);
+    }
+    Ok(out)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -947,14 +1007,11 @@ macro_rules! for_each_peripheral {
         assert!(!p.iter().any(|n| n.starts_with("GPIO")), "{p:?}");
     }
 
-    /// The C5's GDMA, checked against the sentence its datasheet writes in prose.
+    /// The C5's GDMA: three pool channels, as its datasheet describes.
     ///
     /// Section 4.1.1.4: "The GDMA has six independent channels, three transmit
-    /// channels and three receive channels. These channels are shared by
-    /// peripherals with the GDMA feature, consisting of SPI2, UHCI0, I2S, AES,
-    /// SHA, ADC, and PARLIO." Three channels, each with a TX and an RX half,
-    /// and one compatibility list of seven — which is what this asserts, under
-    /// the vendor's own spellings (`APB_SARADC` for the ADC, `PARL_IO`).
+    /// channels and three receive channels." Three, each with a TX and an RX
+    /// half — which is why esp-hal takes ONE channel per bus and drives both.
     #[test]
     #[ignore]
     fn the_c5_gdma_matches_its_datasheet() {
@@ -963,20 +1020,8 @@ macro_rules! for_each_peripheral {
             c5.dma.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             ["DMA_CH0", "DMA_CH1", "DMA_CH2"],
         );
-        assert!(c5.dma.iter().all(|c| c.engine == "AHB_GDMA"));
-        assert_eq!(
-            c5.dma[0].compatible,
-            [
-                "SPI2",
-                "UHCI0",
-                "I2S0",
-                "AES",
-                "SHA",
-                "APB_SARADC",
-                "PARL_IO"
-            ],
-        );
         assert!(c5.dma_shared, "GDMA is a pool");
+        assert!(c5.dma.iter().all(|c| c.serves.is_none()));
     }
 
     /// The two ESP32s whose DMA is NOT a pool must not be read as one.
@@ -996,13 +1041,8 @@ macro_rules! for_each_peripheral {
                 .iter()
                 .find(|d| d.name == "DMA_SPI2")
                 .unwrap_or_else(|| panic!("{id} has no DMA_SPI2"));
-            assert_eq!(spi2.compatible, ["SPI2"], "{id}");
+            assert_eq!(spi2.serves.as_deref(), Some("SPI2"), "{id}");
         }
-        // The S2 has a channel that serves nothing with a driver; an empty
-        // list is real data, not a parse failure.
-        let s2 = load(&dir, "esp32s2").unwrap();
-        let copy = s2.dma.iter().find(|d| d.name == "DMA_COPY").unwrap();
-        assert!(copy.compatible.is_empty());
     }
 
     /// Every shipped chip has DMA, and it is read the same way for all of them.
@@ -1017,6 +1057,35 @@ macro_rules! for_each_peripheral {
                 c.dma.iter().all(|d| d.name.starts_with("DMA_")),
                 "{id}: a channel is not a DMA_* singleton: {:?}",
                 c.dma
+            );
+        }
+    }
+
+    /// The driver list is what the IDE may offer, and it is NOT the silicon.
+    ///
+    /// The ESP32-C5 is the case that proves the difference: it has
+    /// `peripherals.I2S0`, and esp-hal 1.1.2 has no `i2s` module for it. Read
+    /// the wrong one and the IDE offers a peripheral the user's project cannot
+    /// name.
+    #[test]
+    #[ignore]
+    fn the_driver_list_is_not_the_peripheral_list() {
+        let dir = vendor_dir().expect("esp-metadata");
+        let c5 = load(&dir, "esp32c5").expect("parses");
+        assert!(
+            c5.peripherals.iter().any(|p| p == "I2S0"),
+            "the silicon has the block"
+        );
+        assert!(
+            !c5.drivers.iter().any(|d| d == "i2s"),
+            "…and esp-hal has no driver for it on this part"
+        );
+        // Every chip must have SOMETHING, or the file was not found at all.
+        for id in RISCV_CHIPS {
+            let c = load(&dir, id).expect("parses");
+            assert!(
+                c.drivers.iter().any(|d| d == "gpio"),
+                "{id}: no driver cfgs read - is _build_script_utils.rs there?"
             );
         }
     }
@@ -1141,11 +1210,17 @@ macro_rules! for_each_peripheral {
                 "{chip} lost the pins after the gap"
             );
         }
+        // A GAP is real data, not a parse failure: the release esp-hal pins
+        // gives the ESP32-C5 no GPIO15..22 at all (they are its flash bus), so
+        // this asserts the numbers RISE without asserting they are contiguous.
         for chip in ["esp32c2", "esp32c3", "esp32c5", "esp32c6", "esp32c61"] {
             let c = load(&dir, chip).unwrap();
-            let want: Vec<u8> = (0..c.gpios.len() as u8).collect();
             let got: Vec<u8> = c.gpios.iter().map(|g| g.number).collect();
-            assert_eq!(got, want, "{chip} grew a gap — recheck the layout");
+            assert!(!got.is_empty(), "{chip} has no GPIOs at all");
+            assert!(
+                got.windows(2).all(|w| w[0] < w[1]),
+                "{chip} lists its GPIOs out of order: {got:?}"
+            );
         }
 
         // The ESP32 is the only part with pads that cannot drive. Its GPIO34..39
@@ -1164,14 +1239,19 @@ macro_rules! for_each_peripheral {
             );
         }
 
-        // The C61 carried no analog functions at all in esp-metadata 0.4, though
-        // its datasheet describes a SAR ADC; 0.5 filled them in. Kept as an
-        // assertion because the two readings differ, and a definition generated
-        // against the older data silently lacked every ADC pin.
-        let c61 = load(&dir, "esp32c61").unwrap();
+        // The ESP32-C61 carries no analog functions at all in the esp-metadata
+        // release esp-hal pins, though its datasheet describes a SAR ADC; a
+        // later release fills them in. The IDE follows the PINNED release on
+        // purpose (see `vendor_dir`), so a C61 generated here has no ADC pins —
+        // which is right, because esp-hal has no channel types for them either.
+        // Asserted the other way round, this line used to demand the newer data
+        // and so demanded a version the generated projects do not build against.
+        //
+        // The C3 stands in as the chip whose ADC every release describes.
+        let c3 = load(&dir, "esp32c3").unwrap();
         assert!(
-            !c61.adc.is_empty(),
-            "esp32c61 lost its ADC — is an older esp-metadata being read?"
+            !c3.adc.is_empty(),
+            "esp32c3 lost its ADC — the analog list is not being read at all"
         );
 
         // The Xtensa parts read the same way and name their own triples; what

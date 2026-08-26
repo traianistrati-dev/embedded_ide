@@ -2129,6 +2129,19 @@ pub enum I2sMode {
 }
 
 impl I2sMode {
+    /// Whether this family's HAL can be the follower as well as the leader.
+    ///
+    /// `esp_hal::i2s::master::I2s::new` calls `set_master()` on the way in and
+    /// offers no other entry point, so an ESP I2S drives the clocks. The slave
+    /// side is a different driver esp-hal does not expose.
+    pub fn options(family: &str) -> &'static [Self] {
+        if crate::panels::mcu_module::codegen::family::is_esp(family) {
+            &[Self::Master]
+        } else {
+            &Self::ALL
+        }
+    }
+
     pub const ALL: [Self; 2] = [Self::Master, Self::Slave];
 
     pub fn embassy(self) -> &'static str {
@@ -2158,6 +2171,25 @@ pub enum I2sStandard {
 }
 
 impl I2sStandard {
+    /// The standards this family's HAL can actually build.
+    ///
+    /// esp-hal has four `Config` constructors — Philips, MSB-first, and the two
+    /// PCM sync widths — and no LSB-first one at all. embassy builds all five.
+    /// Offering the fifth on an ESP would be a setting the generator has to
+    /// quietly replace, which is the kind of lie this table exists to prevent.
+    pub fn options(family: &str) -> &'static [Self] {
+        if crate::panels::mcu_module::codegen::family::is_esp(family) {
+            &[
+                Self::Philips,
+                Self::MsbFirst,
+                Self::PcmLongSync,
+                Self::PcmShortSync,
+            ]
+        } else {
+            &Self::ALL
+        }
+    }
+
     pub const ALL: [Self; 5] = [
         Self::Philips,
         Self::MsbFirst,
@@ -2198,6 +2230,20 @@ pub enum I2sFormat {
 }
 
 impl I2sFormat {
+    /// The data widths this family's HAL can actually build.
+    ///
+    /// The two lists overlap in two places. esp-hal names its widths
+    /// `Data{8,16,32}Channel{8,16,24,32}` and embassy names the STM32's four;
+    /// 16-in-16 and 32-in-32 are in both, and 16-in-32 and 24-in-32 are not
+    /// esp-hal shapes at all.
+    pub fn options(family: &str) -> &'static [Self] {
+        if crate::panels::mcu_module::codegen::family::is_esp(family) {
+            &[Self::Data16Channel16, Self::Data32Channel32]
+        } else {
+            &Self::ALL
+        }
+    }
+
     pub const ALL: [Self; 4] = [
         Self::Data16Channel16,
         Self::Data16Channel32,
@@ -3487,6 +3533,39 @@ impl VirtualModule {
     /// The peripheral instance this module targets.
     pub fn instance(&self) -> u8 {
         self.config.instance()
+    }
+}
+
+#[cfg(test)]
+mod i2s_option_tests {
+    use super::{I2sFormat, I2sMode, I2sStandard};
+
+    /// Everything the I2S module offers on an ESP must have an esp-hal shape.
+    ///
+    /// The three lists are hand-written against esp-hal's own constructors, so
+    /// this pins what is offered and what is deliberately left out. The STM32
+    /// side keeps every variant, which is the other half of the claim: the
+    /// narrowing is per family, not a general trim.
+    #[test]
+    fn an_esp_i2s_offers_only_what_esp_hal_can_build() {
+        // No `Config::new_tdm_lsb()` exists.
+        assert!(!I2sStandard::options("esp32c6").contains(&I2sStandard::LsbFirst));
+        assert_eq!(I2sStandard::options("esp32c6").len(), 4);
+        assert_eq!(
+            I2sStandard::options("stm32f4").len(),
+            I2sStandard::ALL.len()
+        );
+
+        // The two widths the two HALs both name.
+        assert_eq!(
+            I2sFormat::options("esp32c6"),
+            [I2sFormat::Data16Channel16, I2sFormat::Data32Channel32]
+        );
+        assert_eq!(I2sFormat::options("stm32f4").len(), I2sFormat::ALL.len());
+
+        // `I2s::new` calls `set_master()`; there is no follower entry point.
+        assert_eq!(I2sMode::options("esp32c6"), [I2sMode::Master]);
+        assert_eq!(I2sMode::options("stm32f4").len(), 2);
     }
 }
 
