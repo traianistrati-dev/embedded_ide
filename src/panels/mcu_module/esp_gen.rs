@@ -40,9 +40,10 @@
 //! ignoring where each pad IS, which only a datasheet can say.
 
 use super::clock::graph::model::{ClockGraph, Edge, Node, NodeKind, NodeState};
+use super::codegen::dma_data::DmaChannel;
 use super::esp_metadata::EspChip;
 use super::mcu_catalog::ToolchainKind;
-use super::mcu_def::{McuDefinition, PinDef, PinLayout, ProjectDef};
+use super::mcu_def::{DmaDef as McuDma, McuDefinition, PinDef, PinLayout, ProjectDef};
 use super::pins::logic::pin_function::PinFunction;
 
 /// GPIOs the metadata lists but a board cannot use, per chip.
@@ -602,6 +603,54 @@ const ESP32S3_QFN56: &[(u8, &str)] = &[
 /// [`pwm_channels`].
 const LEDC_SIX: &[&str] = &["esp32c2", "esp32c3", "esp32c6", "esp32h2"];
 
+/// The chip's DMA, in the shape the IDE's allocator and its DMA card expect.
+///
+/// # Why an ESP32 needs the `requests` table and a C5 does not
+///
+/// [`DmaDef::mux`] asks whether any channel serves any peripheral. On the GDMA
+/// parts — every RISC-V one, and the S3 — it does: the vendor gives all three
+/// channels the same compatibility list, so the allocator can take the first
+/// free one. The original ESP32 and the S2 are the opposite: `DMA_SPI2` is
+/// bolted to SPI2. There the list is INVERTED into `requests`, so asking for
+/// SPI2's channel can only ever return `DMA_SPI2`.
+///
+/// # The interrupt name is empty on purpose
+///
+/// [`DmaChannel::irq`] is embassy's `bind_interrupts!` key. esp-hal owns its DMA
+/// interrupt and no generated line names it, exactly as on the F1's blocking
+/// path — so the field is left empty rather than filled with the engine name,
+/// which would read like a binding that does not exist.
+fn dma_def(chip: &EspChip) -> Option<McuDma> {
+    if chip.dma.is_empty() {
+        return None;
+    }
+    let channels = chip
+        .dma
+        .iter()
+        .map(|c| DmaChannel {
+            peri: c.name.clone(),
+            irq: String::new(),
+        })
+        .collect();
+    let mut requests: Vec<(String, Vec<String>)> = Vec::new();
+    if !chip.dma_shared {
+        for c in &chip.dma {
+            for peri in &c.compatible {
+                match requests.iter_mut().find(|(p, _)| p == peri) {
+                    Some((_, chans)) => chans.push(c.name.clone()),
+                    None => requests.push((peri.clone(), vec![c.name.clone()])),
+                }
+            }
+        }
+        requests.sort();
+    }
+    Some(McuDma {
+        mux: chip.dma_shared,
+        channels,
+        requests,
+    })
+}
+
 /// The PWM channels this chip's pads can carry, or none.
 ///
 /// `esp32c5` and `esp32c61` have no `LEDC` in their metadata, so they get no PWM
@@ -1008,7 +1057,10 @@ pub fn definition(chip: &EspChip) -> Result<McuDefinition, String> {
             }),
             None => super::mcu_def::ClockDef::None,
         },
-        dma: None,
+        // From the vendor metadata, like everything else here. This is what
+        // makes the Configuration tab's DMA card real on an ESP: without it the
+        // card can only say the chip carries no channel data.
+        dma: dma_def(chip),
         irq_vectors: Vec::new(),
         usart_ip: None,
         sdmmc_ip: None,
@@ -1305,6 +1357,11 @@ mod tests {
                 want.difference(got).collect::<Vec<_>>()
             );
         }
+        // The DMA too. The C3's file is hand-written, so its GDMA block was
+        // typed in rather than generated — this is what keeps it from drifting
+        // away from what the metadata says, silently, at the next esp-metadata
+        // release.
+        assert_eq!(generated.dma, hand.dma, "the C3's DMA block has drifted");
         println!("{} pads agree, function for function", g.len());
     }
 

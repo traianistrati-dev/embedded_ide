@@ -151,6 +151,37 @@ impl SpiMaster {
     }
 }
 
+/// One DMA channel of the chip, and the engine that owns it.
+///
+/// Two shapes hide behind one macro, and the difference decides whether a
+/// channel can be handed out freely:
+///
+/// * **GDMA** (`AHB_GDMA`, every RISC-V part and the S3) — a pool. `DMA_CH0`
+///   serves any peripheral that asks, so the allocator just takes a free one.
+/// * **Per-peripheral DMA** (the original ESP32 and the S2) — `DMA_SPI2` is
+///   wired to SPI2 and to nothing else. Handing it to an I2S would not compile.
+///
+/// Which it is comes from [`DmaChannel::compatible`], not from the vendor's bare
+/// `((shared))` / `((split))` marker: the marker is one token that could change
+/// spelling, while the compatibility lists ARE the answer and are checkable.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DmaChannel {
+    /// `AHB_GDMA`, `SPI_DMA`, `I2S_DMA`, `CRYPTO_DMA`, `COPY_DMA`.
+    pub engine: String,
+    /// The `esp_hal::peripherals` singleton — `DMA_CH0`, `DMA_SPI2`.
+    pub name: String,
+    /// Every peripheral this channel may serve, as the vendor's
+    /// `compatible = [...]` states it: `[SPI2, UHCI0, I2S0, AES, SHA,
+    /// APB_SARADC, PARL_IO]` on an ESP32-C5, `[SPI2]` alone on an ESP32's
+    /// `DMA_SPI2`. Empty is real too — the S2's `DMA_COPY` serves nothing that
+    /// has a driver.
+    ///
+    /// This is the same list the C5 datasheet gives in prose ("shared by
+    /// peripherals with the GDMA feature, consisting of SPI2, UHCI0, I2S, AES,
+    /// SHA, ADC, and PARLIO"), which is how it was checked.
+    pub compatible: Vec<String>,
+}
+
 /// One chip, as the vendor's metadata describes it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EspChip {
@@ -180,6 +211,18 @@ pub struct EspChip {
     pub adc: Vec<(String, u8)>,
     /// Every peripheral singleton the chip has, GPIOs excluded.
     pub peripherals: Vec<String>,
+    /// The chip's DMA channels. Empty for a part with no DMA at all.
+    pub dma: Vec<DmaChannel>,
+    /// True when the channels are a POOL any peripheral may draw from (GDMA),
+    /// false when each is bolted to one peripheral.
+    ///
+    /// DERIVED, not read: every channel offering the same non-empty set of
+    /// peripherals is what "pool" means. Not a detail — it is exactly the
+    /// question [`DmaDef::mux`] asks, and getting it backwards would let the
+    /// allocator hand an ESP32's `DMA_SPI2` to an I2S.
+    ///
+    /// [`DmaDef::mux`]: crate::panels::mcu_module::mcu_def::DmaDef::mux
+    pub dma_shared: bool,
     /// Every output the PLL can be SET to, in Hz, lowest first.
     ///
     /// Two sources, because the vendor uses two shapes and they do not overlap:
@@ -543,6 +586,41 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
     peripherals.sort();
     peripherals.dedup();
 
+    // DMA. The macro emits each channel FOUR times — a bare name, an
+    // `any_channel` alias, the full entry, and the whole list again under a
+    // `shared(...)` / `split(...)` heading. Only the full entry carries
+    // `compatible =`, and only it starts with the engine's quoted name, so
+    // those two conditions together pick each channel exactly once.
+    let dma_body = body_of("for_each_dma_channel");
+    let dma: Vec<DmaChannel> = instances(&dma_body, "dma_channel")
+        .iter()
+        .filter(|t| t.starts_with('"') && t.contains("compatible ="))
+        .filter_map(|t| {
+            let f = fields(t);
+            let engine = f.first()?.trim_matches('"').to_owned();
+            let name = f.get(1)?.trim().to_owned();
+            let compatible = f
+                .iter()
+                .find_map(|x| x.trim().strip_prefix("compatible ="))
+                .map(bracket_list)
+                .unwrap_or_default();
+            Some(DmaChannel {
+                engine,
+                name,
+                compatible,
+            })
+        })
+        .collect();
+    // A pool is "every channel serves the same peripherals, and more than one
+    // of them". An ESP32's four channels each name a single different one, so
+    // this is false there — which is the whole difference.
+    //
+    // Deliberately NOT "more than one channel": the ESP32-C2's GDMA has exactly
+    // one, and it still serves either of two peripherals. Counting channels
+    // would have described that single pool channel as bolted to a peripheral.
+    let dma_shared = dma.first().is_some_and(|first| first.compatible.len() > 1)
+        && dma.iter().all(|c| c.compatible == dma[0].compatible);
+
     // `pub fn <node>_frequency(…) -> u32 { 480000000 }`, keeping only the
     // bodies that ARE a literal: the rest are computed from the live
     // configuration and cannot be read as a constant.
@@ -628,6 +706,8 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
         spi,
         adc,
         peripherals,
+        dma,
+        dma_shared,
         analog,
         pll_hz,
         xtal_hz,
@@ -865,6 +945,80 @@ macro_rules! for_each_peripheral {
         assert!(p.contains(&"LEDC".to_owned()), "{p:?}");
         // A pad is not a peripheral anyone shops for.
         assert!(!p.iter().any(|n| n.starts_with("GPIO")), "{p:?}");
+    }
+
+    /// The C5's GDMA, checked against the sentence its datasheet writes in prose.
+    ///
+    /// Section 4.1.1.4: "The GDMA has six independent channels, three transmit
+    /// channels and three receive channels. These channels are shared by
+    /// peripherals with the GDMA feature, consisting of SPI2, UHCI0, I2S, AES,
+    /// SHA, ADC, and PARLIO." Three channels, each with a TX and an RX half,
+    /// and one compatibility list of seven — which is what this asserts, under
+    /// the vendor's own spellings (`APB_SARADC` for the ADC, `PARL_IO`).
+    #[test]
+    #[ignore]
+    fn the_c5_gdma_matches_its_datasheet() {
+        let c5 = load(&vendor_dir().expect("esp-metadata"), "esp32c5").expect("parses");
+        assert_eq!(
+            c5.dma.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["DMA_CH0", "DMA_CH1", "DMA_CH2"],
+        );
+        assert!(c5.dma.iter().all(|c| c.engine == "AHB_GDMA"));
+        assert_eq!(
+            c5.dma[0].compatible,
+            [
+                "SPI2",
+                "UHCI0",
+                "I2S0",
+                "AES",
+                "SHA",
+                "APB_SARADC",
+                "PARL_IO"
+            ],
+        );
+        assert!(c5.dma_shared, "GDMA is a pool");
+    }
+
+    /// The two ESP32s whose DMA is NOT a pool must not be read as one.
+    ///
+    /// `DMA_SPI2` is wired to SPI2 and to nothing else. Were `dma_shared` true
+    /// here, the allocator would happily hand it to an I2S and the project
+    /// would not compile.
+    #[test]
+    #[ignore]
+    fn per_peripheral_dma_is_not_a_pool() {
+        let dir = vendor_dir().expect("esp-metadata");
+        for id in ["esp32", "esp32s2"] {
+            let c = load(&dir, id).expect("parses");
+            assert!(!c.dma_shared, "{id}: bolted channels read as a pool");
+            let spi2 = c
+                .dma
+                .iter()
+                .find(|d| d.name == "DMA_SPI2")
+                .unwrap_or_else(|| panic!("{id} has no DMA_SPI2"));
+            assert_eq!(spi2.compatible, ["SPI2"], "{id}");
+        }
+        // The S2 has a channel that serves nothing with a driver; an empty
+        // list is real data, not a parse failure.
+        let s2 = load(&dir, "esp32s2").unwrap();
+        let copy = s2.dma.iter().find(|d| d.name == "DMA_COPY").unwrap();
+        assert!(copy.compatible.is_empty());
+    }
+
+    /// Every shipped chip has DMA, and it is read the same way for all of them.
+    #[test]
+    #[ignore]
+    fn every_chip_reports_its_dma_channels() {
+        let dir = vendor_dir().expect("esp-metadata");
+        for id in RISCV_CHIPS.iter().chain(&["esp32", "esp32s2", "esp32s3"]) {
+            let c = load(&dir, id).expect("parses");
+            assert!(!c.dma.is_empty(), "{id}: no DMA channels read");
+            assert!(
+                c.dma.iter().all(|d| d.name.starts_with("DMA_")),
+                "{id}: a channel is not a DMA_* singleton: {:?}",
+                c.dma
+            );
+        }
     }
 
     #[test]

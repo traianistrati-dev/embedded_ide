@@ -307,9 +307,15 @@ fn dma_note(
         // ESP32. It reached them because the branch was excluded for
         // one family by name (`!= "stm32f1"`) rather than by asking
         // whether the family uses a `DmaDef` at all.
-        format!(
-            "The {family} backend generates no DMA. esp-hal has the drivers; nothing here emits them yet, so a bus on this chip is a blocking esp-hal driver written inline in main.rs."
-        )
+        if !on_dma_runtime {
+            format!(
+                "No DMA on this runtime for {family}. esp-hal's DMA lives on the async drivers, so switch to the Async runtime (System tab), then set a SPI module's Async init to Async-DMA."
+            )
+        } else {
+            format!(
+                "No bus is on DMA yet. Set a SPI module's Async init to Async-DMA and the channel it takes appears here. On {family} a channel is not split into TX and RX: esp-hal's `with_dma` takes one and drives both halves."
+            )
+        }
     } else if !on_dma_runtime {
         format!(
             "No DMA on this runtime for {family}. Switch a bus to the Async runtime \

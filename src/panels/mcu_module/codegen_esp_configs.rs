@@ -37,7 +37,8 @@
 
 use super::codegen_esp::EspRuntime;
 use super::modules::{
-    I2cModuleConfig, Parity, SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, TimerModuleConfig,
+    UsartModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -297,7 +298,7 @@ fn uart_file(n: u8, sigs: &[&str], cfg: Option<&UsartModuleConfig>, rt: EspRunti
 // ── SPI ──────────────────────────────────────────────────────────────────────
 
 fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime) -> String {
-    let consts = format!(
+    let mut consts = format!(
         "const FREQUENCY_HZ: u32 = {};\nconst MODE: Mode = Mode::_{}; // CPOL/CPHA, 0..=3\n",
         cfg.map_or(1_000_000, |c| c.clock_hz),
         cfg.map_or(0, |c| c.mode).min(3),
@@ -323,6 +324,14 @@ fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime)
             ("cs", "with_cs"),
         ],
     );
+    // Only meaningful on the DMA path, and only emitted there: an unused
+    // constant in a generated file is a warning in the user's project.
+    if rt == EspRuntime::Async && cfg.is_some_and(|c| c.async_mode == AsyncBusMode::AsyncDma) {
+        consts.push_str(
+            "const DMA_BUFFER_BYTES: usize = 4096; // per direction, static-backed
+",
+        );
+    }
     let ctor = "    let config = Config::default()\n\
                 \x20       .with_frequency(Rate::from_hz(FREQUENCY_HZ))\n\
                 \x20       .with_mode(MODE);\n\
@@ -338,14 +347,20 @@ fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime)
          {ctor}\
          {chain}}}\n"
     );
+    let on_dma =
+        rt == EspRuntime::Async && cfg.is_some_and(|c| c.async_mode == AsyncBusMode::AsyncDma);
     if rt == EspRuntime::Async {
-        body.push_str(&async_twin(
-            &format!("SPI{n} master — async driver."),
-            &params,
-            "Spi",
-            ctor,
-            &chain,
-        ));
+        if on_dma {
+            body.push_str(&spi_dma_twin(n, &params, ctor, &chain));
+        } else {
+            body.push_str(&async_twin(
+                &format!("SPI{n} master — async driver."),
+                &params,
+                "Spi",
+                ctor,
+                &chain,
+            ));
+        }
     }
     let example = example_for(
         &format!("Using SPI{n}"),
@@ -384,15 +399,64 @@ fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime)
     file(
         &format!(
             "{}\
+             {}\
              use esp_hal::gpio::interconnect::{{PeripheralInput, PeripheralOutput}};\n\
              use esp_hal::spi::Mode;\n\
              use esp_hal::spi::master::{{Config, Instance, Spi}};\n\
              use esp_hal::time::Rate;\n",
-            mode_import(rt)
+            mode_import(rt),
+            if on_dma {
+                "use esp_hal::dma::{DmaChannelFor, DmaRxBuf, DmaTxBuf};\n\
+                 use esp_hal::dma_buffers;\n\
+                 use esp_hal::spi::master::{AnySpi, SpiDmaBus};\n"
+            } else {
+                ""
+            },
         ),
         &consts,
         &body,
         &example,
+    )
+}
+
+/// The DMA twin of `init_async`: the same bus, moved by the GDMA instead of by
+/// the CPU.
+///
+/// # Why this is a separate shape and not a flag on [`async_twin`]
+///
+/// `.into_async()` alone gives an `Spi<'_, Async>` that still copies every byte
+/// through the CPU. Going to DMA changes the RETURN TYPE — `SpiDmaBus` — and
+/// needs two owned descriptor buffers built before the bus exists, so there is
+/// no line to append: the whole body differs.
+///
+/// The buffers are `static`-backed by `dma_buffers!`, which is why the size is a
+/// constant here rather than a parameter: they must outlive the transfer, and a
+/// caller-supplied slice could not.
+fn spi_dma_twin(n: u8, params: &str, ctor: &str, chain: &str) -> String {
+    format!(
+        "\n\
+         /// SPI{n} master — async driver on DMA.\n\
+         ///\n\
+         /// Same construction as `init`, then `.with_dma()` and a pair of DMA\n\
+         /// buffers. The GDMA moves the bytes, so a transfer costs the CPU one\n\
+         /// `.await` rather than one interrupt per word.\n\
+         ///\n\
+         /// The channel comes from main.rs. On this chip any free channel serves\n\
+         /// any peripheral, so which one you get is the IDE's choice — see the\n\
+         /// DMA card in the Configuration tab, or pin one by hand in the SPI\n\
+         /// module.\n\
+         pub fn init_async<'d>(\n\
+         {params}\x20   dma: impl DmaChannelFor<AnySpi<'d>>,\n\
+         ) -> SpiDmaBus<'d, Async> {{\n\
+         \x20   let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =\n\
+         \x20       dma_buffers!(DMA_BUFFER_BYTES);\n\
+         \x20   let dma_rx = DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();\n\
+         \x20   let dma_tx = DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();\n\
+         {ctor}\
+         {chain}\x20       .with_dma(dma)\n\
+         \x20       .with_buffers(dma_rx, dma_tx)\n\
+         \x20       .into_async()\n\
+         }}\n"
     )
 }
 

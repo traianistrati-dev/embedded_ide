@@ -5,7 +5,48 @@ McuDefinition(
     package: "QFN56",
     max_mhz: Some(240),
     sram_kb: Some(320),
-    dma: None,
+    dma: Some(DmaDef(
+        mux: false,
+        channels: [
+            DmaChannel(
+                peri: "DMA_SPI2",
+                irq: "",
+            ),
+            DmaChannel(
+                peri: "DMA_SPI3",
+                irq: "",
+            ),
+            DmaChannel(
+                peri: "DMA_I2S0",
+                irq: "",
+            ),
+            DmaChannel(
+                peri: "DMA_CRYPTO",
+                irq: "",
+            ),
+            DmaChannel(
+                peri: "DMA_COPY",
+                irq: "",
+            ),
+        ],
+        requests: [
+            ("AES", [
+                "DMA_CRYPTO",
+            ]),
+            ("I2S0", [
+                "DMA_I2S0",
+            ]),
+            ("SHA", [
+                "DMA_CRYPTO",
+            ]),
+            ("SPI2", [
+                "DMA_SPI2",
+            ]),
+            ("SPI3", [
+                "DMA_SPI3",
+            ]),
+        ],
+    )),
     cpu: "Xtensa LX",
     toolchain: EspRust,
     project: ProjectDef(

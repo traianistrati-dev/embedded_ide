@@ -1646,6 +1646,7 @@ mod tests {
             line,
             "esp32c3",
             crate::panels::mcu_module::codegen_esp::EspRuntime::Blocking,
+            None,
         );
         assert!(
             esp.contains(line),

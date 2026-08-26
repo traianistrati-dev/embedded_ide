@@ -1191,7 +1191,12 @@ pub fn module_config_ui(
         ui.end_row();
     };
 
-    // Async runtime only (SPI/I2C): blocking embassy driver vs async-DMA.
+    // Async runtime only (SPI/I2C): blocking driver vs async-DMA.
+    //
+    // The wording is deliberately HAL-neutral. It named embassy's constructors
+    // outright, on a row an Espressif chip sees too — where the driver is
+    // esp-hal's and the DMA is the GDMA. Whatever the chip, the choice is the
+    // same one: a standard blocking bus, or an .await-able one on DMA.
     let async_row = |ui: &mut egui::Ui, mode: &mut AsyncBusMode| {
         ui.label("Async init");
         egui::ComboBox::from_id_salt("async_mode")
@@ -1202,7 +1207,7 @@ pub fn module_config_ui(
             .show_ui(ui, |ui| {
                 ui.selectable_value(mode, AsyncBusMode::Blocking, "Blocking (embedded-hal 1.0)")
                     .on_hover_text(
-                        "embassy new_blocking -> a STANDARD blocking embedded-hal 1.0 bus. \
+                        "A STANDARD blocking embedded-hal 1.0 bus. \
                          No DMA — compiles out of the box. Fine inside an async project.",
                     );
                 ui.selectable_value(
@@ -1211,9 +1216,11 @@ pub fn module_config_ui(
                     "Async-DMA (embedded-hal-async)",
                 )
                 .on_hover_text(
-                    "embassy DMA new -> an .await-able embedded-hal-async bus. Needs DMA \
-                         channels: main.rs gets a TODO line to fill with channels valid for \
-                         this peripheral on your chip (won't compile until you do).",
+                    "An .await-able bus whose bytes are moved by DMA. On an STM32 the 
+                         channels are allocated for you (or pinned below); on an 
+                         ESP32 it is the one GDMA channel esp-hal takes, passed 
+                         from main.rs. Either way the Configuration tab's DMA card 
+                         shows what was taken.",
                 );
             });
         ui.end_row();

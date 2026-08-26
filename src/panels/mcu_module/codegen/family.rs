@@ -262,6 +262,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
         &mcu.family,
         runtime,
+        mcu.dma.as_ref(),
     )
 }
 
@@ -324,6 +325,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
         &mcu.family,
         runtime,
+        mcu.dma.as_ref(),
     )
 }
 
@@ -842,6 +844,16 @@ pub fn rtic_unavailable_reason(family: &str) -> Option<String> {
 pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
     use crate::panels::mcu_module::mcu::model::Runtime;
     match mcu.runtime {
+        // The ESP path is its own: esp-hal's `with_dma` takes ONE channel per
+        // bus, not a TX/RX pair, so the plan is keyed by instance rather than
+        // by direction.
+        Runtime::Async if is_esp(&mcu.family) => codegen_esp::dma_plan(
+            mcu.dma.as_ref(),
+            EspRuntime::Async,
+            &modules::spi_configs(&mcu.modules),
+        )
+        .into_values()
+        .collect(),
         Runtime::Async if async_supported(&mcu.family) => async_periphs(mcu).dma_uses,
         // Only the F1 backend has a blocking DMA transport; every other family
         // reaches DMA through embassy, i.e. through the async runtime.
@@ -1493,6 +1505,156 @@ mod tests {
         );
         // Round-trip is stable — a switch there and back is not a rewrite.
         assert_eq!(back, blocking, "blocking -> async -> blocking is identity");
+    }
+
+    /// The Configuration tab's DMA card is fed from the ESP plan too.
+    ///
+    /// `dma_uses` had two arms — embassy-async and F1-blocking — and an ESP fell
+    /// through both to `Vec::new()`, so the card could only ever say "no bus is
+    /// on DMA" no matter what the project did.
+    #[test]
+    #[ignore]
+    fn an_esp_reports_its_dma_to_the_configuration_card() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::modules::{
+            AsyncBusMode, ModuleConfig, ModuleKind, SpiModuleConfig, VirtualModule,
+        };
+        let def = crate::panels::mcu_module::builtins::builtin_for("esp32c5").expect("c5");
+        let mut mcu = def.build_mcu();
+        mcu.runtime = Runtime::Async;
+        assert!(dma_uses(&mcu).is_empty(), "nothing asked for DMA yet");
+
+        let mut cfg = SpiModuleConfig::new(2);
+        cfg.async_mode = AsyncBusMode::AsyncDma;
+        mcu.modules.push(VirtualModule {
+            id: "spi_2".into(),
+            kind: ModuleKind::GenericInterfaceSpi,
+            name: "SPI2".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Spi(cfg),
+            connections: Vec::new(),
+        });
+        let uses = dma_uses(&mcu);
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].peri, "DMA_CH0");
+        assert_eq!(uses[0].user, "SPI2");
+
+        // …and it is an ASYNC-runtime feature: the blocking project takes none.
+        mcu.runtime = Runtime::Blocking;
+        assert!(dma_uses(&mcu).is_empty());
+    }
+
+    /// The same, for an ESP chip whose SPI is on the GDMA.
+    ///
+    /// The DMA path changes the config file's RETURN TYPE (`SpiDmaBus`), adds
+    /// two owned descriptor buffers and takes an extra `init_async` argument
+    /// from main.rs. None of that can be checked by reading the string: it
+    /// either compiles against esp-hal or it does not.
+    ///
+    /// ```text
+    /// ESP_DMA_OUT=/some/dir EIDE_ESP_CHIP=esp32c5 \
+    ///     cargo test write_esp_dma_project -- --ignored
+    /// cd /some/dir && cargo build --release
+    /// ```
+    ///
+    /// The chip defaults to the ESP32-C5, the part this was written for; any
+    /// GDMA part works, and the pads are chosen by SEARCH because the numbering
+    /// differs between them.
+    #[test]
+    #[ignore]
+    fn write_esp_dma_project() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::modules::{
+            AsyncBusMode, ModuleConfig, ModuleKind, SpiModuleConfig, VirtualModule,
+        };
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+        use crate::panels::mcu_module::project_gen::{self, AsyncFlavor, ConfigFile};
+        use std::fs;
+        use std::path::PathBuf;
+
+        let out = PathBuf::from(
+            std::env::var("ESP_DMA_OUT").expect("set ESP_DMA_OUT to the target folder"),
+        );
+        let id = std::env::var("EIDE_ESP_CHIP").unwrap_or_else(|_| "esp32c5".into());
+        let def =
+            crate::panels::mcu_module::builtins::builtin_for(&id).expect("a bundled ESP chip");
+        let mut mcu = def.build_mcu();
+        mcu.runtime = Runtime::Async;
+
+        // By search, not by name: GPIO4 is a JTAG pad on one part and a plain
+        // pad on the next, and the pin NUMBERS differ between packages.
+        let mut want = vec![
+            PinFunction::SpiSck(2),
+            PinFunction::SpiMosi(2),
+            PinFunction::SpiMiso(2),
+        ];
+        for p in mcu.iter_all_pins_mut() {
+            if p.reserved || p.selected_function != PinFunction::Unset {
+                continue;
+            }
+            let Some(ix) = want.iter().position(|f| p.available_functions.contains(f)) else {
+                continue;
+            };
+            p.selected_function = want.remove(ix);
+        }
+        assert!(want.is_empty(), "{id}: no pad for {want:?}");
+
+        let mut spi_cfg = SpiModuleConfig::new(2);
+        spi_cfg.async_mode = AsyncBusMode::AsyncDma;
+        mcu.modules.push(VirtualModule {
+            id: "spi_2".into(),
+            kind: ModuleKind::GenericInterfaceSpi,
+            name: "SPI2".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Spi(spi_cfg),
+            connections: Vec::new(),
+        });
+
+        let files = crate::panels::mcu_module::codegen::family::backend_for_runtime(
+            &mcu.family,
+            mcu.runtime,
+        )
+        .expect("an ESP backend")
+        .config_files(&mcu);
+        let main_rs = crate::panels::mcu_module::codegen::family::backend_for_runtime(
+            &mcu.family,
+            mcu.runtime,
+        )
+        .expect("an ESP backend")
+        .fresh_main_rs(&mcu);
+
+        let cargo_toml =
+            project_gen::gen_config(ConfigFile::CargoToml, &def.project, &def.toolchain);
+        let cargo_toml = project_gen::ensure_async_deps(
+            &cargo_toml,
+            true,
+            AsyncFlavor::Esp(&def.project.probe_chip),
+            false,
+            false,
+            false,
+            &[],
+        );
+        fs::create_dir_all(out.join("src/pins/configs")).unwrap();
+        fs::create_dir_all(out.join(".cargo")).unwrap();
+        fs::write(out.join("Cargo.toml"), cargo_toml).unwrap();
+        fs::write(
+            out.join(".cargo/config.toml"),
+            project_gen::gen_config(ConfigFile::CargoConfig, &def.project, &def.toolchain),
+        )
+        .unwrap();
+        fs::write(out.join("src/main.rs"), &main_rs).unwrap();
+        let mut mods = String::new();
+        for (name, body) in &files {
+            fs::write(out.join("src/pins/configs").join(name), body).unwrap();
+            mods.push_str(&format!("pub mod {};\n", name.trim_end_matches(".rs")));
+        }
+        fs::write(out.join("src/pins/configs/mod.rs"), mods).unwrap();
+        fs::write(out.join("src/pins/mod.rs"), "pub mod configs;\n").unwrap();
+        assert!(
+            main_rs.contains("peripherals.DMA_"),
+            "main.rs passes no DMA channel:\n{main_rs}"
+        );
+        println!("wrote {id} DMA project to {}", out.display());
     }
 
     /// Writes the EXACT files an Async ESP32-C3 project generates (main.rs,

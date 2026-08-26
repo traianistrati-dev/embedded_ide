@@ -5,7 +5,41 @@ McuDefinition(
     package: "QFN48",
     max_mhz: Some(240),
     sram_kb: Some(328),
-    dma: None,
+    dma: Some(DmaDef(
+        mux: false,
+        channels: [
+            DmaChannel(
+                peri: "DMA_SPI2",
+                irq: "",
+            ),
+            DmaChannel(
+                peri: "DMA_SPI3",
+                irq: "",
+            ),
+            DmaChannel(
+                peri: "DMA_I2S0",
+                irq: "",
+            ),
+            DmaChannel(
+                peri: "DMA_I2S1",
+                irq: "",
+            ),
+        ],
+        requests: [
+            ("I2S0", [
+                "DMA_I2S0",
+            ]),
+            ("I2S1", [
+                "DMA_I2S1",
+            ]),
+            ("SPI2", [
+                "DMA_SPI2",
+            ]),
+            ("SPI3", [
+                "DMA_SPI3",
+            ]),
+        ],
+    )),
     cpu: "Xtensa LX",
     toolchain: EspRust,
     project: ProjectDef(

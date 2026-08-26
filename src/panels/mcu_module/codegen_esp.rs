@@ -38,8 +38,12 @@
 
 use super::clock::ClockConfig;
 use super::clock::graph::evaluate;
+use super::codegen::dma_map::DmaUse;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
-use super::modules::{I2cModuleConfig, SpiModuleConfig, TimerModuleConfig, UsartModuleConfig};
+use super::mcu_def::DmaDef;
+use super::modules::{
+    AsyncBusMode, I2cModuleConfig, SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
+};
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
@@ -152,6 +156,9 @@ pub fn fresh_esp32c3_main_rs(
     // variants exist, and they differ per part.
     chip: &str,
     runtime: EspRuntime,
+    // The chip's DMA channels, so a bus asking for one can be given
+    // it here rather than left with a TODO.
+    dma: Option<&DmaDef>,
 ) -> String {
     let section = make_gen_section(
         pins,
@@ -163,6 +170,7 @@ pub fn fresh_esp32c3_main_rs(
         custom_inits,
         chip,
         runtime,
+        dma,
     );
     format!(
         "{}{section}\n{USER_TAIL}",
@@ -187,6 +195,9 @@ pub fn update_esp32c3_main_rs(
     // variants exist, and they differ per part.
     chip: &str,
     runtime: EspRuntime,
+    // The chip's DMA channels, so a bus asking for one can be given
+    // it here rather than left with a TODO.
+    dma: Option<&DmaDef>,
 ) -> String {
     let new_section = make_gen_section(
         pins,
@@ -198,6 +209,7 @@ pub fn update_esp32c3_main_rs(
         custom_inits,
         chip,
         runtime,
+        dma,
     );
     if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
@@ -317,6 +329,7 @@ fn make_gen_section(
     // variants exist, and they differ per part.
     chip: &str,
     runtime: EspRuntime,
+    dma: Option<&DmaDef>,
 ) -> String {
     let configured: Vec<&Pin> = pins
         .iter()
@@ -464,7 +477,8 @@ fn make_gen_section(
     // code, and it is the ONLY record a reopened project has — `parse_main_rs`
     // rebuilds the diagram from these lines (`mcu.config` stores no pin
     // functions). Moving them into the config module would lose the pins.
-    for (label, calls) in bus_sections(&configured, usart, spi, i2c, runtime) {
+    let dma_plan = dma_plan(dma, runtime, spi);
+    for (label, calls) in bus_sections(&configured, usart, spi, i2c, runtime, &dma_plan) {
         body.push('\n');
         body.push_str(&format!("    // ── {label} ──\n"));
         body.push_str(&calls);
@@ -737,6 +751,88 @@ pub const I2C_ORDER: &[&str] = &["scl", "sda"];
 ///
 /// Signals the canvas did not wire are simply absent — `init` takes only what
 /// its template declares (SCK+MOSI for SPI, both lines for UART/I2C), so a
+/// Which GDMA channel each DMA-enabled bus gets, and who has it.
+///
+/// # One channel, not two
+///
+/// Everywhere else in this IDE a bus on DMA takes a TX channel and an RX
+/// channel. esp-hal does not work that way: `with_dma` takes ONE channel, whose
+/// two halves (`DMA_IN_CHn` / `DMA_OUT_CHn`) the driver drives together. So a
+/// SPI here consumes a single entry, and a module's hand-pinned `dma_tx` is
+/// read as "the channel" — `dma_rx` is not consulted at all.
+///
+/// # Allocation
+///
+/// Hand-pinned channels are reserved first, exactly as on the STM32 path, so a
+/// choice made in one module is never handed to another. After that the buses
+/// take free channels in instance order. On a pool chip (`mux`) any channel
+/// serves any peripheral; on the original ESP32 and the S2 the `requests` table
+/// says which ones a peripheral may have, and a bus whose channels are all
+/// taken gets none — the config file is still written, and main.rs says so.
+pub(crate) fn dma_plan(
+    dma: Option<&DmaDef>,
+    runtime: EspRuntime,
+    spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
+) -> BTreeMap<u8, DmaUse> {
+    let mut out = BTreeMap::new();
+    if runtime != EspRuntime::Async {
+        return out;
+    }
+    let Some(dma) = dma else {
+        return out;
+    };
+    let on_dma: Vec<u8> = spi_cfg
+        .iter()
+        .filter(|(_, c)| c.async_mode == AsyncBusMode::AsyncDma)
+        .map(|(n, _)| *n)
+        .collect();
+
+    // Reserve every hand-pinned channel BEFORE allocating, so the allocator
+    // cannot hand one of them to a different bus.
+    let mut taken: Vec<String> = on_dma
+        .iter()
+        .filter_map(|n| spi_cfg.get(n))
+        .map(|c| c.dma_tx.trim().to_owned())
+        .filter(|c| !c.is_empty())
+        .collect();
+
+    for n in on_dma {
+        let cfg = &spi_cfg[&n];
+        let manual = cfg.dma_tx.trim();
+        let peri = if !manual.is_empty() {
+            manual.to_owned()
+        } else {
+            // A pool offers every channel; a bolted DMA offers only the ones
+            // its request table names for this peripheral.
+            let allowed: Vec<&str> = if dma.mux {
+                dma.channels.iter().map(|c| c.peri.as_str()).collect()
+            } else {
+                dma.requests
+                    .iter()
+                    .find(|(req, _)| *req == format!("SPI{n}"))
+                    .map(|(_, chans)| chans.iter().map(String::as_str).collect())
+                    .unwrap_or_default()
+            };
+            let Some(free) = allowed.into_iter().find(|c| !taken.iter().any(|t| t == c)) else {
+                continue;
+            };
+            taken.push(free.to_owned());
+            free.to_owned()
+        };
+        out.insert(
+            n,
+            DmaUse {
+                peri,
+                // esp-hal owns the DMA interrupt; no generated line names it.
+                irq: String::new(),
+                user: format!("SPI{n}"),
+                manual: !manual.is_empty(),
+            },
+        );
+    }
+    out
+}
+
 /// half-wired bus is reported as a TODO comment rather than emitting a call
 /// that would not compile.
 fn bus_sections(
@@ -745,6 +841,8 @@ fn bus_sections(
     spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
     i2c_cfg: &BTreeMap<u8, I2cModuleConfig>,
     runtime: EspRuntime,
+    // The channel each DMA-enabled bus was given — see [`dma_plan`].
+    dma_plan: &BTreeMap<u8, DmaUse>,
 ) -> Vec<(String, String)> {
     let (uart, spi, i2c) = collect_buses(configured);
     let mut out = Vec::new();
@@ -763,7 +861,10 @@ fn bus_sections(
                    order: &[&'static str],
                    handle: String,
                    module: String,
-                   periph: String| {
+                   periph: String,
+                   // Appended after the pins, because that is where `init`
+                   // takes it: the DMA channel, on a bus that asked for one.
+                   tail: Option<String>| {
         let mut body = String::new();
         let mut args = Vec::new();
         for sig in order.iter().filter(|s| pins.contains_key(*s)) {
@@ -776,6 +877,7 @@ fn bus_sections(
             ));
             args.push(var);
         }
+        args.extend(tail);
         body.push_str(&format!(
             "    let mut {handle} = pins::configs::{module}::{init_fn}({periph}, {});\n",
             args.join(", ")
@@ -796,6 +898,7 @@ fn bus_sections(
                 format!("_uart{n}{sfx}"),
                 format!("uart{n}"),
                 format!("peripherals.UART{n}"),
+                None,
             ),
         ));
     }
@@ -812,6 +915,10 @@ fn bus_sections(
                 format!("_spi{n}{sfx}"),
                 format!("spi{n}"),
                 format!("peripherals.SPI{n}"),
+                // A bus the allocator could not serve gets no channel and no
+                // argument - and `init_async` without DMA is what the config
+                // file then holds, so the two always agree.
+                dma_plan.get(n).map(|u| format!("peripherals.{}", u.peri)),
             ),
         ));
     }
@@ -828,6 +935,7 @@ fn bus_sections(
                 format!("_i2c{n}{sfx}"),
                 format!("i2c{n}"),
                 format!("peripherals.I2C{n}"),
+                None,
             ),
         ));
     }
@@ -893,6 +1001,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Blocking,
+            None,
         );
         assert_eq!(
             code.matches("Ledc::new(peripherals.LEDC)").count(),
@@ -939,6 +1048,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Blocking,
+            None,
         );
         assert!(!code.contains("Ledc"), "{code}");
     }
@@ -982,6 +1092,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Blocking,
+            None,
         );
         assert!(
             code.contains("CpuClock::_160MHz"),
@@ -1005,6 +1116,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Blocking,
+            None,
         );
         assert!(
             code.contains("CpuClock::_80MHz"),
@@ -1028,6 +1140,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Blocking,
+            None,
         );
         assert!(code.contains("CpuClock::max()"), "{code}");
     }
@@ -1048,6 +1161,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Blocking,
+            None,
         );
         assert_eq!(parse_mcu_id(&fresh).as_deref(), Some("esp32c3-graph"));
         let updated = update_esp32c3_main_rs(
@@ -1063,6 +1177,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Blocking,
+            None,
         );
         assert_eq!(parse_mcu_id(&updated).as_deref(), Some("esp32c3-graph"));
     }
@@ -1087,6 +1202,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Blocking,
+            None,
         );
         assert!(
             blocking.contains(&format!("// MCU: ESP32-C3 | HAL: esp-hal {hal} (blocking)")),
@@ -1113,6 +1229,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Async,
+            None,
         );
         assert!(
             updated.contains(&format!(
@@ -1147,6 +1264,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Async,
+            None,
         );
         assert_eq!(again, updated, "re-splice must not churn the header");
     }
@@ -1188,6 +1306,7 @@ mod tests {
                 "",
                 "esp32c3",
                 runtime,
+                None,
             );
             for (i, line) in code.lines().enumerate() {
                 if let Some((_, comment)) = line.split_once("//") {
@@ -1263,6 +1382,7 @@ mod tests {
             "",
             "esp32c3",
             EspRuntime::Blocking,
+            None,
         );
         // The baud lives in the CONFIG MODULE now, not in main.rs — main.rs
         // only names the module. (The consts themselves are covered by
@@ -1281,5 +1401,111 @@ mod tests {
         // project parses back.
         assert!(code.contains("let gpio20_usart0_rx = peripherals.GPIO20; // USART0  RX"));
         assert!(code.contains("let gpio21_usart0_tx = peripherals.GPIO21; // USART0  TX"));
+    }
+
+    // ── DMA ──────────────────────────────────────────────────────────────────
+
+    fn gdma(n: usize) -> DmaDef {
+        DmaDef {
+            mux: true,
+            channels: (0..n)
+                .map(
+                    |i| crate::panels::mcu_module::codegen::dma_data::DmaChannel {
+                        peri: format!("DMA_CH{i}"),
+                        irq: String::new(),
+                    },
+                )
+                .collect(),
+            requests: Vec::new(),
+        }
+    }
+
+    fn spi_on_dma(instance: u8) -> SpiModuleConfig {
+        let mut c = SpiModuleConfig::new(instance);
+        c.async_mode = AsyncBusMode::AsyncDma;
+        c
+    }
+
+    /// A pool hands out free channels in instance order.
+    #[test]
+    fn gdma_channels_are_allocated_in_order() {
+        let dma = gdma(3);
+        let spi: BTreeMap<u8, SpiModuleConfig> =
+            [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi);
+        assert_eq!(plan[&2].peri, "DMA_CH0");
+        assert_eq!(plan[&3].peri, "DMA_CH1");
+        assert!(plan.values().all(|u| !u.manual && u.irq.is_empty()));
+    }
+
+    /// A hand-pinned channel is reserved BEFORE anything is allocated, so the
+    /// bus emitted first cannot be handed the channel a later one asked for.
+    #[test]
+    fn a_pinned_channel_is_never_allocated_to_another_bus() {
+        let dma = gdma(3);
+        let mut later = spi_on_dma(3);
+        later.dma_tx = "DMA_CH0".into();
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2)), (3u8, later)].into();
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi);
+        assert_eq!(plan[&3].peri, "DMA_CH0", "the pinned one is honoured");
+        assert!(plan[&3].manual);
+        assert_eq!(plan[&2].peri, "DMA_CH1", "and SPI2 had to take the next");
+    }
+
+    /// On the original ESP32 a channel is bolted to one peripheral, so SPI3 may
+    /// only ever be given `DMA_SPI3` — never the first free channel.
+    #[test]
+    fn a_bolted_channel_follows_the_request_table() {
+        let dma = DmaDef {
+            mux: false,
+            channels: ["DMA_SPI2", "DMA_SPI3", "DMA_I2S0"]
+                .iter()
+                .map(
+                    |p| crate::panels::mcu_module::codegen::dma_data::DmaChannel {
+                        peri: (*p).to_owned(),
+                        irq: String::new(),
+                    },
+                )
+                .collect(),
+            requests: vec![
+                ("SPI2".into(), vec!["DMA_SPI2".into()]),
+                ("SPI3".into(), vec!["DMA_SPI3".into()]),
+            ],
+        };
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(3u8, spi_on_dma(3))].into();
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi);
+        assert_eq!(plan[&3].peri, "DMA_SPI3");
+    }
+
+    /// More DMA buses than channels: the ones that fit are served and the rest
+    /// get nothing — rather than every bus being handed `DMA_CH0`.
+    #[test]
+    fn a_bus_with_no_channel_left_gets_none() {
+        let dma = gdma(1);
+        let spi: BTreeMap<u8, SpiModuleConfig> =
+            [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi);
+        assert_eq!(plan[&2].peri, "DMA_CH0");
+        assert!(!plan.contains_key(&3));
+    }
+
+    /// The switch is an ASYNC one. A blocking project ignores it entirely —
+    /// esp-hal's DMA surface is on the async drivers.
+    #[test]
+    fn the_blocking_runtime_allocates_nothing() {
+        let dma = gdma(3);
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2))].into();
+        assert!(dma_plan(Some(&dma), EspRuntime::Blocking, &spi).is_empty());
+        // …and a chip with no channel data cannot be served on any runtime.
+        assert!(dma_plan(None, EspRuntime::Async, &spi).is_empty());
+    }
+
+    /// A SPI that did NOT ask for DMA takes no channel, so the two paths never
+    /// disagree about how many arguments `init_async` has.
+    #[test]
+    fn a_bus_that_did_not_ask_for_dma_takes_no_channel() {
+        let dma = gdma(3);
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, SpiModuleConfig::new(2))].into();
+        assert!(dma_plan(Some(&dma), EspRuntime::Async, &spi).is_empty());
     }
 }

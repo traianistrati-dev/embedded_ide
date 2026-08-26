@@ -3,6 +3,23 @@ McuDefinition(
     display_name: "ESP32-C3",
     family: "esp32c3",
     package: "QFN32",
+    dma: Some(DmaDef(
+        mux: true,
+        channels: [
+            DmaChannel(
+                peri: "DMA_CH0",
+                irq: "",
+            ),
+            DmaChannel(
+                peri: "DMA_CH1",
+                irq: "",
+            ),
+            DmaChannel(
+                peri: "DMA_CH2",
+                irq: "",
+            ),
+        ],
+    )),
     max_mhz: Some(160),
     sram_kb: Some(384),
     cpu: "RISC-V 32-bit",

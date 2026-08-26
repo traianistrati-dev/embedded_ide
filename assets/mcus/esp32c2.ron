@@ -5,7 +5,15 @@ McuDefinition(
     package: "QFN24",
     max_mhz: Some(120),
     sram_kb: Some(256),
-    dma: None,
+    dma: Some(DmaDef(
+        mux: true,
+        channels: [
+            DmaChannel(
+                peri: "DMA_CH0",
+                irq: "",
+            ),
+        ],
+    )),
     cpu: "RISC-V 32-bit",
     toolchain: EspRust,
     project: ProjectDef(
