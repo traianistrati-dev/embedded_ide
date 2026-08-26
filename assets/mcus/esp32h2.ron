@@ -133,6 +133,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -221,6 +247,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -316,6 +368,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -403,6 +481,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -490,6 +594,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -577,6 +707,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -664,6 +820,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -751,6 +933,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -838,6 +1046,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -939,6 +1173,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1030,6 +1290,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1121,6 +1407,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1212,6 +1524,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1303,6 +1641,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1394,6 +1758,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1483,6 +1873,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1570,6 +1986,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1657,6 +2099,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,
@@ -1744,6 +2212,32 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    ParlData(
+                        lane: 0,
+                    ),
+                    ParlData(
+                        lane: 1,
+                    ),
+                    ParlData(
+                        lane: 2,
+                    ),
+                    ParlData(
+                        lane: 3,
+                    ),
+                    ParlData(
+                        lane: 4,
+                    ),
+                    ParlData(
+                        lane: 5,
+                    ),
+                    ParlData(
+                        lane: 6,
+                    ),
+                    ParlData(
+                        lane: 7,
+                    ),
+                    ParlClk,
+                    ParlValid,
                     McpwmA(
                         unit: 0,
                         operator: 0,

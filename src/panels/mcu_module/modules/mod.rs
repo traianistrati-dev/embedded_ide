@@ -16,9 +16,10 @@ pub use model::{
     Connection, DacModuleConfig, HspiMode, HspiModuleConfig, I2cModuleConfig, I2sClockPolarity,
     I2sDirection, I2sFormat, I2sMode, I2sModuleConfig, I2sStandard, McpwmModuleConfig,
     ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType, OspiMode, OspiModuleConfig, Parity,
-    PcntCtrlMode, PcntEdgeMode, PcntModuleConfig, PwmChannelConfig, PwmCounting, PwmMode,
-    PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, RmtDirection,
-    RmtModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx,
+    ParlIoBitOrder, ParlIoDirection, ParlIoModuleConfig, ParlIoWidth, PcntCtrlMode, PcntEdgeMode,
+    PcntModuleConfig, PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
+    QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, RmtDirection, RmtModuleConfig,
+    SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx,
     SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection,
     UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, VirtualModule, XspiMemoryType,
     XspiMode, XspiModuleConfig, module_signal_of,
@@ -70,6 +71,17 @@ pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Spi(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// The parallel port's config, keyed by its (always 0) instance.
+pub fn parl_io_configs(modules: &[VirtualModule]) -> BTreeMap<u8, ParlIoModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::ParlIo(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

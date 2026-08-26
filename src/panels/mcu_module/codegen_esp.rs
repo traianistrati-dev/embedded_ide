@@ -42,8 +42,8 @@ use super::codegen::dma_map::DmaUse;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
 use super::mcu_def::DmaDef;
 use super::modules::{
-    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, McpwmModuleConfig, PcntModuleConfig,
-    RmtModuleConfig, SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, McpwmModuleConfig, ParlIoModuleConfig,
+    PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -155,6 +155,7 @@ pub fn fresh_esp32c3_main_rs(
     rmt: &BTreeMap<u8, RmtModuleConfig>,
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
+    parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -175,6 +176,7 @@ pub fn fresh_esp32c3_main_rs(
         rmt,
         pcnt,
         mcpwm,
+        parl_io,
         timer,
         custom_inits,
         chip,
@@ -202,6 +204,7 @@ pub fn update_esp32c3_main_rs(
     rmt: &BTreeMap<u8, RmtModuleConfig>,
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
+    parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -222,6 +225,7 @@ pub fn update_esp32c3_main_rs(
         rmt,
         pcnt,
         mcpwm,
+        parl_io,
         timer,
         custom_inits,
         chip,
@@ -342,6 +346,7 @@ fn make_gen_section(
     rmt: &BTreeMap<u8, RmtModuleConfig>,
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
+    parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
     // PWM (LEDC) module settings, keyed by LEDC timer.
     timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
@@ -508,7 +513,13 @@ fn make_gen_section(
     // The I2S instances the canvas wires, so the allocator can serve them
     // first — an I2S without a channel cannot be generated at all.
     let i2s_wired: Vec<u8> = collect_buses(&configured).3.keys().copied().collect();
-    let dma_plan = dma_plan(dma, runtime, spi, &i2s_wired);
+    let dma_plan = dma_plan(
+        dma,
+        runtime,
+        spi,
+        &i2s_wired,
+        collect_parl_io(&configured).is_some(),
+    );
     for (label, calls) in bus_sections(
         &configured,
         usart,
@@ -518,6 +529,7 @@ fn make_gen_section(
         rmt,
         pcnt,
         mcpwm,
+        parl_io.get(&0),
         crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(chip),
         runtime,
         &dma_plan,
@@ -813,6 +825,40 @@ fn collect_rmt<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, &'a Pin> {
         .collect()
 }
 
+/// The parallel port's pads, in the order `init` takes them.
+///
+/// `(data lanes by index, clock, valid)`. The data lanes are returned SPARSE —
+/// a bus whose D3 is unassigned yields no D3 — because the generated `init`
+/// declares a parameter per lane of its width, and a gap there is a wiring
+/// mistake worth showing rather than papering over.
+fn collect_parl_io<'a>(
+    configured: &[&'a Pin],
+) -> Option<(BTreeMap<u8, &'a Pin>, Option<&'a Pin>, Option<&'a Pin>)> {
+    let mut data: BTreeMap<u8, &Pin> = BTreeMap::new();
+    let (mut clk, mut valid) = (None, None);
+    for p in configured {
+        match p.selected_function {
+            PinFunction::ParlData { lane } => {
+                data.insert(lane, *p);
+            }
+            PinFunction::ParlClk => clk = Some(*p),
+            PinFunction::ParlValid => valid = Some(*p),
+            _ => {}
+        }
+    }
+    // The clock is what makes it a port rather than a handful of GPIOs, and
+    // `init` always takes one — so nothing is generated without it.
+    if data.is_empty() || clk.is_none() {
+        return None;
+    }
+    Some((data, clk, valid))
+}
+
+/// `Some(has a valid pad)` when the parallel port is wired.
+pub(crate) fn parl_io_wired(configured: &[&Pin]) -> Option<bool> {
+    collect_parl_io(configured).map(|(_, _, v)| v.is_some())
+}
+
 /// The MCPWM outputs the canvas wires, by unit.
 ///
 /// `(operator, is B)` per unit, in operator order then A before B — the order
@@ -995,13 +1041,16 @@ pub(crate) struct DmaPlan {
     pub spi: BTreeMap<u8, DmaUse>,
     /// Keyed by I2S instance. Every wired one, since I2S has no non-DMA form.
     pub i2s: BTreeMap<u8, DmaUse>,
+    /// The parallel port, which is one per chip and also DMA-only.
+    pub parl_io: Option<DmaUse>,
 }
 
 impl DmaPlan {
     /// Every channel taken, for the Configuration tab's DMA card.
     pub fn uses(&self) -> Vec<DmaUse> {
-        self.i2s
-            .values()
+        self.parl_io
+            .iter()
+            .chain(self.i2s.values())
             .chain(self.spi.values())
             .cloned()
             .collect()
@@ -1015,10 +1064,13 @@ pub(crate) fn dma_plan(
     // Every I2S instance the canvas wires. Unlike SPI there is nothing to opt
     // into: `I2s::new` takes a channel, so a wired I2S always wants one.
     i2s_wired: &[u8],
+    // True when the canvas wires the parallel port.
+    parl_io_wired: bool,
 ) -> DmaPlan {
     let mut plan = DmaPlan {
         spi: BTreeMap::new(),
         i2s: BTreeMap::new(),
+        parl_io: None,
     };
     if runtime != EspRuntime::Async {
         return plan;
@@ -1076,6 +1128,11 @@ pub(crate) fn dma_plan(
             plan.i2s.insert(*n, u);
         }
     }
+    // The parallel port is served with the I2S, and for the same reason: no
+    // channel means no port at all, where a SPI merely loses its DMA.
+    if parl_io_wired {
+        plan.parl_io = claim("PARL_IO".to_owned(), "");
+    }
     for n in on_dma {
         let manual = spi_cfg[&n].dma_tx.trim().to_owned();
         if let Some(u) = claim(format!("SPI{n}"), &manual) {
@@ -1096,6 +1153,7 @@ fn bus_sections(
     rmt_cfg: &BTreeMap<u8, RmtModuleConfig>,
     pcnt_cfg: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
+    parl_io_cfg: Option<&ParlIoModuleConfig>,
     // The RMT source clock, which `Rmt::new` takes as an argument.
     rmt_hz: u32,
     runtime: EspRuntime,
@@ -1304,6 +1362,58 @@ fn bus_sections(
         }
         out.push(("PCNT".to_owned(), body));
     }
+    // PARL_IO. Like the I2S it is DMA-only, so a port with no channel left
+    // produces a note rather than a call that could not be written.
+    if let Some((data, clk, valid)) = collect_parl_io(configured) {
+        let sfx = parl_io_cfg
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        let mut body = String::new();
+        let mut args = Vec::new();
+        let lanes = parl_io_cfg.map(|c| c.width.lanes()).unwrap_or(8);
+        for lane in 0..lanes {
+            let Some(p) = data.get(&lane) else {
+                body.push_str(&format!(
+                    "    // TODO: PARL_IO D{lane} is not assigned - the bus is {lanes} wide.\n"
+                ));
+                continue;
+            };
+            let var = esp_binding(p);
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
+            args.push(var);
+        }
+        for p in [clk, valid].into_iter().flatten() {
+            // The valid pad is only an argument below sixteen bits; at sixteen
+            // the signal rides the bus - see `parl_io_file`.
+            if p.selected_function == PinFunction::ParlValid && lanes >= 16 {
+                continue;
+            }
+            let var = esp_binding(p);
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
+            args.push(var);
+        }
+        match dma_plan.parl_io.as_ref() {
+            Some(u) => body.push_str(&format!(
+                "    let (mut _parl{sfx}, mut _parl{sfx}_buf) =\n\
+                 \x20       pins::configs::parl_io::{init_fn}(peripherals.PARL_IO, peripherals.{}, {});\n",
+                u.peri,
+                args.join(", "),
+            )),
+            None => body.push_str(
+                "    // TODO: the parallel port has no DMA channel left - every one is\n\
+                 \x20   // taken. Free one in another module, or pin this one by hand.\n",
+            ),
+        }
+        out.push(("PARL_IO".to_owned(), body));
+    }
     // MCPWM last. The TIMER binding is not decorative: it owns the guard that
     // holds the peripheral clock on, so dropping it would silence every pin.
     for (unit, outs) in collect_mcpwm(configured) {
@@ -1397,6 +1507,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &timer,
             "",
             "esp32c3",
@@ -1448,6 +1559,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1496,6 +1608,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_parl() -> BTreeMap<u8, ParlIoModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1512,6 +1628,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1540,6 +1657,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1568,6 +1686,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1593,6 +1712,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1613,6 +1733,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1642,6 +1763,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1673,6 +1795,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1712,6 +1835,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1758,6 +1882,7 @@ mod tests {
                 &no_rmt(),
                 &no_pcnt(),
                 &no_mcpwm(),
+                &no_parl(),
                 &Default::default(),
                 "",
                 "esp32c3",
@@ -1838,6 +1963,7 @@ mod tests {
             &no_rmt(),
             &no_pcnt(),
             &no_mcpwm(),
+            &no_parl(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1920,7 +2046,7 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> =
             [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[]);
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false);
         assert_eq!(plan.spi[&2].peri, "DMA_CH0");
         assert_eq!(plan.spi[&3].peri, "DMA_CH1");
         assert!(plan.spi.values().all(|u| !u.manual && u.irq.is_empty()));
@@ -1934,7 +2060,7 @@ mod tests {
         let mut later = spi_on_dma(3);
         later.dma_tx = "DMA_CH0".into();
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2)), (3u8, later)].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[]);
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false);
         assert_eq!(plan.spi[&3].peri, "DMA_CH0", "the pinned one is honoured");
         assert!(plan.spi[&3].manual);
         assert_eq!(
@@ -1964,7 +2090,7 @@ mod tests {
             ],
         };
         let spi: BTreeMap<u8, SpiModuleConfig> = [(3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[]);
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false);
         assert_eq!(plan.spi[&3].peri, "DMA_SPI3");
     }
 
@@ -1975,7 +2101,7 @@ mod tests {
         let dma = gdma(1);
         let spi: BTreeMap<u8, SpiModuleConfig> =
             [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[]);
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false);
         assert_eq!(plan.spi[&2].peri, "DMA_CH0");
         assert!(!plan.spi.contains_key(&3));
     }
@@ -1987,13 +2113,13 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2))].into();
         assert!(
-            dma_plan(Some(&dma), EspRuntime::Blocking, &spi, &[])
+            dma_plan(Some(&dma), EspRuntime::Blocking, &spi, &[], false)
                 .uses()
                 .is_empty()
         );
         // …and a chip with no channel data cannot be served on any runtime.
         assert!(
-            dma_plan(None, EspRuntime::Async, &spi, &[])
+            dma_plan(None, EspRuntime::Async, &spi, &[], false)
                 .uses()
                 .is_empty()
         );
@@ -2006,7 +2132,7 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, SpiModuleConfig::new(2))].into();
         assert!(
-            dma_plan(Some(&dma), EspRuntime::Async, &spi, &[])
+            dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false)
                 .uses()
                 .is_empty()
         );

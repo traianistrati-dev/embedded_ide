@@ -183,6 +183,25 @@ pub enum PinFunction {
     /// I2S{n} master clock out — an oversampled clock for the codec, optional.
     I2sMck(u8),
 
+    // ── PARL_IO ─────────────────────────────────────────────────────────────
+    /// PARL_IO data line {lane} — Espressif's parallel IO port.
+    ///
+    /// A whole BYTE (or nibble, or word) moved per clock instead of a bit:
+    /// what talks to an LED matrix, a fast ADC or a camera-style sensor. The
+    /// port is one direction at a time, and the data lines are numbered from 0.
+    ParlData {
+        lane: u8,
+    },
+    /// PARL_IO clock. An OUTPUT when the port transmits and an INPUT when it
+    /// receives — the port owns the clock either way, which is why one function
+    /// covers both.
+    ParlClk,
+    /// PARL_IO valid/enable line, optional.
+    ///
+    /// Marks which clocks carry real data. Without it every clock counts, which
+    /// is fine for a continuous stream and wrong for a framed one.
+    ParlValid,
+
     // ── MCPWM ───────────────────────────────────────────────────────────────
     /// MCPWM{unit} operator {operator}, output A.
     ///

@@ -1287,6 +1287,9 @@ mod module_support_tests {
                         // the parts esp-hal gives neither driver to.
                         | ModuleKind::GenericInterfacePcnt
                         | ModuleKind::GenericInterfaceMcpwm
+                        // PARL_IO likewise: only three ESP parts have one, and
+                        // the C3 is not among them.
+                        | ModuleKind::GenericInterfaceParlIo
                         | ModuleKind::GenericInterfaceSai
                         | ModuleKind::GenericInterfaceSdmmc
                         | ModuleKind::GenericInterfaceQspi

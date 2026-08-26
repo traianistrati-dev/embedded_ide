@@ -38,8 +38,8 @@
 use super::codegen_esp::EspRuntime;
 use super::modules::{
     AsyncBusMode, I2cModuleConfig, I2sDirection, I2sFormat, I2sModuleConfig, I2sStandard,
-    McpwmModuleConfig, Parity, PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, StopBits,
-    TimerModuleConfig, UsartModuleConfig,
+    McpwmModuleConfig, Parity, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig,
+    SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -654,6 +654,216 @@ fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime)
         &body,
         &example,
     )
+}
+
+// ── PARL_IO ─────────────────────────────────────────────────────────────────
+
+/// The chip's parallel port, in the direction and width the module asked for.
+///
+/// # DMA only, like the I2S
+///
+/// `ParlIo::new` TAKES a channel: there is no other constructor, so a port with
+/// no channel left is not generated at all rather than generated half-working.
+///
+/// # The buffer comes back
+///
+/// Same reason as the I2S: `dma_buffers!` makes the descriptors that disappear
+/// into the driver and the BUFFER that every transfer reads or writes, so the
+/// second has to be returned.
+///
+/// # The valid line
+///
+/// Espressif puts it on the sixteenth data line when the bus is sixteen wide,
+/// and on a pad of its own when it is narrower — esp-hal says so by
+/// implementing `NotContainsValidSignalPin` for every width but the widest.
+/// So a wired VALID pad is used below 16 bits and ignored at 16, which the
+/// module states rather than leaving to be discovered.
+fn parl_io_file(cfg: Option<&ParlIoModuleConfig>, has_valid: bool, rt: EspRuntime) -> String {
+    let d = ParlIoModuleConfig::new(0);
+    let c = cfg.unwrap_or(&d);
+    let tx = c.direction.is_tx();
+    let lanes = c.width.lanes();
+    // At sixteen bits the valid signal IS one of the data lines.
+    let valid = has_valid && lanes < 16;
+
+    let consts = format!(
+        "const FREQUENCY_HZ: u32 = {};\n\
+         const BUFFER_BYTES: usize = {};\n",
+        c.freq_hz, c.buffer_bytes,
+    );
+
+    let pad_bound = if tx {
+        "impl PeripheralOutput<'d>"
+    } else {
+        "impl PeripheralInput<'d>"
+    };
+    let mut params =
+        format!("    parl_io: PARL_IO<'d>,\n    dma: impl DmaChannelFor<PARL_IO<'d>>,\n");
+    for lane in 0..lanes {
+        params.push_str(&format!("    d{lane}: {pad_bound},\n"));
+    }
+    params.push_str(&format!(
+        "    clk: impl Peripheral{}<'d>,\n",
+        if tx { "Output" } else { "Input" }
+    ));
+    if valid {
+        params.push_str("    valid: impl PeripheralOutput<'d>,\n");
+    }
+
+    let data_args: Vec<String> = (0..lanes).map(|l| format!("d{l}")).collect();
+    let pins_ty = c.width.esp_hal(tx);
+    let mut build = format!(
+        "\x20   let pins = {pins_ty}::new({});\n",
+        data_args.join(", ")
+    );
+    if valid {
+        build.push_str("\x20   let pins = TxPinConfigWithValidPin::new(pins, valid);\n");
+    }
+    build.push_str(&format!(
+        "\x20   let clk_pin = Clk{}Pin::new(clk);\n",
+        if tx { "Out" } else { "In" }
+    ));
+
+    let (buffers, sizes, buf_ty, half) = if tx {
+        (
+            "(_, _, buffer, descriptors)",
+            "0, BUFFER_BYTES",
+            "DmaTxBuf",
+            "tx",
+        )
+    } else {
+        (
+            "(buffer, descriptors, _, _)",
+            "BUFFER_BYTES, 0",
+            "DmaRxBuf",
+            "rx",
+        )
+    };
+    let cfg_ty = if tx { "TxConfig" } else { "RxConfig" };
+    let driver = if tx { "ParlIoTx" } else { "ParlIoRx" };
+    // The receiver needs a timeout or a frame never ends; the transmitter has
+    // no such knob.
+    let extra_cfg = if tx {
+        String::new()
+    } else {
+        "\n\x20       .with_timeout_ticks(0xfff)".to_owned()
+    };
+
+    let body_for = |name: &str, mode: &str, into_async: &str| {
+        format!(
+            "pub fn {name}<'d>(\n\
+             {params}) -> ({driver}<'d, {mode}>, {buf_ty}) {{\n\
+             \x20   let {buffers} = dma_buffers!({sizes});\n\
+             \x20   let dma_buf = {buf_ty}::new(descriptors, buffer).unwrap();\n\
+             {build}\
+             \x20   let config = {cfg_ty}::default()\n\
+             \x20       .with_frequency(Rate::from_hz(FREQUENCY_HZ))\n\
+             \x20       .with_bit_order(BitPackOrder::{order})\
+             {extra_cfg};\n\
+             \x20   let port = ParlIo::new(parl_io, dma).unwrap(){into_async};\n\
+             \x20   let driver = port.{half}.with_config(pins, clk_pin, config).unwrap();\n\
+             \x20   (driver, dma_buf)\n\
+             }}\n",
+            order = c.bit_order.esp_hal(),
+        )
+    };
+
+    let mut body = format!(
+        "/// The parallel port — {} {} lines at {} Hz.\n\
+         ///\n\
+         /// Returns the driver AND its DMA buffer: the descriptors go into the\n\
+         /// driver, the buffer is what each transfer moves.\n\
+         {}",
+        if tx { "transmitting" } else { "receiving" },
+        lanes,
+        c.freq_hz,
+        body_for("init", "Blocking", ""),
+    );
+    if rt == EspRuntime::Async {
+        body.push_str(&format!(
+            "\n/// The same, async.\n{}",
+            body_for("init_async", "Async", ".into_async()"),
+        ));
+    }
+
+    // Every call below is the REAL one: `write`/`read` take a length and the
+    // buffer and hand back a transfer, which gives both back when it ends.
+    // `wait_for_done` is the only async-specific method — the rest is shared.
+    let example = example_for(
+        "Using the parallel port",
+        "_parl",
+        &if tx {
+            vec![
+                "Fill the buffer, hand it over, and take it back when done:",
+                "",
+                "    let (mut port, mut buf) = …;   // as generated above",
+                "    buf.as_mut_slice().fill(0xAA);",
+                "    let transfer = port.write(buf.len(), buf).unwrap();",
+                "    let (result, p, b) = transfer.wait();",
+                "    (port, buf) = (p, b);",
+                "    result.ok();",
+            ]
+        } else {
+            vec![
+                "Hand the buffer over and take it back full:",
+                "",
+                "    let (mut port, mut buf) = …;   // as generated above",
+                "    let transfer = port.read(Some(buf.len()), buf).unwrap();",
+                "    let (result, p, b) = transfer.wait();",
+                "    (port, buf) = (p, b);",
+                "    result.ok();",
+            ]
+        },
+        &if tx {
+            vec![
+                "`init_async` gives the transfer a `.wait_for_done()` that yields",
+                "instead of spinning; everything else is the same:",
+                "",
+                "    let (mut port, mut buf) = …;   // as generated above",
+                "    buf.as_mut_slice().fill(0xAA);",
+                "    let mut transfer = port.write(buf.len(), buf).unwrap();",
+                "    transfer.wait_for_done().await;",
+                "    let (_, p, b) = transfer.wait();",
+                "    (port, buf) = (p, b);",
+            ]
+        } else {
+            vec![
+                "`init_async` gives the transfer a `.wait_for_done()` that yields",
+                "instead of spinning; everything else is the same:",
+                "",
+                "    let (mut port, mut buf) = …;   // as generated above",
+                "    let mut transfer = port.read(Some(buf.len()), buf).unwrap();",
+                "    transfer.wait_for_done().await;",
+                "    let (_, p, b) = transfer.wait();",
+                "    (port, buf) = (p, b);",
+            ]
+        },
+        rt,
+    );
+
+    let mut uses = format!(
+        "{}\
+         use esp_hal::dma::{{DmaChannelFor, {buf_ty}}};\n\
+         use esp_hal::dma_buffers;\n",
+        mode_import(rt)
+    );
+    uses.push_str(&format!(
+        "use esp_hal::gpio::interconnect::{};\n",
+        if tx {
+            "PeripheralOutput"
+        } else {
+            "{PeripheralInput, PeripheralOutput}"
+        }
+    ));
+    uses.push_str(&format!(
+        "use esp_hal::parl_io::{{BitPackOrder, Clk{}Pin, ParlIo, {driver}, {cfg_ty}, {pins_ty}{}}};\n\
+         use esp_hal::peripherals::PARL_IO;\n\
+         use esp_hal::time::Rate;\n",
+        if tx { "Out" } else { "In" },
+        if valid { ", TxPinConfigWithValidPin" } else { "" },
+    ));
+
+    file(&uses, &consts, &body, &example)
 }
 
 // ── MCPWM ───────────────────────────────────────────────────────────────────
@@ -1608,6 +1818,9 @@ pub fn config_files(
     mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
     // The MCPWM peripheral clock, in MHz. 40 everywhere but the H2, which is 32.
     mcpwm_source_mhz: u32,
+    // `Some(has a valid pad)` when the parallel port is wired at all.
+    parl_io: &Option<bool>,
+    parl_io_cfg: Option<&ParlIoModuleConfig>,
     // LEDC timer → the channels wired on it, with each channel duty in
     // hundredths of a percent.
     pwm: &[(u8, Vec<(u8, u16)>)],
@@ -1644,6 +1857,12 @@ pub fn config_files(
     }
     if usb {
         out.push(("usb.rs".to_owned(), usb_file(rt)));
+    }
+    if let Some(has_valid) = parl_io {
+        out.push((
+            "parl_io.rs".to_owned(),
+            parl_io_file(parl_io_cfg, *has_valid, rt),
+        ));
     }
     for (unit, outputs) in mcpwm {
         out.push((
@@ -1916,6 +2135,8 @@ mod tests {
             &[(0, vec![(0, false), (0, true)])],
             &BTreeMap::new(),
             40,
+            &Some(false),
+            None,
             &[(0, vec![(1, 2_000)])],
             &BTreeMap::new(),
             EspRuntime::Blocking,
@@ -1931,6 +2152,7 @@ mod tests {
                 "rmt2.rs",
                 "pcnt1.rs",
                 "usb.rs",
+                "parl_io.rs",
                 "mcpwm0.rs",
                 "pwm0.rs"
             ]

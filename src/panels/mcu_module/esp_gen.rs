@@ -719,6 +719,27 @@ fn drives(f: &PinFunction) -> bool {
     )
 }
 
+/// True when this chip has a PARL_IO its `esp-hal` can drive.
+pub(crate) fn has_parl_io(chip: &EspChip) -> bool {
+    chip.drivers.iter().any(|d| d == "parl_io")
+}
+
+/// How many data lanes its PARL_IO has.
+///
+/// Sixteen on the first generation of the peripheral, eight on the second.
+/// esp-hal gates `TxSixteenBits` on `#[cfg(parl_io_version = "1")]`, and the
+/// three parts that have a PARL_IO at all split C6 (version 1) from C5 and H2
+/// (version 2) — so offering `D8`-`D15` on a C5 would be eight pads that no
+/// generated line could name.
+///
+/// The same split is stated for the UI by
+/// [`super::modules::ParlIoWidth::options`], and
+/// [`tests::the_parl_io_width_split_agrees_with_the_pads`] holds the two
+/// together.
+pub(crate) fn parl_io_lanes(chip: &EspChip) -> u8 {
+    if chip.id == "esp32c6" { 16 } else { 8 }
+}
+
 /// How many MCPWM units this chip has, or none.
 ///
 /// From the peripheral singletons — `MCPWM0`, and `MCPWM1` on the ESP32 and S3
@@ -888,6 +909,17 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
     for u in 0..pcnt_units(chip) {
         out.push(PinFunction::PcntEdge(u));
         out.push(PinFunction::PcntCtrl(u));
+    }
+
+    // PARL_IO: the whole bus is offered on every pad, because the GPIO matrix
+    // routes it like everything else. The WIDTH is the module's choice; what a
+    // pad can carry is any of the sixteen lanes.
+    if has_parl_io(chip) {
+        for lane in 0..parl_io_lanes(chip) {
+            out.push(PinFunction::ParlData { lane });
+        }
+        out.push(PinFunction::ParlClk);
+        out.push(PinFunction::ParlValid);
     }
 
     // MCPWM: three operators per unit, each a complementary pair.
@@ -1231,6 +1263,34 @@ mod tests {
             );
         }
         out
+    }
+
+    /// The width the UI offers and the pads the chip has must be the same claim.
+    ///
+    /// Two places state the 16-vs-8 split — `ParlIoWidth::options` for the combo
+    /// and `parl_io_lanes` for the pads — and they are only correct together: a
+    /// UI offering 16 lines on a chip whose pads stop at D7 would let someone
+    /// pick a width they cannot wire.
+    #[test]
+    #[ignore]
+    fn the_parl_io_width_split_agrees_with_the_pads() {
+        use crate::panels::mcu_module::modules::ParlIoWidth;
+        let dir = esp_metadata::vendor_dir().expect("esp-metadata");
+        for id in ["esp32c5", "esp32c6", "esp32h2"] {
+            let c = esp_metadata::load(&dir, id).expect("parses");
+            assert!(has_parl_io(&c), "{id} has a PARL_IO");
+            let widest = ParlIoWidth::options(id)
+                .iter()
+                .map(|w| w.lanes())
+                .max()
+                .unwrap();
+            assert_eq!(widest, parl_io_lanes(&c), "{id}");
+        }
+        // …and the parts without one offer no pads at all.
+        for id in ["esp32c3", "esp32s3"] {
+            let c = esp_metadata::load(&dir, id).expect("parses");
+            assert!(!has_parl_io(&c), "{id} has no PARL_IO driver");
+        }
     }
 
     /// A datasheet table is typed in by hand, so it gets checked like one.

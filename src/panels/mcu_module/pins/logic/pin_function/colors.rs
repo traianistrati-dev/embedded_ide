@@ -26,6 +26,11 @@ impl PinFunction {
             // RMT drives edges, not data — a warm amber of its own, away from
             // both the buses and the PWM orange it is most easily confused with.
             PinFunction::RmtChannel(..) => egui::Color32::from_rgb(200, 150, 60),
+            // PARL_IO is a bus, so it sits with the buses — a slate blue
+            // distinct from SPI's teal, since a pad can rarely be both.
+            PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => {
+                egui::Color32::from_rgb(110, 130, 190)
+            }
             // MCPWM shares the PWM orange: it IS pwm, and a reader looking
             // for "which pins can switch something" wants the two together.
             PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. } => {

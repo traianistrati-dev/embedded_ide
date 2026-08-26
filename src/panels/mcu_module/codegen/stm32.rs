@@ -3020,7 +3020,14 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         // RMT is Espressif's, and no STM32 pin ever carries it. Grouped with
         // the other push-pull outputs so the match stays total rather than
         // reaching a panic that could never fire.
-        PinFunction::RmtChannel(..) | PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. } => {
+        // PARL_IO's clock and data reverse with the port's direction, and no
+        // STM32 pin carries any of them; push-pull keeps the match total.
+        PinFunction::ParlData { .. }
+        | PinFunction::ParlClk
+        | PinFunction::ParlValid
+        | PinFunction::RmtChannel(..)
+        | PinFunction::McpwmA { .. }
+        | PinFunction::McpwmB { .. } => {
             format!("into_push_pull_output(&mut {pv}.{crx})")
         }
         // PCNT reads, so its two pads are inputs — again unreachable on an

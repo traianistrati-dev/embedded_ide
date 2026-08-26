@@ -252,6 +252,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let rmt = modules::rmt_configs(&mcu.modules);
     let pcnt = modules::pcnt_configs(&mcu.modules);
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
+    let parl_io = modules::parl_io_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::fresh_esp32c3_main_rs(
         &pins_of(mcu),
@@ -265,6 +266,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &rmt,
         &pcnt,
         &mcpwm,
+        &parl_io,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -325,6 +327,9 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         &codegen_esp::mcpwm_outputs_wired(&configured),
         &modules::mcpwm_configs(&mcu.modules),
         if mcu.family == "esp32h2" { 32 } else { 40 },
+        // The parallel port, and whether a VALID pad went with it.
+        &codegen_esp::parl_io_wired(&configured),
+        modules::parl_io_configs(&mcu.modules).get(&0),
         &pwm,
         &timers,
         runtime,
@@ -340,6 +345,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let rmt = modules::rmt_configs(&mcu.modules);
     let pcnt = modules::pcnt_configs(&mcu.modules);
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
+    let parl_io = modules::parl_io_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::update_esp32c3_main_rs(
         existing,
@@ -354,6 +360,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &rmt,
         &pcnt,
         &mcpwm,
+        &parl_io,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -886,6 +893,7 @@ pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
             EspRuntime::Async,
             &modules::spi_configs(&mcu.modules),
             &codegen_esp::i2s_instances_wired(&pins_of(mcu)),
+            codegen_esp::parl_io_wired(&pins_of(mcu)).is_some(),
         )
         .uses(),
         Runtime::Async if async_supported(&mcu.family) => async_periphs(mcu).dma_uses,
@@ -1652,6 +1660,15 @@ mod tests {
                 unit: 0,
                 operator: 0,
             },
+            // A four-bit parallel port with its clock and a valid pad: the
+            // shape that exercises the width table, the clock direction and
+            // the `TxPinConfigWithValidPin` wrapper all at once.
+            PinFunction::ParlData { lane: 0 },
+            PinFunction::ParlData { lane: 1 },
+            PinFunction::ParlData { lane: 2 },
+            PinFunction::ParlData { lane: 3 },
+            PinFunction::ParlClk,
+            PinFunction::ParlValid,
         ];
         for p in mcu.iter_all_pins_mut() {
             if p.reserved || p.selected_function != PinFunction::Unset {
@@ -1672,6 +1689,19 @@ mod tests {
             name: "SPI2".into(),
             pos: (0.0, 0.0),
             config: ModuleConfig::Spi(spi_cfg),
+            connections: Vec::new(),
+        });
+        mcu.modules.push(VirtualModule {
+            id: "parl_io".into(),
+            kind: ModuleKind::GenericInterfaceParlIo,
+            name: "PARL".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::ParlIo({
+                use crate::panels::mcu_module::modules::{ParlIoModuleConfig, ParlIoWidth};
+                let mut c = ParlIoModuleConfig::new(0);
+                c.width = ParlIoWidth::Four;
+                c
+            }),
             connections: Vec::new(),
         });
         mcu.modules.push(VirtualModule {

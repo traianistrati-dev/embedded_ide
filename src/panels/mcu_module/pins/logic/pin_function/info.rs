@@ -423,6 +423,39 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => {
+                let role = match self {
+                    PinFunction::ParlClk => {
+                        "the clock — driven out when the port transmits, read in when it receives"
+                    }
+                    PinFunction::ParlValid => {
+                        "the valid line, which marks the clocks that carry real data"
+                    }
+                    _ => "one data line of the bus",
+                };
+                FunctionInfo {
+                    description: format!(
+                        "PARL_IO: {role}. A parallel port that moves a whole nibble, byte or                          word per clock instead of one bit — for LED matrices, fast ADCs and                          camera-style sensors."
+                    ),
+                    specs: vec![
+                        (
+                            "Width".into(),
+                            "1, 2, 4 or 8 lines, and 16 on the parts whose PARL_IO is the                              first generation. Set it in the module; the extra data pads are                              assigned here on the canvas."
+                                .into(),
+                        ),
+                        (
+                            "One direction".into(),
+                            "The port transmits or receives, not both. Which one decides                              whether these pads are outputs or inputs."
+                                .into(),
+                        ),
+                        (
+                            "DMA".into(),
+                            "There is no non-DMA form: the port exists to move blocks, and                              its constructor takes a channel. The Configuration tab shows                              which one it took."
+                                .into(),
+                        ),
+                    ],
+                }
+            }
             PinFunction::McpwmA { unit, operator } | PinFunction::McpwmB { unit, operator } => {
                 let b = matches!(self, PinFunction::McpwmB { .. });
                 FunctionInfo {

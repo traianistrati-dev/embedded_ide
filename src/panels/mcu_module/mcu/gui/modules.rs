@@ -13,10 +13,10 @@ use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, HspiMode, I2sClockPolarity, I2sDirection,
     I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType,
-    OspiMode, Parity, PcntCtrlMode, PcntEdgeMode, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
-    QSPI_MEMORY_SIZES, QspiAddressSize, RmtDirection, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx,
-    SpiBitOrder, StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
-    XspiMemoryType, XspiMode,
+    OspiMode, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoWidth, PcntCtrlMode, PcntEdgeMode,
+    PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, RmtDirection,
+    SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder, StopBits, UsartDirection, UsartFlow,
+    UsartMode, UsartModuleConfig, VirtualModule, XspiMemoryType, XspiMode,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -282,6 +282,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceI2s => PinFunction::I2sCk(instance),
         ModuleKind::GenericInterfaceRmt => PinFunction::RmtChannel(instance),
         ModuleKind::GenericInterfacePcnt => PinFunction::PcntEdge(instance),
+        ModuleKind::GenericInterfaceParlIo => PinFunction::ParlData { lane: 0 },
         ModuleKind::GenericInterfaceMcpwm => PinFunction::McpwmA {
             unit: instance,
             operator: 0,
@@ -448,6 +449,8 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceI2s => format!("_i2s{n}{sfx}"),
         ModuleKind::GenericInterfaceRmt => format!("_rmt{n}{sfx}"),
         ModuleKind::GenericInterfacePcnt => format!("_pcnt{n}{sfx}"),
+        // The port is one driver, whatever the bus is wide.
+        ModuleKind::GenericInterfaceParlIo => format!("_parl{sfx}"),
         // One handle per OUTPUT: each is its own `PwmPin`, and they are set
         // independently. The list is built from what is wired, so an
         // operator with only A gives one name.
@@ -1510,6 +1513,95 @@ pub fn module_config_ui(
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
             match &mut m.config {
+                ModuleConfig::ParlIo(cfg) => {
+                    ui.label("Direction");
+                    egui::ComboBox::from_id_salt("parl_dir")
+                        .selected_text(cfg.direction.label())
+                        .show_ui(ui, |ui| {
+                            for v in ParlIoDirection::ALL {
+                                ui.selectable_value(&mut cfg.direction, v, v.label());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "The port moves data one way at a time. This also decides whether \
+                             the data pads and the clock are outputs or inputs.",
+                        );
+                    ui.end_row();
+
+                    ui.label("Bus width");
+                    let widths = ParlIoWidth::options(family);
+                    egui::ComboBox::from_id_salt("parl_width")
+                        .selected_text(cfg.width.label())
+                        .show_ui(ui, |ui| {
+                            for v in widths.iter().copied() {
+                                ui.selectable_value(&mut cfg.width, v, v.label());
+                            }
+                        })
+                        .response
+                        .on_hover_text(if widths.len() == 5 {
+                            "How many data lines move together. Assign D0..D15 on the canvas \
+                             to match - only D0 and the clock are wired for you."
+                        } else {
+                            "How many data lines move together. Sixteen is missing because \
+                             esp-hal builds it only for the first generation of this \
+                             peripheral, which this chip does not have."
+                        });
+                    ui.end_row();
+
+                    ui.label("Clock");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.freq_hz)
+                                .range(1_000..=40_000_000)
+                                .suffix(" Hz")
+                                .speed(1000.0),
+                        );
+                        for (lbl, hz) in [("1M", 1_000_000u32), ("10M", 10_000_000)] {
+                            if ui.small_button(lbl).clicked() {
+                                cfg.freq_hz = hz;
+                            }
+                        }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} MB/s",
+                                (u64::from(cfg.freq_hz) * u64::from(cfg.width.lanes()) / 8)
+                                    as f64
+                                    / 1_000_000.0
+                            ))
+                            .size(11.0)
+                            .color(egui::Color32::GRAY),
+                        );
+                    })
+                    .response
+                    .on_hover_text(
+                        "One transfer of the whole bus per clock, so the throughput is the \
+                         clock times the width.",
+                    );
+                    ui.end_row();
+
+                    ui.label("Bit order");
+                    egui::ComboBox::from_id_salt("parl_order")
+                        .selected_text(cfg.bit_order.label())
+                        .show_ui(ui, |ui| {
+                            for v in ParlIoBitOrder::ALL {
+                                ui.selectable_value(&mut cfg.bit_order, v, v.label());
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("DMA buffer");
+                    ui.add(
+                        egui::DragValue::new(&mut cfg.buffer_bytes)
+                            .range(64..=32_768)
+                            .suffix(" bytes"),
+                    )
+                    .on_hover_text(
+                        "The block the DMA moves in one go. A parallel port has no non-DMA \
+                         form - its constructor takes a channel.",
+                    );
+                    ui.end_row();
+                }
                 ModuleConfig::Mcpwm(cfg) => {
                     ui.label("Frequency");
                     ui.horizontal(|ui| {

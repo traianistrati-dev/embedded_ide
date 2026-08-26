@@ -69,6 +69,17 @@ pub enum ModuleKind {
     /// `GI_SPI 2` and a `GI_I2S 2` describe the same silicon and only one of
     /// them can be built.
     GenericInterfaceI2s,
+    /// A parallel data port — "PARL".
+    ///
+    /// Espressif only, one per chip. It moves a nibble, byte or word per clock
+    /// rather than a bit, in ONE direction at a time, and always over DMA —
+    /// `ParlIo::new` takes a channel and there is no other constructor.
+    ///
+    /// Only the first data line and the clock are auto-wired; the rest of the
+    /// bus joins by assigning pads on the canvas, exactly as the HSPI module's
+    /// wider width does. Wiring eight pads for a port someone added to try it
+    /// would spend the chip.
+    GenericInterfaceParlIo,
     /// Motor-control PWM on one MCPWM unit — "MCPWM".
     ///
     /// Espressif only, and NOT the same peripheral as the plain PWM module: on
@@ -122,7 +133,7 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 19] = [
+    pub const ALL: [ModuleKind; 20] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
@@ -131,6 +142,7 @@ impl ModuleKind {
         ModuleKind::GenericInterfaceRmt,
         ModuleKind::GenericInterfacePcnt,
         ModuleKind::GenericInterfaceMcpwm,
+        ModuleKind::GenericInterfaceParlIo,
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceSdmmc,
         ModuleKind::GenericInterfaceQspi,
@@ -177,6 +189,7 @@ impl ModuleKind {
             // The edge input is the counter; the control input is what
             // turns it into an encoder, and plenty of uses do not want one.
             ModuleKind::GenericInterfacePcnt => (&[PcntEdgeSig], &[PcntCtrlSig]),
+            ModuleKind::GenericInterfaceParlIo => (&[ParlD0, ParlClkSig], &[]),
             // One output is required and the other five are not: a single
             // operator driving one side is a normal use, and auto-wiring
             // six pads for it would spend the chip.
@@ -240,6 +253,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceRmt => "RMT",
             ModuleKind::GenericInterfacePcnt => "PCNT",
             ModuleKind::GenericInterfaceMcpwm => "MCPWM",
+            ModuleKind::GenericInterfaceParlIo => "PARL",
             ModuleKind::GenericInterfaceDac => "DAC",
             ModuleKind::GenericInterfaceSai => "SAI",
             ModuleKind::GenericInterfaceSdmmc => "SDMMC",
@@ -271,6 +285,9 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2s => ModuleConfig::I2s(I2sModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceRmt => ModuleConfig::Rmt(RmtModuleConfig::new(instance)),
             ModuleKind::GenericInterfacePcnt => ModuleConfig::Pcnt(PcntModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceParlIo => {
+                ModuleConfig::ParlIo(ParlIoModuleConfig::new(instance))
+            }
             ModuleKind::GenericInterfaceMcpwm => {
                 ModuleConfig::Mcpwm(McpwmModuleConfig::new(instance))
             }
@@ -347,6 +364,13 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::I2cScl(n) => (GenericInterfaceI2c, *n, Scl),
         PinFunction::I2cSda(n) => (GenericInterfaceI2c, *n, Sda),
         PinFunction::RmtChannel(n) => (GenericInterfaceRmt, *n, RmtLine),
+        PinFunction::ParlData { lane } => (
+            GenericInterfaceParlIo,
+            0,
+            PARL_DATA_SIGNALS[(*lane as usize).min(15)],
+        ),
+        PinFunction::ParlClk => (GenericInterfaceParlIo, 0, ParlClkSig),
+        PinFunction::ParlValid => (GenericInterfaceParlIo, 0, ParlValidSig),
         PinFunction::McpwmA { unit, operator } => (
             GenericInterfaceMcpwm,
             *unit,
@@ -567,6 +591,25 @@ pub enum ModuleSignal {
     PcntEdgeSig,
     /// The level that decides what each edge means.
     PcntCtrlSig,
+    // PARL_IO — the data bus, its clock, and the optional valid line.
+    ParlD0,
+    ParlD1,
+    ParlD2,
+    ParlD3,
+    ParlD4,
+    ParlD5,
+    ParlD6,
+    ParlD7,
+    ParlD8,
+    ParlD9,
+    ParlD10,
+    ParlD11,
+    ParlD12,
+    ParlD13,
+    ParlD14,
+    ParlD15,
+    ParlClkSig,
+    ParlValidSig,
     // MCPWM — three operators, each a complementary pair.
     McpwmA0,
     McpwmB0,
@@ -697,6 +740,24 @@ impl ModuleSignal {
             ModuleSignal::RmtLine => "RMT",
             ModuleSignal::PcntEdgeSig => "EDGE",
             ModuleSignal::PcntCtrlSig => "CTRL",
+            ModuleSignal::ParlD0 => "D0",
+            ModuleSignal::ParlD1 => "D1",
+            ModuleSignal::ParlD2 => "D2",
+            ModuleSignal::ParlD3 => "D3",
+            ModuleSignal::ParlD4 => "D4",
+            ModuleSignal::ParlD5 => "D5",
+            ModuleSignal::ParlD6 => "D6",
+            ModuleSignal::ParlD7 => "D7",
+            ModuleSignal::ParlD8 => "D8",
+            ModuleSignal::ParlD9 => "D9",
+            ModuleSignal::ParlD10 => "D10",
+            ModuleSignal::ParlD11 => "D11",
+            ModuleSignal::ParlD12 => "D12",
+            ModuleSignal::ParlD13 => "D13",
+            ModuleSignal::ParlD14 => "D14",
+            ModuleSignal::ParlD15 => "D15",
+            ModuleSignal::ParlClkSig => "CLK",
+            ModuleSignal::ParlValidSig => "VALID",
             ModuleSignal::McpwmA0 => "OP0A",
             ModuleSignal::McpwmB0 => "OP0B",
             ModuleSignal::McpwmA1 => "OP1A",
@@ -828,6 +889,24 @@ impl ModuleSignal {
             ModuleSignal::RmtLine => PinFunction::RmtChannel(instance),
             ModuleSignal::PcntEdgeSig => PinFunction::PcntEdge(instance),
             ModuleSignal::PcntCtrlSig => PinFunction::PcntCtrl(instance),
+            ModuleSignal::ParlD0 => PinFunction::ParlData { lane: 0 },
+            ModuleSignal::ParlD1 => PinFunction::ParlData { lane: 1 },
+            ModuleSignal::ParlD2 => PinFunction::ParlData { lane: 2 },
+            ModuleSignal::ParlD3 => PinFunction::ParlData { lane: 3 },
+            ModuleSignal::ParlD4 => PinFunction::ParlData { lane: 4 },
+            ModuleSignal::ParlD5 => PinFunction::ParlData { lane: 5 },
+            ModuleSignal::ParlD6 => PinFunction::ParlData { lane: 6 },
+            ModuleSignal::ParlD7 => PinFunction::ParlData { lane: 7 },
+            ModuleSignal::ParlD8 => PinFunction::ParlData { lane: 8 },
+            ModuleSignal::ParlD9 => PinFunction::ParlData { lane: 9 },
+            ModuleSignal::ParlD10 => PinFunction::ParlData { lane: 10 },
+            ModuleSignal::ParlD11 => PinFunction::ParlData { lane: 11 },
+            ModuleSignal::ParlD12 => PinFunction::ParlData { lane: 12 },
+            ModuleSignal::ParlD13 => PinFunction::ParlData { lane: 13 },
+            ModuleSignal::ParlD14 => PinFunction::ParlData { lane: 14 },
+            ModuleSignal::ParlD15 => PinFunction::ParlData { lane: 15 },
+            ModuleSignal::ParlClkSig => PinFunction::ParlClk,
+            ModuleSignal::ParlValidSig => PinFunction::ParlValid,
             ModuleSignal::McpwmA0 | ModuleSignal::McpwmA1 | ModuleSignal::McpwmA2 => {
                 PinFunction::McpwmA {
                     unit: instance,
@@ -3469,6 +3548,204 @@ pub struct McpwmModuleConfig {
     pub custom_label: String,
 }
 
+/// `ParlData { lane }` -> the signal that carries it, by index.
+///
+/// A table rather than a match: the sixteen are interchangeable, and a
+/// sixteen-arm match would say nothing a reader does not already know.
+/// Which way a parallel port moves its data.
+///
+/// One at a time: `ParlIo` splits into a `tx` and an `rx` half and the module
+/// builds one of them. The direction also decides whether the data pads and
+/// the clock are outputs or inputs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParlIoDirection {
+    #[default]
+    Transmit,
+    Receive,
+}
+
+impl ParlIoDirection {
+    pub const ALL: [Self; 2] = [Self::Transmit, Self::Receive];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transmit => "Transmit",
+            Self::Receive => "Receive",
+        }
+    }
+
+    pub fn is_tx(self) -> bool {
+        matches!(self, Self::Transmit)
+    }
+}
+
+/// How many data lines the port drives at once.
+///
+/// esp-hal builds exactly these — `TxOneBit`, `TxTwoBits`, `TxFourBits`,
+/// `TxEightBits` and, only where the peripheral is the first generation,
+/// `TxSixteenBits`. A width with no type behind it is not offered; see
+/// [`ParlIoWidth::options`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParlIoWidth {
+    One,
+    Two,
+    Four,
+    #[default]
+    Eight,
+    Sixteen,
+}
+
+impl ParlIoWidth {
+    pub const ALL: [Self; 5] = [Self::One, Self::Two, Self::Four, Self::Eight, Self::Sixteen];
+
+    /// How many data lines this is.
+    pub fn lanes(self) -> u8 {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Four => 4,
+            Self::Eight => 8,
+            Self::Sixteen => 16,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::One => "1 bit",
+            Self::Two => "2 bits",
+            Self::Four => "4 bits",
+            Self::Eight => "8 bits",
+            Self::Sixteen => "16 bits",
+        }
+    }
+
+    /// The esp-hal type name for `direction`.
+    pub fn esp_hal(self, tx: bool) -> &'static str {
+        let side = if tx { "Tx" } else { "Rx" };
+        match self {
+            Self::One => match side {
+                "Tx" => "TxOneBit",
+                _ => "RxOneBit",
+            },
+            Self::Two => match side {
+                "Tx" => "TxTwoBits",
+                _ => "RxTwoBits",
+            },
+            Self::Four => match side {
+                "Tx" => "TxFourBits",
+                _ => "RxFourBits",
+            },
+            Self::Eight => match side {
+                "Tx" => "TxEightBits",
+                _ => "RxEightBits",
+            },
+            Self::Sixteen => match side {
+                "Tx" => "TxSixteenBits",
+                _ => "RxSixteenBits",
+            },
+        }
+    }
+
+    /// The widths this chip's PARL_IO can actually build.
+    ///
+    /// Sixteen lines exist only on the FIRST generation of the peripheral —
+    /// esp-hal gates `TxSixteenBits` on `#[cfg(parl_io_version = "1")]`, which
+    /// is the ESP32-C6 and not the C5 or the H2. Offering it there would be a
+    /// width with no type behind it.
+    pub fn options(family: &str) -> &'static [Self] {
+        if family == "esp32c6" {
+            &Self::ALL
+        } else {
+            &[Self::One, Self::Two, Self::Four, Self::Eight]
+        }
+    }
+}
+
+/// Which end of a byte goes out first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParlIoBitOrder {
+    #[default]
+    Msb,
+    Lsb,
+}
+
+impl ParlIoBitOrder {
+    pub const ALL: [Self; 2] = [Self::Msb, Self::Lsb];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Msb => "MSB first",
+            Self::Lsb => "LSB first",
+        }
+    }
+
+    pub fn esp_hal(self) -> &'static str {
+        match self {
+            Self::Msb => "Msb",
+            Self::Lsb => "Lsb",
+        }
+    }
+}
+
+/// The chip's one parallel port.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParlIoModuleConfig {
+    /// Always 0: a chip has one PARL_IO. Carried anyway so the module looks
+    /// like every other one and `reconcile_modules` needs no special case.
+    pub instance: u8,
+    #[serde(default)]
+    pub direction: ParlIoDirection,
+    #[serde(default)]
+    pub width: ParlIoWidth,
+    /// Clock rate on the bus, in Hz.
+    pub freq_hz: u32,
+    #[serde(default)]
+    pub bit_order: ParlIoBitOrder,
+    /// Bytes the DMA buffer holds. A parallel port exists to move blocks, so
+    /// this is the size of the block.
+    pub buffer_bytes: u32,
+    pub rx_model: String,
+    pub tx_model: String,
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl ParlIoModuleConfig {
+    /// Defaults: transmit, eight lines, 1 MHz, MSB first, 4 KiB of buffer.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            direction: ParlIoDirection::default(),
+            width: ParlIoWidth::default(),
+            freq_hz: 1_000_000,
+            bit_order: ParlIoBitOrder::default(),
+            buffer_bytes: 4096,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+}
+
+const PARL_DATA_SIGNALS: [ModuleSignal; 16] = [
+    ModuleSignal::ParlD0,
+    ModuleSignal::ParlD1,
+    ModuleSignal::ParlD2,
+    ModuleSignal::ParlD3,
+    ModuleSignal::ParlD4,
+    ModuleSignal::ParlD5,
+    ModuleSignal::ParlD6,
+    ModuleSignal::ParlD7,
+    ModuleSignal::ParlD8,
+    ModuleSignal::ParlD9,
+    ModuleSignal::ParlD10,
+    ModuleSignal::ParlD11,
+    ModuleSignal::ParlD12,
+    ModuleSignal::ParlD13,
+    ModuleSignal::ParlD14,
+    ModuleSignal::ParlD15,
+];
+
 impl McpwmModuleConfig {
     /// Defaults: 20 kHz at 1 % resolution, every output idle.
     ///
@@ -3708,6 +3985,7 @@ pub enum ModuleConfig {
     Rmt(RmtModuleConfig),
     Pcnt(PcntModuleConfig),
     Mcpwm(McpwmModuleConfig),
+    ParlIo(ParlIoModuleConfig),
     Dac(DacModuleConfig),
     Sai(SaiModuleConfig),
     Sdmmc(SdmmcModuleConfig),
@@ -3736,6 +4014,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => c.instance,
             ModuleConfig::Xspi(c) => c.instance,
             ModuleConfig::Hspi(c) => c.instance,
+            ModuleConfig::ParlIo(c) => c.instance,
             ModuleConfig::Mcpwm(c) => c.instance,
             ModuleConfig::Pcnt(c) => c.instance,
             ModuleConfig::Rmt(c) => c.instance,
@@ -3759,6 +4038,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.rx_model,
             ModuleConfig::Xspi(c) => &c.rx_model,
             ModuleConfig::Hspi(c) => &c.rx_model,
+            ModuleConfig::ParlIo(c) => &c.rx_model,
             ModuleConfig::Mcpwm(c) => &c.rx_model,
             ModuleConfig::Pcnt(c) => &c.rx_model,
             ModuleConfig::Rmt(c) => &c.rx_model,
@@ -3782,6 +4062,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.tx_model,
             ModuleConfig::Xspi(c) => &c.tx_model,
             ModuleConfig::Hspi(c) => &c.tx_model,
+            ModuleConfig::ParlIo(c) => &c.tx_model,
             ModuleConfig::Mcpwm(c) => &c.tx_model,
             ModuleConfig::Pcnt(c) => &c.tx_model,
             ModuleConfig::Rmt(c) => &c.tx_model,
@@ -3805,6 +4086,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.rx_model,
             ModuleConfig::Xspi(c) => &mut c.rx_model,
             ModuleConfig::Hspi(c) => &mut c.rx_model,
+            ModuleConfig::ParlIo(c) => &mut c.rx_model,
             ModuleConfig::Mcpwm(c) => &mut c.rx_model,
             ModuleConfig::Pcnt(c) => &mut c.rx_model,
             ModuleConfig::Rmt(c) => &mut c.rx_model,
@@ -3828,6 +4110,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.tx_model,
             ModuleConfig::Xspi(c) => &mut c.tx_model,
             ModuleConfig::Hspi(c) => &mut c.tx_model,
+            ModuleConfig::ParlIo(c) => &mut c.tx_model,
             ModuleConfig::Mcpwm(c) => &mut c.tx_model,
             ModuleConfig::Pcnt(c) => &mut c.tx_model,
             ModuleConfig::Rmt(c) => &mut c.tx_model,
@@ -3852,6 +4135,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.custom_label,
             ModuleConfig::Xspi(c) => &c.custom_label,
             ModuleConfig::Hspi(c) => &c.custom_label,
+            ModuleConfig::ParlIo(c) => &c.custom_label,
             ModuleConfig::Mcpwm(c) => &c.custom_label,
             ModuleConfig::Pcnt(c) => &c.custom_label,
             ModuleConfig::Rmt(c) => &c.custom_label,
@@ -3875,6 +4159,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.custom_label,
             ModuleConfig::Xspi(c) => &mut c.custom_label,
             ModuleConfig::Hspi(c) => &mut c.custom_label,
+            ModuleConfig::ParlIo(c) => &mut c.custom_label,
             ModuleConfig::Mcpwm(c) => &mut c.custom_label,
             ModuleConfig::Pcnt(c) => &mut c.custom_label,
             ModuleConfig::Rmt(c) => &mut c.custom_label,
@@ -3891,6 +4176,12 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => format!("USART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Lpuart(c) => format!("LPUART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Timer(c) => format!("TIM{}  ·  {}", c.instance, hz_label(c.freq_hz)),
+            ModuleConfig::ParlIo(c) => format!(
+                "PARL  ·  {}  ·  {}  ·  {}",
+                c.direction.label(),
+                c.width.label(),
+                hz_label(c.freq_hz)
+            ),
             ModuleConfig::Mcpwm(c) => format!("MCPWM{}  ·  {}", c.instance, hz_label(c.freq_hz)),
             ModuleConfig::Pcnt(c) => format!(
                 "PCNT{}  ·  {}",
