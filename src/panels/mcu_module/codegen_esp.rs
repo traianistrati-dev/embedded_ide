@@ -42,8 +42,8 @@ use super::codegen::dma_map::DmaUse;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
 use super::mcu_def::DmaDef;
 use super::modules::{
-    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, PcntModuleConfig, RmtModuleConfig,
-    SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, McpwmModuleConfig, PcntModuleConfig,
+    RmtModuleConfig, SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -154,6 +154,7 @@ pub fn fresh_esp32c3_main_rs(
     i2s: &BTreeMap<u8, I2sModuleConfig>,
     rmt: &BTreeMap<u8, RmtModuleConfig>,
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
+    mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -173,6 +174,7 @@ pub fn fresh_esp32c3_main_rs(
         i2s,
         rmt,
         pcnt,
+        mcpwm,
         timer,
         custom_inits,
         chip,
@@ -199,6 +201,7 @@ pub fn update_esp32c3_main_rs(
     i2s: &BTreeMap<u8, I2sModuleConfig>,
     rmt: &BTreeMap<u8, RmtModuleConfig>,
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
+    mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -218,6 +221,7 @@ pub fn update_esp32c3_main_rs(
         i2s,
         rmt,
         pcnt,
+        mcpwm,
         timer,
         custom_inits,
         chip,
@@ -337,6 +341,7 @@ fn make_gen_section(
     i2s: &BTreeMap<u8, I2sModuleConfig>,
     rmt: &BTreeMap<u8, RmtModuleConfig>,
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
+    mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     // PWM (LEDC) module settings, keyed by LEDC timer.
     timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
@@ -512,6 +517,7 @@ fn make_gen_section(
         i2s,
         rmt,
         pcnt,
+        mcpwm,
         crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(chip),
         runtime,
         &dma_plan,
@@ -706,6 +712,8 @@ fn build_use_block(
     if has_pcnt {
         lines.push("use esp_hal::pcnt::Pcnt;".into());
     }
+    // Nothing for MCPWM: `McPwm::new` lives in the config module, and `main.rs`
+    // only hands it the peripheral it already holds.
     // Nothing: the USB driver is built inside `pins/configs/usb.rs`, which
     // takes no argument from `main.rs` at all.
     // No bus imports: UART/SPI/I2C are built inside `pins/configs/<bus>.rs`, and
@@ -802,6 +810,35 @@ fn collect_rmt<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, &'a Pin> {
             PinFunction::RmtChannel(n) => Some((n, *p)),
             _ => None,
         })
+        .collect()
+}
+
+/// The MCPWM outputs the canvas wires, by unit.
+///
+/// `(operator, is B)` per unit, in operator order then A before B — the order
+/// the generated `init` declares its parameters in, so the call site and the
+/// module cannot disagree about which pad is which.
+fn collect_mcpwm<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, Vec<(u8, bool, &'a Pin)>> {
+    let mut out: BTreeMap<u8, Vec<(u8, bool, &Pin)>> = BTreeMap::new();
+    for p in configured {
+        let (unit, operator, b) = match p.selected_function {
+            PinFunction::McpwmA { unit, operator } => (unit, operator, false),
+            PinFunction::McpwmB { unit, operator } => (unit, operator, true),
+            _ => continue,
+        };
+        out.entry(unit).or_default().push((operator, b, *p));
+    }
+    for v in out.values_mut() {
+        v.sort_by_key(|(op, b, _)| (*op, *b));
+    }
+    out
+}
+
+/// `(unit, [(operator, is B)])` for every wired MCPWM unit.
+pub(crate) fn mcpwm_outputs_wired(configured: &[&Pin]) -> Vec<(u8, Vec<(u8, bool)>)> {
+    collect_mcpwm(configured)
+        .into_iter()
+        .map(|(u, outs)| (u, outs.into_iter().map(|(op, b, _)| (op, b)).collect()))
         .collect()
 }
 
@@ -1058,6 +1095,7 @@ fn bus_sections(
     i2s_cfg: &BTreeMap<u8, I2sModuleConfig>,
     rmt_cfg: &BTreeMap<u8, RmtModuleConfig>,
     pcnt_cfg: &BTreeMap<u8, PcntModuleConfig>,
+    mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
     // The RMT source clock, which `Rmt::new` takes as an argument.
     rmt_hz: u32,
     runtime: EspRuntime,
@@ -1266,6 +1304,37 @@ fn bus_sections(
         }
         out.push(("PCNT".to_owned(), body));
     }
+    // MCPWM last. The TIMER binding is not decorative: it owns the guard that
+    // holds the peripheral clock on, so dropping it would silence every pin.
+    for (unit, outs) in collect_mcpwm(configured) {
+        let sfx = mcpwm_cfg
+            .get(&unit)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        let mut body = String::new();
+        let mut args = Vec::new();
+        let mut handles = vec![format!("_mcpwm{unit}_timer{sfx}")];
+        for (op, b, p) in &outs {
+            let var = esp_binding(p);
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
+            args.push(var);
+            handles.push(format!(
+                "mut _mcpwm{unit}_op{op}{}{sfx}",
+                if *b { "b" } else { "a" }
+            ));
+        }
+        body.push_str(&format!(
+            "    let ({}) =\n\
+             \x20       pins::configs::mcpwm{unit}::init(peripherals.MCPWM{unit}, {});\n",
+            handles.join(", "),
+            args.join(", "),
+        ));
+        out.push((format!("MCPWM{unit}"), body));
+    }
     out
 }
 
@@ -1327,6 +1396,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &timer,
             "",
             "esp32c3",
@@ -1377,6 +1447,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1421,6 +1492,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_mcpwm() -> BTreeMap<u8, McpwmModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1436,6 +1511,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1463,6 +1539,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1490,6 +1567,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1514,6 +1592,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1533,6 +1612,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1561,6 +1641,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1591,6 +1672,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1629,6 +1711,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1674,6 +1757,7 @@ mod tests {
                 &no_i2s(),
                 &no_rmt(),
                 &no_pcnt(),
+                &no_mcpwm(),
                 &Default::default(),
                 "",
                 "esp32c3",
@@ -1753,6 +1837,7 @@ mod tests {
             &no_i2s(),
             &no_rmt(),
             &no_pcnt(),
+            &no_mcpwm(),
             &Default::default(),
             "",
             "esp32c3",

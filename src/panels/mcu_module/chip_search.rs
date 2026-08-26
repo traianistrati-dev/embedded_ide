@@ -852,6 +852,11 @@ mod tests {
             }
         }
 
+        let mut parts_of: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for &ix in &c.unified {
+            *parts_of.entry(c.rows[ix].entry.family.as_str()).or_default() += 1;
+        }
         let (mut yes, mut no) = (Vec::new(), Vec::new());
         for (family, row) in &per_family {
             let src = &c.sources[row.source];
@@ -868,9 +873,9 @@ mod tests {
                 None => ClockConfig::None,
             };
             if generates_clock_code_for(family, &clock) {
-                yes.push(family.clone());
+                yes.push(format!("{family}	{}", parts_of.get(family.as_str()).copied().unwrap_or(0)));
             } else {
-                no.push(format!("{family} (e.g. {})", row.entry.ref_name));
+                no.push(format!("{family}	{}	(e.g. {})", parts_of.get(family.as_str()).copied().unwrap_or(0), row.entry.ref_name));
             }
         }
         println!(
@@ -891,7 +896,7 @@ KEEPS THE COMMENTED SKELETON ({}):",
         }
         // How much of the catalogue that actually is. A family with three parts
         // and one with three hundred are not the same problem.
-        let affected: Vec<&str> = no.iter().filter_map(|f| f.split(' ').next()).collect();
+        let affected: Vec<&str> = no.iter().filter_map(|f| f.split('\t').next()).collect();
         let mut count = 0usize;
         for &ix in &c.unified {
             if affected.contains(&c.rows[ix].entry.family.as_str()) {

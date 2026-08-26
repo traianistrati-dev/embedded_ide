@@ -719,6 +719,27 @@ fn drives(f: &PinFunction) -> bool {
     )
 }
 
+/// How many MCPWM units this chip has, or none.
+///
+/// From the peripheral singletons — `MCPWM0`, and `MCPWM1` on the ESP32 and S3
+/// — gated on the driver, because the two are different questions everywhere
+/// else in this file and there is no reason to trust them to agree here.
+///
+/// Only four parts have one at all: the C2, C3, C5, C61 and S2 have no `mcpwm`
+/// driver, and the ESP32-C5 in particular has no MCPWM block either.
+///
+/// Three operators each, which is the count on every part esp-hal supports and
+/// the reason [`super::modules::McpwmModuleConfig`] has exactly three.
+pub(crate) fn mcpwm_units(chip: &EspChip) -> u8 {
+    if !chip.drivers.iter().any(|d| d == "mcpwm") {
+        return 0;
+    }
+    chip.peripherals
+        .iter()
+        .filter(|p| p.starts_with("MCPWM"))
+        .count() as u8
+}
+
 /// How many PCNT units this chip has, or none.
 ///
 /// Not in the metadata at any depth: the vendor lists the `PCNT` block and
@@ -867,6 +888,14 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
     for u in 0..pcnt_units(chip) {
         out.push(PinFunction::PcntEdge(u));
         out.push(PinFunction::PcntCtrl(u));
+    }
+
+    // MCPWM: three operators per unit, each a complementary pair.
+    for unit in 0..mcpwm_units(chip) {
+        for operator in 0..3 {
+            out.push(PinFunction::McpwmA { unit, operator });
+            out.push(PinFunction::McpwmB { unit, operator });
+        }
     }
 
     // TWAI is Espressif's CAN. Unnumbered here because `CanTx`/`CanRx` are, and

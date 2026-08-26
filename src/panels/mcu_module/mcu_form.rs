@@ -956,6 +956,8 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SaiFs { sai, block } => format!("sai{sai}_{}_fs", sai_letter(*block)),
         PinFunction::SaiMclk { sai, block } => format!("sai{sai}_{}_mclk", sai_letter(*block)),
         PinFunction::RmtChannel(n) => format!("rmt{n}"),
+        PinFunction::McpwmA { unit, operator } => format!("mcpwm{unit}_op{operator}a"),
+        PinFunction::McpwmB { unit, operator } => format!("mcpwm{unit}_op{operator}b"),
         PinFunction::PcntEdge(n) => format!("pcnt{n}_edge"),
         PinFunction::PcntCtrl(n) => format!("pcnt{n}_ctrl"),
         PinFunction::I2sCk(n) => format!("i2s{n}_ck"),

@@ -423,6 +423,32 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::McpwmA { unit, operator } | PinFunction::McpwmB { unit, operator } => {
+                let b = matches!(self, PinFunction::McpwmB { .. });
+                FunctionInfo {
+                    description: format!(
+                        "MCPWM{unit} operator {operator}, output {}. Espressif's MOTOR-control                          PWM — a different peripheral from the LEDC that drives the plain PWM                          pins. An operator's two outputs are a complementary PAIR meant to                          switch the two sides of a half-bridge.",
+                        if b { "B" } else { "A" }
+                    ),
+                    specs: vec![
+                        (
+                            "Why not LEDC".into(),
+                            "The LEDC dims LEDs: one output per channel, no pairing and no                              dead time. This one exists to drive a bridge, where turning both                              sides on at once destroys it."
+                                .into(),
+                        ),
+                        (
+                            "The pair".into(),
+                            "A and B come from one operator and share its timer, so they                              share a frequency by construction. Wiring only A is fine - a                              single-ended output is a normal use."
+                                .into(),
+                        ),
+                        (
+                            "Frequency".into(),
+                            "Set once for the whole MCPWM unit in the module: all three of                              its operators run off the same timer here."
+                                .into(),
+                        ),
+                    ],
+                }
+            }
             PinFunction::PcntEdge(n) | PinFunction::PcntCtrl(n) => {
                 let ctrl = matches!(self, PinFunction::PcntCtrl(_));
                 FunctionInfo {

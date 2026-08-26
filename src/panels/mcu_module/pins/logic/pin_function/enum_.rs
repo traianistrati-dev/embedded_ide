@@ -183,6 +183,24 @@ pub enum PinFunction {
     /// I2S{n} master clock out — an oversampled clock for the codec, optional.
     I2sMck(u8),
 
+    // ── MCPWM ───────────────────────────────────────────────────────────────
+    /// MCPWM{unit} operator {operator}, output A.
+    ///
+    /// Espressif's MOTOR-control PWM, and a different peripheral from the LEDC
+    /// that [`PinFunction::TimerPwm`] drives on an ESP. Where the LEDC dims
+    /// LEDs, this one exists to switch a bridge: an operator's A and B outputs
+    /// are a complementary pair, with dead time between them, so the two sides
+    /// of a half-bridge are never on at once.
+    McpwmA {
+        unit: u8,
+        operator: u8,
+    },
+    /// MCPWM{unit} operator {operator}, output B — A's counterpart.
+    McpwmB {
+        unit: u8,
+        operator: u8,
+    },
+
     // ── PCNT ────────────────────────────────────────────────────────────────
     /// PCNT unit {n} — the pulses being counted.
     ///

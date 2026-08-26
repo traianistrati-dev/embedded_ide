@@ -251,6 +251,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let i2s = modules::i2s_configs(&mcu.modules);
     let rmt = modules::rmt_configs(&mcu.modules);
     let pcnt = modules::pcnt_configs(&mcu.modules);
+    let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::fresh_esp32c3_main_rs(
         &pins_of(mcu),
@@ -263,6 +264,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &i2s,
         &rmt,
         &pcnt,
+        &mcpwm,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -318,6 +320,11 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
             .iter()
             .any(|p| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp))
             && codegen_esp::has_usb_serial_jtag(&mcu.family),
+        // The MCPWM outputs wired, their unit's settings, and the peripheral
+        // clock esp-hal's own examples pass - 32 MHz on the H2, 40 elsewhere.
+        &codegen_esp::mcpwm_outputs_wired(&configured),
+        &modules::mcpwm_configs(&mcu.modules),
+        if mcu.family == "esp32h2" { 32 } else { 40 },
         &pwm,
         &timers,
         runtime,
@@ -332,6 +339,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let i2s = modules::i2s_configs(&mcu.modules);
     let rmt = modules::rmt_configs(&mcu.modules);
     let pcnt = modules::pcnt_configs(&mcu.modules);
+    let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::update_esp32c3_main_rs(
         existing,
@@ -345,6 +353,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &i2s,
         &rmt,
         &pcnt,
+        &mcpwm,
         &timer,
         &mcu.custom_module_inits(),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
@@ -1633,6 +1642,16 @@ mod tests {
             // two pads are what makes it appear at all.
             PinFunction::UsbDm,
             PinFunction::UsbDp,
+            // One MCPWM operator with BOTH outputs: the complementary pair, and
+            // the shape whose return type is longest.
+            PinFunction::McpwmA {
+                unit: 0,
+                operator: 0,
+            },
+            PinFunction::McpwmB {
+                unit: 0,
+                operator: 0,
+            },
         ];
         for p in mcu.iter_all_pins_mut() {
             if p.reserved || p.selected_function != PinFunction::Unset {
@@ -1653,6 +1672,19 @@ mod tests {
             name: "SPI2".into(),
             pos: (0.0, 0.0),
             config: ModuleConfig::Spi(spi_cfg),
+            connections: Vec::new(),
+        });
+        mcu.modules.push(VirtualModule {
+            id: "mcpwm_0".into(),
+            kind: ModuleKind::GenericInterfaceMcpwm,
+            name: "MCPWM0".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Mcpwm({
+                let mut c = crate::panels::mcu_module::modules::McpwmModuleConfig::new(0);
+                c.duty_x100.insert((0, false), 2_500);
+                c.duty_x100.insert((0, true), 7_500);
+                c
+            }),
             connections: Vec::new(),
         });
         mcu.modules.push(VirtualModule {

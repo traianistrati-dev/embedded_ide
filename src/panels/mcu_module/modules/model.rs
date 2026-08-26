@@ -69,6 +69,18 @@ pub enum ModuleKind {
     /// `GI_SPI 2` and a `GI_I2S 2` describe the same silicon and only one of
     /// them can be built.
     GenericInterfaceI2s,
+    /// Motor-control PWM on one MCPWM unit — "MCPWM".
+    ///
+    /// Espressif only, and NOT the same peripheral as the plain PWM module: on
+    /// an ESP that one is the LEDC, which dims LEDs. This drives bridges.
+    ///
+    /// The instance is the UNIT (a chip has one, or two on the ESP32 and S3),
+    /// and its three operators are SIGNALS — the same shape the SAI module uses
+    /// for its two blocks. All three run off the unit's timer 0, so one
+    /// frequency covers the module: a three-phase inverter wants exactly that,
+    /// and three contradictory numbers in one panel would be the alternative.
+    /// Per-operator timers are a later addition, not a limit of the silicon.
+    GenericInterfaceMcpwm,
     /// A hardware pulse counter — "PCNT".
     ///
     /// Espressif only. The instance is a UNIT: a chip has one PCNT block with
@@ -110,7 +122,7 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 18] = [
+    pub const ALL: [ModuleKind; 19] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
@@ -118,6 +130,7 @@ impl ModuleKind {
         ModuleKind::GenericInterfaceI2s,
         ModuleKind::GenericInterfaceRmt,
         ModuleKind::GenericInterfacePcnt,
+        ModuleKind::GenericInterfaceMcpwm,
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceSdmmc,
         ModuleKind::GenericInterfaceQspi,
@@ -164,6 +177,12 @@ impl ModuleKind {
             // The edge input is the counter; the control input is what
             // turns it into an encoder, and plenty of uses do not want one.
             ModuleKind::GenericInterfacePcnt => (&[PcntEdgeSig], &[PcntCtrlSig]),
+            // One output is required and the other five are not: a single
+            // operator driving one side is a normal use, and auto-wiring
+            // six pads for it would spend the chip.
+            ModuleKind::GenericInterfaceMcpwm => {
+                (&[McpwmA0], &[McpwmB0, McpwmA1, McpwmB1, McpwmA2, McpwmB2])
+            }
             // One channel, like the PWM module: taking the second pad by
             // default would spend a pin on a DAC the user added for one.
             ModuleKind::GenericInterfaceDac => (&[DacOut1], &[]),
@@ -220,6 +239,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2s => "I2S",
             ModuleKind::GenericInterfaceRmt => "RMT",
             ModuleKind::GenericInterfacePcnt => "PCNT",
+            ModuleKind::GenericInterfaceMcpwm => "MCPWM",
             ModuleKind::GenericInterfaceDac => "DAC",
             ModuleKind::GenericInterfaceSai => "SAI",
             ModuleKind::GenericInterfaceSdmmc => "SDMMC",
@@ -251,6 +271,9 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2s => ModuleConfig::I2s(I2sModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceRmt => ModuleConfig::Rmt(RmtModuleConfig::new(instance)),
             ModuleKind::GenericInterfacePcnt => ModuleConfig::Pcnt(PcntModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceMcpwm => {
+                ModuleConfig::Mcpwm(McpwmModuleConfig::new(instance))
+            }
             ModuleKind::GenericInterfaceDac => ModuleConfig::Dac(DacModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceSai => ModuleConfig::Sai(SaiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceSdmmc => {
@@ -324,6 +347,24 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::I2cScl(n) => (GenericInterfaceI2c, *n, Scl),
         PinFunction::I2cSda(n) => (GenericInterfaceI2c, *n, Sda),
         PinFunction::RmtChannel(n) => (GenericInterfaceRmt, *n, RmtLine),
+        PinFunction::McpwmA { unit, operator } => (
+            GenericInterfaceMcpwm,
+            *unit,
+            match operator {
+                0 => McpwmA0,
+                1 => McpwmA1,
+                _ => McpwmA2,
+            },
+        ),
+        PinFunction::McpwmB { unit, operator } => (
+            GenericInterfaceMcpwm,
+            *unit,
+            match operator {
+                0 => McpwmB0,
+                1 => McpwmB1,
+                _ => McpwmB2,
+            },
+        ),
         PinFunction::PcntEdge(n) => (GenericInterfacePcnt, *n, PcntEdgeSig),
         PinFunction::PcntCtrl(n) => (GenericInterfacePcnt, *n, PcntCtrlSig),
         PinFunction::I2sCk(n) => (GenericInterfaceI2s, *n, I2sCk),
@@ -526,6 +567,13 @@ pub enum ModuleSignal {
     PcntEdgeSig,
     /// The level that decides what each edge means.
     PcntCtrlSig,
+    // MCPWM — three operators, each a complementary pair.
+    McpwmA0,
+    McpwmB0,
+    McpwmA1,
+    McpwmB1,
+    McpwmA2,
+    McpwmB2,
     // DAC — one pad per channel, nothing shared but the block.
     DacOut1,
     DacOut2,
@@ -649,6 +697,12 @@ impl ModuleSignal {
             ModuleSignal::RmtLine => "RMT",
             ModuleSignal::PcntEdgeSig => "EDGE",
             ModuleSignal::PcntCtrlSig => "CTRL",
+            ModuleSignal::McpwmA0 => "OP0A",
+            ModuleSignal::McpwmB0 => "OP0B",
+            ModuleSignal::McpwmA1 => "OP1A",
+            ModuleSignal::McpwmB1 => "OP1B",
+            ModuleSignal::McpwmA2 => "OP2A",
+            ModuleSignal::McpwmB2 => "OP2B",
             ModuleSignal::Tx => "TX",
             ModuleSignal::Rx => "RX",
             ModuleSignal::Cts => "CTS",
@@ -774,6 +828,26 @@ impl ModuleSignal {
             ModuleSignal::RmtLine => PinFunction::RmtChannel(instance),
             ModuleSignal::PcntEdgeSig => PinFunction::PcntEdge(instance),
             ModuleSignal::PcntCtrlSig => PinFunction::PcntCtrl(instance),
+            ModuleSignal::McpwmA0 | ModuleSignal::McpwmA1 | ModuleSignal::McpwmA2 => {
+                PinFunction::McpwmA {
+                    unit: instance,
+                    operator: match self {
+                        ModuleSignal::McpwmA0 => 0,
+                        ModuleSignal::McpwmA1 => 1,
+                        _ => 2,
+                    },
+                }
+            }
+            ModuleSignal::McpwmB0 | ModuleSignal::McpwmB1 | ModuleSignal::McpwmB2 => {
+                PinFunction::McpwmB {
+                    unit: instance,
+                    operator: match self {
+                        ModuleSignal::McpwmB0 => 0,
+                        ModuleSignal::McpwmB1 => 1,
+                        _ => 2,
+                    },
+                }
+            }
             ModuleSignal::Tx => PinFunction::UsartTx(instance),
             ModuleSignal::Rx => PinFunction::UsartRx(instance),
             ModuleSignal::Cts => PinFunction::UsartCts(instance),
@@ -3366,6 +3440,70 @@ pub struct PcntModuleConfig {
     pub custom_label: String,
 }
 
+/// One MCPWM unit: a frequency, a resolution, and a duty per wired output.
+///
+/// The duty is in HUNDREDTHS of a percent for the same reason the LEDC module's
+/// is — see [`TimerModuleConfig::duty_x100`]: whole percent cannot express the
+/// first duty anyone reaches for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpwmModuleConfig {
+    /// The MCPWM unit — `peripherals.MCPWM0`, or `MCPWM1` on the parts with two.
+    pub instance: u8,
+    /// Output frequency in Hz, shared by every operator of the unit.
+    pub freq_hz: u32,
+    /// The timer's counter top. The duty can only be set in `period + 1` steps,
+    /// so this is the RESOLUTION — and the product of it and the frequency is
+    /// bounded by the peripheral clock, which is what makes it a real choice
+    /// rather than "as high as possible".
+    pub period: u16,
+    /// `(operator, is B) -> duty` in hundredths of a percent.
+    ///
+    /// Keyed by the OUTPUT rather than the operator, because A and B are set
+    /// independently: a bridge driven from one operator wants them
+    /// complementary, and a pair of unrelated loads does not.
+    #[serde(default)]
+    pub duty_x100: std::collections::BTreeMap<(u8, bool), u16>,
+    pub rx_model: String,
+    pub tx_model: String,
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl McpwmModuleConfig {
+    /// Defaults: 20 kHz at 1 % resolution, every output idle.
+    ///
+    /// 20 kHz is above hearing, which is where a motor drive wants to be, and
+    /// a period of 99 gives whole-percent steps — the pair the esp-hal example
+    /// itself uses.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            freq_hz: 20_000,
+            period: 99,
+            duty_x100: std::collections::BTreeMap::new(),
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+
+    /// The duty of one output, in hundredths of a percent. Zero when unset —
+    /// an output nobody has given a duty stays low.
+    pub fn duty_x100_of(&self, operator: u8, b: bool) -> u16 {
+        self.duty_x100.get(&(operator, b)).copied().unwrap_or(0)
+    }
+
+    /// The TIMESTAMP that duty becomes: the counter value the output flips at.
+    ///
+    /// `period + 1` steps, so 50 % of a period of 99 is 50. Rounded rather than
+    /// truncated, or every duty would land one step low.
+    pub fn timestamp_of(&self, operator: u8, b: bool) -> u16 {
+        let steps = u32::from(self.period) + 1;
+        let x100 = u32::from(self.duty_x100_of(operator, b));
+        ((x100 * steps).div_ceil(10_000)).min(steps) as u16
+    }
+}
+
 impl PcntModuleConfig {
     /// Defaults: count up on the rising edge, +/-32767, no filter — a plain
     /// pulse counter. Adding a control pad and setting one level to `Reverse`
@@ -3569,6 +3707,7 @@ pub enum ModuleConfig {
     I2s(I2sModuleConfig),
     Rmt(RmtModuleConfig),
     Pcnt(PcntModuleConfig),
+    Mcpwm(McpwmModuleConfig),
     Dac(DacModuleConfig),
     Sai(SaiModuleConfig),
     Sdmmc(SdmmcModuleConfig),
@@ -3597,6 +3736,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => c.instance,
             ModuleConfig::Xspi(c) => c.instance,
             ModuleConfig::Hspi(c) => c.instance,
+            ModuleConfig::Mcpwm(c) => c.instance,
             ModuleConfig::Pcnt(c) => c.instance,
             ModuleConfig::Rmt(c) => c.instance,
             ModuleConfig::Timer(c) => c.instance,
@@ -3619,6 +3759,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.rx_model,
             ModuleConfig::Xspi(c) => &c.rx_model,
             ModuleConfig::Hspi(c) => &c.rx_model,
+            ModuleConfig::Mcpwm(c) => &c.rx_model,
             ModuleConfig::Pcnt(c) => &c.rx_model,
             ModuleConfig::Rmt(c) => &c.rx_model,
             ModuleConfig::Timer(c) => &c.rx_model,
@@ -3641,6 +3782,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.tx_model,
             ModuleConfig::Xspi(c) => &c.tx_model,
             ModuleConfig::Hspi(c) => &c.tx_model,
+            ModuleConfig::Mcpwm(c) => &c.tx_model,
             ModuleConfig::Pcnt(c) => &c.tx_model,
             ModuleConfig::Rmt(c) => &c.tx_model,
             ModuleConfig::Timer(c) => &c.tx_model,
@@ -3663,6 +3805,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.rx_model,
             ModuleConfig::Xspi(c) => &mut c.rx_model,
             ModuleConfig::Hspi(c) => &mut c.rx_model,
+            ModuleConfig::Mcpwm(c) => &mut c.rx_model,
             ModuleConfig::Pcnt(c) => &mut c.rx_model,
             ModuleConfig::Rmt(c) => &mut c.rx_model,
             ModuleConfig::Timer(c) => &mut c.rx_model,
@@ -3685,6 +3828,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.tx_model,
             ModuleConfig::Xspi(c) => &mut c.tx_model,
             ModuleConfig::Hspi(c) => &mut c.tx_model,
+            ModuleConfig::Mcpwm(c) => &mut c.tx_model,
             ModuleConfig::Pcnt(c) => &mut c.tx_model,
             ModuleConfig::Rmt(c) => &mut c.tx_model,
             ModuleConfig::Timer(c) => &mut c.tx_model,
@@ -3708,6 +3852,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.custom_label,
             ModuleConfig::Xspi(c) => &c.custom_label,
             ModuleConfig::Hspi(c) => &c.custom_label,
+            ModuleConfig::Mcpwm(c) => &c.custom_label,
             ModuleConfig::Pcnt(c) => &c.custom_label,
             ModuleConfig::Rmt(c) => &c.custom_label,
             ModuleConfig::Timer(c) => &c.custom_label,
@@ -3730,6 +3875,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.custom_label,
             ModuleConfig::Xspi(c) => &mut c.custom_label,
             ModuleConfig::Hspi(c) => &mut c.custom_label,
+            ModuleConfig::Mcpwm(c) => &mut c.custom_label,
             ModuleConfig::Pcnt(c) => &mut c.custom_label,
             ModuleConfig::Rmt(c) => &mut c.custom_label,
             ModuleConfig::Timer(c) => &mut c.custom_label,
@@ -3745,6 +3891,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => format!("USART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Lpuart(c) => format!("LPUART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Timer(c) => format!("TIM{}  ·  {}", c.instance, hz_label(c.freq_hz)),
+            ModuleConfig::Mcpwm(c) => format!("MCPWM{}  ·  {}", c.instance, hz_label(c.freq_hz)),
             ModuleConfig::Pcnt(c) => format!(
                 "PCNT{}  ·  {}",
                 c.instance,
@@ -3850,6 +3997,52 @@ impl VirtualModule {
     /// The peripheral instance this module targets.
     pub fn instance(&self) -> u8 {
         self.config.instance()
+    }
+}
+
+#[cfg(test)]
+mod mcpwm_tests {
+    use super::McpwmModuleConfig;
+
+    /// A duty is a TIMESTAMP on this peripheral, and the conversion has to
+    /// round rather than truncate.
+    ///
+    /// The counter runs `0..=period`, so there are `period + 1` steps. Plain
+    /// integer division would put every duty one step low — 50 % of 99 would be
+    /// 49, and a half-bridge driven from a pair of them would never be
+    /// symmetric.
+    #[test]
+    fn a_duty_becomes_the_timestamp_it_should() {
+        let mut c = McpwmModuleConfig::new(0);
+        assert_eq!(c.period, 99, "100 steps");
+
+        c.duty_x100.insert((0, false), 5_000); // 50 %
+        assert_eq!(c.timestamp_of(0, false), 50);
+
+        c.duty_x100.insert((0, true), 10_000); // 100 %
+        assert_eq!(c.timestamp_of(0, true), 100, "the full period");
+
+        // An output nobody set stays low, and 0 % is a real setting.
+        assert_eq!(c.timestamp_of(1, false), 0);
+        c.duty_x100.insert((1, false), 0);
+        assert_eq!(c.timestamp_of(1, false), 0);
+
+        // The two outputs of one operator are independent: setting A must not
+        // move B, which is what a key of `operator` alone would have done.
+        c.duty_x100.insert((2, false), 2_500);
+        assert_eq!(c.timestamp_of(2, false), 25);
+        assert_eq!(c.timestamp_of(2, true), 0);
+    }
+
+    /// A finer period gives finer steps, and the rounding follows it.
+    #[test]
+    fn the_period_is_the_resolution() {
+        let mut c = McpwmModuleConfig::new(0);
+        c.period = 999;
+        c.duty_x100.insert((0, false), 1_234); // 12.34 %
+        assert_eq!(c.timestamp_of(0, false), 124, "1000 steps, rounded up");
+        c.period = 9;
+        assert_eq!(c.timestamp_of(0, false), 2, "10 steps cannot say 12.34 %");
     }
 }
 

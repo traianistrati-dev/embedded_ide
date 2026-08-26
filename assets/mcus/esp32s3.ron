@@ -150,6 +150,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -235,6 +283,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -320,6 +416,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -405,6 +549,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -490,6 +682,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -575,6 +815,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -666,6 +954,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -751,6 +1087,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -836,6 +1220,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -927,6 +1359,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1016,6 +1496,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1105,6 +1633,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1194,6 +1770,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1283,6 +1907,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1378,6 +2050,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1467,6 +2187,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1556,6 +2324,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1645,6 +2461,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1735,6 +2599,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1825,6 +2737,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1910,6 +2870,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -1995,6 +3003,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2106,6 +3162,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2195,6 +3299,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2284,6 +3436,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2373,6 +3573,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2462,6 +3710,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2551,6 +3847,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2640,6 +3984,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2729,6 +4121,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2818,6 +4258,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2907,6 +4395,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -2994,6 +4530,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3079,6 +4663,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3164,6 +4796,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3249,6 +4929,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3334,6 +5062,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3419,6 +5195,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3504,6 +5328,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3589,6 +5461,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3674,6 +5594,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3759,6 +5727,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3844,6 +5860,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -3929,6 +5993,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],
@@ -4014,6 +6126,54 @@ McuDefinition(
                     PcntCtrl(2),
                     PcntEdge(3),
                     PcntCtrl(3),
+                    McpwmA(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 0,
+                        operator: 2,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 0,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 1,
+                    ),
+                    McpwmA(
+                        unit: 1,
+                        operator: 2,
+                    ),
+                    McpwmB(
+                        unit: 1,
+                        operator: 2,
+                    ),
                     CanTx,
                     CanRx,
                 ],

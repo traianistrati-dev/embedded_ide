@@ -26,6 +26,11 @@ impl PinFunction {
             // RMT drives edges, not data — a warm amber of its own, away from
             // both the buses and the PWM orange it is most easily confused with.
             PinFunction::RmtChannel(..) => egui::Color32::from_rgb(200, 150, 60),
+            // MCPWM shares the PWM orange: it IS pwm, and a reader looking
+            // for "which pins can switch something" wants the two together.
+            PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. } => {
+                egui::Color32::from_rgb(200, 120, 50)
+            }
             // PCNT counts edges rather than driving them — a cooler green,
             // apart from RMT's amber and from the GPIO-input green.
             PinFunction::PcntEdge(..) | PinFunction::PcntCtrl(..) => {

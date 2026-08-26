@@ -37,9 +37,9 @@
 
 use super::codegen_esp::EspRuntime;
 use super::modules::{
-    AsyncBusMode, I2cModuleConfig, I2sDirection, I2sFormat, I2sModuleConfig, I2sStandard, Parity,
-    PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, StopBits, TimerModuleConfig,
-    UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, I2sDirection, I2sFormat, I2sModuleConfig, I2sStandard,
+    McpwmModuleConfig, Parity, PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, StopBits,
+    TimerModuleConfig, UsartModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -649,6 +649,181 @@ fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime)
             } else {
                 "PeripheralInput, PeripheralOutput"
             },
+        ),
+        &consts,
+        &body,
+        &example,
+    )
+}
+
+// ── MCPWM ───────────────────────────────────────────────────────────────────
+
+/// One MCPWM unit: its timer, and a `PwmPin` per wired output.
+///
+/// # Why the TIMER comes back too
+///
+/// `Timer` owns the `PwmClockGuard` that keeps the MCPWM function clock
+/// running; `PwmPin` does not — it holds only a `PeripheralGuard`. An `init`
+/// that returned the pins alone would compile, and the clock would be switched
+/// off the moment it returned, leaving every output silent. So the timer is
+/// handed back as the first element of the tuple and `main.rs` binds it.
+///
+/// # One frequency, one timer
+///
+/// Every wired operator is pointed at timer 0. The module carries one
+/// frequency, so three timers would be three names for one number — and a
+/// three-phase inverter, which is what this peripheral is for, wants exactly
+/// one anyway.
+///
+/// # No async twin
+///
+/// There is no `into_async` on `McPwm`: the duty is set by writing a register,
+/// and there is nothing to await. `init` is the whole surface on either runtime.
+fn mcpwm_file(
+    unit: u8,
+    outputs: &[(u8, bool)],
+    cfg: Option<&McpwmModuleConfig>,
+    source_mhz: u32,
+) -> String {
+    let d = McpwmModuleConfig::new(unit);
+    let c = cfg.unwrap_or(&d);
+    let peri = format!("MCPWM{unit}");
+
+    let mut consts = format!(
+        "const FREQUENCY_HZ: u32 = {};\n\
+         // The timer counts 0..=PERIOD, so a duty lands on one of PERIOD+1 steps. Public: main.rs sets duty in terms of it.\n\
+         pub const PERIOD: u16 = {};\n",
+        c.freq_hz, c.period,
+    );
+    for (op, b) in outputs {
+        consts.push_str(&format!(
+            "const TIMESTAMP_OP{op}{}: u16 = {}; // {:.2} %\n",
+            if *b { "B" } else { "A" },
+            c.timestamp_of(*op, *b),
+            f64::from(c.duty_x100_of(*op, *b)) / 100.0,
+        ));
+    }
+
+    let name = |op: u8, b: bool| format!("op{op}{}", if b { "b" } else { "a" });
+    let params: String = outputs
+        .iter()
+        .map(|(op, b)| format!("    {}: impl PeripheralOutput<'d>,\n", name(*op, *b)))
+        .collect();
+    // The const parameter is IS_A, so it is the NEGATION of "this is the B
+    // output" — inverting it silently swaps which pad each handle drives.
+    let ret: String = outputs
+        .iter()
+        .map(|(op, b)| format!(", PwmPin<'d, {peri}<'d>, {op}, {}>", !b))
+        .collect();
+
+    // Each operator is pointed at timer 0 once, however many of its two
+    // outputs are wired.
+    let mut ops: Vec<u8> = outputs.iter().map(|(op, _)| *op).collect();
+    ops.sort_unstable();
+    ops.dedup();
+    let links: String = ops
+        .iter()
+        .map(|op| format!("\x20   mcpwm.operator{op}.set_timer(&mcpwm.timer0);\n"))
+        .collect();
+
+    // `with_pin_a` CONSUMES the operator, so an operator whose two outputs are
+    // both wired has to build them together — `with_pins` is the constructor
+    // that exists for exactly that, and reaching for `with_pin_a` twice does
+    // not compile.
+    let mut pins = String::new();
+    for op in &ops {
+        let a = outputs.contains(&(*op, false));
+        let b = outputs.contains(&(*op, true));
+        match (a, b) {
+            (true, true) => pins.push_str(&format!(
+                "\x20   let (mut {a_n}, mut {b_n}) = mcpwm.operator{op}.with_pins(\n\
+                 \x20       {a_n},\n\
+                 \x20       PwmPinConfig::UP_ACTIVE_HIGH,\n\
+                 \x20       {b_n},\n\
+                 \x20       PwmPinConfig::UP_ACTIVE_HIGH,\n\
+                 \x20   );\n",
+                a_n = name(*op, false),
+                b_n = name(*op, true),
+            )),
+            _ => {
+                let is_b = b;
+                pins.push_str(&format!(
+                    "\x20   let mut {n} = mcpwm\n\
+                     \x20       .operator{op}\n\
+                     \x20       .with_pin_{ab}({n}, PwmPinConfig::UP_ACTIVE_HIGH);\n",
+                    n = name(*op, is_b),
+                    ab = if is_b { "b" } else { "a" },
+                ));
+            }
+        }
+    }
+    let stamps: String = outputs
+        .iter()
+        .map(|(op, b)| {
+            format!(
+                "\x20   {}.set_timestamp(TIMESTAMP_OP{op}{});\n",
+                name(*op, *b),
+                if *b { "B" } else { "A" },
+            )
+        })
+        .collect();
+    let handles: String = outputs
+        .iter()
+        .map(|(op, b)| format!(", {}", name(*op, *b)))
+        .collect();
+
+    let body = format!(
+        "/// MCPWM{unit} — motor-control PWM.\n\
+         ///\n\
+         /// Returns the TIMER as well as the pins, and `main.rs` keeps it: the\n\
+         /// timer owns the guard that holds the MCPWM clock on. Drop it and every\n\
+         /// output here goes quiet.\n\
+         pub fn init<'d>(\n\
+         \x20   mcpwm: {peri}<'d>,\n\
+         {params}) -> (Timer<0, {peri}<'d>>{ret}) {{\n\
+         \x20   let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz({source_mhz}))\n\
+         \x20       .unwrap();\n\
+         \x20   let mut mcpwm = McPwm::new(mcpwm, clock_cfg);\n\
+         {links}{pins}\n\
+         \x20   let timer_cfg = clock_cfg\n\
+         \x20       .timer_clock_with_frequency(\n\
+         \x20           PERIOD,\n\
+         \x20           PwmWorkingMode::Increase,\n\
+         \x20           Rate::from_hz(FREQUENCY_HZ),\n\
+         \x20       )\n\
+         \x20       .unwrap();\n\
+         \x20   mcpwm.timer0.start(timer_cfg);\n\
+         {stamps}\n\
+         \x20   (mcpwm.timer0{handles})\n\
+         }}\n"
+    );
+
+    let first = outputs
+        .first()
+        .map(|(op, b)| name(*op, *b))
+        .unwrap_or_else(|| "op0a".into());
+    let example = example_block(
+        &format!("Using MCPWM{unit}"),
+        &[
+            "The duty is a TIMESTAMP: the counter value the output flips at,".into(),
+            "so it runs 0..=PERIOD rather than 0..=100.".into(),
+            String::new(),
+            format!("    // Half power, whatever PERIOD is set to"),
+            format!("    _mcpwm{unit}_{first}.set_timestamp((PERIOD + 1) / 2);"),
+            String::new(),
+            "// Keep the timer binding alive for as long as you want output:".into(),
+            "// it holds the clock on, and dropping it stops every pin above.".into(),
+        ],
+    );
+
+    file(
+        &format!(
+            "use esp_hal::gpio::interconnect::PeripheralOutput;\n\
+             use esp_hal::mcpwm::operator::{{PwmPin, PwmPinConfig}};\n\
+             use esp_hal::mcpwm::timer::{{PwmWorkingMode, Timer}};\n\
+             use esp_hal::mcpwm::{{McPwm, PeripheralClockConfig}};\n\
+             use esp_hal::peripherals::{peri};\n\
+             use esp_hal::time::Rate;\n"
         ),
         &consts,
         &body,
@@ -1428,6 +1603,11 @@ pub fn config_files(
     // True when the USB pads are wired AND this chip's esp-hal has the driver
     // — see `codegen_esp::has_usb_serial_jtag`.
     usb: bool,
+    // `(unit, its wired outputs as (operator, is B))`.
+    mcpwm: &[(u8, Vec<(u8, bool)>)],
+    mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
+    // The MCPWM peripheral clock, in MHz. 40 everywhere but the H2, which is 32.
+    mcpwm_source_mhz: u32,
     // LEDC timer → the channels wired on it, with each channel duty in
     // hundredths of a percent.
     pwm: &[(u8, Vec<(u8, u16)>)],
@@ -1464,6 +1644,12 @@ pub fn config_files(
     }
     if usb {
         out.push(("usb.rs".to_owned(), usb_file(rt)));
+    }
+    for (unit, outputs) in mcpwm {
+        out.push((
+            format!("mcpwm{unit}.rs"),
+            mcpwm_file(*unit, outputs, mcpwm_cfg.get(unit), mcpwm_source_mhz),
+        ));
     }
     for (n, chans) in pwm {
         out.push((format!("pwm{n}.rs"), pwm_file(*n, chans, timer_cfg.get(n))));
@@ -1727,6 +1913,9 @@ mod tests {
             &[(1, true)],
             &BTreeMap::new(),
             true,
+            &[(0, vec![(0, false), (0, true)])],
+            &BTreeMap::new(),
+            40,
             &[(0, vec![(1, 2_000)])],
             &BTreeMap::new(),
             EspRuntime::Blocking,
@@ -1735,7 +1924,14 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "uart1.rs", "spi2.rs", "i2c0.rs", "i2s0.rs", "rmt2.rs", "pcnt1.rs", "usb.rs",
+                "uart1.rs",
+                "spi2.rs",
+                "i2c0.rs",
+                "i2s0.rs",
+                "rmt2.rs",
+                "pcnt1.rs",
+                "usb.rs",
+                "mcpwm0.rs",
                 "pwm0.rs"
             ]
         );

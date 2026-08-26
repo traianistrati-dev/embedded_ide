@@ -3020,7 +3020,9 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         // RMT is Espressif's, and no STM32 pin ever carries it. Grouped with
         // the other push-pull outputs so the match stays total rather than
         // reaching a panic that could never fire.
-        PinFunction::RmtChannel(..) => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        PinFunction::RmtChannel(..) | PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. } => {
+            format!("into_push_pull_output(&mut {pv}.{crx})")
+        }
         // PCNT reads, so its two pads are inputs — again unreachable on an
         // STM32, and again grouped rather than left to a panic.
         PinFunction::PcntEdge(..) | PinFunction::PcntCtrl(..) => {

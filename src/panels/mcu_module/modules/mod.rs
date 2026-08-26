@@ -14,11 +14,11 @@ pub mod persist;
 pub use model::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakInputConfig, BreakPolarity, CanModuleConfig,
     Connection, DacModuleConfig, HspiMode, HspiModuleConfig, I2cModuleConfig, I2sClockPolarity,
-    I2sDirection, I2sFormat, I2sMode, I2sModuleConfig, I2sStandard, ModuleConfig, ModuleKind,
-    ModuleSignal, OspiMemoryType, OspiMode, OspiModuleConfig, Parity, PcntCtrlMode, PcntEdgeMode,
-    PcntModuleConfig, PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
-    QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, RmtDirection, RmtModuleConfig,
-    SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx,
+    I2sDirection, I2sFormat, I2sMode, I2sModuleConfig, I2sStandard, McpwmModuleConfig,
+    ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType, OspiMode, OspiModuleConfig, Parity,
+    PcntCtrlMode, PcntEdgeMode, PcntModuleConfig, PwmChannelConfig, PwmCounting, PwmMode,
+    PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, RmtDirection,
+    RmtModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx,
     SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection,
     UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, VirtualModule, XspiMemoryType,
     XspiMode, XspiModuleConfig, module_signal_of,
@@ -70,6 +70,17 @@ pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Spi(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// MCPWM module configs keyed by UNIT.
+pub fn mcpwm_configs(modules: &[VirtualModule]) -> BTreeMap<u8, McpwmModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Mcpwm(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

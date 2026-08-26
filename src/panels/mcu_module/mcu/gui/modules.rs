@@ -282,6 +282,10 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceI2s => PinFunction::I2sCk(instance),
         ModuleKind::GenericInterfaceRmt => PinFunction::RmtChannel(instance),
         ModuleKind::GenericInterfacePcnt => PinFunction::PcntEdge(instance),
+        ModuleKind::GenericInterfaceMcpwm => PinFunction::McpwmA {
+            unit: instance,
+            operator: 0,
+        },
         ModuleKind::GenericInterfaceDac => PinFunction::DacOut {
             dac: instance,
             channel: 1,
@@ -444,6 +448,26 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceI2s => format!("_i2s{n}{sfx}"),
         ModuleKind::GenericInterfaceRmt => format!("_rmt{n}{sfx}"),
         ModuleKind::GenericInterfacePcnt => format!("_pcnt{n}{sfx}"),
+        // One handle per OUTPUT: each is its own `PwmPin`, and they are set
+        // independently. The list is built from what is wired, so an
+        // operator with only A gives one name.
+        ModuleKind::GenericInterfaceMcpwm => {
+            let mut names: Vec<String> = m
+                .connections
+                .iter()
+                .filter_map(|c| match c.signal {
+                    ModuleSignal::McpwmA0 => Some(format!("_mcpwm{n}_op0a{sfx}")),
+                    ModuleSignal::McpwmB0 => Some(format!("_mcpwm{n}_op0b{sfx}")),
+                    ModuleSignal::McpwmA1 => Some(format!("_mcpwm{n}_op1a{sfx}")),
+                    ModuleSignal::McpwmB1 => Some(format!("_mcpwm{n}_op1b{sfx}")),
+                    ModuleSignal::McpwmA2 => Some(format!("_mcpwm{n}_op2a{sfx}")),
+                    ModuleSignal::McpwmB2 => Some(format!("_mcpwm{n}_op2b{sfx}")),
+                    _ => None,
+                })
+                .collect();
+            names.sort();
+            names.join(", ")
+        }
         ModuleKind::GenericInterfaceDac => format!("_dac{n}{sfx}"),
         // One handle per SUB-BLOCK: they are independent streams.
         ModuleKind::GenericInterfaceSai => format!("_sai{n}a{sfx}, _sai{n}b{sfx}"),
@@ -1486,6 +1510,88 @@ pub fn module_config_ui(
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
             match &mut m.config {
+                ModuleConfig::Mcpwm(cfg) => {
+                    ui.label("Frequency");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.freq_hz)
+                                .range(1..=1_000_000)
+                                .suffix(" Hz")
+                                .speed(100.0),
+                        );
+                        for (lbl, hz) in [("1k", 1_000u32), ("20k", 20_000), ("50k", 50_000)] {
+                            if ui.small_button(lbl).clicked() {
+                                cfg.freq_hz = hz;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Shared by every operator of this unit. 20 kHz and up is above \
+                         hearing, which is where a motor drive wants to be.",
+                    );
+                    ui.end_row();
+
+                    ui.label("Resolution");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.period)
+                                .range(1..=65_534)
+                                .prefix("period "),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("{} duty steps", cfg.period as u32 + 1))
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        );
+                    })
+                    .response
+                    .on_hover_text(
+                        "The timer's counter top. Duty can only land on one of these steps, \
+                         and period x frequency is bounded by the peripheral clock - so a \
+                         finer resolution costs frequency.",
+                    );
+                    ui.end_row();
+
+                    // One duty row per WIRED output: the six are not all in use,
+                    // and a row for a pad nobody assigned sets nothing.
+                    let mut wired: Vec<(u8, bool, &'static str)> = m
+                        .connections
+                        .iter()
+                        .filter_map(|c| match c.signal {
+                            ModuleSignal::McpwmA0 => Some((0u8, false, "OP0 A")),
+                            ModuleSignal::McpwmB0 => Some((0, true, "OP0 B")),
+                            ModuleSignal::McpwmA1 => Some((1, false, "OP1 A")),
+                            ModuleSignal::McpwmB1 => Some((1, true, "OP1 B")),
+                            ModuleSignal::McpwmA2 => Some((2, false, "OP2 A")),
+                            ModuleSignal::McpwmB2 => Some((2, true, "OP2 B")),
+                            _ => None,
+                        })
+                        .collect();
+                    wired.sort();
+                    for (op, is_b, lbl) in wired {
+                        ui.label(format!("Duty {lbl}"));
+                        let mut pct = f32::from(cfg.duty_x100_of(op, is_b)) / 100.0;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut pct)
+                                    .range(0.0..=100.0)
+                                    .suffix(" %")
+                                    .speed(0.5),
+                            )
+                            .on_hover_text(format!(
+                                "Timestamp {} of {}",
+                                cfg.timestamp_of(op, is_b),
+                                cfg.period as u32 + 1
+                            ))
+                            .changed()
+                        {
+                            cfg.duty_x100
+                                .insert((op, is_b), (pct * 100.0).round() as u16);
+                        }
+                        ui.end_row();
+                    }
+                }
                 ModuleConfig::Pcnt(cfg) => {
                     ui.label("Counts");
                     ui.horizontal(|ui| {
