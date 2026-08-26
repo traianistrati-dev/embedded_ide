@@ -1086,6 +1086,11 @@ pub fn module_config_ui(
     // Set when a function is picked from a pin button; the caller applies it.
     pin_fn_choice: &mut Option<(usize, PinFunction)>,
     is_async: bool,
+    // The ESP's async runtime (esp-rtos). A separate flag from `is_async`
+    // because the two backends share almost no rows: embassy's transport and
+    // channel names come from `embassy-stm32`, the ESP's DMA is `with_dma` on
+    // an esp-hal driver with a channel called `DMA_CH0`.
+    is_esp_async: bool,
     is_native: bool,
     // The chip's family key — the blocking DMA transport is stm32f1xx-hal's,
     // so only the F1 backend can emit it.
@@ -1286,6 +1291,81 @@ pub fn module_config_ui(
     // Async runtime only (USART): interrupt ring buffer vs DMA. A separate
     // enum from `AsyncBusMode` because "blocking" is not one of the options —
     // an async USART is never blocking, only differently non-blocking.
+    // The ESP's own transport row. Same CHOICE as embassy's `async_row` and a
+    // different mechanism behind it, so it says the mechanism: esp-hal takes a
+    // channel in `with_dma`, and the driver that comes back is a different type
+    // with different methods.
+    let esp_dma_row = |ui: &mut egui::Ui, mode: &mut AsyncBusMode| {
+        ui.label("Transfers");
+        egui::ComboBox::from_id_salt("esp_dma")
+            .selected_text(match mode {
+                AsyncBusMode::Blocking => "CPU (blocking)",
+                AsyncBusMode::AsyncDma => "DMA",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(mode, AsyncBusMode::Blocking, "CPU (blocking)")
+                    .on_hover_text(
+                        "The CPU moves every byte. Simplest, and fine for short \
+                         transfers.",
+                    );
+                ui.selectable_value(mode, AsyncBusMode::AsyncDma, "DMA")
+                    .on_hover_text(
+                        "esp-hal's `with_dma`: the peripheral moves the bytes itself. \
+                         Takes one of the chip's channels - the Configuration tab \
+                         shows which one it got.",
+                    );
+            });
+        ui.end_row();
+    };
+
+    // The ESP channel picker. `dma_plan` reserves a hand-pinned channel BEFORE
+    // it allocates the rest, so naming one here takes it out of the pool rather
+    // than fighting over it.
+    //
+    // The list is the same one the allocator would draw from: every channel on
+    // a pooled DMA, and only the ones the request table names on a bolted one
+    // (the original ESP32 and the S2, whose `DMA_SPI2` serves SPI2 alone).
+    let esp_dma_channel_row = |ui: &mut egui::Ui,
+                               dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
+                               request: &str,
+                               chan: &mut String| {
+        ui.label("DMA channel");
+        // The allocator's own list, not a second one built to match it.
+        let options = crate::panels::mcu_module::codegen_esp::dma_candidates(dma, request);
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt(format!("esp_dma_ch_{request}"))
+                .selected_text(if chan.is_empty() {
+                    "Automatic".to_owned()
+                } else {
+                    chan.clone()
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(chan, String::new(), "Automatic");
+                    for c in &options {
+                        ui.selectable_value(chan, c.clone(), c);
+                    }
+                });
+            if options.is_empty() {
+                ui.label(
+                    egui::RichText::new("no channel data for this chip")
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(220, 160, 70)),
+                );
+            }
+        })
+        .response
+        .on_hover_text(
+            "Automatic lets the generator pick a free one. Naming a channel pins \
+             it: it is reserved before anything else is handed out, which is how \
+             two buses are kept off each other.",
+        );
+        ui.end_row();
+    };
+
+    // The ESP's USART rows do not follow the runtime: `UartTx::new` and
+    // `.with_cts()` exist on both, so the family is the whole condition.
+    let is_esp_uart = crate::panels::mcu_module::codegen::family::is_esp(family);
+
     let usart_mode_row = |ui: &mut egui::Ui, mode: &mut UsartMode| {
         ui.label("Async transport");
         egui::ComboBox::from_id_salt("usart_mode")
@@ -2246,7 +2326,41 @@ pub fn module_config_ui(
                     // Blocking → editable Portable|Native; Native runtime → shown
                     // locked on Native; async USART → hidden (always the
                     // embedded-io-async BufferedUart bridge, no choice).
-                    if is_native {
+                    if is_esp_uart {
+                        // Direction and flow control are NOT async concepts on
+                        // an ESP — `UartTx::new` and `.with_cts()` are there on
+                        // either runtime — so they show whatever the runtime is.
+                        // They were unreachable while the ESP shared embassy's
+                        // async gate.
+                        direction_row(ui, cfg);
+                        flow_row(ui, cfg, wired_flow);
+                        if !UsartDirection::options_for(cfg.mode, family)
+                            .contains(&cfg.direction)
+                        {
+                            cfg.direction = UsartDirection::TxRx;
+                        }
+                        if !UsartFlow::options_for(cfg.mode, cfg.direction, family)
+                            .contains(&cfg.flow)
+                        {
+                            cfg.flow = UsartFlow::None;
+                        }
+                        // No transport row: esp-hal's UART DMA is UHCI, a
+                        // different driver this generator does not write yet.
+                        // Said rather than left blank — the SPI beside it has
+                        // the row, and the difference is not obvious.
+                        ui.label("Transfers");
+                        ui.label(
+                            egui::RichText::new("CPU (blocking)")
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        )
+                        .on_hover_text(
+                            "esp-hal moves UART bytes over DMA through UHCI, a driver of \
+                             its own that this generator does not write yet. The SPI \
+                             module's DMA is unrelated and does work.",
+                        );
+                        ui.end_row();
+                    } else if is_native {
                         api_row_locked(ui);
                     } else if is_async {
                         // The API style is fixed on async (embedded-io-async
@@ -2406,7 +2520,18 @@ pub fn module_config_ui(
                             }
                         });
                     ui.end_row();
-                    if is_async {
+                    if is_esp_async {
+                        // esp-hal puts the DMA surface on the ASYNC driver, so
+                        // this is an async-runtime choice on the ESP too — but
+                        // the mechanism is `with_dma`, not embassy's transport.
+                        esp_dma_row(ui, &mut pending.1);
+                        if pending.1 == AsyncBusMode::AsyncDma {
+                            // ONE channel per bus on an ESP: `with_dma` drives
+                            // both directions from it, unlike embassy's pair.
+                            let req = format!("SPI{}", cfg.instance);
+                            esp_dma_channel_row(ui, dma, &req, &mut cfg.dma_tx);
+                        }
+                    } else if is_async {
                         async_row(ui, &mut pending.1);
                         if pending.1 == AsyncBusMode::AsyncDma {
                             let inst = cfg.instance;

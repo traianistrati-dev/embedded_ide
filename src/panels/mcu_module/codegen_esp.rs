@@ -1432,6 +1432,30 @@ impl DmaPlan {
     }
 }
 
+/// The channels a request may use on this chip, in the allocator's own order.
+///
+/// A pooled DMA (`mux`) lets any channel serve anything, so the answer is every
+/// channel. A bolted one — the original ESP32 and the S2 — has a fixed table:
+/// `DMA_SPI2` serves SPI2 and nothing else.
+///
+/// Shared with the module panel's channel picker on purpose: a picker built
+/// from its own list is a picker that eventually offers a channel `dma_plan`
+/// will not accept.
+pub(crate) fn dma_candidates(dma: Option<&DmaDef>, request: &str) -> Vec<String> {
+    let Some(d) = dma else {
+        return Vec::new();
+    };
+    if d.mux {
+        d.channels.iter().map(|c| c.peri.clone()).collect()
+    } else {
+        d.requests
+            .iter()
+            .find(|(req, _)| req == request)
+            .map(|(_, chans)| chans.clone())
+            .unwrap_or_default()
+    }
+}
+
 pub(crate) fn dma_plan(
     dma: Option<&DmaDef>,
     runtime: EspRuntime,
@@ -1487,20 +1511,11 @@ pub(crate) fn dma_plan(
         let peri = if !manual.is_empty() {
             manual.to_owned()
         } else {
-            let allowed: Vec<&str> = if dma.mux {
-                dma.channels.iter().map(|c| c.peri.as_str()).collect()
-            } else {
-                dma.requests
-                    .iter()
-                    .find(|(req, _)| *req == request)
-                    .map(|(_, chans)| chans.iter().map(String::as_str).collect())
-                    .unwrap_or_default()
-            };
-            let free = allowed
+            let free = dma_candidates(Some(dma), &request)
                 .into_iter()
                 .find(|c| !taken.iter().any(|t| t == c))?;
-            taken.push(free.to_owned());
-            free.to_owned()
+            taken.push(free.clone());
+            free
         };
         Some(DmaUse {
             peri,
@@ -2817,6 +2832,61 @@ mod tests {
             assert!(plan.i2s.contains_key(&0), "i2s on {rt:?}: {plan:?}");
             assert!(plan.parl_io.is_some(), "parl_io on {rt:?}: {plan:?}");
         }
+    }
+
+    /// The picker offers exactly what the allocator would take, because they
+    /// read the SAME list. A picker with its own list is a picker that
+    /// eventually offers a channel `dma_plan` refuses.
+    #[test]
+    fn the_channel_picker_offers_what_the_allocator_accepts() {
+        // A pooled DMA: every channel serves anything.
+        let pool = gdma(3);
+        let offered = dma_candidates(Some(&pool), "SPI2");
+        assert_eq!(offered, vec!["DMA_CH0", "DMA_CH1", "DMA_CH2"]);
+        // …and each of them is accepted when pinned by hand.
+        for c in &offered {
+            let mut cfg = spi_on_dma(2);
+            cfg.dma_tx = c.clone();
+            let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, cfg)].into();
+            let plan = dma_plan(
+                Some(&pool),
+                EspRuntime::Async,
+                &spi,
+                &[],
+                false,
+                false,
+                false,
+            );
+            assert_eq!(plan.spi[&2].peri, *c, "pinned {c}");
+            assert!(plan.spi[&2].manual, "pinned {c}");
+        }
+
+        // A bolted DMA names one channel per peripheral, and the picker must
+        // not offer the others: `DMA_SPI2` serves SPI2 alone.
+        let bolted = DmaDef {
+            mux: false,
+            channels: vec![
+                crate::panels::mcu_module::codegen::dma_data::DmaChannel {
+                    peri: "DMA_SPI2".to_owned(),
+                    irq: String::new(),
+                },
+                crate::panels::mcu_module::codegen::dma_data::DmaChannel {
+                    peri: "DMA_I2S0".to_owned(),
+                    irq: String::new(),
+                },
+            ],
+            requests: vec![
+                ("SPI2".to_owned(), vec!["DMA_SPI2".to_owned()]),
+                ("I2S0".to_owned(), vec!["DMA_I2S0".to_owned()]),
+            ],
+        };
+        assert_eq!(dma_candidates(Some(&bolted), "SPI2"), vec!["DMA_SPI2"]);
+        assert_eq!(dma_candidates(Some(&bolted), "I2S0"), vec!["DMA_I2S0"]);
+        // A request the table does not name gets nothing — the picker then says
+        // so rather than offering a channel that would not work.
+        assert!(dma_candidates(Some(&bolted), "SPI3").is_empty());
+        // …and a chip with no channel data at all gets nothing either.
+        assert!(dma_candidates(None, "SPI2").is_empty());
     }
 
     /// esp-hal's DMA surface is on the async drivers — for the MASTERS, which

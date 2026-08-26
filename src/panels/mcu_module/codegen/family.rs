@@ -1979,6 +1979,11 @@ mod tests {
         // `ESP_SPI_SLAVE=1` builds the other end of the bus instead: a
         // different driver module, reversed pin bounds, no frequency, and DMA
         // whether or not the async switch is on.
+        // `ESP_SPI_CHAN=DMA_CH2` pins the channel by hand, the way the module
+        // panel's picker now can — reserved before anything else is allocated.
+        if let Ok(c) = std::env::var("ESP_SPI_CHAN") {
+            spi_cfg.dma_tx = c;
+        }
         if std::env::var("ESP_SPI_SLAVE").is_ok() {
             spi_cfg.role = crate::panels::mcu_module::modules::SpiRole::Slave;
         }

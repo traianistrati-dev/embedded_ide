@@ -728,17 +728,26 @@ impl AppIde {
                             // The module selectors follow the STAGED runtime (what
                             // the user is about to Apply), not the applied one.
                             //
-                            // ESP is excluded on purpose: the embassy Blocking |
-                            // Async-DMA row belongs to the embassy bus drivers in
-                            // src/pins/configs/*.rs, which the esp-rtos backend
-                            // does not emit — its USART/SPI/I2C stay the blocking
-                            // esp-hal ones inline in main.rs, same as ESP
-                            // blocking. Offering the row there would promise a
-                            // driver the generator never writes.
-                            let is_async = mcu.pending_is_async()
-                                && !crate::panels::mcu_module::codegen::family::async_is_esp(
+                            // TWO flags, because the two async backends share
+                            // almost no rows. `is_async` means EMBASSY async:
+                            // its transport row, its channel names, its timeout
+                            // — all from `embassy-stm32`.
+                            //
+                            // The ESP has its own async (esp-rtos) and its own
+                            // DMA: `with_dma` on the esp-hal drivers, channels
+                            // named `DMA_CH0`. It used to be folded into the
+                            // `!async_is_esp` above with a comment saying the
+                            // ESP backend emits no bus drivers — which stopped
+                            // being true once `codegen_esp_configs` started
+                            // writing `uart*.rs`, `spi*.rs` and `i2c*.rs`. The
+                            // effect was that NO DMA control reached an ESP at
+                            // all, while the generator behind it was complete.
+                            let esp_family =
+                                crate::panels::mcu_module::codegen::family::async_is_esp(
                                     &mcu.family,
                                 );
+                            let is_async = mcu.pending_is_async() && !esp_family;
+                            let is_esp_async = mcu.pending_is_async() && esp_family;
                             let is_native = mcu.pending_is_native();
 
                             if !mcu.modules.is_empty() && !collapsed {
@@ -1103,7 +1112,7 @@ impl AppIde {
                                                         ui, m, &pin_names, &pin_sigs,
                                                         &pin_blocked, &mut pin_labels,
                                                         &pin_funcs_current, &pin_funcs,
-                                                        &mut pin_fn_choice, is_async, is_native,
+                                                        &mut pin_fn_choice, is_async, is_esp_async, is_native,
                                                         &family, pending, chip_dma.as_ref(),
                                                         usart_line_extras,
                                                     );
