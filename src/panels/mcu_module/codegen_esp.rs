@@ -577,14 +577,33 @@ fn make_gen_section(
         }
     }
 
-    // ── USB — comment only. The pads are fixed in hardware, but WHICH pads
-    // differs per part: a C3 uses GPIO18/19, a C6 GPIO12/13, an S3 GPIO19/20,
-    // an H2 GPIO26/27. The emitted line names none of them for that reason —
-    // the definition already puts `UsbDm`/`UsbDp` on the right two pads.
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── USB Serial/JTAG ──────────────────────────────────────────────────────
+    // No pins are passed, and that is the peripheral, not a shortcut: the pads
+    // are fixed in silicon and differ per part (C3 GPIO18/19, C6 GPIO12/13, S3
+    // GPIO19/20, H2 GPIO26/27), so `UsbSerialJtag::new` takes the peripheral
+    // alone. The two pads still carry `UsbDm`/`UsbDp` on the canvas — that is
+    // what makes the pair visible and unassignable to anything else.
     if has_usb {
         body.push('\n');
-        body.push_str("    // ── USB — configured automatically by the USB peripheral ──\n");
+        if has_usb_serial_jtag(chip) {
+            body.push_str("    // ── USB Serial/JTAG ──\n");
+            body.push_str(&format!(
+                "    let mut _usb = pins::configs::usb::{}(peripherals.USB_DEVICE);\n",
+                if runtime == EspRuntime::Async {
+                    "init_async"
+                } else {
+                    "init"
+                },
+            ));
+        } else {
+            // The pads are real and the driver is not. Saying so beats an
+            // "automatically configured" line that configures nothing.
+            body.push_str(
+                "    // ── USB — pads only ──\n\
+                 \x20   // This chip has the USB pads, and its esp-hal has no\n\
+                 \x20   // usb_serial_jtag driver. Nothing is generated for them.\n",
+            );
+        }
     }
 
     // ── Custom modules ── last, after every binding/init they consume.
@@ -687,6 +706,8 @@ fn build_use_block(
     if has_pcnt {
         lines.push("use esp_hal::pcnt::Pcnt;".into());
     }
+    // Nothing: the USB driver is built inside `pins/configs/usb.rs`, which
+    // takes no argument from `main.rs` at all.
     // No bus imports: UART/SPI/I2C are built inside `pins/configs/<bus>.rs`, and
     // `main.rs` only hands them peripherals it already has in scope.
     let _ = (has_uart, has_spi, has_i2c);
@@ -782,6 +803,29 @@ fn collect_rmt<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, &'a Pin> {
             _ => None,
         })
         .collect()
+}
+
+/// True when this chip's `esp-hal` has the USB Serial/JTAG driver.
+///
+/// # Why a list and not the metadata
+///
+/// The pads and the driver are different questions, and the answers differ on
+/// two parts. Every chip here whose `UsbDm`/`UsbDp` pads exist gets them from
+/// the vendor's analog list — including the ESP32-C61, which has the pads and
+/// no `esp_hal::usb_serial_jtag` at all, and the ESP32-S2, whose USB pads
+/// belong to a full OTG controller instead. Reading "has USB pads" as "can
+/// build a USB Serial/JTAG" would generate `UsbSerialJtag::new` for both.
+///
+/// Kept here rather than on `EspChip` because this is the CODE generator and
+/// the definition it works from carries pins, not driver names — the same
+/// reason [`super::esp_clocks::max_mhz`] is a table keyed on the chip id.
+/// Checked against the metadata by
+/// [`tests::the_usb_serial_jtag_list_matches_esp_hal`].
+pub(crate) fn has_usb_serial_jtag(chip: &str) -> bool {
+    matches!(
+        chip,
+        "esp32c3" | "esp32c5" | "esp32c6" | "esp32h2" | "esp32s3"
+    )
 }
 
 /// The PCNT units the canvas wires: the edge pad, and the ctrl pad if there is
@@ -1732,6 +1776,34 @@ mod tests {
         // project parses back.
         assert!(code.contains("let gpio20_usart0_rx = peripherals.GPIO20; // USART0  RX"));
         assert!(code.contains("let gpio21_usart0_tx = peripherals.GPIO21; // USART0  TX"));
+    }
+
+    /// The hand-written USB Serial/JTAG list must match the vendor's own.
+    ///
+    /// Two parts make the difference worth pinning: the ESP32-C61 has the USB
+    /// PADS and no driver, and the ESP32-S2's USB is a full OTG controller
+    /// rather than a Serial/JTAG one. Read "has USB pads" as "can build this"
+    /// and both get a `UsbSerialJtag::new` that does not compile.
+    #[test]
+    #[ignore]
+    fn the_usb_serial_jtag_list_matches_esp_hal() {
+        use crate::panels::mcu_module::esp_metadata::{self, RISCV_CHIPS};
+        let dir = esp_metadata::vendor_dir().expect("esp-metadata");
+        for id in RISCV_CHIPS.iter().chain(&["esp32", "esp32s2", "esp32s3"]) {
+            let c = esp_metadata::load(&dir, id).expect("parses");
+            let driver = c.drivers.iter().any(|d| d == "usb_serial_jtag");
+            assert_eq!(
+                has_usb_serial_jtag(id),
+                driver,
+                "{id}: the list and esp-hal disagree"
+            );
+        }
+        // …and the two that have pads without a driver stay out.
+        for id in ["esp32c61", "esp32s2"] {
+            let c = esp_metadata::load(&dir, id).expect("parses");
+            assert!(c.usb_pads().is_some(), "{id} has the pads");
+            assert!(!has_usb_serial_jtag(id), "{id} must not be offered one");
+        }
     }
 
     // ── DMA ──────────────────────────────────────────────────────────────────

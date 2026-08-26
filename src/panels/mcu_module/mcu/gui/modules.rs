@@ -3102,6 +3102,34 @@ pub fn module_config_ui(
                     }
                 }
                 ModuleConfig::Usb(cfg) => {
+                    // The three descriptor fields belong to the `usb-device`
+                    // stack the STM32 path builds, where they really are a
+                    // choice. An ESP's USB Serial/JTAG enumerates as Espressif's
+                    // fixed `303a:1001` and has no descriptors to set, so
+                    // showing them would be three controls that change nothing.
+                    if crate::panels::mcu_module::codegen::family::is_esp(family) {
+                        ui.label("Identity");
+                        ui.label(
+                            egui::RichText::new("303a:1001  ·  fixed in silicon")
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        )
+                        .on_hover_text(
+                            "The USB Serial/JTAG peripheral enumerates with Espressif's own                              VID:PID and a fixed descriptor set. Nothing here can change it                              - a board that needs its own identity uses a USB stack over the                              OTG controller instead, which this chip may not have.",
+                        );
+                        ui.end_row();
+                        ui.label("Port");
+                        ui.label(
+                            egui::RichText::new("CDC serial, on the chip's own pads")
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        )
+                        .on_hover_text(
+                            "A board with a USB-UART bridge chip shows that as well; the two                              are different devices to the host.",
+                        );
+                        ui.end_row();
+                        return;
+                    }
                     ui.label("Product");
                     ui.add(
                         egui::TextEdit::singleline(&mut cfg.product)

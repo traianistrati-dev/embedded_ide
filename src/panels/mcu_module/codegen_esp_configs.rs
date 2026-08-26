@@ -656,6 +656,103 @@ fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime)
     )
 }
 
+// ── USB Serial/JTAG ─────────────────────────────────────────────────────────
+
+/// The USB Serial/JTAG peripheral: a CDC serial port over the chip's own USB.
+///
+/// # No pins, and no VID/PID either
+///
+/// The two pads are fixed in silicon, so `UsbSerialJtag::new` takes the
+/// peripheral and nothing else — this is the one config file here whose `init`
+/// has no parameters at all.
+///
+/// The descriptors are fixed too: the device always enumerates as Espressif's
+/// `303a:1001`, which is why the module's Vendor ID, Product ID and product
+/// string are not offered on an ESP. They belong to the `usb-device` stack the
+/// STM32 path builds, where they really are a choice.
+///
+/// # It is not the flashing port
+///
+/// A board with a USB-UART bridge chip exposes that instead; this is the port
+/// the chip provides itself, on parts that have one. Both can be present, and
+/// they are different devices to the host.
+fn usb_file(rt: EspRuntime) -> String {
+    let body_for = |name: &str, mode: &str, extra: &str| {
+        format!(
+            "pub fn {name}<'d>(usb: USB_DEVICE<'d>) -> UsbSerialJtag<'d, {mode}> {{\n\
+             \x20   UsbSerialJtag::new(usb){extra}\n\
+             }}\n",
+        )
+    };
+    let mut body = format!(
+        "/// The chip's own USB CDC serial port — blocking driver.\n\
+         ///\n\
+         /// Enumerates as Espressif's `303a:1001`. On a board that also has a\n\
+         /// USB-UART bridge, this is the SECOND serial port the host sees.\n\
+         {}",
+        body_for("init", "Blocking", ""),
+    );
+    if rt == EspRuntime::Async {
+        body.push_str(&format!(
+            "\n/// The same, async.\n\
+             ///\n\
+             /// `.into_async()` makes the reads and writes `.await`-able on the\n\
+             /// executor instead of spinning.\n\
+             {}",
+            body_for("init_async", "Async", "\n\x20       .into_async()"),
+        ));
+    }
+
+    let example = example_for(
+        "Using the USB serial port",
+        "_usb",
+        &[
+            "Writing works on the handle, which implements `core::fmt::Write`:",
+            "",
+            "    use core::fmt::Write;",
+            "    writeln!({H}, \"hello over USB\").ok();",
+            "",
+            "Reading needs the two halves apart, and `split` CONSUMES the handle:",
+            "",
+            "    let (mut rx, mut tx) = {H}.split();",
+            "    let mut buf = [0u8; 64];",
+            "    let n = rx.drain_rx_fifo(&mut buf);   // non-blocking",
+            "    tx.write(&buf[..n]).ok();             // echo it back",
+            "",
+            "// Nothing is sent until a host opens the port.",
+        ],
+        &[
+            "`init_async` swaps in the interrupt-driven handler. The .await-able",
+            "surface is the embedded-io-async traits, which this project does not",
+            "depend on yet — add `embedded-io-async` to Cargo.toml to use them.",
+            "The calls below work on either driver:",
+            "",
+            "    use core::fmt::Write;",
+            "    writeln!({H}, \"hello over USB\").ok();",
+            "",
+            "    let (mut rx, mut tx) = {H}.split();",
+            "    let mut buf = [0u8; 64];",
+            "    let n = rx.drain_rx_fifo(&mut buf);",
+            "    tx.write(&buf[..n]).ok();",
+        ],
+        rt,
+    );
+
+    file(
+        &format!(
+            "{}\
+             use esp_hal::peripherals::USB_DEVICE;\n\
+             use esp_hal::usb_serial_jtag::UsbSerialJtag;\n",
+            mode_import(rt)
+        ),
+        // Nothing to configure: the peripheral has no settings the driver
+        // exposes, so the generated block is empty rather than decorative.
+        "",
+        &body,
+        &example,
+    )
+}
+
 // ── PCNT ────────────────────────────────────────────────────────────────────
 
 /// One PCNT unit: its limits, its filter, and what each edge means.
@@ -1328,6 +1425,9 @@ pub fn config_files(
     // ctrl argument at all.
     pcnt: &[(u8, bool)],
     pcnt_cfg: &BTreeMap<u8, PcntModuleConfig>,
+    // True when the USB pads are wired AND this chip's esp-hal has the driver
+    // — see `codegen_esp::has_usb_serial_jtag`.
+    usb: bool,
     // LEDC timer → the channels wired on it, with each channel duty in
     // hundredths of a percent.
     pwm: &[(u8, Vec<(u8, u16)>)],
@@ -1361,6 +1461,9 @@ pub fn config_files(
             format!("pcnt{n}.rs"),
             pcnt_file(*n, *has_ctrl, pcnt_cfg.get(n), rt),
         ));
+    }
+    if usb {
+        out.push(("usb.rs".to_owned(), usb_file(rt)));
     }
     for (n, chans) in pwm {
         out.push((format!("pwm{n}.rs"), pwm_file(*n, chans, timer_cfg.get(n))));
@@ -1623,6 +1726,7 @@ mod tests {
             80_000_000,
             &[(1, true)],
             &BTreeMap::new(),
+            true,
             &[(0, vec![(1, 2_000)])],
             &BTreeMap::new(),
             EspRuntime::Blocking,
@@ -1631,7 +1735,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "uart1.rs", "spi2.rs", "i2c0.rs", "i2s0.rs", "rmt2.rs", "pcnt1.rs", "pwm0.rs"
+                "uart1.rs", "spi2.rs", "i2c0.rs", "i2s0.rs", "rmt2.rs", "pcnt1.rs", "usb.rs",
+                "pwm0.rs"
             ]
         );
     }

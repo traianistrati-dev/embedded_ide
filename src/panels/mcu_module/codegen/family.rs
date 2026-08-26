@@ -313,6 +313,11 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(&mcu.family),
         &codegen_esp::pcnt_units_wired(&configured),
         &modules::pcnt_configs(&mcu.modules),
+        // The USB pads wired, and a chip whose esp-hal can drive them.
+        configured
+            .iter()
+            .any(|p| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp))
+            && codegen_esp::has_usb_serial_jtag(&mcu.family),
         &pwm,
         &timers,
         runtime,
@@ -1624,6 +1629,10 @@ mod tests {
             // that emits `set_ctrl_signal` and `set_ctrl_mode`.
             PinFunction::PcntEdge(0),
             PinFunction::PcntCtrl(0),
+            // The chip's own USB serial port: no pins are passed to it, but the
+            // two pads are what makes it appear at all.
+            PinFunction::UsbDm,
+            PinFunction::UsbDp,
         ];
         for p in mcu.iter_all_pins_mut() {
             if p.reserved || p.selected_function != PinFunction::Unset {
