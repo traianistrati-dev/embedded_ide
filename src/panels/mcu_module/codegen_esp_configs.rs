@@ -1111,27 +1111,27 @@ fn parl_io_file(cfg: Option<&ParlIoModuleConfig>, has_valid: bool, rt: EspRuntim
 
 // ── MCPWM ───────────────────────────────────────────────────────────────────
 
-/// One MCPWM unit: its timer, and a `PwmPin` per wired output.
+/// One MCPWM unit: its timers, its operators, and the pads they drive.
 ///
-/// # Why the TIMER comes back too
+/// # A timer per operator
 ///
-/// `Timer` owns the `PwmClockGuard` that keeps the MCPWM function clock
-/// running; `PwmPin` does not — it holds only a `PeripheralGuard`. An `init`
-/// that returned the pins alone would compile, and the clock would be switched
-/// off the moment it returned, leaving every output silent. So the timer is
-/// handed back as the first element of the tuple and `main.rs` binds it.
+/// The unit has THREE timers and three operators, and `Operator::set_timer`
+/// takes the timer index as a const parameter — any operator can be pointed at
+/// any timer. That is what puts two motors at two frequencies on one unit, and
+/// it is why the frequency and the period are per TIMER here rather than per
+/// unit. Only the timers something actually runs on are started.
 ///
-/// # One frequency, one timer
+/// # The timers come back
 ///
-/// Every wired operator is pointed at timer 0. The module carries one
-/// frequency, so three timers would be three names for one number — and a
-/// three-phase inverter, which is what this peripheral is for, wants exactly
-/// one anyway.
+/// A `Timer` owns the guard that holds the MCPWM clock on; a `PwmPin` does not.
+/// Returning only the pins compiles and silently kills every output, so `init`
+/// hands the started timers back and `main.rs` keeps them.
 ///
-/// # No async twin
+/// # `with_pin_a` consumes the operator
 ///
-/// There is no `into_async` on `McPwm`: the duty is set by writing a register,
-/// and there is nothing to await. `init` is the whole surface on either runtime.
+/// An operator whose two outputs are both wired has to build them together with
+/// `with_pins`; reaching for `with_pin_a` and then `with_pin_b` does not
+/// compile, because the first call moved the operator.
 fn mcpwm_file(
     unit: u8,
     outputs: &[(u8, bool)],
@@ -1142,18 +1142,28 @@ fn mcpwm_file(
     let c = cfg.unwrap_or(&d);
     let peri = format!("MCPWM{unit}");
 
-    let mut consts = format!(
-        "const FREQUENCY_HZ: u32 = {};\n\
-         // The timer counts 0..=PERIOD, so a duty lands on one of PERIOD+1 steps. Public: main.rs sets duty in terms of it.\n\
-         pub const PERIOD: u16 = {};\n",
-        c.freq_hz, c.period,
-    );
+    let mut ops: Vec<u8> = outputs.iter().map(|(op, _)| *op).collect();
+    ops.sort_unstable();
+    ops.dedup();
+    let timers = c.timers_used(&ops);
+
+    let mut consts = String::new();
+    for t in &timers {
+        consts.push_str(&format!(
+            "const FREQUENCY_HZ_T{t}: u32 = {};\n\
+             // Timer {t} counts 0..=PERIOD_T{t}, so a duty lands on one of PERIOD_T{t}+1 steps. Public: main.rs sets duty in terms of it.\n\
+             pub const PERIOD_T{t}: u16 = {};\n",
+            c.timer_freq_hz(*t),
+            c.timer_period(*t),
+        ));
+    }
     for (op, b) in outputs {
         consts.push_str(&format!(
-            "const TIMESTAMP_OP{op}{}: u16 = {}; // {:.2} %\n",
+            "const TIMESTAMP_OP{op}{}: u16 = {}; // {:.2} % of timer {}\n",
             if *b { "B" } else { "A" },
             c.timestamp_of(*op, *b),
             f64::from(c.duty_x100_of(*op, *b)) / 100.0,
+            c.timer_of(*op),
         ));
     }
 
@@ -1164,25 +1174,30 @@ fn mcpwm_file(
         .collect();
     // The const parameter is IS_A, so it is the NEGATION of "this is the B
     // output" — inverting it silently swaps which pad each handle drives.
-    let ret: String = outputs
+    let ret: String = timers
         .iter()
-        .map(|(op, b)| format!(", PwmPin<'d, {peri}<'d>, {op}, {}>", !b))
-        .collect();
+        .map(|t| format!("Timer<{t}, {peri}<'d>>, "))
+        .chain(
+            outputs
+                .iter()
+                .map(|(op, b)| format!("PwmPin<'d, {peri}<'d>, {op}, {}>, ", !b)),
+        )
+        .collect::<String>()
+        .trim_end_matches(", ")
+        .to_owned();
 
-    // Each operator is pointed at timer 0 once, however many of its two
+    // Each operator is pointed at ITS timer once, however many of its two
     // outputs are wired.
-    let mut ops: Vec<u8> = outputs.iter().map(|(op, _)| *op).collect();
-    ops.sort_unstable();
-    ops.dedup();
     let links: String = ops
         .iter()
-        .map(|op| format!("\x20   mcpwm.operator{op}.set_timer(&mcpwm.timer0);\n"))
+        .map(|op| {
+            format!(
+                "\x20   mcpwm.operator{op}.set_timer(&mcpwm.timer{});\n",
+                c.timer_of(*op)
+            )
+        })
         .collect();
 
-    // `with_pin_a` CONSUMES the operator, so an operator whose two outputs are
-    // both wired has to build them together — `with_pins` is the constructor
-    // that exists for exactly that, and reaching for `with_pin_a` twice does
-    // not compile.
     let mut pins = String::new();
     for op in &ops {
         let a = outputs.contains(&(*op, false));
@@ -1210,6 +1225,25 @@ fn mcpwm_file(
             }
         }
     }
+
+    // One config and one `start` per timer IN USE. Starting an unused one would
+    // hold the peripheral clock for an output that does not exist.
+    let starts: String = timers
+        .iter()
+        .map(|t| {
+            format!(
+                "\x20   let timer_cfg_t{t} = clock_cfg\n\
+                 \x20       .timer_clock_with_frequency(\n\
+                 \x20           PERIOD_T{t},\n\
+                 \x20           PwmWorkingMode::Increase,\n\
+                 \x20           Rate::from_hz(FREQUENCY_HZ_T{t}),\n\
+                 \x20       )\n\
+                 \x20       .unwrap();\n\
+                 \x20   mcpwm.timer{t}.start(timer_cfg_t{t});\n"
+            )
+        })
+        .collect();
+
     let stamps: String = outputs
         .iter()
         .map(|(op, b)| {
@@ -1220,52 +1254,52 @@ fn mcpwm_file(
             )
         })
         .collect();
-    let handles: String = outputs
+    let handles: String = timers
         .iter()
-        .map(|(op, b)| format!(", {}", name(*op, *b)))
-        .collect();
+        .map(|t| format!("mcpwm.timer{t}, "))
+        .chain(outputs.iter().map(|(op, b)| format!("{}, ", name(*op, *b))))
+        .collect::<String>()
+        .trim_end_matches(", ")
+        .to_owned();
 
     let body = format!(
-        "/// MCPWM{unit} — motor-control PWM.\n\
+        "/// MCPWM{unit} — motor-control PWM on {} timer{}.\n\
          ///\n\
-         /// Returns the TIMER as well as the pins, and `main.rs` keeps it: the\n\
-         /// timer owns the guard that holds the MCPWM clock on. Drop it and every\n\
-         /// output here goes quiet.\n\
+         /// Returns the TIMERS as well as the pins, and `main.rs` keeps them: a\n\
+         /// timer owns the guard that holds the MCPWM clock on. Drop one and\n\
+         /// every output on it goes quiet.\n\
          pub fn init<'d>(\n\
          \x20   mcpwm: {peri}<'d>,\n\
-         {params}) -> (Timer<0, {peri}<'d>>{ret}) {{\n\
+         {params}) -> ({ret}) {{\n\
          \x20   let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz({source_mhz}))\n\
          \x20       .unwrap();\n\
          \x20   let mut mcpwm = McPwm::new(mcpwm, clock_cfg);\n\
          {links}{pins}\n\
-         \x20   let timer_cfg = clock_cfg\n\
-         \x20       .timer_clock_with_frequency(\n\
-         \x20           PERIOD,\n\
-         \x20           PwmWorkingMode::Increase,\n\
-         \x20           Rate::from_hz(FREQUENCY_HZ),\n\
-         \x20       )\n\
-         \x20       .unwrap();\n\
-         \x20   mcpwm.timer0.start(timer_cfg);\n\
-         {stamps}\n\
-         \x20   (mcpwm.timer0{handles})\n\
-         }}\n"
+         {starts}{stamps}\n\
+         \x20   ({handles})\n\
+         }}\n",
+        timers.len(),
+        if timers.len() == 1 { "" } else { "s" },
     );
 
-    let first = outputs
-        .first()
-        .map(|(op, b)| name(*op, *b))
-        .unwrap_or_else(|| "op0a".into());
+    let first = outputs.first().copied().unwrap_or((0, false));
+    let ft = c.timer_of(first.0);
     let example = example_block(
         &format!("Using MCPWM{unit}"),
         &[
-            "The duty is a TIMESTAMP: the counter value the output flips at,".into(),
-            "so it runs 0..=PERIOD rather than 0..=100.".into(),
+            format!(
+                "Duty is a TIMESTAMP: the count the output flips at, out of {}.",
+                format!("PERIOD_T{ft} + 1")
+            ),
             String::new(),
-            format!("    // Half power, whatever PERIOD is set to"),
-            format!("    _mcpwm{unit}_{first}.set_timestamp((PERIOD + 1) / 2);"),
+            format!(
+                // The handle main.rs binds, which carries the unit in its name.
+                "    _mcpwm{unit}_{}.set_timestamp(pins::configs::mcpwm{unit}::PERIOD_T{ft} / 2);   // 50 %",
+                name(first.0, first.1)
+            ),
             String::new(),
-            "// Keep the timer binding alive for as long as you want output:".into(),
-            "// it holds the clock on, and dropping it stops every pin above.".into(),
+            "// Each timer has its own PERIOD, so a duty computed against one".to_owned(),
+            "// means nothing on another. The constant is named for its timer.".to_owned(),
         ],
     );
 

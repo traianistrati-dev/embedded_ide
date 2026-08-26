@@ -3860,7 +3860,11 @@ pub struct PcntModuleConfig {
 pub struct McpwmModuleConfig {
     /// The MCPWM unit — `peripherals.MCPWM0`, or `MCPWM1` on the parts with two.
     pub instance: u8,
-    /// Output frequency in Hz, shared by every operator of the unit.
+    /// Timer 0's output frequency, in Hz.
+    ///
+    /// Named without an index because it was the unit's ONLY frequency before
+    /// the other two timers were reachable — keeping the name is what lets an
+    /// older config still mean what it said.
     pub freq_hz: u32,
     /// The timer's counter top. The duty can only be set in `period + 1` steps,
     /// so this is the RESOLUTION — and the product of it and the frequency is
@@ -3874,6 +3878,22 @@ pub struct McpwmModuleConfig {
     /// complementary, and a pair of unrelated loads does not.
     #[serde(default)]
     pub duty_x100: std::collections::BTreeMap<(u8, bool), u16>,
+    /// Which of the unit's THREE timers each operator runs on, indexed by
+    /// operator.
+    ///
+    /// The silicon has three timers and three operators, and any operator can
+    /// be pointed at any timer — `Operator::set_timer` takes the index as a
+    /// const parameter. One timer per operator is what makes two motors at two
+    /// frequencies possible on one unit.
+    ///
+    /// All zeros is what this was before, and what an older config reads back
+    /// as: every operator on timer 0.
+    #[serde(default)]
+    pub op_timer: [u8; 3],
+    /// Frequency and period for timers 1 and 2. Timer 0's are `freq_hz` and
+    /// `period` above.
+    #[serde(default = "default_extra_timers")]
+    pub extra_timers: [(u32, u16); 2],
     pub rx_model: String,
     pub tx_model: String,
     #[serde(default)]
@@ -4134,6 +4154,12 @@ const PARL_DATA_SIGNALS: [ModuleSignal; 16] = [
     ModuleSignal::ParlD15,
 ];
 
+/// `serde` default for [`McpwmModuleConfig::extra_timers`] — the same 20 kHz
+/// at whole-percent steps that timer 0 starts on.
+fn default_extra_timers() -> [(u32, u16); 2] {
+    [(20_000, 99), (20_000, 99)]
+}
+
 impl McpwmModuleConfig {
     /// Defaults: 20 kHz at 1 % resolution, every output idle.
     ///
@@ -4146,10 +4172,59 @@ impl McpwmModuleConfig {
             freq_hz: 20_000,
             period: 99,
             duty_x100: std::collections::BTreeMap::new(),
+            op_timer: [0; 3],
+            extra_timers: default_extra_timers(),
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
         }
+    }
+
+    /// Which timer an operator runs on, clamped to the three that exist.
+    pub fn timer_of(&self, operator: u8) -> u8 {
+        self.op_timer
+            .get(usize::from(operator))
+            .copied()
+            .unwrap_or(0)
+            .min(2)
+    }
+
+    /// One timer's frequency in Hz. Timer 0 is the unit's original field.
+    pub fn timer_freq_hz(&self, timer: u8) -> u32 {
+        match timer {
+            0 => self.freq_hz,
+            t => self.extra_timers[usize::from(t.min(2)) - 1].0,
+        }
+    }
+
+    /// One timer's counter top — the duty resolution, in `period + 1` steps.
+    pub fn timer_period(&self, timer: u8) -> u16 {
+        match timer {
+            0 => self.period,
+            t => self.extra_timers[usize::from(t.min(2)) - 1].1,
+        }
+    }
+
+    /// A mutable handle on one timer's `(frequency, period)`, for the panel.
+    pub fn timer_mut(&mut self, timer: u8) -> (&mut u32, &mut u16) {
+        match timer {
+            0 => (&mut self.freq_hz, &mut self.period),
+            t => {
+                let e = &mut self.extra_timers[usize::from(t.min(2)) - 1];
+                (&mut e.0, &mut e.1)
+            }
+        }
+    }
+
+    /// The timers at least one of `operators` runs on, in order.
+    ///
+    /// Only these are started: an unused timer left running would hold the
+    /// peripheral clock for nothing.
+    pub fn timers_used(&self, operators: &[u8]) -> Vec<u8> {
+        let mut v: Vec<u8> = operators.iter().map(|op| self.timer_of(*op)).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     /// The duty of one output, in hundredths of a percent. Zero when unset —
@@ -4162,8 +4237,11 @@ impl McpwmModuleConfig {
     ///
     /// `period + 1` steps, so 50 % of a period of 99 is 50. Rounded rather than
     /// truncated, or every duty would land one step low.
+    /// The resolution is the OPERATOR's timer's period, not the unit's: two
+    /// operators on two timers can count to two different tops, and a duty read
+    /// against the wrong one is a silently wrong pulse width.
     pub fn timestamp_of(&self, operator: u8, b: bool) -> u16 {
-        let steps = u32::from(self.period) + 1;
+        let steps = u32::from(self.timer_period(self.timer_of(operator))) + 1;
         let x100 = u32::from(self.duty_x100_of(operator, b));
         ((x100 * steps).div_ceil(10_000)).min(steps) as u16
     }

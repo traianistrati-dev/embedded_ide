@@ -1793,48 +1793,6 @@ pub fn module_config_ui(
                     ui.end_row();
                 }
                 ModuleConfig::Mcpwm(cfg) => {
-                    ui.label("Frequency");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut cfg.freq_hz)
-                                .range(1..=1_000_000)
-                                .suffix(" Hz")
-                                .speed(100.0),
-                        );
-                        for (lbl, hz) in [("1k", 1_000u32), ("20k", 20_000), ("50k", 50_000)] {
-                            if ui.small_button(lbl).clicked() {
-                                cfg.freq_hz = hz;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "Shared by every operator of this unit. 20 kHz and up is above \
-                         hearing, which is where a motor drive wants to be.",
-                    );
-                    ui.end_row();
-
-                    ui.label("Resolution");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut cfg.period)
-                                .range(1..=65_534)
-                                .prefix("period "),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("{} duty steps", cfg.period as u32 + 1))
-                                .size(11.0)
-                                .color(egui::Color32::GRAY),
-                        );
-                    })
-                    .response
-                    .on_hover_text(
-                        "The timer's counter top. Duty can only land on one of these steps, \
-                         and period x frequency is bounded by the peripheral clock - so a \
-                         finer resolution costs frequency.",
-                    );
-                    ui.end_row();
-
                     // One duty row per WIRED output: the six are not all in use,
                     // and a row for a pad nobody assigned sets nothing.
                     let mut wired: Vec<(u8, bool, &'static str)> = m
@@ -1851,9 +1809,99 @@ pub fn module_config_ui(
                         })
                         .collect();
                     wired.sort();
+                    let mut ops: Vec<u8> = wired.iter().map(|(op, _, _)| *op).collect();
+                    ops.dedup();
+
+                    // The unit has three timers and any operator can be on any
+                    // of them, so an operator with a pad wired picks its own.
+                    // With one operator there is nothing to choose, and the row
+                    // would be a control that changes nothing.
+                    if ops.len() > 1 {
+                        for op in &ops {
+                            ui.label(format!("OP{op} timer"));
+                            let mut t = cfg.timer_of(*op);
+                            egui::ComboBox::from_id_salt(format!("mcpwmtim{op}"))
+                                .selected_text(format!("Timer {t}"))
+                                .show_ui(ui, |ui| {
+                                    for v in 0u8..3 {
+                                        ui.selectable_value(&mut t, v, format!("Timer {v}"));
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Operators on the SAME timer share its frequency and \
+                                     period; on different timers they are independent. Two \
+                                     motors at two speeds is what the three are for.",
+                                );
+                            cfg.op_timer[usize::from(*op).min(2)] = t;
+                            ui.end_row();
+                        }
+                    }
+
+                    // A frequency and a resolution per timer IN USE. An unused
+                    // timer is never started, so showing its settings would be
+                    // two more controls that change nothing.
+                    let used = cfg.timers_used(&ops);
+                    let one = used.len() == 1;
+                    for t in &used {
+                        let tag = if one {
+                            String::new()
+                        } else {
+                            format!(" T{t}")
+                        };
+                        let (freq, period) = cfg.timer_mut(*t);
+                        ui.label(format!("Frequency{tag}"));
+                        let mut set: Option<u32> = None;
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(freq)
+                                    .range(1..=1_000_000)
+                                    .suffix(" Hz")
+                                    .speed(100.0),
+                            );
+                            for (lbl, hz) in [("1k", 1_000u32), ("20k", 20_000), ("50k", 50_000)] {
+                                if ui.small_button(lbl).clicked() {
+                                    set = Some(hz);
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Shared by every operator on THIS timer. 20 kHz and up is above \
+                             hearing, which is where a motor drive wants to be.",
+                        );
+                        if let Some(hz) = set {
+                            *freq = hz;
+                        }
+                        ui.end_row();
+
+                        ui.label(format!("Resolution{tag}"));
+                        let steps = u32::from(*period) + 1;
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(period)
+                                    .range(1..=65_534)
+                                    .prefix("period "),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("{steps} duty steps"))
+                                    .size(11.0)
+                                    .color(egui::Color32::GRAY),
+                            );
+                        })
+                        .response
+                        .on_hover_text(
+                            "The timer's counter top. Duty can only land on one of these \
+                             steps, and period x frequency is bounded by the peripheral \
+                             clock - so a finer resolution costs frequency.",
+                        );
+                        ui.end_row();
+                    }
+
                     for (op, is_b, lbl) in wired {
                         ui.label(format!("Duty {lbl}"));
                         let mut pct = f32::from(cfg.duty_x100_of(op, is_b)) / 100.0;
+                        let steps = u32::from(cfg.timer_period(cfg.timer_of(op))) + 1;
                         if ui
                             .add(
                                 egui::DragValue::new(&mut pct)
@@ -1862,9 +1910,9 @@ pub fn module_config_ui(
                                     .speed(0.5),
                             )
                             .on_hover_text(format!(
-                                "Timestamp {} of {}",
+                                "Timestamp {} of {steps}, on timer {}",
                                 cfg.timestamp_of(op, is_b),
-                                cfg.period as u32 + 1
+                                cfg.timer_of(op),
                             ))
                             .changed()
                         {

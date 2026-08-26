@@ -1907,7 +1907,19 @@ fn bus_sections(
             .unwrap_or_default();
         let mut body = String::new();
         let mut args = Vec::new();
-        let mut handles = vec![format!("_mcpwm{unit}_timer{sfx}")];
+        // One binding per timer IN USE, named for it: two operators at two
+        // frequencies mean two timers, and each owns the clock guard for its
+        // own outputs.
+        let d = McpwmModuleConfig::new(unit);
+        let c = mcpwm_cfg.get(&unit).unwrap_or(&d);
+        let mut ops: Vec<u8> = outs.iter().map(|(op, _, _)| *op).collect();
+        ops.sort_unstable();
+        ops.dedup();
+        let mut handles: Vec<String> = c
+            .timers_used(&ops)
+            .iter()
+            .map(|t| format!("_mcpwm{unit}_timer{t}{sfx}"))
+            .collect();
         for (op, b, p) in &outs {
             let var = esp_binding(p);
             body.push_str(&format!(

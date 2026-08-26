@@ -1780,7 +1780,13 @@ mod tests {
             PinFunction::UsbDm,
             PinFunction::UsbDp,
             // One MCPWM operator with BOTH outputs: the complementary pair, and
-            // the shape whose return type is longest.
+            // the shape whose return type is longest. A SECOND operator joins
+            // it, so `ESP_MCPWM_TIMERS=split` can put the two on two timers —
+            // two motors at two frequencies on one unit.
+            PinFunction::McpwmA {
+                unit: 0,
+                operator: 1,
+            },
             PinFunction::McpwmA {
                 unit: 0,
                 operator: 0,
@@ -2052,6 +2058,14 @@ mod tests {
                 let mut c = crate::panels::mcu_module::modules::McpwmModuleConfig::new(0);
                 c.duty_x100.insert((0, false), 2_500);
                 c.duty_x100.insert((0, true), 7_500);
+                c.duty_x100.insert((1, false), 5_000);
+                // `ESP_MCPWM_TIMERS=split` puts operator 1 on its own timer at
+                // its own frequency — two timers started, two periods, two
+                // handles back.
+                if std::env::var("ESP_MCPWM_TIMERS").as_deref() == Ok("split") {
+                    c.op_timer[1] = 1;
+                    c.extra_timers[0] = (1_000, 999);
+                }
                 c
             }),
             connections: Vec::new(),
@@ -3574,5 +3588,128 @@ mod tests {
         // half's module now.
         assert_ne!(LcdCamModuleConfig::new(0).mode, LcdCamMode::Camera);
         assert_eq!(LcdCamModuleConfig::new_camera().mode, LcdCamMode::Camera);
+    }
+
+    /// Build an S3 with MCPWM0 operators 0 and 1 wired, and return
+    /// `(main.rs, mcpwm0.rs)`.
+    #[cfg(test)]
+    fn esp_mcpwm_project(op1_timer: u8, runtime: Runtime) -> (String, String) {
+        use crate::panels::mcu_module::modules::{
+            McpwmModuleConfig, ModuleConfig, ModuleKind, VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32s3")
+            .unwrap()
+            .build_mcu();
+        mcu.runtime = runtime;
+        for f in [
+            PinFunction::McpwmA {
+                unit: 0,
+                operator: 0,
+            },
+            PinFunction::McpwmB {
+                unit: 0,
+                operator: 0,
+            },
+            PinFunction::McpwmA {
+                unit: 0,
+                operator: 1,
+            },
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(&f)
+                })
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("no pad for {f:?}"));
+            mcu.apply_pin_function(num, f);
+        }
+        let mut cfg = McpwmModuleConfig::new(0);
+        cfg.duty_x100.insert((0, false), 2_500);
+        cfg.duty_x100.insert((1, false), 5_000);
+        cfg.op_timer[1] = op1_timer;
+        cfg.extra_timers[0] = (1_000, 999);
+        mcu.modules.push(VirtualModule {
+            id: "mcpwm_0".into(),
+            kind: ModuleKind::GenericInterfaceMcpwm,
+            name: "MCPWM0".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Mcpwm(cfg),
+            connections: Vec::new(),
+        });
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "mcpwm0.rs")
+            .map(|(_, c)| c)
+            .unwrap_or_default();
+        (mcu.fresh_main_rs(), file)
+    }
+
+    /// Two operators on two timers: two configs, two `start`s, two handles —
+    /// and each operator pointed at ITS timer.
+    #[test]
+    fn esp_mcpwm_gives_each_operator_its_own_timer() {
+        let (main, file) = esp_mcpwm_project(1, Runtime::Blocking);
+        assert!(
+            file.contains("mcpwm.operator0.set_timer(&mcpwm.timer0);"),
+            "{file}"
+        );
+        assert!(
+            file.contains("mcpwm.operator1.set_timer(&mcpwm.timer1);"),
+            "{file}"
+        );
+        assert!(
+            file.contains("const FREQUENCY_HZ_T0: u32 = 20000;"),
+            "{file}"
+        );
+        assert!(
+            file.contains("const FREQUENCY_HZ_T1: u32 = 1000;"),
+            "{file}"
+        );
+        assert!(file.contains("mcpwm.timer0.start(timer_cfg_t0);"), "{file}");
+        assert!(file.contains("mcpwm.timer1.start(timer_cfg_t1);"), "{file}");
+        // Both timers come back: each owns the clock guard for its own outputs.
+        assert!(
+            main.contains("let (_mcpwm0_timer0, _mcpwm0_timer1, mut _mcpwm0_op0a"),
+            "handles:\n{main}"
+        );
+    }
+
+    /// The duty is a fraction of the OPERATOR's timer, so the same 50 % is a
+    /// different timestamp on a different period. Reading it against the wrong
+    /// timer is a silently wrong pulse width, which is why this is asserted.
+    #[test]
+    fn esp_mcpwm_duty_follows_its_own_timer() {
+        let (_, split) = esp_mcpwm_project(1, Runtime::Blocking);
+        // Timer 1 has period 999, so 50 % is 500.
+        assert!(
+            split.contains("const TIMESTAMP_OP1A: u16 = 500; // 50.00 % of timer 1"),
+            "{split}"
+        );
+        // Timer 0 has period 99, so 25 % is 25.
+        assert!(
+            split.contains("const TIMESTAMP_OP0A: u16 = 25; // 25.00 % of timer 0"),
+            "{split}"
+        );
+
+        // …and with both operators back on timer 0, the same duty is 50 of 100.
+        let (main, one) = esp_mcpwm_project(0, Runtime::Blocking);
+        assert!(
+            one.contains("const TIMESTAMP_OP1A: u16 = 50; // 50.00 % of timer 0"),
+            "{one}"
+        );
+        assert!(
+            !one.contains("FREQUENCY_HZ_T1"),
+            "one timer, one config:\n{one}"
+        );
+        assert!(
+            !one.contains("timer1.start"),
+            "no unused timer started:\n{one}"
+        );
+        assert!(
+            main.contains("let (_mcpwm0_timer0, mut _mcpwm0_op0a"),
+            "one handle:\n{main}"
+        );
     }
 }
