@@ -273,6 +273,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let pcnt = modules::pcnt_configs(&mcu.modules);
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
+    let lcd_cam = modules::lcd_cam_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
     let can = modules::can_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
@@ -289,6 +290,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &pcnt,
         &mcpwm,
         &parl_io,
+        &lcd_cam,
         &dac,
         &can,
         &timer,
@@ -327,6 +329,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         })
         .collect();
     let can_cfg = modules::can_configs(&mcu.modules);
+    let lcd_cam_cfg = modules::lcd_cam_configs(&mcu.modules);
     crate::panels::mcu_module::codegen_esp_configs::config_files(
         &uart,
         &spi_n,
@@ -360,6 +363,8 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         // The parallel port, and whether a VALID pad went with it.
         &codegen_esp::parl_io_wired(&configured),
         modules::parl_io_configs(&mcu.modules).get(&0),
+        &codegen_esp::lcd_cam_wired(&configured),
+        lcd_cam_cfg.get(&0),
         // The DAC channels wired, and the module that holds their levels.
         &codegen_esp::dac_channels_wired(&configured),
         modules::dac_configs(&mcu.modules).get(&1),
@@ -380,6 +385,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let pcnt = modules::pcnt_configs(&mcu.modules);
     let mcpwm = modules::mcpwm_configs(&mcu.modules);
     let parl_io = modules::parl_io_configs(&mcu.modules);
+    let lcd_cam = modules::lcd_cam_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
     let can = modules::can_configs(&mcu.modules);
     let timer = modules::timer_configs(&mcu.modules);
@@ -397,6 +403,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &pcnt,
         &mcpwm,
         &parl_io,
+        &lcd_cam,
         &dac,
         &can,
         &timer,
@@ -932,6 +939,7 @@ pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
             &modules::spi_configs(&mcu.modules),
             &codegen_esp::i2s_instances_wired(&pins_of(mcu)),
             codegen_esp::parl_io_wired(&pins_of(mcu)).is_some(),
+            !codegen_esp::lcd_cam_wired(&pins_of(mcu)).is_empty(),
         )
         .uses(),
         Runtime::Async if async_supported(&mcu.family) => async_periphs(mcu).dma_uses,
@@ -1724,6 +1732,28 @@ mod tests {
             // is what proves the section at all.
             PinFunction::CanRx,
             PinFunction::CanTx,
+            // The video port, in whichever mode `ESP_LCD_MODE` names. The S3
+            // is the only part with the pads, so everywhere else these are
+            // reported skipped and the project is the same as before.
+            PinFunction::LcdCamData { lane: 0 },
+            PinFunction::LcdCamData { lane: 1 },
+            PinFunction::LcdCamData { lane: 2 },
+            PinFunction::LcdCamData { lane: 3 },
+            PinFunction::LcdCamData { lane: 4 },
+            PinFunction::LcdCamData { lane: 5 },
+            PinFunction::LcdCamData { lane: 6 },
+            PinFunction::LcdCamData { lane: 7 },
+            // Every control pad of all three modes: the ones a mode does not
+            // name are simply never passed, and wiring them anyway proves it.
+            PinFunction::LcdCamDc,
+            PinFunction::LcdCamWr,
+            PinFunction::LcdCamCs,
+            PinFunction::LcdCamPclk,
+            PinFunction::LcdCamVsync,
+            PinFunction::LcdCamHsync,
+            PinFunction::LcdCamDe,
+            PinFunction::LcdCamHenable,
+            PinFunction::LcdCamMclk,
             // Both DAC channels. Their pads are fixed, so the search below
             // finds them wherever the chip puts them.
             PinFunction::DacOut { dac: 1, channel: 1 },
@@ -1804,6 +1834,25 @@ mod tests {
                     c.mode = CanMode::ListenOnly;
                     c.transceiver = false;
                 }
+                c
+            }),
+            connections: Vec::new(),
+        });
+        // `ESP_LCD_MODE=dpi|camera` picks the other two shapes — a different
+        // driver, different pads and, for DPI, a whole timing block.
+        mcu.modules.push(VirtualModule {
+            id: "lcd_cam".into(),
+            kind: ModuleKind::GenericInterfaceLcdCam,
+            name: "LCD".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::LcdCam({
+                use crate::panels::mcu_module::modules::{LcdCamMode, LcdCamModuleConfig};
+                let mut c = LcdCamModuleConfig::new(0);
+                c.mode = match std::env::var("ESP_LCD_MODE").as_deref() {
+                    Ok("dpi") => LcdCamMode::Dpi,
+                    Ok("camera") => LcdCamMode::Camera,
+                    _ => LcdCamMode::I8080,
+                };
                 c
             }),
             connections: Vec::new(),
@@ -2778,5 +2827,188 @@ mod tests {
         // plain `Can::new`.
         assert_eq!(CanMode::options("esp32c6").len(), 3);
         assert_eq!(CanMode::options("stm32f1"), &[CanMode::Normal]);
+    }
+
+    /// Build an S3 with the video port wired and return `(main.rs, lcd_cam.rs)`.
+    #[cfg(test)]
+    fn esp_lcd_project(
+        mode: crate::panels::mcu_module::modules::LcdCamMode,
+        width: u8,
+        runtime: Runtime,
+    ) -> (String, String) {
+        use crate::panels::mcu_module::modules::{
+            LcdCamModuleConfig, ModuleConfig, ModuleKind, VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32s3")
+            .unwrap()
+            .build_mcu();
+        mcu.runtime = runtime;
+
+        let mut want: Vec<PinFunction> = (0..width)
+            .map(|lane| PinFunction::LcdCamData { lane })
+            .collect();
+        // Every control pad of every mode. The ones this mode does not name are
+        // simply never passed, which is what makes one pad set serve three.
+        want.extend([
+            PinFunction::LcdCamDc,
+            PinFunction::LcdCamWr,
+            PinFunction::LcdCamCs,
+            PinFunction::LcdCamPclk,
+            PinFunction::LcdCamVsync,
+            PinFunction::LcdCamHsync,
+            PinFunction::LcdCamDe,
+            PinFunction::LcdCamHenable,
+            PinFunction::LcdCamMclk,
+        ]);
+        for f in &want {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(f)
+                })
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("no S3 pad for {f:?}"));
+            mcu.apply_pin_function(num, f.clone());
+        }
+
+        let mut cfg = LcdCamModuleConfig::new(0);
+        cfg.mode = mode;
+        cfg.width = width;
+        mcu.modules.push(VirtualModule {
+            id: "lcd_cam".into(),
+            kind: ModuleKind::GenericInterfaceLcdCam,
+            name: "LCD".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::LcdCam(cfg),
+            connections: Vec::new(),
+        });
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "lcd_cam.rs")
+            .map(|(_, c)| c)
+            .unwrap_or_default();
+        (mcu.fresh_main_rs(), file)
+    }
+
+    /// Each mode reaches for a DIFFERENT esp-hal driver, and binds only the
+    /// control pads that driver has a setter for.
+    #[test]
+    fn esp_lcd_cam_builds_the_mode_it_was_given() {
+        use crate::panels::mcu_module::modules::LcdCamMode;
+        let (_, i8080) = esp_lcd_project(LcdCamMode::I8080, 8, Runtime::Blocking);
+        assert!(i8080.contains("lcd::i8080"), "driver:\n{i8080}");
+        assert!(i8080.contains(".with_dc(dc)") && i8080.contains(".with_wrx(wr)"));
+        // The RGB and camera pads are wired on the canvas and STILL not bound:
+        // the i8080 driver has no setter for them.
+        assert!(!i8080.contains("with_vsync"), "not an RGB panel:\n{i8080}");
+        assert!(
+            !i8080.contains("with_master_clock"),
+            "not a camera:\n{i8080}"
+        );
+
+        let (_, dpi) = esp_lcd_project(LcdCamMode::Dpi, 8, Runtime::Blocking);
+        assert!(dpi.contains("lcd::dpi"), "driver:\n{dpi}");
+        assert!(dpi.contains("FrameTiming {"), "the timings:\n{dpi}");
+        assert!(dpi.contains("horizontal_active_width: H_ACTIVE"));
+        assert!(
+            !dpi.contains("with_dc("),
+            "no command line on an RGB panel:\n{dpi}"
+        );
+
+        let (_, cam) = esp_lcd_project(LcdCamMode::Camera, 8, Runtime::Blocking);
+        assert!(cam.contains("lcd_cam::{LcdCam, cam::"), "driver:\n{cam}");
+        assert!(cam.contains(".with_master_clock(mclk)"), "mclk:\n{cam}");
+        assert!(cam.contains(".with_h_enable(href)"), "href:\n{cam}");
+        // A camera READS: its data pads take the input bound.
+        assert!(
+            cam.contains("d0: impl PeripheralInput<'d>"),
+            "data direction:\n{cam}"
+        );
+        assert!(
+            !cam.contains("d0: impl PeripheralOutput<'d>"),
+            "data direction:\n{cam}"
+        );
+    }
+
+    /// The width is how many data pads the driver binds — not a number written
+    /// anywhere in the i8080 config.
+    #[test]
+    fn esp_lcd_cam_width_decides_the_pads_bound() {
+        use crate::panels::mcu_module::modules::LcdCamMode;
+        let (_, eight) = esp_lcd_project(LcdCamMode::I8080, 8, Runtime::Blocking);
+        assert!(eight.contains(".with_data7(d7)"));
+        assert!(
+            !eight.contains(".with_data8("),
+            "8-bit stops at 7:\n{eight}"
+        );
+
+        let (main, sixteen) = esp_lcd_project(LcdCamMode::I8080, 16, Runtime::Blocking);
+        assert!(sixteen.contains(".with_data15(d15)"), "16-bit:\n{sixteen}");
+        // …and main.rs passes exactly those pads, in the same order.
+        let call = main
+            .lines()
+            .find(|l| l.contains("configs::lcd_cam::init"))
+            .expect("the call");
+        assert!(
+            call.contains("_lcd_d15"),
+            "the wide bus reaches main:\n{call}"
+        );
+    }
+
+    /// `into_async` sits on `LcdCam`, before either half is taken — so it lands
+    /// in the middle of `init`, not at the end of the chain. And the camera's
+    /// type does not change with it, because `Camera` has no mode parameter.
+    #[test]
+    fn esp_lcd_cam_async_is_on_the_peripheral() {
+        use crate::panels::mcu_module::modules::LcdCamMode;
+        let (_, blocking) = esp_lcd_project(LcdCamMode::I8080, 8, Runtime::Blocking);
+        assert!(
+            blocking.contains("LcdCam::new(lcd_cam);"),
+            "sync:\n{blocking}"
+        );
+        assert!(blocking.contains("-> I8080<'d, Blocking>"));
+
+        let (_, asyn) = esp_lcd_project(LcdCamMode::I8080, 8, Runtime::Async);
+        assert!(
+            asyn.contains("LcdCam::new(lcd_cam).into_async();"),
+            "async goes in before the half is taken:\n{asyn}"
+        );
+        assert!(asyn.contains("-> I8080<'d, Async>"));
+
+        let (_, cam) = esp_lcd_project(LcdCamMode::Camera, 8, Runtime::Async);
+        assert!(cam.contains(".into_async();"), "still registers:\n{cam}");
+        assert!(cam.contains("-> Camera<'d>"), "no mode on Camera:\n{cam}");
+        // …and with no mode in the type, the marker is not imported either.
+        assert!(
+            !cam.contains("use esp_hal::Async;"),
+            "unused import:\n{cam}"
+        );
+    }
+
+    /// Only the ESP32-S3 has LCD_CAM, and the pads say so — the module is not
+    /// offered anywhere else rather than offered and then silent.
+    #[test]
+    fn only_the_s3_offers_the_video_port() {
+        for chip in [
+            "esp32", "esp32c2", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2", "esp32s2",
+        ] {
+            let mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+                .unwrap()
+                .build_mcu();
+            assert!(
+                !mcu.iter_all_pins()
+                    .any(|p| p.available_functions.contains(&PinFunction::LcdCamDc)),
+                "{chip} must not offer a video pad"
+            );
+        }
+        let s3 = crate::panels::mcu_module::builtins::builtin_for("esp32s3")
+            .unwrap()
+            .build_mcu();
+        assert!(
+            s3.iter_all_pins()
+                .any(|p| p.available_functions.contains(&PinFunction::LcdCamDc)),
+            "the S3 has it"
+        );
     }
 }

@@ -80,6 +80,16 @@ pub enum ModuleKind {
     /// wider width does. Wiring eight pads for a port someone added to try it
     /// would spend the chip.
     GenericInterfaceParlIo,
+    /// The parallel video port — "LCD".
+    ///
+    /// ONE module for what esp-hal splits into three drivers, because the
+    /// silicon is one peripheral with one set of pads: an i8080 display, an
+    /// RGB/DPI display, or a DVP camera. The module's mode picks which, and
+    /// the pads mean whatever that mode says they mean.
+    ///
+    /// Only the ESP32-S3 has it. Everywhere else the kind is not offered at
+    /// all, rather than offered and then refusing to generate.
+    GenericInterfaceLcdCam,
     /// Motor-control PWM on one MCPWM unit — "MCPWM".
     ///
     /// Espressif only, and NOT the same peripheral as the plain PWM module: on
@@ -133,7 +143,7 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 20] = [
+    pub const ALL: [ModuleKind; 21] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
@@ -143,6 +153,7 @@ impl ModuleKind {
         ModuleKind::GenericInterfacePcnt,
         ModuleKind::GenericInterfaceMcpwm,
         ModuleKind::GenericInterfaceParlIo,
+        ModuleKind::GenericInterfaceLcdCam,
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceSdmmc,
         ModuleKind::GenericInterfaceQspi,
@@ -190,6 +201,12 @@ impl ModuleKind {
             // turns it into an encoder, and plenty of uses do not want one.
             ModuleKind::GenericInterfacePcnt => (&[PcntEdgeSig], &[PcntCtrlSig]),
             ModuleKind::GenericInterfaceParlIo => (&[ParlD0, ParlClkSig], &[]),
+            // Two data lines and nothing else is auto-wired. Which CONTROL
+            // pads a mode needs differs — i8080 wants DC and WR, RGB wants
+            // four sync lines, a camera wants three — so wiring any of them
+            // here would be right for one mode and wrong for two. They join
+            // by being assigned on the canvas.
+            ModuleKind::GenericInterfaceLcdCam => (&[LcdCamD0, LcdCamD1], &[]),
             // One output is required and the other five are not: a single
             // operator driving one side is a normal use, and auto-wiring
             // six pads for it would spend the chip.
@@ -238,7 +255,11 @@ impl ModuleKind {
     pub fn is_single_instance(self) -> bool {
         matches!(
             self,
-            ModuleKind::GenericInterfaceCan | ModuleKind::GenericInterfaceUsb
+            ModuleKind::GenericInterfaceCan
+                | ModuleKind::GenericInterfaceUsb
+                // One LCD_CAM on the chip, and its pin functions carry no
+                // instance index either.
+                | ModuleKind::GenericInterfaceLcdCam
         )
     }
 
@@ -254,6 +275,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfacePcnt => "PCNT",
             ModuleKind::GenericInterfaceMcpwm => "MCPWM",
             ModuleKind::GenericInterfaceParlIo => "PARL",
+            ModuleKind::GenericInterfaceLcdCam => "LCD",
             ModuleKind::GenericInterfaceDac => "DAC",
             ModuleKind::GenericInterfaceSai => "SAI",
             ModuleKind::GenericInterfaceSdmmc => "SDMMC",
@@ -287,6 +309,9 @@ impl ModuleKind {
             ModuleKind::GenericInterfacePcnt => ModuleConfig::Pcnt(PcntModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceParlIo => {
                 ModuleConfig::ParlIo(ParlIoModuleConfig::new(instance))
+            }
+            ModuleKind::GenericInterfaceLcdCam => {
+                ModuleConfig::LcdCam(LcdCamModuleConfig::new(instance))
             }
             ModuleKind::GenericInterfaceMcpwm => {
                 ModuleConfig::Mcpwm(McpwmModuleConfig::new(instance))
@@ -369,6 +394,20 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
             0,
             PARL_DATA_SIGNALS[(*lane as usize).min(15)],
         ),
+        PinFunction::LcdCamData { lane } => (
+            GenericInterfaceLcdCam,
+            0,
+            LCD_DATA_SIGNALS[(*lane as usize).min(15)],
+        ),
+        PinFunction::LcdCamDc => (GenericInterfaceLcdCam, 0, LcdCamDcSig),
+        PinFunction::LcdCamWr => (GenericInterfaceLcdCam, 0, LcdCamWrSig),
+        PinFunction::LcdCamCs => (GenericInterfaceLcdCam, 0, LcdCamCsSig),
+        PinFunction::LcdCamPclk => (GenericInterfaceLcdCam, 0, LcdCamPclkSig),
+        PinFunction::LcdCamVsync => (GenericInterfaceLcdCam, 0, LcdCamVsyncSig),
+        PinFunction::LcdCamHsync => (GenericInterfaceLcdCam, 0, LcdCamHsyncSig),
+        PinFunction::LcdCamDe => (GenericInterfaceLcdCam, 0, LcdCamDeSig),
+        PinFunction::LcdCamHenable => (GenericInterfaceLcdCam, 0, LcdCamHenSig),
+        PinFunction::LcdCamMclk => (GenericInterfaceLcdCam, 0, LcdCamMclkSig),
         PinFunction::ParlClk => (GenericInterfaceParlIo, 0, ParlClkSig),
         PinFunction::ParlValid => (GenericInterfaceParlIo, 0, ParlValidSig),
         PinFunction::McpwmA { unit, operator } => (
@@ -610,6 +649,33 @@ pub enum ModuleSignal {
     ParlD15,
     ParlClkSig,
     ParlValidSig,
+
+    // ── LCD_CAM ─────────────────────────────────────────────────────────
+    LcdCamD0,
+    LcdCamD1,
+    LcdCamD2,
+    LcdCamD3,
+    LcdCamD4,
+    LcdCamD5,
+    LcdCamD6,
+    LcdCamD7,
+    LcdCamD8,
+    LcdCamD9,
+    LcdCamD10,
+    LcdCamD11,
+    LcdCamD12,
+    LcdCamD13,
+    LcdCamD14,
+    LcdCamD15,
+    LcdCamDcSig,
+    LcdCamWrSig,
+    LcdCamCsSig,
+    LcdCamPclkSig,
+    LcdCamVsyncSig,
+    LcdCamHsyncSig,
+    LcdCamDeSig,
+    LcdCamHenSig,
+    LcdCamMclkSig,
     // MCPWM — three operators, each a complementary pair.
     McpwmA0,
     McpwmB0,
@@ -740,6 +806,31 @@ impl ModuleSignal {
             ModuleSignal::RmtLine => "RMT",
             ModuleSignal::PcntEdgeSig => "EDGE",
             ModuleSignal::PcntCtrlSig => "CTRL",
+            ModuleSignal::LcdCamD0 => "D0",
+            ModuleSignal::LcdCamD1 => "D1",
+            ModuleSignal::LcdCamD2 => "D2",
+            ModuleSignal::LcdCamD3 => "D3",
+            ModuleSignal::LcdCamD4 => "D4",
+            ModuleSignal::LcdCamD5 => "D5",
+            ModuleSignal::LcdCamD6 => "D6",
+            ModuleSignal::LcdCamD7 => "D7",
+            ModuleSignal::LcdCamD8 => "D8",
+            ModuleSignal::LcdCamD9 => "D9",
+            ModuleSignal::LcdCamD10 => "D10",
+            ModuleSignal::LcdCamD11 => "D11",
+            ModuleSignal::LcdCamD12 => "D12",
+            ModuleSignal::LcdCamD13 => "D13",
+            ModuleSignal::LcdCamD14 => "D14",
+            ModuleSignal::LcdCamD15 => "D15",
+            ModuleSignal::LcdCamDcSig => "DC",
+            ModuleSignal::LcdCamWrSig => "WR",
+            ModuleSignal::LcdCamCsSig => "CS",
+            ModuleSignal::LcdCamPclkSig => "PCLK",
+            ModuleSignal::LcdCamVsyncSig => "VSYNC",
+            ModuleSignal::LcdCamHsyncSig => "HSYNC",
+            ModuleSignal::LcdCamDeSig => "DE",
+            ModuleSignal::LcdCamHenSig => "HREF",
+            ModuleSignal::LcdCamMclkSig => "MCLK",
             ModuleSignal::ParlD0 => "D0",
             ModuleSignal::ParlD1 => "D1",
             ModuleSignal::ParlD2 => "D2",
@@ -889,6 +980,31 @@ impl ModuleSignal {
             ModuleSignal::RmtLine => PinFunction::RmtChannel(instance),
             ModuleSignal::PcntEdgeSig => PinFunction::PcntEdge(instance),
             ModuleSignal::PcntCtrlSig => PinFunction::PcntCtrl(instance),
+            ModuleSignal::LcdCamD0 => PinFunction::LcdCamData { lane: 0 },
+            ModuleSignal::LcdCamD1 => PinFunction::LcdCamData { lane: 1 },
+            ModuleSignal::LcdCamD2 => PinFunction::LcdCamData { lane: 2 },
+            ModuleSignal::LcdCamD3 => PinFunction::LcdCamData { lane: 3 },
+            ModuleSignal::LcdCamD4 => PinFunction::LcdCamData { lane: 4 },
+            ModuleSignal::LcdCamD5 => PinFunction::LcdCamData { lane: 5 },
+            ModuleSignal::LcdCamD6 => PinFunction::LcdCamData { lane: 6 },
+            ModuleSignal::LcdCamD7 => PinFunction::LcdCamData { lane: 7 },
+            ModuleSignal::LcdCamD8 => PinFunction::LcdCamData { lane: 8 },
+            ModuleSignal::LcdCamD9 => PinFunction::LcdCamData { lane: 9 },
+            ModuleSignal::LcdCamD10 => PinFunction::LcdCamData { lane: 10 },
+            ModuleSignal::LcdCamD11 => PinFunction::LcdCamData { lane: 11 },
+            ModuleSignal::LcdCamD12 => PinFunction::LcdCamData { lane: 12 },
+            ModuleSignal::LcdCamD13 => PinFunction::LcdCamData { lane: 13 },
+            ModuleSignal::LcdCamD14 => PinFunction::LcdCamData { lane: 14 },
+            ModuleSignal::LcdCamD15 => PinFunction::LcdCamData { lane: 15 },
+            ModuleSignal::LcdCamDcSig => PinFunction::LcdCamDc,
+            ModuleSignal::LcdCamWrSig => PinFunction::LcdCamWr,
+            ModuleSignal::LcdCamCsSig => PinFunction::LcdCamCs,
+            ModuleSignal::LcdCamPclkSig => PinFunction::LcdCamPclk,
+            ModuleSignal::LcdCamVsyncSig => PinFunction::LcdCamVsync,
+            ModuleSignal::LcdCamHsyncSig => PinFunction::LcdCamHsync,
+            ModuleSignal::LcdCamDeSig => PinFunction::LcdCamDe,
+            ModuleSignal::LcdCamHenSig => PinFunction::LcdCamHenable,
+            ModuleSignal::LcdCamMclkSig => PinFunction::LcdCamMclk,
             ModuleSignal::ParlD0 => PinFunction::ParlData { lane: 0 },
             ModuleSignal::ParlD1 => PinFunction::ParlData { lane: 1 },
             ModuleSignal::ParlD2 => PinFunction::ParlData { lane: 2 },
@@ -3793,6 +3909,27 @@ impl ParlIoModuleConfig {
     }
 }
 
+/// The sixteen data lanes, indexed by lane number — see
+/// [`PinFunction::LcdCamData`].
+const LCD_DATA_SIGNALS: [ModuleSignal; 16] = [
+    ModuleSignal::LcdCamD0,
+    ModuleSignal::LcdCamD1,
+    ModuleSignal::LcdCamD2,
+    ModuleSignal::LcdCamD3,
+    ModuleSignal::LcdCamD4,
+    ModuleSignal::LcdCamD5,
+    ModuleSignal::LcdCamD6,
+    ModuleSignal::LcdCamD7,
+    ModuleSignal::LcdCamD8,
+    ModuleSignal::LcdCamD9,
+    ModuleSignal::LcdCamD10,
+    ModuleSignal::LcdCamD11,
+    ModuleSignal::LcdCamD12,
+    ModuleSignal::LcdCamD13,
+    ModuleSignal::LcdCamD14,
+    ModuleSignal::LcdCamD15,
+];
+
 const PARL_DATA_SIGNALS: [ModuleSignal; 16] = [
     ModuleSignal::ParlD0,
     ModuleSignal::ParlD1,
@@ -3972,6 +4109,142 @@ impl CanMode {
     }
 }
 
+/// Which of the three shapes the one peripheral is wearing.
+///
+/// esp-hal splits LCD_CAM into three drivers — `lcd::i8080`, `lcd::dpi` and
+/// `cam` — but the silicon is one block with one set of pads, and the LCD half
+/// can be an i8080 OR a DPI, never both. So this is a mode on one module rather
+/// than three module kinds that would all fight over the same peripheral.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LcdCamMode {
+    /// A parallel MCU display: command/data select, a write strobe, and a byte
+    /// (or word) at a time. What most small colour TFTs speak.
+    #[default]
+    I8080,
+    /// An RGB/DPI display: this chip drives the pixel clock and the sync lines
+    /// and streams a whole framebuffer continuously.
+    Dpi,
+    /// A DVP camera: the sensor drives the pixel clock and this chip reads.
+    Camera,
+}
+
+impl LcdCamMode {
+    pub const ALL: [Self; 3] = [Self::I8080, Self::Dpi, Self::Camera];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::I8080 => "i8080 display",
+            Self::Dpi => "RGB display",
+            Self::Camera => "DVP camera",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::I8080 => {
+                "A parallel MCU display. Commands and pixels share the bus; DC says \
+                 which, and WR is the strobe the display latches on."
+            }
+            Self::Dpi => {
+                "An RGB panel with no controller of its own: this chip drives the \
+                 pixel clock and the sync lines and streams the framebuffer forever."
+            }
+            Self::Camera => {
+                "A DVP sensor. The camera drives the pixel clock and this chip reads \
+                 - which is why MCLK is optional and PCLK is an input."
+            }
+        }
+    }
+
+    /// True where the peripheral is receiving rather than driving.
+    pub fn is_camera(self) -> bool {
+        matches!(self, Self::Camera)
+    }
+
+    /// The esp-hal driver type this becomes.
+    pub fn driver(self) -> &'static str {
+        match self {
+            Self::I8080 => "I8080",
+            Self::Dpi => "Dpi",
+            Self::Camera => "Camera",
+        }
+    }
+}
+
+/// LCD_CAM settings + data model.
+///
+/// One struct for all three modes: the fields a mode does not use are simply
+/// not read by the generator, which keeps a project's settings intact when the
+/// user switches mode to compare and switches back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcdCamModuleConfig {
+    /// Always 0 — the chip has one LCD_CAM.
+    pub instance: u8,
+    pub mode: LcdCamMode,
+    /// 8 or 16. Not a free number: it is how many data pads the driver binds,
+    /// and the peripheral has no other widths.
+    pub width: u8,
+    /// Pixel-clock frequency in Hz. Meaningless in camera SLAVE mode, where the
+    /// sensor supplies the clock, but esp-hal takes it either way.
+    pub clock_hz: u32,
+    /// Camera mode: give the sensor a master clock. Off is slave mode.
+    pub master_clock: bool,
+    /// RGB mode: the active area, in pixels.
+    pub h_active: u16,
+    pub v_active: u16,
+    /// RGB mode: the total line and frame, active area plus blanking.
+    pub h_total: u16,
+    pub v_total: u16,
+    /// RGB mode: the gap before the active area starts.
+    pub h_front_porch: u16,
+    pub v_front_porch: u16,
+    /// RGB mode: how long the sync pulses are held.
+    pub hsync_width: u16,
+    pub vsync_width: u16,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated handle (e.g. `_lcd_panel`).
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl LcdCamModuleConfig {
+    /// Defaults: an 8-bit i8080 display at 20 MHz, which is esp-hal's own.
+    ///
+    /// The RGB timings default to a 480x480 panel — the one esp-hal's `dpi`
+    /// example uses — so a user who switches to that mode starts from numbers
+    /// that describe a real display rather than from zeros.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            mode: LcdCamMode::I8080,
+            width: 8,
+            clock_hz: 20_000_000,
+            master_clock: true,
+            h_active: 480,
+            v_active: 480,
+            h_total: 520,
+            v_total: 510,
+            h_front_porch: 10,
+            v_front_porch: 10,
+            hsync_width: 10,
+            vsync_width: 10,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+
+    /// The data lanes this width uses, as signals.
+    pub fn lanes(&self) -> &'static [ModuleSignal] {
+        if self.width >= 16 {
+            &LCD_DATA_SIGNALS
+        } else {
+            &LCD_DATA_SIGNALS[..8]
+        }
+    }
+}
+
 /// CAN device settings + data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanModuleConfig {
@@ -4132,6 +4405,7 @@ pub enum ModuleConfig {
     Pcnt(PcntModuleConfig),
     Mcpwm(McpwmModuleConfig),
     ParlIo(ParlIoModuleConfig),
+    LcdCam(LcdCamModuleConfig),
     Dac(DacModuleConfig),
     Sai(SaiModuleConfig),
     Sdmmc(SdmmcModuleConfig),
@@ -4161,6 +4435,7 @@ impl ModuleConfig {
             ModuleConfig::Xspi(c) => c.instance,
             ModuleConfig::Hspi(c) => c.instance,
             ModuleConfig::ParlIo(c) => c.instance,
+            ModuleConfig::LcdCam(c) => c.instance,
             ModuleConfig::Mcpwm(c) => c.instance,
             ModuleConfig::Pcnt(c) => c.instance,
             ModuleConfig::Rmt(c) => c.instance,
@@ -4185,6 +4460,7 @@ impl ModuleConfig {
             ModuleConfig::Xspi(c) => &c.rx_model,
             ModuleConfig::Hspi(c) => &c.rx_model,
             ModuleConfig::ParlIo(c) => &c.rx_model,
+            ModuleConfig::LcdCam(c) => &c.rx_model,
             ModuleConfig::Mcpwm(c) => &c.rx_model,
             ModuleConfig::Pcnt(c) => &c.rx_model,
             ModuleConfig::Rmt(c) => &c.rx_model,
@@ -4209,6 +4485,7 @@ impl ModuleConfig {
             ModuleConfig::Xspi(c) => &c.tx_model,
             ModuleConfig::Hspi(c) => &c.tx_model,
             ModuleConfig::ParlIo(c) => &c.tx_model,
+            ModuleConfig::LcdCam(c) => &c.tx_model,
             ModuleConfig::Mcpwm(c) => &c.tx_model,
             ModuleConfig::Pcnt(c) => &c.tx_model,
             ModuleConfig::Rmt(c) => &c.tx_model,
@@ -4233,6 +4510,7 @@ impl ModuleConfig {
             ModuleConfig::Xspi(c) => &mut c.rx_model,
             ModuleConfig::Hspi(c) => &mut c.rx_model,
             ModuleConfig::ParlIo(c) => &mut c.rx_model,
+            ModuleConfig::LcdCam(c) => &mut c.rx_model,
             ModuleConfig::Mcpwm(c) => &mut c.rx_model,
             ModuleConfig::Pcnt(c) => &mut c.rx_model,
             ModuleConfig::Rmt(c) => &mut c.rx_model,
@@ -4257,6 +4535,7 @@ impl ModuleConfig {
             ModuleConfig::Xspi(c) => &mut c.tx_model,
             ModuleConfig::Hspi(c) => &mut c.tx_model,
             ModuleConfig::ParlIo(c) => &mut c.tx_model,
+            ModuleConfig::LcdCam(c) => &mut c.tx_model,
             ModuleConfig::Mcpwm(c) => &mut c.tx_model,
             ModuleConfig::Pcnt(c) => &mut c.tx_model,
             ModuleConfig::Rmt(c) => &mut c.tx_model,
@@ -4282,6 +4561,7 @@ impl ModuleConfig {
             ModuleConfig::Xspi(c) => &c.custom_label,
             ModuleConfig::Hspi(c) => &c.custom_label,
             ModuleConfig::ParlIo(c) => &c.custom_label,
+            ModuleConfig::LcdCam(c) => &c.custom_label,
             ModuleConfig::Mcpwm(c) => &c.custom_label,
             ModuleConfig::Pcnt(c) => &c.custom_label,
             ModuleConfig::Rmt(c) => &c.custom_label,
@@ -4306,6 +4586,7 @@ impl ModuleConfig {
             ModuleConfig::Xspi(c) => &mut c.custom_label,
             ModuleConfig::Hspi(c) => &mut c.custom_label,
             ModuleConfig::ParlIo(c) => &mut c.custom_label,
+            ModuleConfig::LcdCam(c) => &mut c.custom_label,
             ModuleConfig::Mcpwm(c) => &mut c.custom_label,
             ModuleConfig::Pcnt(c) => &mut c.custom_label,
             ModuleConfig::Rmt(c) => &mut c.custom_label,
@@ -4327,6 +4608,12 @@ impl ModuleConfig {
                 c.direction.label(),
                 c.width.label(),
                 hz_label(c.freq_hz)
+            ),
+            ModuleConfig::LcdCam(c) => format!(
+                "LCD  ·  {}  ·  {}-bit  ·  {}",
+                c.mode.label(),
+                c.width,
+                hz_label(c.clock_hz)
             ),
             ModuleConfig::Mcpwm(c) => format!("MCPWM{}  ·  {}", c.instance, hz_label(c.freq_hz)),
             ModuleConfig::Pcnt(c) => format!(

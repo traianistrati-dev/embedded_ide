@@ -3022,7 +3022,19 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         // reaching a panic that could never fire.
         // PARL_IO's clock and data reverse with the port's direction, and no
         // STM32 pin carries any of them; push-pull keeps the match total.
-        PinFunction::ParlData { .. }
+        // LCD_CAM is an ESP32-S3 peripheral and nothing else has it, so the
+        // same reasoning covers it: totality, not a real STM32 mode.
+        PinFunction::LcdCamData { .. }
+        | PinFunction::LcdCamDc
+        | PinFunction::LcdCamWr
+        | PinFunction::LcdCamCs
+        | PinFunction::LcdCamPclk
+        | PinFunction::LcdCamVsync
+        | PinFunction::LcdCamHsync
+        | PinFunction::LcdCamDe
+        | PinFunction::LcdCamHenable
+        | PinFunction::LcdCamMclk
+        | PinFunction::ParlData { .. }
         | PinFunction::ParlClk
         | PinFunction::ParlValid
         | PinFunction::RmtChannel(..)

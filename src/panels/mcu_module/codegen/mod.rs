@@ -1650,6 +1650,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
             line,
             "esp32c3",
             crate::panels::mcu_module::codegen_esp::EspRuntime::Blocking,

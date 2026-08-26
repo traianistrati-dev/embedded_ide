@@ -982,6 +982,25 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
         }
     }
 
+    // LCD_CAM: the parallel video port. One peripheral, so the pads carry no
+    // instance number, and the ESP32-S3 is the only part that has it — the
+    // driver module itself is gated on `soc_has_lcd_cam`, which is this
+    // singleton existing.
+    if chip.peripherals.iter().any(|p| p == "LCD_CAM") {
+        for lane in 0..16 {
+            out.push(PinFunction::LcdCamData { lane });
+        }
+        out.push(PinFunction::LcdCamDc);
+        out.push(PinFunction::LcdCamWr);
+        out.push(PinFunction::LcdCamCs);
+        out.push(PinFunction::LcdCamPclk);
+        out.push(PinFunction::LcdCamVsync);
+        out.push(PinFunction::LcdCamHsync);
+        out.push(PinFunction::LcdCamDe);
+        out.push(PinFunction::LcdCamHenable);
+        out.push(PinFunction::LcdCamMclk);
+    }
+
     // TWAI is Espressif's CAN. Gated on the DRIVER, like everything else here:
     // the C5 has TWAI0 in silicon and no `esp_hal::twai`, so a peripheral-based
     // gate would offer pads for a bus nothing can be generated for.

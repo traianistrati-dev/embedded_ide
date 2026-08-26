@@ -12,12 +12,12 @@ use crate::panels::mcu_module::modules::model::BlockingDma;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, CanMode, HspiMode, I2sClockPolarity,
-    I2sDirection, I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal,
-    OspiMemoryType, OspiMode, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoWidth, PcntCtrlMode,
-    PcntEdgeMode, PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize,
-    RmtDirection, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder, SpiRole, StopBits,
-    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule, XspiMemoryType,
-    XspiMode,
+    I2sDirection, I2sFormat, I2sMode, I2sStandard, LcdCamMode, ModuleConfig, ModuleKind,
+    ModuleSignal, OspiMemoryType, OspiMode, Parity, ParlIoBitOrder, ParlIoDirection, ParlIoWidth,
+    PcntCtrlMode, PcntEdgeMode, PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES,
+    QspiAddressSize, RmtDirection, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder,
+    SpiRole, StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
+    XspiMemoryType, XspiMode,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -284,6 +284,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceRmt => PinFunction::RmtChannel(instance),
         ModuleKind::GenericInterfacePcnt => PinFunction::PcntEdge(instance),
         ModuleKind::GenericInterfaceParlIo => PinFunction::ParlData { lane: 0 },
+        ModuleKind::GenericInterfaceLcdCam => PinFunction::LcdCamData { lane: 0 },
         ModuleKind::GenericInterfaceMcpwm => PinFunction::McpwmA {
             unit: instance,
             operator: 0,
@@ -452,6 +453,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfacePcnt => format!("_pcnt{n}{sfx}"),
         // The port is one driver, whatever the bus is wide.
         ModuleKind::GenericInterfaceParlIo => format!("_parl{sfx}"),
+        ModuleKind::GenericInterfaceLcdCam => format!("_lcd{sfx}"),
         // One handle per OUTPUT: each is its own `PwmPin`, and they are set
         // independently. The list is built from what is wired, so an
         // operator with only A gives one name.
@@ -1514,6 +1516,127 @@ pub fn module_config_ui(
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
             match &mut m.config {
+                ModuleConfig::LcdCam(cfg) => {
+                    ui.label("Mode");
+                    egui::ComboBox::from_id_salt("lcd_mode")
+                        .selected_text(cfg.mode.label())
+                        .show_ui(ui, |ui| {
+                            for v in LcdCamMode::ALL {
+                                ui.selectable_value(&mut cfg.mode, v, v.label())
+                                    .on_hover_text(v.hint());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "One peripheral, three shapes - and only one at a time. The \
+                             mode decides what the control pads mean and which of them \
+                             the driver needs.",
+                        );
+                    ui.end_row();
+
+                    ui.label("Bus width");
+                    egui::ComboBox::from_id_salt("lcd_width")
+                        .selected_text(format!("{}-bit", cfg.width))
+                        .show_ui(ui, |ui| {
+                            for w in [8u8, 16] {
+                                ui.selectable_value(&mut cfg.width, w, format!("{w}-bit"));
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "How many data pads the driver binds. Assign D0..D15 on the \
+                             canvas to match - only D0 and D1 are wired for you.",
+                        );
+                    ui.end_row();
+
+                    // A camera in SLAVE mode is clocked by the sensor, so the
+                    // number below changes nothing. Said, rather than hidden.
+                    let slave_cam = cfg.mode.is_camera() && !cfg.master_clock;
+                    ui.label("Pixel clock");
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(
+                            !slave_cam,
+                            egui::DragValue::new(&mut cfg.clock_hz)
+                                .range(100_000..=80_000_000)
+                                .speed(100_000.0)
+                                .custom_formatter(|v, _| hz_label(v as u32))
+                                .suffix(""),
+                        );
+                        if slave_cam {
+                            ui.label(
+                                egui::RichText::new("the sensor supplies it")
+                                    .size(11.0)
+                                    .color(egui::Color32::GRAY),
+                            );
+                        }
+                    });
+                    ui.end_row();
+
+                    if cfg.mode.is_camera() {
+                        ui.label("Master clock");
+                        ui.checkbox(&mut cfg.master_clock, "this chip clocks the sensor")
+                            .on_hover_text(
+                                "On, the MCLK pad drives the camera and the frequency above \
+                                 is what it gets. Off is slave mode: the sensor is clocked \
+                                 from elsewhere and this chip only reads.",
+                            );
+                        ui.end_row();
+                    }
+
+                    if cfg.mode == LcdCamMode::Dpi {
+                        // An RGB panel has no controller: every one of these
+                        // numbers comes off its datasheet, and a wrong one is a
+                        // rolling picture rather than a build error.
+                        ui.label("Active area");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut cfg.h_active).range(1..=4095));
+                            ui.label("x");
+                            ui.add(egui::DragValue::new(&mut cfg.v_active).range(1..=4095));
+                            ui.label(
+                                egui::RichText::new("px").size(11.0).color(egui::Color32::GRAY),
+                            );
+                        });
+                        ui.end_row();
+
+                        ui.label("Total")
+                            .on_hover_text("Active area plus blanking - from the panel datasheet.");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut cfg.h_total).range(1..=4095));
+                            ui.label("x");
+                            ui.add(egui::DragValue::new(&mut cfg.v_total).range(1..=4095));
+                        });
+                        ui.end_row();
+
+                        ui.label("Front porch");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut cfg.h_front_porch).range(0..=1023));
+                            ui.label("x");
+                            ui.add(egui::DragValue::new(&mut cfg.v_front_porch).range(0..=1023));
+                        });
+                        ui.end_row();
+
+                        ui.label("Sync width");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut cfg.hsync_width).range(1..=1023));
+                            ui.label("x");
+                            ui.add(egui::DragValue::new(&mut cfg.vsync_width).range(1..=1023));
+                        });
+                        ui.end_row();
+                    }
+
+                    ui.label("Transfers");
+                    ui.label(
+                        egui::RichText::new("DMA, always")
+                            .size(11.0)
+                            .color(egui::Color32::GRAY),
+                    )
+                    .on_hover_text(
+                        "Every LCD_CAM driver takes a channel in its only constructor: \
+                         there is no CPU path. The Configuration tab shows which channel \
+                         this one got.",
+                    );
+                    ui.end_row();
+                }
                 ModuleConfig::ParlIo(cfg) => {
                     ui.label("Direction");
                     egui::ComboBox::from_id_salt("parl_dir")

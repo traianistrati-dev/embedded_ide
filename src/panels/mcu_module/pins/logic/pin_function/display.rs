@@ -31,6 +31,16 @@ impl PinFunction {
             PinFunction::GpioOutput => "out",
             PinFunction::GpioAnalog => "analog",
             PinFunction::AdcChannel { .. } => "adc",
+            PinFunction::LcdCamData { .. } => "lcd_d",
+            PinFunction::LcdCamDc => "lcd_dc",
+            PinFunction::LcdCamWr => "lcd_wr",
+            PinFunction::LcdCamCs => "lcd_cs",
+            PinFunction::LcdCamPclk => "lcd_pclk",
+            PinFunction::LcdCamVsync => "lcd_vsync",
+            PinFunction::LcdCamHsync => "lcd_hsync",
+            PinFunction::LcdCamDe => "lcd_de",
+            PinFunction::LcdCamHenable => "lcd_href",
+            PinFunction::LcdCamMclk => "lcd_mclk",
             PinFunction::ParlData { .. } => "parl_d",
             PinFunction::ParlClk => "parl_clk",
             PinFunction::ParlValid => "parl_valid",
@@ -106,6 +116,16 @@ impl PinFunction {
             PinFunction::GpioOutput => "GPIO Output".into(),
             PinFunction::GpioAnalog => "GPIO Analog".into(),
             PinFunction::AdcChannel { adc, channel } => format!("ADC{adc}  IN{channel}"),
+            PinFunction::LcdCamData { lane } => format!("LCD  D{lane}"),
+            PinFunction::LcdCamDc => "LCD  DC".to_owned(),
+            PinFunction::LcdCamWr => "LCD  WR".to_owned(),
+            PinFunction::LcdCamCs => "LCD  CS".to_owned(),
+            PinFunction::LcdCamPclk => "LCD  PCLK".to_owned(),
+            PinFunction::LcdCamVsync => "LCD  VSYNC".to_owned(),
+            PinFunction::LcdCamHsync => "LCD  HSYNC".to_owned(),
+            PinFunction::LcdCamDe => "LCD  DE".to_owned(),
+            PinFunction::LcdCamHenable => "LCD  HREF".to_owned(),
+            PinFunction::LcdCamMclk => "LCD  MCLK".to_owned(),
             PinFunction::ParlData { lane } => format!("PARL  D{lane}"),
             PinFunction::ParlClk => "PARL  CLK".to_owned(),
             PinFunction::ParlValid => "PARL  VALID".to_owned(),
@@ -384,6 +404,16 @@ impl PinFunction {
             PinFunction::RmtChannel(..) => "RMT",
             PinFunction::PcntEdge(..) | PinFunction::PcntCtrl(..) => "PCNT",
             PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. } => "MCPWM",
+            PinFunction::LcdCamData { .. }
+            | PinFunction::LcdCamDc
+            | PinFunction::LcdCamWr
+            | PinFunction::LcdCamCs
+            | PinFunction::LcdCamPclk
+            | PinFunction::LcdCamVsync
+            | PinFunction::LcdCamHsync
+            | PinFunction::LcdCamDe
+            | PinFunction::LcdCamHenable
+            | PinFunction::LcdCamMclk => "LCD",
             PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => "PARL",
             PinFunction::TimerBreak { .. } => "BRK",
             PinFunction::DacOut { .. } => "DAC",

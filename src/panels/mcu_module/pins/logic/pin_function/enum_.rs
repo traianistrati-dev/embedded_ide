@@ -202,6 +202,52 @@ pub enum PinFunction {
     /// is fine for a continuous stream and wrong for a framed one.
     ParlValid,
 
+    // ── LCD_CAM ─────────────────────────────────────────────────────────────
+    /// LCD_CAM data line {lane} — one pad of the parallel video bus.
+    ///
+    /// ONE family for all three modes, because the peripheral has one set of
+    /// pads and only one mode at a time: lane 3 is lane 3 whether it is going
+    /// out to an i8080 display or coming in from a camera. Which direction it
+    /// takes is decided by the module's mode, not by the pad.
+    LcdCamData {
+        lane: u8,
+    },
+    /// LCD_CAM data/command select (i8080 `DC`/`RS`).
+    ///
+    /// Low says the byte on the bus is a command, high says it is data. The
+    /// i8080 mode alone has it.
+    LcdCamDc,
+    /// LCD_CAM write strobe (i8080 `WR`). The display latches on its edge.
+    LcdCamWr,
+    /// LCD_CAM chip select (i8080 `CS`), optional.
+    ///
+    /// Leave it unwired to tie CS low on the board and give the pad to
+    /// something else.
+    LcdCamCs,
+    /// LCD_CAM pixel clock.
+    ///
+    /// Driven OUT in RGB mode and read IN from the camera, which is the whole
+    /// difference between the two: one of them owns the clock.
+    LcdCamPclk,
+    /// LCD_CAM vertical sync — start of frame.
+    LcdCamVsync,
+    /// LCD_CAM horizontal sync — start of line.
+    LcdCamHsync,
+    /// LCD_CAM data enable (RGB mode).
+    ///
+    /// Marks the clocks inside the active area. The blanking porches have no
+    /// pixels on them, and this is what says so.
+    LcdCamDe,
+    /// LCD_CAM h-enable / "data enable" (camera mode).
+    ///
+    /// The sensor's HREF: high while a line carries pixels.
+    LcdCamHenable,
+    /// LCD_CAM master clock — the clock this chip GIVES the camera.
+    ///
+    /// Unwired means slave mode: the sensor is clocked from somewhere else and
+    /// this chip just reads what arrives.
+    LcdCamMclk,
+
     // ── MCPWM ───────────────────────────────────────────────────────────────
     /// MCPWM{unit} operator {operator}, output A.
     ///

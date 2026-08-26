@@ -42,9 +42,9 @@ use super::codegen::dma_map::DmaUse;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
 use super::mcu_def::DmaDef;
 use super::modules::{
-    AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sModuleConfig,
-    McpwmModuleConfig, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig, SpiModuleConfig,
-    TimerModuleConfig, UsartModuleConfig,
+    AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sModuleConfig, LcdCamMode,
+    LcdCamModuleConfig, McpwmModuleConfig, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig,
+    SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -157,6 +157,8 @@ pub fn fresh_esp32c3_main_rs(
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
+    // One LCD_CAM per chip, so this is keyed by 0 and never anything else.
+    lcd_cam: &BTreeMap<u8, LcdCamModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
@@ -180,6 +182,7 @@ pub fn fresh_esp32c3_main_rs(
         pcnt,
         mcpwm,
         parl_io,
+        lcd_cam,
         dac,
         can,
         timer,
@@ -210,6 +213,8 @@ pub fn update_esp32c3_main_rs(
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
+    // One LCD_CAM per chip, so this is keyed by 0 and never anything else.
+    lcd_cam: &BTreeMap<u8, LcdCamModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
@@ -233,6 +238,7 @@ pub fn update_esp32c3_main_rs(
         pcnt,
         mcpwm,
         parl_io,
+        lcd_cam,
         dac,
         can,
         timer,
@@ -356,6 +362,8 @@ fn make_gen_section(
     pcnt: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io: &BTreeMap<u8, ParlIoModuleConfig>,
+    // One LCD_CAM per chip, so this is keyed by 0 and never anything else.
+    lcd_cam: &BTreeMap<u8, LcdCamModuleConfig>,
     dac: &BTreeMap<u8, DacModuleConfig>,
     // Keyed by instance like the rest, but there is only ever instance 1: the
     // CAN pin functions carry no number — see `twai_pads`.
@@ -532,6 +540,7 @@ fn make_gen_section(
         spi,
         &i2s_wired,
         collect_parl_io(&configured).is_some(),
+        !collect_lcd_cam(&configured).is_empty(),
     );
     for (label, calls) in bus_sections(
         &configured,
@@ -543,6 +552,7 @@ fn make_gen_section(
         pcnt,
         mcpwm,
         parl_io.get(&0),
+        lcd_cam.get(&0),
         dac.get(&1),
         crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(chip),
         runtime,
@@ -924,6 +934,38 @@ fn collect_parl_io<'a>(
     Some((data, clk, valid))
 }
 
+/// Every LCD_CAM pad the canvas wires, keyed by the name `lcd_cam_file` gives
+/// it in the generated signature.
+///
+/// The names are the CONTRACT between this and the config file: a pad that is
+/// wired but whose name the mode's table does not mention is simply not passed,
+/// which is how one pad set serves three drivers.
+fn collect_lcd_cam<'a>(configured: &[&'a Pin]) -> BTreeMap<String, &'a Pin> {
+    let mut out = BTreeMap::new();
+    for p in configured {
+        let name = match p.selected_function {
+            PinFunction::LcdCamData { lane } => format!("d{lane}"),
+            PinFunction::LcdCamDc => "dc".to_owned(),
+            PinFunction::LcdCamWr => "wr".to_owned(),
+            PinFunction::LcdCamCs => "cs".to_owned(),
+            PinFunction::LcdCamPclk => "pclk".to_owned(),
+            PinFunction::LcdCamVsync => "vsync".to_owned(),
+            PinFunction::LcdCamHsync => "hsync".to_owned(),
+            PinFunction::LcdCamDe => "de".to_owned(),
+            PinFunction::LcdCamHenable => "href".to_owned(),
+            PinFunction::LcdCamMclk => "mclk".to_owned(),
+            _ => continue,
+        };
+        out.insert(name, *p);
+    }
+    out
+}
+
+/// The LCD_CAM signal names wired, for `config_files`.
+pub(crate) fn lcd_cam_wired(configured: &[&Pin]) -> Vec<String> {
+    collect_lcd_cam(configured).into_keys().collect()
+}
+
 /// `Some(has a valid pad)` when the parallel port is wired.
 pub(crate) fn parl_io_wired(configured: &[&Pin]) -> Option<bool> {
     collect_parl_io(configured).map(|(_, _, v)| v.is_some())
@@ -1131,13 +1173,17 @@ pub(crate) struct DmaPlan {
     pub i2s: BTreeMap<u8, DmaUse>,
     /// The parallel port, which is one per chip and also DMA-only.
     pub parl_io: Option<DmaUse>,
+    /// The video port. One per chip, DMA-only, and it takes a TX channel for a
+    /// display and an RX one for a camera — the same pool either way.
+    pub lcd_cam: Option<DmaUse>,
 }
 
 impl DmaPlan {
     /// Every channel taken, for the Configuration tab's DMA card.
     pub fn uses(&self) -> Vec<DmaUse> {
-        self.parl_io
+        self.lcd_cam
             .iter()
+            .chain(self.parl_io.iter())
             .chain(self.i2s.values())
             .chain(self.spi.values())
             .cloned()
@@ -1154,11 +1200,14 @@ pub(crate) fn dma_plan(
     i2s_wired: &[u8],
     // True when the canvas wires the parallel port.
     parl_io_wired: bool,
+    // True when the canvas wires the video port.
+    lcd_cam_wired: bool,
 ) -> DmaPlan {
     let mut plan = DmaPlan {
         spi: BTreeMap::new(),
         i2s: BTreeMap::new(),
         parl_io: None,
+        lcd_cam: None,
     };
     let Some(dma) = dma else {
         return plan;
@@ -1227,6 +1276,9 @@ pub(crate) fn dma_plan(
     if parl_io_wired {
         plan.parl_io = claim("PARL_IO".to_owned(), "");
     }
+    if lcd_cam_wired {
+        plan.lcd_cam = claim("LCD_CAM".to_owned(), "");
+    }
     // Slaves first among the SPIs, for the same reason the I2S goes before the
     // masters: a master that loses the race still generates, blocking.
     let mut order = on_dma;
@@ -1252,6 +1304,7 @@ fn bus_sections(
     pcnt_cfg: &BTreeMap<u8, PcntModuleConfig>,
     mcpwm_cfg: &BTreeMap<u8, McpwmModuleConfig>,
     parl_io_cfg: Option<&ParlIoModuleConfig>,
+    lcd_cam_cfg: Option<&LcdCamModuleConfig>,
     dac_cfg: Option<&DacModuleConfig>,
     // The RMT source clock, which `Rmt::new` takes as an argument.
     rmt_hz: u32,
@@ -1556,6 +1609,50 @@ fn bus_sections(
         }
         out.push(("PARL_IO".to_owned(), body));
     }
+    // LCD_CAM. The pads are passed in the ORDER the config file names them:
+    // control pads first, in the mode's own order, then the data lanes. Getting
+    // that wrong compiles and mis-wires the display, so the order lives in one
+    // place — `LCD_CAM_ORDER` here mirrors the tables in `lcd_cam_file`.
+    let lcd_pads = collect_lcd_cam(configured);
+    if !lcd_pads.is_empty() {
+        let default_cfg = LcdCamModuleConfig::new(0);
+        let c = lcd_cam_cfg.unwrap_or(&default_cfg);
+        let sfx = module_label_sfx(&c.custom_label);
+        let mut body = String::new();
+        let mut args = Vec::new();
+        let ctl: &[&str] = match c.mode {
+            LcdCamMode::I8080 => &["dc", "wr", "cs"],
+            LcdCamMode::Dpi => &["vsync", "hsync", "de", "pclk"],
+            LcdCamMode::Camera => &["mclk", "pclk", "vsync", "hsync", "href"],
+        };
+        let lanes = usize::from(c.width.min(16)).max(8);
+        let data: Vec<String> = (0..lanes).map(|n| format!("d{n}")).collect();
+        for name in ctl.iter().map(|s| (*s).to_owned()).chain(data) {
+            let Some(p) = lcd_pads.get(&name) else {
+                continue;
+            };
+            let var = esp_binding(p);
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
+            args.push(var);
+        }
+        match dma_plan.lcd_cam.as_ref() {
+            Some(u) => body.push_str(&format!(
+                "    let mut _lcd{sfx} =\n\
+                 \x20       pins::configs::lcd_cam::{init_fn}(peripherals.LCD_CAM, peripherals.{}, {});\n",
+                u.peri,
+                args.join(", "),
+            )),
+            None => body.push_str(
+                "    // TODO: the video port has no DMA channel left - every one is\n\
+                 \x20   // taken. Free one in another module, or pin this one by hand.\n",
+            ),
+        }
+        out.push(("LCD_CAM".to_owned(), body));
+    }
     // MCPWM last. The TIMER binding is not decorative: it owns the guard that
     // holds the peripheral clock on, so dropping it would silence every pin.
     for (unit, outs) in collect_mcpwm(configured) {
@@ -1650,6 +1747,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &timer,
@@ -1704,6 +1802,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1766,6 +1865,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_lcd() -> BTreeMap<u8, LcdCamModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1783,6 +1886,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1814,6 +1918,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1845,6 +1950,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1873,6 +1979,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1896,6 +2003,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1928,6 +2036,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -1962,6 +2071,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2004,6 +2114,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2053,6 +2164,7 @@ mod tests {
                 &no_pcnt(),
                 &no_mcpwm(),
                 &no_parl(),
+                &no_lcd(),
                 &no_dac(),
                 &no_can(),
                 &Default::default(),
@@ -2136,6 +2248,7 @@ mod tests {
             &no_pcnt(),
             &no_mcpwm(),
             &no_parl(),
+            &no_lcd(),
             &no_dac(),
             &no_can(),
             &Default::default(),
@@ -2220,7 +2333,7 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> =
             [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false);
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false);
         assert_eq!(plan.spi[&2].peri, "DMA_CH0");
         assert_eq!(plan.spi[&3].peri, "DMA_CH1");
         assert!(plan.spi.values().all(|u| !u.manual && u.irq.is_empty()));
@@ -2234,7 +2347,7 @@ mod tests {
         let mut later = spi_on_dma(3);
         later.dma_tx = "DMA_CH0".into();
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2)), (3u8, later)].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false);
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false);
         assert_eq!(plan.spi[&3].peri, "DMA_CH0", "the pinned one is honoured");
         assert!(plan.spi[&3].manual);
         assert_eq!(
@@ -2264,7 +2377,7 @@ mod tests {
             ],
         };
         let spi: BTreeMap<u8, SpiModuleConfig> = [(3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false);
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false);
         assert_eq!(plan.spi[&3].peri, "DMA_SPI3");
     }
 
@@ -2275,7 +2388,7 @@ mod tests {
         let dma = gdma(1);
         let spi: BTreeMap<u8, SpiModuleConfig> =
             [(2u8, spi_on_dma(2)), (3u8, spi_on_dma(3))].into();
-        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false);
+        let plan = dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false);
         assert_eq!(plan.spi[&2].peri, "DMA_CH0");
         assert!(!plan.spi.contains_key(&3));
     }
@@ -2293,7 +2406,7 @@ mod tests {
         slave.async_mode = AsyncBusMode::Blocking;
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, slave)].into();
         for rt in [EspRuntime::Blocking, EspRuntime::Async] {
-            let plan = dma_plan(Some(&dma), rt, &spi, &[0], true);
+            let plan = dma_plan(Some(&dma), rt, &spi, &[0], true, false);
             assert!(plan.spi.contains_key(&2), "slave on {rt:?}: {plan:?}");
             assert!(plan.i2s.contains_key(&0), "i2s on {rt:?}: {plan:?}");
             assert!(plan.parl_io.is_some(), "parl_io on {rt:?}: {plan:?}");
@@ -2308,13 +2421,13 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2))].into();
         assert!(
-            dma_plan(Some(&dma), EspRuntime::Blocking, &spi, &[], false)
+            dma_plan(Some(&dma), EspRuntime::Blocking, &spi, &[], false, false)
                 .uses()
                 .is_empty()
         );
         // …and a chip with no channel data cannot be served on any runtime.
         assert!(
-            dma_plan(None, EspRuntime::Async, &spi, &[], false)
+            dma_plan(None, EspRuntime::Async, &spi, &[], false, false)
                 .uses()
                 .is_empty()
         );
@@ -2327,7 +2440,7 @@ mod tests {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, SpiModuleConfig::new(2))].into();
         assert!(
-            dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false)
+            dma_plan(Some(&dma), EspRuntime::Async, &spi, &[], false, false)
                 .uses()
                 .is_empty()
         );

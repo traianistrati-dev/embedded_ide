@@ -423,6 +423,51 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::LcdCamData { .. }
+            | PinFunction::LcdCamDc
+            | PinFunction::LcdCamWr
+            | PinFunction::LcdCamCs
+            | PinFunction::LcdCamPclk
+            | PinFunction::LcdCamVsync
+            | PinFunction::LcdCamHsync
+            | PinFunction::LcdCamDe
+            | PinFunction::LcdCamHenable
+            | PinFunction::LcdCamMclk => {
+                let role = match self {
+                    PinFunction::LcdCamDc => {
+                        "the data/command select - low says the byte on the bus is a command"
+                    }
+                    PinFunction::LcdCamWr => "the write strobe the display latches on",
+                    PinFunction::LcdCamCs => "the chip select, optional if the board ties it low",
+                    PinFunction::LcdCamPclk => {
+                        "the pixel clock - driven OUT in RGB mode, read IN from a camera"
+                    }
+                    PinFunction::LcdCamVsync => "vertical sync, the start of a frame",
+                    PinFunction::LcdCamHsync => "horizontal sync, the start of a line",
+                    PinFunction::LcdCamDe => "data enable, marking the clocks inside the active area",
+                    PinFunction::LcdCamHenable => "the sensor's HREF - high while a line carries pixels",
+                    PinFunction::LcdCamMclk => {
+                        "the master clock this chip GIVES the camera; unwired means slave mode"
+                    }
+                    _ => "one data line of the parallel video bus",
+                };
+                FunctionInfo {
+                    description: format!(
+                        "LCD_CAM: {role}. One peripheral that drives a parallel display \
+                         (i8080 or RGB) or reads a DVP camera - 8 or 16 bits wide, always \
+                         on DMA. The ESP32-S3 is the only part that has it."
+                    ),
+                    specs: vec![
+                        ("Width".into(), "8 or 16 data lines".into()),
+                        ("Transfers".into(), "DMA only - there is no CPU path".into()),
+                        (
+                            "Modes".into(),
+                            "i8080 display, RGB/DPI display, or DVP camera - one at a time".into(),
+                        ),
+                    ],
+                }
+            }
+
             PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => {
                 let role = match self {
                     PinFunction::ParlClk => {
