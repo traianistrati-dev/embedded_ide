@@ -183,6 +183,23 @@ pub enum PinFunction {
     /// I2S{n} master clock out — an oversampled clock for the codec, optional.
     I2sMck(u8),
 
+    // ── RMT ─────────────────────────────────────────────────────────────────
+    /// RMT channel {n} — Espressif's Remote Control transceiver.
+    ///
+    /// A pulse-train engine, not a bus: one pin, and a list of
+    /// (level, duration) pairs the hardware clocks out or samples in. It is
+    /// what drives an IR remote, a WS2812 strip or a 1-Wire line without the
+    /// CPU timing each edge.
+    ///
+    /// The DIRECTION belongs to the channel, not to the pin: on every part
+    /// after the original ESP32 the low channels transmit and the high ones
+    /// receive, fixed in silicon. The module carries which, and the UI offers
+    /// only the direction that channel has — see `RmtDirection::options`.
+    ///
+    /// STM32 has no counterpart, which is why the variant is numbered by
+    /// CHANNEL rather than by instance: there is one RMT block per chip.
+    RmtChannel(u8),
+
     // ── Timers / PWM ────────────────────────────────────────────────────────
     /// PWM output — TIM{timer} CH{channel}
     TimerPwm {

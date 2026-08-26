@@ -17,10 +17,10 @@ pub use model::{
     I2sDirection, I2sFormat, I2sMode, I2sModuleConfig, I2sStandard, ModuleConfig, ModuleKind,
     ModuleSignal, OspiMemoryType, OspiMode, OspiModuleConfig, Parity, PwmChannelConfig,
     PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize,
-    QspiModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono,
-    SaiTxRx, SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, StopBits, TimerModuleConfig,
-    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, VirtualModule,
-    XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,
+    QspiModuleConfig, RmtDirection, RmtModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode,
+    SaiModuleConfig, SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig,
+    StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig,
+    UsbModuleConfig, VirtualModule, XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,
 };
 
 use std::collections::BTreeMap;
@@ -69,6 +69,17 @@ pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Spi(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// RMT module configs keyed by CHANNEL — the instance is the channel here.
+pub fn rmt_configs(modules: &[VirtualModule]) -> BTreeMap<u8, RmtModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Rmt(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

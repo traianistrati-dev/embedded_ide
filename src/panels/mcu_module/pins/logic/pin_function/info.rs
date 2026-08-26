@@ -423,6 +423,28 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::RmtChannel(n) => FunctionInfo {
+                description: format!(
+                    "RMT channel {n}. A pulse-train engine, not a bus: you hand it a list of                      (level, duration) pairs and the hardware clocks every edge out — or                      samples them in — without the CPU timing anything. This is what drives                      an IR remote, a WS2812 strip or a 1-Wire line."
+                ),
+                specs: vec![
+                    (
+                        "Direction".into(),
+                        "Fixed in silicon on most parts: the low channels transmit and the                          high ones receive. The original ESP32 and the S2 let every channel                          do either."
+                            .into(),
+                    ),
+                    (
+                        "Resolution".into(),
+                        "One tick is the RMT source clock divided by the channel's divider.                          The module states the divider; the generated file works the tick                          time out for you."
+                            .into(),
+                    ),
+                    (
+                        "Carrier".into(),
+                        "The channel can modulate its output onto a carrier — 38 kHz is the                          usual one for IR — so the LED driver needs no oscillator of its own."
+                            .into(),
+                    ),
+                ],
+            },
             PinFunction::I2sCk(n)
             | PinFunction::I2sWs(n)
             | PinFunction::I2sSd(n)

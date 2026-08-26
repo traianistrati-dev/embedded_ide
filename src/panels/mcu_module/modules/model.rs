@@ -69,6 +69,14 @@ pub enum ModuleKind {
     /// `GI_SPI 2` and a `GI_I2S 2` describe the same silicon and only one of
     /// them can be built.
     GenericInterfaceI2s,
+    /// A pulse train on one RMT channel — "RMT".
+    ///
+    /// Espressif only, and unlike every other kind here the instance is a
+    /// CHANNEL, not a peripheral: a chip has one RMT block whose four (or
+    /// eight) channels are independent, each with its own pin, divider and
+    /// carrier. `Rmt::new` is called once in `main.rs` and lends each channel
+    /// out, exactly as `Ledc::new` does for PWM.
+    GenericInterfaceRmt,
     /// PWM outputs driven by ONE timer — "PWM".
     ///
     /// The module is the TIMER, not the channel: every channel of a timer shares
@@ -91,12 +99,13 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 16] = [
+    pub const ALL: [ModuleKind; 17] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
         ModuleKind::GenericInterfaceI2c,
         ModuleKind::GenericInterfaceI2s,
+        ModuleKind::GenericInterfaceRmt,
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceSdmmc,
         ModuleKind::GenericInterfaceQspi,
@@ -137,6 +146,9 @@ impl ModuleKind {
             // the pad, and spending it by default would take a pin nobody
             // asked for.
             ModuleKind::GenericInterfaceI2s => (&[I2sCk, I2sWs, I2sSd], &[I2sMck]),
+            // One wire, and it is required: an RMT channel with no pin
+            // has nothing to clock a train onto.
+            ModuleKind::GenericInterfaceRmt => (&[RmtLine], &[]),
             // One channel, like the PWM module: taking the second pad by
             // default would spend a pin on a DAC the user added for one.
             ModuleKind::GenericInterfaceDac => (&[DacOut1], &[]),
@@ -191,6 +203,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceSpi => "SPI",
             ModuleKind::GenericInterfaceI2c => "I2C",
             ModuleKind::GenericInterfaceI2s => "I2S",
+            ModuleKind::GenericInterfaceRmt => "RMT",
             ModuleKind::GenericInterfaceDac => "DAC",
             ModuleKind::GenericInterfaceSai => "SAI",
             ModuleKind::GenericInterfaceSdmmc => "SDMMC",
@@ -220,6 +233,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceSpi => ModuleConfig::Spi(SpiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceI2s => ModuleConfig::I2s(I2sModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceRmt => ModuleConfig::Rmt(RmtModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceDac => ModuleConfig::Dac(DacModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceSai => ModuleConfig::Sai(SaiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceSdmmc => {
@@ -292,6 +306,7 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         ),
         PinFunction::I2cScl(n) => (GenericInterfaceI2c, *n, Scl),
         PinFunction::I2cSda(n) => (GenericInterfaceI2c, *n, Sda),
+        PinFunction::RmtChannel(n) => (GenericInterfaceRmt, *n, RmtLine),
         PinFunction::I2sCk(n) => (GenericInterfaceI2s, *n, I2sCk),
         PinFunction::I2sWs(n) => (GenericInterfaceI2s, *n, I2sWs),
         PinFunction::I2sSd(n) => (GenericInterfaceI2s, *n, I2sSd),
@@ -482,6 +497,11 @@ pub enum ModuleSignal {
     I2sWs,
     I2sSd,
     I2sMck,
+    // RMT
+    /// The channel's single wire — an output on a transmit channel, an input on
+    /// a receive one. One name for both, because it is one pad either way and
+    /// the direction belongs to the channel.
+    RmtLine,
     // DAC — one pad per channel, nothing shared but the block.
     DacOut1,
     DacOut2,
@@ -602,6 +622,7 @@ pub enum ModuleSignal {
 impl ModuleSignal {
     pub fn label(self) -> &'static str {
         match self {
+            ModuleSignal::RmtLine => "RMT",
             ModuleSignal::Tx => "TX",
             ModuleSignal::Rx => "RX",
             ModuleSignal::Cts => "CTS",
@@ -724,6 +745,7 @@ impl ModuleSignal {
     /// The MCU pin function this signal needs on peripheral `instance`.
     pub fn pin_function(self, instance: u8) -> PinFunction {
         match self {
+            ModuleSignal::RmtLine => PinFunction::RmtChannel(instance),
             ModuleSignal::Tx => PinFunction::UsartTx(instance),
             ModuleSignal::Rx => PinFunction::UsartRx(instance),
             ModuleSignal::Cts => PinFunction::UsartCts(instance),
@@ -3120,6 +3142,127 @@ pub struct I2sModuleConfig {
     pub dma_rx: String,
 }
 
+/// Which way an RMT channel moves its pulses.
+///
+/// On every part after the original ESP32 this is fixed in silicon — the low
+/// channels transmit, the high ones receive — so the module cannot choose. It
+/// is still stored, because the ESP32 and the S2 let every channel do either,
+/// and because the direction decides the whole shape of the generated file:
+/// `configure_tx` against `configure_rx`, an output pad against an input one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RmtDirection {
+    #[default]
+    Transmit,
+    Receive,
+}
+
+impl RmtDirection {
+    pub const ALL: [Self; 2] = [Self::Transmit, Self::Receive];
+
+    /// The directions CHANNEL `n` can actually take on this chip.
+    ///
+    /// Every part after the original ESP32 hardwires it: the low channels
+    /// transmit and the high ones receive. The ESP32 and the S2 let each
+    /// channel do either, so both are offered there. A one-entry list is what
+    /// the UI shows locked, with the reason.
+    ///
+    /// Split at the HALFWAY point rather than by a per-chip table, because that
+    /// is the rule esp-hal's own documentation states for all four of the parts
+    /// that have it: "`Channel<0>` and `Channel<1>` hardcoded for transmitting
+    /// and `Channel<2>` and `Channel<3>` for receiving" on the C3/C5/C6/H2, and
+    /// 0-3 against 4-7 on the S3.
+    pub fn options(family: &str, channel: u8) -> &'static [Self] {
+        if !crate::panels::mcu_module::codegen::family::is_esp(family) {
+            return &Self::ALL;
+        }
+        match family {
+            // Eight (four on the S2) channels, each either way round.
+            "esp32" | "esp32s2" => &Self::ALL,
+            "esp32s3" => {
+                if channel < 4 {
+                    &[Self::Transmit]
+                } else {
+                    &[Self::Receive]
+                }
+            }
+            _ => {
+                if channel < 2 {
+                    &[Self::Transmit]
+                } else {
+                    &[Self::Receive]
+                }
+            }
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transmit => "Transmit",
+            Self::Receive => "Receive",
+        }
+    }
+
+    /// True when the pad is driven by the chip.
+    pub fn is_tx(self) -> bool {
+        matches!(self, Self::Transmit)
+    }
+}
+
+/// One RMT channel: a pin, a tick rate, and optionally a carrier.
+///
+/// The instance is the CHANNEL. Every channel of the one RMT block is
+/// independent — its own divider, its own carrier, its own pad — which is why
+/// there is a module per channel rather than one module with a channel list
+/// (the PWM module is the other way round precisely because a timer's channels
+/// share its frequency).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RmtModuleConfig {
+    /// The channel number — `rmt.channel0` and so on.
+    pub instance: u8,
+    #[serde(default)]
+    pub direction: RmtDirection,
+    /// Divides the RMT source clock to give the tick every duration is counted
+    /// in. 1 is the fastest the channel can go; 255 the slowest.
+    pub clk_divider: u8,
+    /// Transmit only: the level the pad rests at between trains.
+    #[serde(default)]
+    pub idle_high: bool,
+    /// Modulate the output onto a carrier — what an IR LED driver wants.
+    #[serde(default)]
+    pub carrier: bool,
+    /// Carrier frequency in Hz. 38 kHz is the usual one for infrared.
+    pub carrier_hz: u32,
+    /// Receive only: how long the line must rest before the frame is over, in
+    /// ticks. Too short and one train is read as several.
+    pub idle_threshold: u16,
+    /// What is on the other end — a `WS2812B` strip, a `TSOP38238` receiver.
+    /// Carried like every other module's, so the notes read the same way.
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated `_rmtN` handle.
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl RmtModuleConfig {
+    /// Defaults: transmit, divider 1 (the finest resolution the channel has),
+    /// no carrier, and an idle threshold long enough for a typical IR frame.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            direction: RmtDirection::default(),
+            clk_divider: 1,
+            idle_high: false,
+            carrier: false,
+            carrier_hz: 38_000,
+            idle_threshold: 10_000,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+}
+
 impl I2sModuleConfig {
     /// Defaults: 48 kHz Philips, 16-in-16, master, transmitting, 256 samples.
     pub fn new(instance: u8) -> Self {
@@ -3281,6 +3424,7 @@ pub enum ModuleConfig {
     Spi(SpiModuleConfig),
     I2c(I2cModuleConfig),
     I2s(I2sModuleConfig),
+    Rmt(RmtModuleConfig),
     Dac(DacModuleConfig),
     Sai(SaiModuleConfig),
     Sdmmc(SdmmcModuleConfig),
@@ -3309,6 +3453,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => c.instance,
             ModuleConfig::Xspi(c) => c.instance,
             ModuleConfig::Hspi(c) => c.instance,
+            ModuleConfig::Rmt(c) => c.instance,
             ModuleConfig::Timer(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
             ModuleConfig::Usb(c) => c.instance,
@@ -3329,6 +3474,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.rx_model,
             ModuleConfig::Xspi(c) => &c.rx_model,
             ModuleConfig::Hspi(c) => &c.rx_model,
+            ModuleConfig::Rmt(c) => &c.rx_model,
             ModuleConfig::Timer(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
             ModuleConfig::Usb(c) => &c.rx_model,
@@ -3349,6 +3495,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.tx_model,
             ModuleConfig::Xspi(c) => &c.tx_model,
             ModuleConfig::Hspi(c) => &c.tx_model,
+            ModuleConfig::Rmt(c) => &c.tx_model,
             ModuleConfig::Timer(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
             ModuleConfig::Usb(c) => &c.tx_model,
@@ -3369,6 +3516,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.rx_model,
             ModuleConfig::Xspi(c) => &mut c.rx_model,
             ModuleConfig::Hspi(c) => &mut c.rx_model,
+            ModuleConfig::Rmt(c) => &mut c.rx_model,
             ModuleConfig::Timer(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
             ModuleConfig::Usb(c) => &mut c.rx_model,
@@ -3389,6 +3537,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.tx_model,
             ModuleConfig::Xspi(c) => &mut c.tx_model,
             ModuleConfig::Hspi(c) => &mut c.tx_model,
+            ModuleConfig::Rmt(c) => &mut c.tx_model,
             ModuleConfig::Timer(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
             ModuleConfig::Usb(c) => &mut c.tx_model,
@@ -3410,6 +3559,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &c.custom_label,
             ModuleConfig::Xspi(c) => &c.custom_label,
             ModuleConfig::Hspi(c) => &c.custom_label,
+            ModuleConfig::Rmt(c) => &c.custom_label,
             ModuleConfig::Timer(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
             ModuleConfig::Usb(c) => &c.custom_label,
@@ -3430,6 +3580,7 @@ impl ModuleConfig {
             ModuleConfig::Ospi(c) => &mut c.custom_label,
             ModuleConfig::Xspi(c) => &mut c.custom_label,
             ModuleConfig::Hspi(c) => &mut c.custom_label,
+            ModuleConfig::Rmt(c) => &mut c.custom_label,
             ModuleConfig::Timer(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
             ModuleConfig::Usb(c) => &mut c.custom_label,
@@ -3443,6 +3594,12 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => format!("USART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Lpuart(c) => format!("LPUART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Timer(c) => format!("TIM{}  ·  {}", c.instance, hz_label(c.freq_hz)),
+            ModuleConfig::Rmt(c) => format!(
+                "RMT CH{}  ·  {}  ·  /{}",
+                c.instance,
+                c.direction.label(),
+                c.clk_divider
+            ),
             ModuleConfig::Spi(c) => {
                 format!(
                     "SPI{}  ·  mode {}  ·  {}",
@@ -3533,6 +3690,44 @@ impl VirtualModule {
     /// The peripheral instance this module targets.
     pub fn instance(&self) -> u8 {
         self.config.instance()
+    }
+}
+
+#[cfg(test)]
+mod rmt_direction_tests {
+    use super::RmtDirection;
+
+    /// The direction a channel can take is the chip's to decide, not the user's.
+    ///
+    /// esp-hal states the split for every part that has one: `Channel<0>` and
+    /// `Channel<1>` transmit and `Channel<2>`/`Channel<3>` receive on the
+    /// C3/C5/C6/H2, 0-3 against 4-7 on the S3, and the ESP32 and S2 leave every
+    /// channel free to do either. A one-entry list is what the UI shows locked.
+    #[test]
+    fn a_channel_offers_only_the_direction_its_chip_gives_it() {
+        for family in ["esp32c3", "esp32c5", "esp32c6", "esp32h2"] {
+            assert_eq!(
+                RmtDirection::options(family, 0),
+                [RmtDirection::Transmit],
+                "{family} channel 0"
+            );
+            assert_eq!(
+                RmtDirection::options(family, 2),
+                [RmtDirection::Receive],
+                "{family} channel 2"
+            );
+        }
+        // Eight channels, split down the middle.
+        assert_eq!(
+            RmtDirection::options("esp32s3", 3),
+            [RmtDirection::Transmit]
+        );
+        assert_eq!(RmtDirection::options("esp32s3", 4), [RmtDirection::Receive]);
+        // …and the two parts where every channel does either.
+        for family in ["esp32", "esp32s2"] {
+            assert_eq!(RmtDirection::options(family, 0).len(), 2, "{family}");
+            assert_eq!(RmtDirection::options(family, 3).len(), 2, "{family}");
+        }
     }
 }
 

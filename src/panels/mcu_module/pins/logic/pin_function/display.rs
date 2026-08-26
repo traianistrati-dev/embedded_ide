@@ -31,6 +31,7 @@ impl PinFunction {
             PinFunction::GpioOutput => "out",
             PinFunction::GpioAnalog => "analog",
             PinFunction::AdcChannel { .. } => "adc",
+            PinFunction::RmtChannel(..) => "rmt",
             PinFunction::TimerPwm { .. } => "pwm",
             PinFunction::TimerPwmN { .. } => "pwmn",
             PinFunction::TimerBreak { .. } => "bkin",
@@ -98,6 +99,7 @@ impl PinFunction {
             PinFunction::GpioOutput => "GPIO Output".into(),
             PinFunction::GpioAnalog => "GPIO Analog".into(),
             PinFunction::AdcChannel { adc, channel } => format!("ADC{adc}  IN{channel}"),
+            PinFunction::RmtChannel(n) => format!("RMT  CH{n}"),
             PinFunction::TimerPwm { timer, channel } => format!("TIM{timer}  CH{channel}  (PWM)"),
             PinFunction::TimerPwmN { timer, channel } => {
                 format!("TIM{timer}  CH{channel}N  (PWM)")
@@ -365,6 +367,7 @@ impl PinFunction {
             // Both PWM shapes share a tag: the label already spells out which
             // channel, and CH1N reads as complementary on its own.
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
+            PinFunction::RmtChannel(..) => "RMT",
             PinFunction::TimerBreak { .. } => "BRK",
             PinFunction::DacOut { .. } => "DAC",
             PinFunction::HspiClk { .. }

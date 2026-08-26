@@ -719,6 +719,19 @@ fn drives(f: &PinFunction) -> bool {
     )
 }
 
+/// How many RMT channels this chip has, or none.
+///
+/// From the vendor's own channel list — see [`EspChip::rmt_channels`].
+///
+/// Zero unless esp-hal has the DRIVER too: the ESP32-C2 and C61 have no `rmt`
+/// module at all, and a pad offering `RMT CH0` there would reach nothing.
+pub(crate) fn rmt_channels(chip: &EspChip) -> u8 {
+    if !chip.drivers.iter().any(|d| d == "rmt") {
+        return 0;
+    }
+    chip.rmt_channels
+}
+
 /// The I2S blocks this chip has, by instance number.
 ///
 /// Read off the peripheral singletons rather than from a macro of its own: the
@@ -823,6 +836,14 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
         out.push(PinFunction::I2sWs(i));
         out.push(PinFunction::I2sSd(i));
         out.push(PinFunction::I2sMck(i));
+    }
+
+    // RMT. Gated on the DRIVER, and the channel count comes from the singleton
+    // list for the same reason I2S's instance does: the vendor's channel macro
+    // describes signals the GPIO matrix makes irrelevant, while the singletons
+    // are what the generated code names.
+    for ch in 0..rmt_channels(chip) {
+        out.push(PinFunction::RmtChannel(ch));
     }
 
     // TWAI is Espressif's CAN. Unnumbered here because `CanTx`/`CanRx` are, and

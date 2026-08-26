@@ -14,9 +14,9 @@ use crate::panels::mcu_module::modules::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, HspiMode, I2sClockPolarity, I2sDirection,
     I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType,
     OspiMode, Parity, PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES,
-    QspiAddressSize, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder, StopBits,
-    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule, XspiMemoryType,
-    XspiMode,
+    QspiAddressSize, RmtDirection, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder,
+    StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
+    XspiMemoryType, XspiMode,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -257,6 +257,20 @@ fn signal_color(sig: ModuleSignal, instance: u8) -> egui::Color32 {
 
 /// The module's representative colour = the peripheral's pin colour (USART/SPI/
 /// I2C category — instance-independent), used for the box border + title so it
+/// The RMT block's source clock, in Hz.
+///
+/// Not from the Clock tab: esp-hal takes the rate as an argument to `Rmt::new`
+/// and every example passes the same one per chip — 32 MHz on the ESP32-H2,
+/// 80 MHz everywhere else. It is here so the module can show what one tick
+/// actually lasts, which is the number a pulse train is written in.
+pub fn rmt_source_hz(family: &str) -> u32 {
+    if family == "esp32h2" {
+        32_000_000
+    } else {
+        80_000_000
+    }
+}
+
 /// matches its pins, plus the list-entry name + the "already added" palette
 /// buttons.
 pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
@@ -266,6 +280,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceSpi => PinFunction::SpiSck(instance),
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
         ModuleKind::GenericInterfaceI2s => PinFunction::I2sCk(instance),
+        ModuleKind::GenericInterfaceRmt => PinFunction::RmtChannel(instance),
         ModuleKind::GenericInterfaceDac => PinFunction::DacOut {
             dac: instance,
             channel: 1,
@@ -426,6 +441,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceSpi => format!("_spi{n}{sfx}"),
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
         ModuleKind::GenericInterfaceI2s => format!("_i2s{n}{sfx}"),
+        ModuleKind::GenericInterfaceRmt => format!("_rmt{n}{sfx}"),
         ModuleKind::GenericInterfaceDac => format!("_dac{n}{sfx}"),
         // One handle per SUB-BLOCK: they are independent streams.
         ModuleKind::GenericInterfaceSai => format!("_sai{n}a{sfx}, _sai{n}b{sfx}"),
@@ -1468,6 +1484,100 @@ pub fn module_config_ui(
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
             match &mut m.config {
+                ModuleConfig::Rmt(cfg) => {
+                    ui.label("Direction");
+                    let dirs = RmtDirection::options(family, cfg.instance);
+                    let locked = dirs.len() == 1;
+                    ui.add_enabled_ui(!locked, |ui| {
+                        egui::ComboBox::from_id_salt("rmt_dir")
+                            .selected_text(cfg.direction.label())
+                            .show_ui(ui, |ui| {
+                                for v in dirs.iter().copied() {
+                                    ui.selectable_value(&mut cfg.direction, v, v.label());
+                                }
+                            });
+                    })
+                    .response
+                    .on_hover_text(if locked {
+                        "Fixed in silicon on this chip: the low RMT channels transmit and the \
+                         high ones receive. Pick a different channel to change direction."
+                    } else {
+                        "This chip's RMT channels can each do either."
+                    });
+                    ui.end_row();
+
+                    ui.label("Clock divider");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.clk_divider)
+                                .range(1..=255)
+                                .prefix("/"),
+                        );
+                        // The tick is what every duration in a pulse train is
+                        // counted in, so showing it is more useful than the
+                        // divider that produced it.
+                        let src = rmt_source_hz(family);
+                        let tick_ns = 1_000_000_000f64 / (src as f64 / cfg.clk_divider as f64);
+                        ui.label(
+                            egui::RichText::new(format!("1 tick = {tick_ns:.0} ns"))
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        );
+                    })
+                    .response
+                    .on_hover_text(
+                        "Divides the RMT source clock. A smaller divider gives finer \
+                         resolution and a shorter longest pulse; the two trade off.",
+                    );
+                    ui.end_row();
+
+                    if cfg.direction.is_tx() {
+                        ui.label("Idle level");
+                        egui::ComboBox::from_id_salt("rmt_idle")
+                            .selected_text(if cfg.idle_high { "High" } else { "Low" })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut cfg.idle_high, false, "Low");
+                                ui.selectable_value(&mut cfg.idle_high, true, "High");
+                            })
+                            .response
+                            .on_hover_text("Where the pad rests between trains.");
+                        ui.end_row();
+                    } else {
+                        ui.label("Idle threshold");
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.idle_threshold)
+                                .range(1..=65535)
+                                .suffix(" ticks"),
+                        )
+                        .on_hover_text(
+                            "How long the line must rest before the frame counts as over. \
+                             Too short and one train is read as several.",
+                        );
+                        ui.end_row();
+                    }
+
+                    ui.label("Carrier");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut cfg.carrier, "");
+                        ui.add_enabled_ui(cfg.carrier, |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut cfg.carrier_hz)
+                                    .range(1_000..=1_000_000)
+                                    .suffix(" Hz")
+                                    .speed(100.0),
+                            );
+                            if ui.small_button("38k").clicked() {
+                                cfg.carrier_hz = 38_000;
+                            }
+                        });
+                    })
+                    .response
+                    .on_hover_text(
+                        "Modulate the pulses onto a carrier — 38 kHz is what an IR receiver \
+                         demodulates. Off for WS2812 and 1-Wire, which want the edges raw.",
+                    );
+                    ui.end_row();
+                }
                 // LPUART reuses the USART settings struct, so it reuses this
                 // whole arm — only the DMA request table differs (`uart_bus`).
                 ModuleConfig::Usart(cfg) | ModuleConfig::Lpuart(cfg) => {

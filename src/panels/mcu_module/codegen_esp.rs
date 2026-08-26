@@ -42,8 +42,8 @@ use super::codegen::dma_map::DmaUse;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
 use super::mcu_def::DmaDef;
 use super::modules::{
-    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, SpiModuleConfig, TimerModuleConfig,
-    UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, RmtModuleConfig, SpiModuleConfig,
+    TimerModuleConfig, UsartModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -152,6 +152,7 @@ pub fn fresh_esp32c3_main_rs(
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     i2s: &BTreeMap<u8, I2sModuleConfig>,
+    rmt: &BTreeMap<u8, RmtModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -169,6 +170,7 @@ pub fn fresh_esp32c3_main_rs(
         spi,
         i2c,
         i2s,
+        rmt,
         timer,
         custom_inits,
         chip,
@@ -193,6 +195,7 @@ pub fn update_esp32c3_main_rs(
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     i2s: &BTreeMap<u8, I2sModuleConfig>,
+    rmt: &BTreeMap<u8, RmtModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
@@ -210,6 +213,7 @@ pub fn update_esp32c3_main_rs(
         spi,
         i2c,
         i2s,
+        rmt,
         timer,
         custom_inits,
         chip,
@@ -327,6 +331,7 @@ fn make_gen_section(
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     i2s: &BTreeMap<u8, I2sModuleConfig>,
+    rmt: &BTreeMap<u8, RmtModuleConfig>,
     // PWM (LEDC) module settings, keyed by LEDC timer.
     timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
@@ -389,8 +394,11 @@ fn make_gen_section(
     let has_pwm = configured
         .iter()
         .any(|p| matches!(p.selected_function, PinFunction::TimerPwm { .. }));
+    let has_rmt = configured
+        .iter()
+        .any(|p| matches!(p.selected_function, PinFunction::RmtChannel(..)));
     let use_block = build_use_block(
-        has_output, has_input, has_adc, has_uart, has_spi, has_i2c, has_pwm, runtime,
+        has_output, has_input, has_adc, has_uart, has_spi, has_i2c, has_pwm, has_rmt, runtime,
     );
 
     // ── fn main() body ────────────────────────────────────────────────────────
@@ -487,7 +495,17 @@ fn make_gen_section(
     // first — an I2S without a channel cannot be generated at all.
     let i2s_wired: Vec<u8> = collect_buses(&configured).3.keys().copied().collect();
     let dma_plan = dma_plan(dma, runtime, spi, &i2s_wired);
-    for (label, calls) in bus_sections(&configured, usart, spi, i2c, i2s, runtime, &dma_plan) {
+    for (label, calls) in bus_sections(
+        &configured,
+        usart,
+        spi,
+        i2c,
+        i2s,
+        rmt,
+        crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(chip),
+        runtime,
+        &dma_plan,
+    ) {
         body.push('\n');
         body.push_str(&format!("    // ── {label} ──\n"));
         body.push_str(&calls);
@@ -590,7 +608,9 @@ fn make_default_gen_section(clock: &ClockConfig, chip: &str, runtime: EspRuntime
          {start}\n\
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n",
-        use_block = build_use_block(false, false, false, false, false, false, false, runtime),
+        use_block = build_use_block(
+            false, false, false, false, false, false, false, false, runtime,
+        ),
         entry = runtime.entry(),
         init = esp_init_line(clock, chip),
         start = runtime.start_block(),
@@ -607,6 +627,7 @@ fn build_use_block(
     has_spi: bool,
     has_i2c: bool,
     has_pwm: bool,
+    has_rmt: bool,
     runtime: EspRuntime,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -643,6 +664,13 @@ fn build_use_block(
     // chip-wide block, so `Ledc::new` cannot live in a per-timer config module.
     if has_pwm {
         lines.push("use esp_hal::ledc::Ledc;".into());
+    }
+    // The RMT is the same shape: one block for the chip, whose channels are
+    // fields of what `Rmt::new` returns, so it too is built here and lent out.
+    // `Rate` comes with it — the constructor takes the source clock.
+    if has_rmt {
+        lines.push("use esp_hal::rmt::Rmt;".into());
+        lines.push("use esp_hal::time::Rate;".into());
     }
     // No bus imports: UART/SPI/I2C are built inside `pins/configs/<bus>.rs`, and
     // `main.rs` only hands them peripherals it already has in scope.
@@ -724,6 +752,29 @@ fn collect_buses<'a>(
         bus.entry(n).or_default().insert(sig, p);
     }
     (uart, spi, i2c, i2s)
+}
+
+/// The RMT channels the canvas wires, with the pad each is on.
+///
+/// Not part of [`collect_buses`]: a bus there is an instance with SEVERAL named
+/// signals, and an RMT channel has exactly one wire. Keeping it separate is
+/// what lets the emission stay a single `let` per channel.
+fn collect_rmt<'a>(configured: &[&'a Pin]) -> BTreeMap<u8, &'a Pin> {
+    configured
+        .iter()
+        .filter_map(|p| match p.selected_function {
+            PinFunction::RmtChannel(n) => Some((n, *p)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The RMT channels a set of pins wires, in channel order.
+///
+/// The config-file list and `main.rs` are built from this same answer, so a
+/// channel can never get a file without a call or the other way round.
+pub(crate) fn rmt_channels_wired(configured: &[&Pin]) -> Vec<u8> {
+    collect_rmt(configured).into_keys().collect()
 }
 
 /// The I2S instances a set of pins wires, in instance order.
@@ -910,6 +961,9 @@ fn bus_sections(
     spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
     i2c_cfg: &BTreeMap<u8, I2cModuleConfig>,
     i2s_cfg: &BTreeMap<u8, I2sModuleConfig>,
+    rmt_cfg: &BTreeMap<u8, RmtModuleConfig>,
+    // The RMT source clock, which `Rmt::new` takes as an argument.
+    rmt_hz: u32,
     runtime: EspRuntime,
     // The channel each DMA-driven bus was given — see [`dma_plan`].
     dma_plan: &DmaPlan,
@@ -1051,6 +1105,36 @@ fn bus_sections(
         }
         out.push((format!("I2S{n}"), body));
     }
+    // RMT last. One `Rmt::new` for the whole chip — the block is shared and the
+    // channels are its fields — then one `let` per wired channel, exactly the
+    // shape the LEDC takes for PWM.
+    let rmt = collect_rmt(configured);
+    if !rmt.is_empty() {
+        let mut body = format!(
+            "    let rmt = Rmt::new(peripherals.RMT, Rate::from_hz({rmt_hz}))\n\
+             \x20       .unwrap(){};\n",
+            if runtime == EspRuntime::Async {
+                "\n\x20       .into_async()"
+            } else {
+                ""
+            },
+        );
+        for (n, p) in &rmt {
+            let sfx = rmt_cfg
+                .get(n)
+                .map(|c| module_label_sfx(&c.custom_label))
+                .unwrap_or_default();
+            let var = esp_binding(p);
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n\
+                 \x20   let mut _rmt{n}{sfx} =\n\
+                 \x20       pins::configs::rmt{n}::{init_fn}(rmt.channel{n}, {var});\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
+        }
+        out.push(("RMT".to_owned(), body));
+    }
     out
 }
 
@@ -1110,6 +1194,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &timer,
             "",
             "esp32c3",
@@ -1158,6 +1243,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1194,6 +1280,10 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_rmt() -> BTreeMap<u8, RmtModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
@@ -1207,6 +1297,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1232,6 +1323,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1257,6 +1349,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1279,6 +1372,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1296,6 +1390,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1322,6 +1417,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1350,6 +1446,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1386,6 +1483,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",
@@ -1429,6 +1527,7 @@ mod tests {
                 &no_spi(),
                 &no_i2c(),
                 &no_i2s(),
+                &no_rmt(),
                 &Default::default(),
                 "",
                 "esp32c3",
@@ -1506,6 +1605,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             &no_i2s(),
+            &no_rmt(),
             &Default::default(),
             "",
             "esp32c3",

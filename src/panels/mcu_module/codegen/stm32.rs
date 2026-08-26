@@ -3017,6 +3017,10 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         // A break input is read, not driven — floating input, like any other
         // signal coming in from the board.
         PinFunction::TimerBreak { .. } => format!("into_floating_input(&mut {pv}.{crx})"),
+        // RMT is Espressif's, and no STM32 pin ever carries it. Grouped with
+        // the other push-pull outputs so the match stays total rather than
+        // reaching a panic that could never fire.
+        PinFunction::RmtChannel(..) => format!("into_push_pull_output(&mut {pv}.{crx})"),
         // The F1 backend has no I2S codegen; the pads still take the alternate
         // function so the pin is at least in the right mode.
         PinFunction::I2sCk(_)

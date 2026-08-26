@@ -515,6 +515,7 @@ impl AppIde {
                                         ModuleKind::GenericInterfaceLpuart => "Add a virtual LPUART device and auto-wire it to a free LPUART TX/RX pin pair (a peripheral of its own, not a USART instance)",
                                         ModuleKind::GenericInterfaceSpi => "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
                                         ModuleKind::GenericInterfaceI2c => "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
+                                        ModuleKind::GenericInterfaceRmt => "Add an RMT channel and auto-wire its single line: a pulse-train engine for IR, WS2812 strips and 1-Wire (Espressif only)",
                                         ModuleKind::GenericInterfaceHspi => "Add external memory on the HSPI (high-end U5): it auto-wires the single-line width, and the octal one joins by assigning IO2-IO7 and DQS0, which that call requires",
                                         ModuleKind::GenericInterfaceXspi => "Add an external flash or RAM on an XSPI port (H7RS / N6): it auto-wires the two-line minimum on NCS1, and the wider modes join by assigning IO2-IO15 on the canvas",
                                         ModuleKind::GenericInterfaceOspi => "Add an external flash or RAM on an OCTOSPI port: it auto-wires the two-line minimum (CLK, NCS, IO0-IO1), and the quad and octal modes join by assigning IO2-IO7 on the canvas",

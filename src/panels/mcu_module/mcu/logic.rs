@@ -1289,7 +1289,11 @@ mod module_support_tests {
                         | ModuleKind::GenericInterfaceXspi
                         | ModuleKind::GenericInterfaceHspi
                         | ModuleKind::GenericInterfaceDac
-                ) && (kind != ModuleKind::GenericInterfaceI2s || esp);
+                ) && (kind != ModuleKind::GenericInterfaceI2s || esp)
+                    // RMT is Espressif's outright: no STM32 pin ever carries it,
+                    // and the C3's do, so the palette offers it on one and not
+                    // the other.
+                    && (kind != ModuleKind::GenericInterfaceRmt || esp);
                 assert_eq!(
                     mcu.supports_module(kind),
                     want,

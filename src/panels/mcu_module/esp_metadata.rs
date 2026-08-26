@@ -205,6 +205,15 @@ pub struct EspChip {
     pub adc: Vec<(String, u8)>,
     /// Every peripheral singleton the chip has, GPIOs excluded.
     pub peripherals: Vec<String>,
+    /// How many RMT channels the chip has. Zero when it has no RMT block.
+    ///
+    /// The vendor lists them one bare number at a time
+    /// (`_for_each_inner_rmt_channel!((0));`), alongside richer forms that name
+    /// which may transmit and which may receive. Only the count is taken: the
+    /// direction follows a rule esp-hal states for every part that has one —
+    /// the low half transmits, the high half receives — and the ESP32 and S2
+    /// let every channel do either. See `RmtDirection::options`.
+    pub rmt_channels: u8,
     /// The esp-hal DRIVERS this chip has — `i2s`, `ledc`, `twai`, `spi_master`.
     ///
     /// A different question from [`EspChip::peripherals`], and the ESP32-C5
@@ -591,6 +600,15 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
     peripherals.sort();
     peripherals.dedup();
 
+    // RMT channels: the macro emits each as a bare number, and again in three
+    // richer forms (`(0, 0)`, `tx(…)`, `rx(…)`) that name memory blocks and
+    // directions. Counting only the bare ones is what gives the channel COUNT
+    // without also counting the same channel three more times.
+    let rmt_channels = instances(&body_of("for_each_rmt_channel"), "rmt_channel")
+        .iter()
+        .filter(|t| t.parse::<u8>().is_ok())
+        .count() as u8;
+
     // DMA, from the peripheral SINGLETONS rather than from a macro.
     //
     // `for_each_dma_channel` carries more — an interrupt name per half, and a
@@ -701,6 +719,7 @@ pub fn parse(src: &str) -> Result<EspChip, String> {
         spi,
         adc,
         peripherals,
+        rmt_channels,
         drivers: Vec::new(),
         dma,
         dma_shared,
@@ -1058,6 +1077,36 @@ macro_rules! for_each_peripheral {
                 "{id}: a channel is not a DMA_* singleton: {:?}",
                 c.dma
             );
+        }
+    }
+
+    /// The RMT channel counts, against what esp-hal's own docs state.
+    ///
+    /// "8 channels" on the ESP32 and S3, "4 channels" on the S2 and on every
+    /// C3/C5/C6/H2 — and zero where there is no driver, which is the C2 and the
+    /// C61. Counted from the vendor macro rather than typed in, so a chip that
+    /// gains channels is picked up by rerunning the generator.
+    #[test]
+    #[ignore]
+    fn rmt_channel_counts_match_esp_hal() {
+        let dir = vendor_dir().expect("esp-metadata");
+        for (id, want) in [
+            ("esp32", 8u8),
+            ("esp32s3", 8),
+            ("esp32s2", 4),
+            ("esp32c3", 4),
+            ("esp32c5", 4),
+            ("esp32c6", 4),
+            ("esp32h2", 4),
+        ] {
+            let c = load(&dir, id).expect("parses");
+            assert_eq!(c.rmt_channels, want, "{id}");
+            assert!(c.drivers.iter().any(|d| d == "rmt"), "{id} has the driver");
+        }
+        // No driver, so nothing to offer even if the silicon had the block.
+        for id in ["esp32c2", "esp32c61"] {
+            let c = load(&dir, id).expect("parses");
+            assert!(!c.drivers.iter().any(|d| d == "rmt"), "{id}");
         }
     }
 

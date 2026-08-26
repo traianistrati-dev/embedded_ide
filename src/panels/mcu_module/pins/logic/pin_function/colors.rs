@@ -23,6 +23,9 @@ impl PinFunction {
             | PinFunction::I2sWs(_)
             | PinFunction::I2sSd(_)
             | PinFunction::I2sMck(_) => egui::Color32::from_rgb(90, 140, 200),
+            // RMT drives edges, not data — a warm amber of its own, away from
+            // both the buses and the PWM orange it is most easily confused with.
+            PinFunction::RmtChannel(..) => egui::Color32::from_rgb(200, 150, 60),
             // Audio too, but a deeper blue: SAI is the bigger, multi-block one.
             PinFunction::SaiSck { .. }
             | PinFunction::SaiSd { .. }

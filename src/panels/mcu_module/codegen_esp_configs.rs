@@ -38,7 +38,7 @@
 use super::codegen_esp::EspRuntime;
 use super::modules::{
     AsyncBusMode, I2cModuleConfig, I2sDirection, I2sFormat, I2sModuleConfig, I2sStandard, Parity,
-    SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
+    RmtModuleConfig, SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -655,6 +655,203 @@ fn i2s_file(n: u8, sigs: &[&str], cfg: Option<&I2sModuleConfig>, rt: EspRuntime)
     )
 }
 
+// ── RMT ─────────────────────────────────────────────────────────────────────
+
+/// One RMT channel, in the direction that channel has.
+///
+/// # Not a bus, so not shaped like one
+///
+/// The other files here build a peripheral that moves BYTES. An RMT channel
+/// moves EDGES: you hand it `(level, ticks)` pairs and it clocks each one out.
+/// So there is no baud rate and no data format — the two numbers that matter
+/// are the tick length (the clock divider) and, if the far end is an IR
+/// receiver, the carrier to modulate onto.
+///
+/// # The channel arrives from main.rs
+///
+/// `Rmt::new` takes the whole block and hands back a struct whose channels are
+/// fields. `main.rs` builds it once and lends `rmt.channel0` here, the same way
+/// it lends a LEDC timer to a PWM channel — which is why `init` takes a
+/// `TxChannelCreator` rather than a `peripherals.*` singleton.
+fn rmt_file(n: u8, cfg: Option<&RmtModuleConfig>, rt: EspRuntime, source_hz: u32) -> String {
+    let tx = cfg.is_none_or(|c| c.direction.is_tx());
+    let divider = cfg.map_or(1, |c| c.clk_divider).max(1);
+    let carrier = cfg.is_some_and(|c| c.carrier);
+    let carrier_hz = cfg.map_or(38_000, |c| c.carrier_hz).max(1);
+    // The carrier is counted in the channel's own ticks, so the divider is
+    // already in play. Split evenly: a 50% duty is what an IR receiver expects.
+    let period = (source_hz / u32::from(divider) / carrier_hz).max(2);
+    let (high, low) = (period / 2, period - period / 2);
+
+    let mut consts = format!(
+        "const CLK_DIVIDER: u8 = {divider}; // 1 tick = {} ns\n",
+        (1_000_000_000f64 / (source_hz as f64 / f64::from(divider))).round() as u64,
+    );
+    if tx {
+        consts.push_str(&format!(
+            "const IDLE_HIGH: bool = {}; // where the pad rests between trains\n",
+            cfg.is_some_and(|c| c.idle_high),
+        ));
+    } else {
+        consts.push_str(&format!(
+            "const IDLE_THRESHOLD: u16 = {}; // ticks of silence that end a frame\n",
+            cfg.map_or(10_000, |c| c.idle_threshold),
+        ));
+    }
+    if carrier {
+        consts.push_str(&format!(
+            "// Carrier {carrier_hz} Hz at 50%: source / CLK_DIVIDER / carrier, split in two.\n\
+             const CARRIER_HIGH: u16 = {high};\n\
+             const CARRIER_LOW: u16 = {low};\n",
+        ));
+    }
+
+    let (ty, creator, ctor, pad_bound, pad_use) = if tx {
+        (
+            "Tx",
+            "TxChannelCreator",
+            "configure_tx",
+            "impl PeripheralOutput<'d>",
+            "PeripheralOutput",
+        )
+    } else {
+        (
+            "Rx",
+            "RxChannelCreator",
+            "configure_rx",
+            "impl PeripheralInput<'d>",
+            "PeripheralInput",
+        )
+    };
+    let cfg_ty = if tx {
+        "TxChannelConfig"
+    } else {
+        "RxChannelConfig"
+    };
+    let mut chain = String::from("\x20       .with_clk_divider(CLK_DIVIDER)\n");
+    if tx {
+        chain.push_str(
+            "\x20       .with_idle_output(true)\n\
+             \x20       .with_idle_output_level(if IDLE_HIGH { Level::High } else { Level::Low })\n",
+        );
+    } else {
+        chain.push_str("\x20       .with_idle_threshold(IDLE_THRESHOLD)\n");
+    }
+    chain.push_str(&if carrier {
+        "\x20       .with_carrier_modulation(true)\n\
+         \x20       .with_carrier_high(CARRIER_HIGH)\n\
+         \x20       .with_carrier_low(CARRIER_LOW)\n\
+         \x20       .with_carrier_level(Level::High)\n"
+            .to_owned()
+    } else {
+        "\x20       .with_carrier_modulation(false)\n".to_owned()
+    });
+
+    // The `;` belongs to the last builder call, not to a line of its own.
+    let chain = chain.trim_end_matches('\n');
+
+    let body_for = |name: &str, mode: &str| {
+        format!(
+            "pub fn {name}<'d>(\n\
+             \x20   channel: impl {creator}<'d, {mode}>,\n\
+             \x20   line: {pad_bound},\n\
+             ) -> Channel<'d, {mode}, {ty}> {{\n\
+             \x20   let config = {cfg_ty}::default()\n\
+             {chain};\n\
+             \x20   channel.{ctor}(&config).unwrap().with_pin(line)\n\
+             }}\n"
+        )
+    };
+    let mut body = format!(
+        "/// RMT channel {n} — {}, blocking driver.\n\
+         ///\n\
+         /// `main.rs` builds the one `Rmt` and lends this channel in.\n\
+         {}",
+        if tx { "transmitting" } else { "receiving" },
+        body_for("init", "Blocking"),
+    );
+    if rt == EspRuntime::Async {
+        body.push_str(&format!(
+            "\n/// RMT channel {n} — async driver.\n\
+             ///\n\
+             /// Identical, but built from the `Rmt` main.rs turned async: the\n\
+             /// transmit and receive calls become `.await`-able.\n\
+             {}",
+            body_for("init_async", "Async"),
+        ));
+    }
+
+    let example = example_for(
+        &format!("Using RMT channel {n}"),
+        &format!("_rmt{n}"),
+        &if tx {
+            vec![
+                "A pulse train is a list of (level, ticks) pairs, ended by a zero:",
+                "",
+                "    use esp_hal::rmt::{PulseCode, TxChannel};",
+                "    let data = [",
+                "        PulseCode::new(Level::High, 200, Level::Low, 100),",
+                "        PulseCode::empty(),   // the terminator",
+                "    ];",
+                "    let tx = {H}.transmit(&data).unwrap();",
+                "    {H} = tx.wait().unwrap();",
+            ]
+        } else {
+            vec![
+                "Receiving fills a buffer with the pairs the line carried:",
+                "",
+                "    use esp_hal::rmt::RxChannel;",
+                "    let mut data = [esp_hal::rmt::PulseCode::empty(); 48];",
+                "    let rx = {H}.receive(&mut data).unwrap();",
+                "    {H} = rx.wait().unwrap();",
+            ]
+        },
+        &if tx {
+            vec![
+                "main.rs calls `init_async`, so the transmit is .await-able:",
+                "",
+                "    use esp_hal::rmt::{PulseCode, TxChannelAsync};",
+                "    let data = [",
+                "        PulseCode::new(Level::High, 200, Level::Low, 100),",
+                "        PulseCode::empty(),",
+                "    ];",
+                "    {H}.transmit(&data).await.unwrap();",
+            ]
+        } else {
+            vec![
+                "main.rs calls `init_async`, so the receive is .await-able:",
+                "",
+                "    use esp_hal::rmt::RxChannelAsync;",
+                "    let mut data = [esp_hal::rmt::PulseCode::empty(); 48];",
+                "    {H}.receive(&mut data).await.unwrap();",
+            ]
+        },
+        rt,
+    );
+
+    file(
+        &format!(
+            "{}\
+             {level_use}\
+             use esp_hal::gpio::interconnect::{pad_use};\n\
+             use esp_hal::rmt::{{Channel, {ty}, {cfg_ty}, {creator}}};\n",
+            mode_import(rt),
+            // `Level` names the idle output and the carrier level, and a
+            // receive channel with no carrier uses neither — importing it
+            // there is an unused-import warning in the user's project.
+            level_use = if tx || carrier {
+                "use esp_hal::gpio::Level;
+"
+            } else {
+                ""
+            },
+        ),
+        &consts,
+        &body,
+        &example,
+    )
+}
+
 // ── I2C ──────────────────────────────────────────────────────────────────────
 
 fn i2c_file(n: u8, sigs: &[&str], cfg: Option<&I2cModuleConfig>, rt: EspRuntime) -> String {
@@ -997,6 +1194,11 @@ pub fn config_files(
     spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
     i2c_cfg: &BTreeMap<u8, I2cModuleConfig>,
     i2s_cfg: &BTreeMap<u8, I2sModuleConfig>,
+    // Just the channel numbers: an RMT channel has one wire, so there is no
+    // signal list to carry.
+    rmt: &[u8],
+    rmt_cfg: &BTreeMap<u8, RmtModuleConfig>,
+    rmt_hz: u32,
     // LEDC timer → the channels wired on it, with each channel duty in
     // hundredths of a percent.
     pwm: &[(u8, Vec<(u8, u16)>)],
@@ -1018,6 +1220,12 @@ pub fn config_files(
     }
     for (n, sigs) in i2s {
         out.push((format!("i2s{n}.rs"), i2s_file(*n, sigs, i2s_cfg.get(n), rt)));
+    }
+    for n in rmt {
+        out.push((
+            format!("rmt{n}.rs"),
+            rmt_file(*n, rmt_cfg.get(n), rt, rmt_hz),
+        ));
     }
     for (n, chans) in pwm {
         out.push((format!("pwm{n}.rs"), pwm_file(*n, chans, timer_cfg.get(n))));
@@ -1275,6 +1483,9 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &[2],
+            &BTreeMap::new(),
+            80_000_000,
             &[(0, vec![(1, 2_000)])],
             &BTreeMap::new(),
             EspRuntime::Blocking,
@@ -1282,7 +1493,9 @@ mod tests {
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
-            vec!["uart1.rs", "spi2.rs", "i2c0.rs", "i2s0.rs", "pwm0.rs"]
+            vec![
+                "uart1.rs", "spi2.rs", "i2c0.rs", "i2s0.rs", "rmt2.rs", "pwm0.rs"
+            ]
         );
     }
 }
