@@ -40,7 +40,7 @@ use super::modules::{
     AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sDirection, I2sFormat,
     I2sModuleConfig, I2sStandard, LcdCamMode, LcdCamModuleConfig, McpwmModuleConfig, Parity,
     ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig, SpiModuleConfig, StopBits,
-    TimerModuleConfig, TouchModuleConfig, UsartModuleConfig, UsbModuleConfig,
+    TimerModuleConfig, TouchModuleConfig, UsartDirection, UsartModuleConfig, UsbModuleConfig,
 };
 use std::collections::BTreeMap;
 
@@ -187,45 +187,130 @@ fn stop_bits_variant(s: StopBits) -> &'static str {
     }
 }
 
+/// One UART instance, in the direction and with the flow control the module
+/// asked for.
+///
+/// # A direction is a different TYPE
+///
+/// `Uart` is the two-way port. One direction is `UartTx` or `UartRx`, built by
+/// its own constructor — not a `Uart` with a pad left off. That is why the
+/// return type changes with the direction rather than the pad list shrinking.
+///
+/// # Flow control is a config AND a pad
+///
+/// `HwFlowControl` in the config turns the hardware on; `.with_cts()` and
+/// `.with_rts()` route the pads. Setting one without the other is half a
+/// feature, so both are emitted together or neither is.
+///
+/// A half of the port has only the pad it drives: `UartTx` takes RTS and
+/// `UartRx` takes CTS. There is no single-wire mode in esp-hal at all — see
+/// `UsartDirection::options_for`.
 fn uart_file(n: u8, sigs: &[&str], cfg: Option<&UsartModuleConfig>, rt: EspRuntime) -> String {
-    let consts = format!(
+    let d = UsartModuleConfig::new(n);
+    let c = cfg.unwrap_or(&d);
+    let dir = c.direction;
+    let (cts, rts) = (c.flow.needs_cts(), c.flow.needs_rts());
+
+    let mut consts = format!(
         "const BAUDRATE: u32 = {};\n\
          const DATA_BITS: DataBits = DataBits::{};\n\
          const PARITY: Parity = Parity::{};\n\
          const STOP_BITS: StopBits = StopBits::{};\n",
-        cfg.map_or(115_200, |c| c.baud_rate),
-        data_bits_variant(cfg.map_or(8, |c| c.data_bits)),
-        parity_variant(cfg.map_or(Parity::None, |c| c.parity)),
-        stop_bits_variant(cfg.map_or(StopBits::One, |c| c.stop_bits)),
+        c.baud_rate,
+        data_bits_variant(c.data_bits),
+        parity_variant(c.parity),
+        stop_bits_variant(c.stop_bits),
     );
-    let params = format!(
-        "    uart: impl Instance + 'd,\n{}",
-        params_for(
-            sigs,
-            &[
+    if cts || rts {
+        consts.push_str(&format!(
+            "// Hardware flow control. The RTS threshold is how many bytes may\n\
+             // still arrive after it is asserted - the sender needs the slack.\n\
+             const FLOW: HwFlowControl = HwFlowControl {{\n\
+             \x20   cts: CtsConfig::{},\n\
+             \x20   rts: RtsConfig::{},\n\
+             }};\n",
+            if cts { "Enabled" } else { "Disabled" },
+            if rts { "Enabled(8)" } else { "Disabled" },
+        ));
+    }
+
+    // `UartTx` needs only the TX pad, `UartRx` only RX — and each takes at most
+    // the one flow pad it drives.
+    let (driver, want): (&str, Vec<(&str, &str)>) = match dir {
+        UsartDirection::TxOnly => (
+            "UartTx",
+            [("tx", "impl PeripheralOutput<'d>")]
+                .into_iter()
+                .chain(rts.then_some(("rts", "impl PeripheralOutput<'d>")))
+                .collect(),
+        ),
+        UsartDirection::RxOnly => (
+            "UartRx",
+            [("rx", "impl PeripheralInput<'d>")]
+                .into_iter()
+                .chain(cts.then_some(("cts", "impl PeripheralInput<'d>")))
+                .collect(),
+        ),
+        _ => (
+            "Uart",
+            [
                 ("rx", "impl PeripheralInput<'d>"),
                 ("tx", "impl PeripheralOutput<'d>"),
-            ],
-        )
+            ]
+            .into_iter()
+            .chain(cts.then_some(("cts", "impl PeripheralInput<'d>")))
+            .chain(rts.then_some(("rts", "impl PeripheralOutput<'d>")))
+            .collect(),
+        ),
+    };
+    let params = format!("    uart: impl Instance + 'd,\n{}", params_for(sigs, &want));
+    let chain_spec: Vec<(&str, &str)> = want
+        .iter()
+        .map(|(name, _)| {
+            (
+                *name,
+                match *name {
+                    "rx" => "with_rx",
+                    "tx" => "with_tx",
+                    "cts" => "with_cts",
+                    _ => "with_rts",
+                },
+            )
+        })
+        .collect();
+    let chain = chain_for(sigs, &chain_spec);
+
+    let flow_line = if cts || rts {
+        "\x20       .with_hw_flow_ctrl(FLOW)\n"
+    } else {
+        ""
+    };
+    let ctor = format!(
+        "    let config = Config::default()\n\
+         \x20       .with_baudrate(BAUDRATE)\n\
+         \x20       .with_data_bits(DATA_BITS)\n\
+         \x20       .with_parity(PARITY)\n\
+         {flow_line}\
+         \x20       .with_stop_bits(STOP_BITS);\n\
+         \x20   // `unwrap`: these values come from the Virtual Module's UI, which\n\
+         \x20   // range-limits them - a failure here is a bug in the generator,\n\
+         \x20   // not a runtime condition the firmware could recover from.\n\
+         \x20   {driver}::new(uart, config)\n\
+         \x20       .unwrap()\n"
     );
-    let chain = chain_for(sigs, &[("rx", "with_rx"), ("tx", "with_tx")]);
-    let ctor = "    let config = Config::default()\n\
-                \x20       .with_baudrate(BAUDRATE)\n\
-                \x20       .with_data_bits(DATA_BITS)\n\
-                \x20       .with_parity(PARITY)\n\
-                \x20       .with_stop_bits(STOP_BITS);\n\
-                \x20   // `unwrap`: these values come from the Virtual Module's UI, which\n\
-                \x20   // range-limits them — a failure here is a bug in the generator,\n\
-                \x20   // not a runtime condition the firmware could recover from.\n\
-                \x20   Uart::new(uart, config)\n\
-                \x20       .unwrap()\n";
+
+    let what = match dir {
+        UsartDirection::TxOnly => "transmit only",
+        UsartDirection::RxOnly => "receive only",
+        _ => "blocking driver",
+    };
     let mut body = format!(
-        "/// UART{n} — blocking driver.\n\
+        "/// UART{n} — {what}.\n\
          ///\n\
          /// Generic over the pins so this file never names a GPIO: `main.rs`\n\
          /// passes the ones wired on the Pins canvas.\n\
          pub fn init<'d>(\n\
-         {params}) -> Uart<'d, Blocking> {{\n\
+         {params}) -> {driver}<'d, Blocking> {{\n\
          {ctor}\
          {chain}}}\n"
     );
@@ -233,63 +318,73 @@ fn uart_file(n: u8, sigs: &[&str], cfg: Option<&UsartModuleConfig>, rt: EspRunti
         body.push_str(&async_twin(
             &format!("UART{n} — async driver."),
             &params,
-            "Uart",
-            ctor,
+            driver,
+            &ctor,
             &chain,
         ));
     }
-    let example = example_for(
-        &format!("Using UART{n}"),
-        &format!("_uart{n}"),
-        &[
-            "In main.rs, after the init above:",
-            "",
-            "    // Send",
-            "    {H}.write(b\"hello\\r\\n\").ok();",
-            "    {H}.flush().ok();",
-            "",
-            "    // Receive what has already arrived (never blocks)",
-            "    let mut buf = [0u8; 32];",
-            "    if let Ok(n) = {H}.read_buffered(&mut buf) {",
-            "        // buf[..n] holds the bytes",
-            "    }",
-            "",
-            "    // Or block until at least one byte shows up",
-            "    let n = {H}.read(&mut buf).unwrap();",
-        ],
-        &[
-            "main.rs calls `init_async`, so the handle is a `Uart<'_, Async>`:",
-            "",
-            "    // Send — yields to the executor instead of spinning",
-            "    {H}.write_async(b\"hello\\r\\n\").await.ok();",
-            "    {H}.flush_async().await.ok();",
-            "",
-            "    // Receive whatever arrives (returns once there is >= 1 byte)",
-            "    let mut buf = [0u8; 32];",
-            "    let n = {H}.read_async(&mut buf).await.unwrap_or(0);",
-            "",
-            "    // ...or exactly this many",
-            "    {H}.read_exact_async(&mut buf).await.ok();",
-            "",
-            "    // Time out a read — the reason for being on an executor at all:",
-            "    use embassy_time::{with_timeout, Duration};",
-            "    let read = {H}.read_async(&mut buf);",
-            "    match with_timeout(Duration::from_millis(500), read).await {",
-            "        Ok(Ok(n)) => { /* n bytes */ }",
-            "        Ok(Err(_)) => { /* UART error */ }",
-            "        Err(_) => { /* timed out */ }",
-            "    }",
-            "",
-            "    // `init` is still there if you want this bus blocking instead.",
-        ],
-        rt,
-    );
+
+    let h = format!("_uart{n}");
+    let send = vec![
+        "In main.rs, after the init above:".to_owned(),
+        String::new(),
+        format!("    {h}.write(b\"hello\\r\\n\").ok();"),
+        format!("    {h}.flush().ok();"),
+    ];
+    let recv = vec![
+        "In main.rs, after the init above:".to_owned(),
+        String::new(),
+        "    let mut buf = [0u8; 32];".to_owned(),
+        format!("    if let Ok(len) = {h}.read_buffered(&mut buf) {{"),
+        "        let _ = &buf[..len];".to_owned(),
+        "    }".to_owned(),
+    ];
+    let both = {
+        let mut v = send.clone();
+        v.push(String::new());
+        v.extend(recv[2..].iter().cloned());
+        v
+    };
+    let lines = match dir {
+        UsartDirection::TxOnly => send,
+        UsartDirection::RxOnly => recv,
+        _ => both,
+    };
+    let mut lines: Vec<String> = lines;
+    if cts || rts {
+        lines.push(String::new());
+        lines.push("// Flow control is on: the peripheral holds off by itself,".to_owned());
+        lines.push("// so nothing here changes - that is the point of it.".to_owned());
+    }
+    let example = example_block(&format!("Using UART{n}"), &lines);
+
     file(
         &format!(
-            "{}\
-             use esp_hal::gpio::interconnect::{{PeripheralInput, PeripheralOutput}};\n\
-             use esp_hal::uart::{{Config, DataBits, Instance, Parity, StopBits, Uart}};\n",
-            mode_import(rt)
+            "{}\n\
+             use esp_hal::gpio::interconnect::{};\n\
+             use esp_hal::uart::{{Config, DataBits, Instance, Parity, StopBits, {driver}{}}};\n",
+            // One combined import when both markers appear; a single item
+            // takes no braces, which is the shape every other file uses.
+            if rt == EspRuntime::Async {
+                "use esp_hal::{Async, Blocking};"
+            } else {
+                "use esp_hal::Blocking;"
+            },
+            // Derived from the parameters actually emitted: a transmit-only
+            // port binds no input, and a receive-only one no output.
+            match (
+                params.contains("PeripheralInput"),
+                params.contains("PeripheralOutput"),
+            ) {
+                (true, true) => "{PeripheralInput, PeripheralOutput}",
+                (true, false) => "PeripheralInput",
+                _ => "PeripheralOutput",
+            },
+            if cts || rts {
+                ", CtsConfig, HwFlowControl, RtsConfig"
+            } else {
+                ""
+            },
         ),
         &consts,
         &body,
@@ -1377,8 +1472,7 @@ fn mcpwm_file(
         &format!("Using MCPWM{unit}"),
         &[
             format!(
-                "Duty is a TIMESTAMP: the count the output flips at, out of {}.",
-                format!("PERIOD_T{ft} + 1")
+                "Duty is a TIMESTAMP: the count the output flips at, out of                  PERIOD_T{ft} + 1."
             ),
             String::new(),
             format!(

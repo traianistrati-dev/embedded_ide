@@ -1815,6 +1815,31 @@ impl UsartDirection {
     /// `BufferedUartRx` exist only as the result of `BufferedUart::split()`, so
     /// both pins are consumed either way and "TX only" would be a lie. On DMA,
     /// `UartTx::new` / `UartRx::new` are real constructors that take one pin.
+    /// The directions this FAMILY's generator can build.
+    ///
+    /// The lists below are embassy's. The other two backends are narrower and
+    /// were silently dropping what they could not build:
+    ///
+    /// - **STM32F1** has one shape. `serial::Pins` is implemented for the
+    ///   `(TX, RX)` PAIR alone, so there is no half of a port to construct —
+    ///   see the note on `f1_usart_needs_both_pads`.
+    /// - **ESP** has `UartTx::new` and `UartRx::new`, so a single direction is
+    ///   real there — but esp-hal has no single-wire mode at all.
+    pub fn options_for(transport: UsartMode, family: &str) -> &'static [UsartDirection] {
+        use crate::panels::mcu_module::codegen::family as fam;
+        if family == "stm32f1" {
+            return &[UsartDirection::TxRx];
+        }
+        if fam::is_esp(family) {
+            return &[
+                UsartDirection::TxRx,
+                UsartDirection::TxOnly,
+                UsartDirection::RxOnly,
+            ];
+        }
+        Self::options(transport)
+    }
+
     pub fn options(transport: UsartMode) -> &'static [UsartDirection] {
         match transport {
             // Half duplex IS available buffered — it is `BufferedUart` with one
@@ -1889,6 +1914,43 @@ impl UsartFlow {
     /// `new_with_cts`, while the DMA `Uart` has neither on its own and offers
     /// CTS-only / RTS-only through the one-way `UartTx` / `UartRx` instead.
     /// Offering a combination with no constructor would be a UI that lies.
+    /// The flow control this FAMILY's generator can build.
+    ///
+    /// - **STM32F1**: none. `stm32f1xx-hal`'s serial module has no RTS, no CTS
+    ///   and no driver-enable — the pads exist on the chip and the HAL does not
+    ///   reach them.
+    /// - **ESP**: RTS and CTS, through `.with_rts()`/`.with_cts()` and the
+    ///   `HwFlowControl` config. No RS485 driver-enable.
+    pub fn options_for(
+        transport: UsartMode,
+        direction: UsartDirection,
+        family: &str,
+    ) -> &'static [UsartFlow] {
+        use crate::panels::mcu_module::codegen::family as fam;
+        if family == "stm32f1" {
+            return &[UsartFlow::None];
+        }
+        if fam::is_esp(family) {
+            return if direction == UsartDirection::TxRx {
+                &[
+                    UsartFlow::None,
+                    UsartFlow::Cts,
+                    UsartFlow::Rts,
+                    UsartFlow::CtsRts,
+                ]
+            } else {
+                // A half of the port has only the pad it drives: `UartTx` takes
+                // an RTS pad and `UartRx` a CTS one, never both.
+                match direction {
+                    UsartDirection::TxOnly => &[UsartFlow::None, UsartFlow::Rts],
+                    UsartDirection::RxOnly => &[UsartFlow::None, UsartFlow::Cts],
+                    _ => &[UsartFlow::None],
+                }
+            };
+        }
+        Self::options(transport, direction)
+    }
+
     pub fn options(transport: UsartMode, direction: UsartDirection) -> &'static [UsartFlow] {
         // No half-duplex constructor takes a flow pad — one wire, no side band.
         if direction.is_half_duplex() {

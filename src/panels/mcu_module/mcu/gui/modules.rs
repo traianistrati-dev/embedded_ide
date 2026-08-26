@@ -1361,13 +1361,16 @@ pub fn module_config_ui(
         };
 
     // Data direction + hardware flow control. Both lists come from
-    // `UsartDirection::options` / `UsartFlow::options`, i.e. from what embassy
-    // has a CONSTRUCTOR for — never from what the silicon could in principle do.
+    // `UsartDirection::options_for` / `UsartFlow::options_for`, i.e. from what
+    // THIS FAMILY's backend has a CONSTRUCTOR for — never from what the silicon
+    // could in principle do. The three backends differ a lot: embassy builds
+    // every shape, the ESP builds a single direction and RTS/CTS, and the F1
+    // builds one TX+RX port and nothing else.
     // `wired` says which of CTS/RTS the module actually has a pin for, so a
     // choice that needs one it hasn't got is called out instead of silently
     // generating code that won't build.
     let direction_row = |ui: &mut egui::Ui, cfg: &mut UsartModuleConfig| {
-        let opts = UsartDirection::options(cfg.mode);
+        let opts = UsartDirection::options_for(cfg.mode, family);
         ui.label("Data direction");
         if opts.len() == 1 {
             // Locked rather than hidden: the reason is the useful part.
@@ -1430,7 +1433,7 @@ pub fn module_config_ui(
             egui::ComboBox::from_id_salt("usart_flow")
                 .selected_text(cfg.flow.label())
                 .show_ui(ui, |ui| {
-                    for f in UsartFlow::options(cfg.mode, cfg.direction) {
+                    for f in UsartFlow::options_for(cfg.mode, cfg.direction, family) {
                         ui.selectable_value(&mut cfg.flow, *f, f.label());
                     }
                 });
@@ -2257,10 +2260,14 @@ pub fn module_config_ui(
                         // A direction the new transport cannot build, or a flow
                         // option the new pair cannot, would otherwise sit there
                         // as a stale choice that generates nothing.
-                        if !UsartDirection::options(cfg.mode).contains(&cfg.direction) {
+                        if !UsartDirection::options_for(cfg.mode, family)
+                            .contains(&cfg.direction)
+                        {
                             cfg.direction = UsartDirection::TxRx;
                         }
-                        if !UsartFlow::options(cfg.mode, cfg.direction).contains(&cfg.flow) {
+                        if !UsartFlow::options_for(cfg.mode, cfg.direction, family)
+                            .contains(&cfg.flow)
+                        {
                             cfg.flow = UsartFlow::None;
                         }
                         if cfg.mode == UsartMode::Dma {

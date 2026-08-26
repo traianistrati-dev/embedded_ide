@@ -906,6 +906,11 @@ fn functions_for(chip: &EspChip, pad: super::esp_metadata::Gpio) -> Vec<PinFunct
     for u in &chip.uarts {
         out.push(PinFunction::UsartTx(u.id));
         out.push(PinFunction::UsartRx(u.id));
+        // The flow-control pads. Every ESP UART has `U<n>CTS`/`U<n>RTS` in the
+        // GPIO matrix, so they route like the data pads do — and esp-hal has
+        // `.with_cts()`/`.with_rts()` to reach them.
+        out.push(PinFunction::UsartCts(u.id));
+        out.push(PinFunction::UsartRts(u.id));
     }
 
     for s in &chip.spi {

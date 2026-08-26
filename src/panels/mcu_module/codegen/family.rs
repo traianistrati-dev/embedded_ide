@@ -354,6 +354,12 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
         .collect();
     let (uart, spi_n, i2c_n, i2s_n) = codegen_esp::bus_instances(&configured);
+    // The same filter `main.rs` uses, so the call and the signature agree.
+    let usart_cfgs = modules::usart_configs(&mcu.modules);
+    let uart: Vec<(u8, Vec<&'static str>)> = uart
+        .into_iter()
+        .map(|(n, sigs)| (n, codegen_esp::uart_sigs(usart_cfgs.get(&n), &sigs)))
+        .collect();
     // The config file needs the duty per channel, not the pin: the pins stay in
     // `main.rs` (they are the only record of the wiring) and arrive as `init`
     // arguments.
@@ -1761,6 +1767,13 @@ mod tests {
         // By search, not by name: GPIO4 is a JTAG pad on one part and a plain
         // pad on the next, and the pin NUMBERS differ between packages.
         let mut want = vec![
+            // A UART, so the direction and flow-control shapes are covered:
+            // `ESP_UART_MODE=tx|rx` builds a single direction, `=flow` adds
+            // RTS/CTS to the two-way port.
+            PinFunction::UsartTx(1),
+            PinFunction::UsartRx(1),
+            PinFunction::UsartCts(1),
+            PinFunction::UsartRts(1),
             PinFunction::SpiSck(2),
             PinFunction::SpiMosi(2),
             PinFunction::SpiMiso(2),
@@ -2048,6 +2061,32 @@ mod tests {
                     Ok("dpi") => LcdCamMode::Dpi,
                     _ => LcdCamMode::I8080,
                 };
+                c
+            }),
+            connections: Vec::new(),
+        });
+        mcu.modules.push(VirtualModule {
+            id: "usart_1".into(),
+            kind: ModuleKind::GenericInterfaceUsart,
+            name: "UART1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Usart({
+                use crate::panels::mcu_module::modules::{
+                    UsartDirection, UsartFlow, UsartModuleConfig,
+                };
+                let mut c = UsartModuleConfig::new(1);
+                match std::env::var("ESP_UART_MODE").as_deref() {
+                    Ok("tx") => {
+                        c.direction = UsartDirection::TxOnly;
+                        c.flow = UsartFlow::Rts;
+                    }
+                    Ok("rx") => {
+                        c.direction = UsartDirection::RxOnly;
+                        c.flow = UsartFlow::Cts;
+                    }
+                    Ok("flow") => c.flow = UsartFlow::CtsRts,
+                    _ => {}
+                }
                 c
             }),
             connections: Vec::new(),
@@ -3942,5 +3981,165 @@ mod tests {
             main.contains("_pcnt0_edge1"),
             "the second edge pad:\n{main}"
         );
+    }
+
+    /// Build a chip with UART1's four pads wired, and return
+    /// `(main.rs, uart1.rs)`.
+    #[cfg(test)]
+    fn esp_uart_project(
+        chip: &str,
+        direction: crate::panels::mcu_module::modules::UsartDirection,
+        flow: crate::panels::mcu_module::modules::UsartFlow,
+    ) -> (String, String) {
+        use crate::panels::mcu_module::modules::{
+            ModuleConfig, ModuleKind, UsartModuleConfig, VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for(chip)
+            .unwrap()
+            .build_mcu();
+        for f in [
+            PinFunction::UsartTx(1),
+            PinFunction::UsartRx(1),
+            PinFunction::UsartCts(1),
+            PinFunction::UsartRts(1),
+        ] {
+            if mcu.iter_all_pins().any(|p| p.selected_function == f) {
+                continue;
+            }
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(&f)
+                })
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("{chip}: no pad for {f:?}"));
+            mcu.apply_pin_function(num, f);
+        }
+        let mut cfg = UsartModuleConfig::new(1);
+        cfg.direction = direction;
+        cfg.flow = flow;
+        mcu.modules.push(VirtualModule {
+            id: "usart_1".into(),
+            kind: ModuleKind::GenericInterfaceUsart,
+            name: "UART1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Usart(cfg),
+            connections: Vec::new(),
+        });
+        let file = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "uart1.rs")
+            .map(|(_, c)| c)
+            .unwrap_or_default();
+        (mcu.fresh_main_rs(), file)
+    }
+
+    /// A single direction is a different esp-hal TYPE with a shorter signature,
+    /// and `main.rs` must pass exactly what that signature declares — a
+    /// mismatched argument list is the failure this guards.
+    #[test]
+    fn esp_uart_direction_picks_the_driver_and_the_pads() {
+        use crate::panels::mcu_module::modules::{UsartDirection, UsartFlow};
+        for (dir, driver, has, hasnt) in [
+            (UsartDirection::TxRx, "Uart", "_usart1_rx", ""),
+            (UsartDirection::TxOnly, "UartTx", "_usart1_tx", "_usart1_rx"),
+            (UsartDirection::RxOnly, "UartRx", "_usart1_rx", "_usart1_tx"),
+        ] {
+            let (main, file) = esp_uart_project("esp32c6", dir, UsartFlow::None);
+            assert!(
+                file.contains(&format!("-> {driver}<'d, Blocking>")),
+                "{dir:?}: {file}"
+            );
+            let call = main
+                .lines()
+                .find(|l| l.contains("configs::uart1::init"))
+                .unwrap_or_else(|| panic!("{dir:?}: no call:\n{main}"));
+            assert!(call.contains(has), "{dir:?}: {call}");
+            if hasnt != "" {
+                assert!(!call.contains(hasnt), "{dir:?}: {call}");
+            }
+            // No flow asked for, so neither flow pad is passed.
+            assert!(!call.contains("_usart1_cts"), "{dir:?}: {call}");
+            assert!(!call.contains("_usart1_rts"), "{dir:?}: {call}");
+        }
+    }
+
+    /// Flow control is a config AND a pad — one without the other is half a
+    /// feature. A half of the port takes only the pad it drives.
+    #[test]
+    fn esp_uart_flow_binds_the_config_and_the_pads() {
+        use crate::panels::mcu_module::modules::{UsartDirection, UsartFlow};
+        let (main, file) = esp_uart_project("esp32c6", UsartDirection::TxRx, UsartFlow::CtsRts);
+        assert!(file.contains("const FLOW: HwFlowControl"), "{file}");
+        assert!(file.contains("cts: CtsConfig::Enabled,"), "{file}");
+        assert!(file.contains("rts: RtsConfig::Enabled(8),"), "{file}");
+        assert!(file.contains(".with_hw_flow_ctrl(FLOW)"), "{file}");
+        assert!(
+            file.contains(".with_cts(cts)") && file.contains(".with_rts(rts)"),
+            "{file}"
+        );
+        let call = main
+            .lines()
+            .find(|l| l.contains("configs::uart1::init"))
+            .expect("the call");
+        assert!(
+            call.contains("_usart1_cts") && call.contains("_usart1_rts"),
+            "{call}"
+        );
+
+        // TX-only takes RTS and never CTS: it drives the flow line, it does not
+        // read one.
+        let (main, file) = esp_uart_project("esp32c6", UsartDirection::TxOnly, UsartFlow::Rts);
+        assert!(file.contains(".with_rts(rts)"), "{file}");
+        assert!(!file.contains(".with_cts("), "{file}");
+        let call = main
+            .lines()
+            .find(|l| l.contains("configs::uart1::init"))
+            .expect("the call");
+        assert!(
+            call.contains("_usart1_rts") && !call.contains("_usart1_cts"),
+            "{call}"
+        );
+    }
+
+    /// The panel offers only what THIS family's backend can build. It used to
+    /// offer every shape everywhere and silently drop what the F1 and the ESP
+    /// could not — a control that changes nothing is worse than an absent one.
+    #[test]
+    fn usart_modes_are_offered_only_where_they_can_be_built() {
+        use crate::panels::mcu_module::modules::{UsartDirection, UsartFlow, UsartMode};
+        // The F1 has one shape: `serial::Pins` is implemented for the (TX, RX)
+        // PAIR alone, and the HAL has no flow control at all.
+        assert_eq!(
+            UsartDirection::options_for(UsartMode::Buffered, "stm32f1"),
+            &[UsartDirection::TxRx]
+        );
+        assert_eq!(
+            UsartFlow::options_for(UsartMode::Buffered, UsartDirection::TxRx, "stm32f1"),
+            &[UsartFlow::None]
+        );
+
+        // The ESP has both single directions and RTS/CTS — but no single wire.
+        let esp = UsartDirection::options_for(UsartMode::Buffered, "esp32c6");
+        assert!(esp.contains(&UsartDirection::TxOnly));
+        assert!(esp.contains(&UsartDirection::RxOnly));
+        assert!(
+            !esp.iter().any(|d| d.is_half_duplex()),
+            "no single wire: {esp:?}"
+        );
+        assert!(
+            UsartFlow::options_for(UsartMode::Buffered, UsartDirection::TxRx, "esp32c6")
+                .contains(&UsartFlow::CtsRts)
+        );
+        // …and never the RS485 driver-enable, which esp-hal does not expose.
+        assert!(
+            !UsartFlow::options_for(UsartMode::Buffered, UsartDirection::TxRx, "esp32c6")
+                .contains(&UsartFlow::De)
+        );
+
+        // embassy keeps every shape it always had.
+        let emb = UsartDirection::options_for(UsartMode::Dma, "stm32f4");
+        assert!(emb.iter().any(|d| d.is_half_duplex()), "{emb:?}");
     }
 }

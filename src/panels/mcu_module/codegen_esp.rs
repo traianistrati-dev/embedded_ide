@@ -44,7 +44,8 @@ use super::mcu_def::DmaDef;
 use super::modules::{
     AsyncBusMode, CanModuleConfig, DacModuleConfig, I2cModuleConfig, I2sModuleConfig, LcdCamMode,
     LcdCamModuleConfig, McpwmModuleConfig, ParlIoModuleConfig, PcntModuleConfig, RmtModuleConfig,
-    SpiModuleConfig, TimerModuleConfig, TouchModuleConfig, UsartModuleConfig, UsbModuleConfig,
+    SpiModuleConfig, TimerModuleConfig, TouchModuleConfig, UsartDirection, UsartModuleConfig,
+    UsbModuleConfig,
 };
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -958,6 +959,9 @@ fn collect_buses<'a>(
         let (bus, n, sig) = match p.selected_function {
             PinFunction::UsartRx(n) => (&mut uart, n, "rx"),
             PinFunction::UsartTx(n) => (&mut uart, n, "tx"),
+            // Flow control routes through the same matrix as the data pads.
+            PinFunction::UsartCts(n) => (&mut uart, n, "cts"),
+            PinFunction::UsartRts(n) => (&mut uart, n, "rts"),
             PinFunction::SpiSck(n) => (&mut spi, n, "sck"),
             PinFunction::SpiMosi(n) => (&mut spi, n, "mosi"),
             PinFunction::SpiMiso(n) => (&mut spi, n, "miso"),
@@ -1313,6 +1317,34 @@ const I2S_ORDER: &[&str] = &["ck", "ws", "sd", "mck"];
 /// the user's `main.rs`, and no pretending a pin is used when it is not. The
 /// call site and the module are built from this same list, so they cannot
 /// disagree.
+/// Which UART pads one module binds, out of the ones wired.
+///
+/// A single direction is a different esp-hal TYPE with a shorter signature —
+/// `UartTx` never takes an RX pad — and a flow pad is only bound when the
+/// module asked for that flow. A pad left out here is still assigned on the
+/// canvas; it is simply not passed.
+pub(crate) fn uart_sigs(
+    cfg: Option<&UsartModuleConfig>,
+    wired: &[&'static str],
+) -> Vec<&'static str> {
+    let Some(c) = cfg else {
+        return wired.to_vec();
+    };
+    let (cts, rts) = (c.flow.needs_cts(), c.flow.needs_rts());
+    wired
+        .iter()
+        .copied()
+        .filter(|s| match *s {
+            "rx" => c.direction != UsartDirection::TxOnly,
+            "tx" => c.direction != UsartDirection::RxOnly,
+            // `UartTx` takes RTS and `UartRx` takes CTS — never the other way.
+            "cts" => cts && c.direction != UsartDirection::TxOnly,
+            "rts" => rts && c.direction != UsartDirection::RxOnly,
+            _ => true,
+        })
+        .collect()
+}
+
 pub fn bus_instances(configured: &[&Pin]) -> (BusWiring, BusWiring, BusWiring, BusWiring) {
     let (uart, spi, i2c, i2s_pins) = collect_buses(configured);
     let flatten = |b: BusPins, order: &[&'static str]| -> BusWiring {
@@ -1340,7 +1372,10 @@ pub type BusWiring = Vec<(u8, Vec<&'static str>)>;
 
 /// Signal order for each bus: the order the pins are bound in `main.rs` and
 /// declared in the generated `init`. One definition, used by both.
-pub const UART_ORDER: &[&str] = &["rx", "tx"];
+/// The order `main.rs` passes the UART pads in — the same order
+/// `codegen_esp_configs::uart_file` declares them. A single-direction port
+/// simply has fewer of them; the ones it does not name are never passed.
+pub const UART_ORDER: &[&str] = &["rx", "tx", "cts", "rts"];
 pub const SPI_ORDER: &[&str] = &["sck", "mosi", "miso", "cs"];
 pub const I2C_ORDER: &[&str] = &["scl", "sda"];
 
@@ -1579,11 +1614,12 @@ fn bus_sections(
             .get(n)
             .map(|c| module_label_sfx(&c.custom_label))
             .unwrap_or_default();
+        let order = uart_sigs(usart.get(n), UART_ORDER);
         out.push((
             format!("UART{n}"),
             section(
                 pins,
-                UART_ORDER,
+                &order,
                 format!("_uart{n}{sfx}"),
                 format!("uart{n}"),
                 format!("peripherals.UART{n}"),
