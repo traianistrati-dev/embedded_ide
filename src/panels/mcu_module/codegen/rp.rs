@@ -141,6 +141,113 @@ fn xtal_hz(mcu: &Mcu) -> u32 {
     }
 }
 
+/// Which GPIO carries each role of one bus instance.
+///
+/// The definition already says it — every header pin lists the SPI/UART/I2C
+/// role its FUNCSEL table gives it — so the backend never has to know the table
+/// itself, only how to read the wiring back out.
+fn bus_pins(mcu: &Mcu, want: impl Fn(&PinFunction) -> Option<(u8, &'static str)>) -> Vec<(u8, &'static str, u8)> {
+    let mut out = Vec::new();
+    for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
+        let Some(n) = gpio_index(&p.name) else { continue };
+        if let Some((inst, role)) = want(&p.selected_function) {
+            out.push((inst, role, n));
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// One instance's pin for a role, if it is wired.
+fn role_of(pins: &[(u8, &'static str, u8)], inst: u8, role: &str) -> Option<u8> {
+    pins.iter()
+        .find(|(i, r, _)| *i == inst && *r == role)
+        .map(|(_, _, n)| *n)
+}
+
+/// The instances that have any pin at all, ascending.
+fn instances(pins: &[(u8, &'static str, u8)]) -> Vec<u8> {
+    let mut v: Vec<u8> = pins.iter().map(|(i, _, _)| *i).collect();
+    v.dedup();
+    v
+}
+
+/// UART, SPI and I2C, in that order.
+///
+/// Each is emitted only when BOTH of its required pads are wired. rp-hal's
+/// constructors take the pins by value in a fixed order and there is no
+/// `NoPin` — so half a bus is not a smaller bus here, it is a type error.
+fn bus_lines(mcu: &Mcu, hal: &str) -> String {
+    let mut o = String::new();
+
+    let uart = bus_pins(mcu, |f| match f {
+        PinFunction::UsartTx(i) => Some((*i, "tx")),
+        PinFunction::UsartRx(i) => Some((*i, "rx")),
+        _ => None,
+    });
+    for i in instances(&uart) {
+        let (Some(tx), Some(rx)) = (role_of(&uart, i, "tx"), role_of(&uart, i, "rx")) else {
+            o.push_str(&format!(
+                "    // UART{i}: only one of TX/RX is wired, and `UartPeripheral::new`\n    // takes the pair. Wire the other pad on the Pins canvas.\n"
+            ));
+            continue;
+        };
+        o.push_str(&format!("    let uart{i} = {hal}::uart::UartPeripheral::new(\n"));
+        o.push_str(&format!("        pac.UART{i},\n"));
+        o.push_str(&format!("        (\n            pins.gpio{tx}.into_function(),\n            pins.gpio{rx}.into_function(),\n        ),\n"));
+        o.push_str("        &mut pac.RESETS,\n    )\n    .enable(\n");
+        o.push_str(&format!("        {hal}::uart::UartConfig::default(),\n"));
+        o.push_str("        clocks.peripheral_clock.freq(),\n    )\n    .unwrap();\n");
+        o.push_str(&format!("    let _ = &uart{i};\n"));
+    }
+
+    let spi = bus_pins(mcu, |f| match f {
+        PinFunction::SpiSck(i) => Some((*i, "sck")),
+        PinFunction::SpiMosi(i) => Some((*i, "mosi")),
+        PinFunction::SpiMiso(i) => Some((*i, "miso")),
+        _ => None,
+    });
+    for i in instances(&spi) {
+        let (Some(sck), Some(mosi), Some(miso)) = (
+            role_of(&spi, i, "sck"),
+            role_of(&spi, i, "mosi"),
+            role_of(&spi, i, "miso"),
+        ) else {
+            o.push_str(&format!(
+                "    // SPI{i}: `Spi::new` takes (MOSI, MISO, SCK) together, so all three\n    // pads have to be wired before anything can be built.\n"
+            ));
+            continue;
+        };
+        o.push_str(&format!("    let spi{i} = {hal}::spi::Spi::<_, _, _, 8>::new(\n"));
+        o.push_str(&format!("        pac.SPI{i},\n"));
+        o.push_str(&format!("        (\n            pins.gpio{mosi}.into_function(),\n            pins.gpio{miso}.into_function(),\n            pins.gpio{sck}.into_function(),\n        ),\n"));
+        o.push_str("    )\n    .init(\n        &mut pac.RESETS,\n        clocks.peripheral_clock.freq(),\n");
+        o.push_str(&format!("        {hal}::fugit::HertzU32::MHz(1),\n"));
+        o.push_str("        embedded_hal::spi::MODE_0,\n    );\n");
+        o.push_str(&format!("    let _ = &spi{i};\n"));
+    }
+
+    let i2c = bus_pins(mcu, |f| match f {
+        PinFunction::I2cSda(i) => Some((*i, "sda")),
+        PinFunction::I2cScl(i) => Some((*i, "scl")),
+        _ => None,
+    });
+    for i in instances(&i2c) {
+        let (Some(sda), Some(scl)) = (role_of(&i2c, i, "sda"), role_of(&i2c, i, "scl")) else {
+            o.push_str(&format!(
+                "    // I2C{i}: SDA and SCL are taken together; wire the missing one.\n"
+            ));
+            continue;
+        };
+        o.push_str(&format!("    let i2c{i} = {hal}::i2c::I2C::i2c{i}(\n"));
+        o.push_str(&format!("        pac.I2C{i},\n        pins.gpio{sda}.reconfigure(),\n        pins.gpio{scl}.reconfigure(),\n"));
+        o.push_str(&format!("        {hal}::fugit::RateExtU32::kHz(400u32),\n"));
+        o.push_str("        &mut pac.RESETS,\n        &clocks.system_clock,\n    );\n");
+        o.push_str(&format!("    let _ = &i2c{i};\n"));
+    }
+    o
+}
+
 /// The generated region: boot stage, clocks, the GPIO bank, and the pins.
 ///
 /// Built line by line rather than as one continued literal: rustfmt joins a
@@ -214,6 +321,7 @@ fn section(mcu: &Mcu) -> String {
     o.push_str(&format!("    let pins = {hal}::gpio::Pins::new(\n"));
     o.push_str("        pac.IO_BANK0,\n        pac.PADS_BANK0,\n        sio.gpio_bank0,\n        &mut pac.RESETS,\n    );\n\n");
     o.push_str(&gpio_lines(mcu));
+    o.push_str(&bus_lines(mcu, hal));
     o.push_str(GEN_END);
     o.push('\n');
     o
@@ -237,9 +345,14 @@ fn header(mcu: &Mcu) -> String {
          use panic_halt as _;\n\
          #[allow(unused_imports)]\n\
          use embedded_hal::digital::{{InputPin, OutputPin}};\n\
+         // `Clock` carries `.freq()`, which every bus constructor asks the\n\
+         // peripheral clock for.\n\
+         #[allow(unused_imports)]\n\
+         use {hal_crate}::Clock;\n\
          \n",
         mcu.name,
         mcu_id_marker_line(&mcu.id),
+        hal_crate = hal_crate(&mcu.family),
     )
 }
 
@@ -447,9 +560,18 @@ mod emit_for_manual_compile {
             let mut mcu = def.build_mcu();
             // The on-board LED and one input, so the GPIO half is exercised.
             for p in mcu.iter_all_pins_mut() {
+                // One of each bus, on the pads their FUNCSEL table gives them:
+                // UART0 on GP0/1, I2C0 on GP4/5, SPI0 on GP18/19/16. Anything
+                // else would be a wiring the chip cannot make.
                 match p.name.as_str() {
                     n if n.starts_with("GP25") => p.selected_function = PinFunction::GpioOutput,
-                    "GP16" => p.selected_function = PinFunction::GpioInput,
+                    "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                    "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                    "GP4" => p.selected_function = PinFunction::I2cSda(0),
+                    "GP5" => p.selected_function = PinFunction::I2cScl(0),
+                    "GP18" => p.selected_function = PinFunction::SpiSck(0),
+                    "GP19" => p.selected_function = PinFunction::SpiMosi(0),
+                    "GP16" => p.selected_function = PinFunction::SpiMiso(0),
                     _ => {}
                 }
             }
