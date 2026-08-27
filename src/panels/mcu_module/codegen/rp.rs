@@ -1261,3 +1261,70 @@ mod ambiguous_wiring {
         assert!(!code.contains("is wired to GP"), "no clash, no note:\n{code}");
     }
 }
+
+#[cfg(test)]
+mod config_file_shape {
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    /// The editable half of a config file must sit OUTSIDE the markers.
+    ///
+    /// `sync_config_files` replaces everything between `<<< GENERATED>>>` and
+    /// `<<< GENERATED END >>>` whenever a Virtual Module changes. So whatever
+    /// lands inside is regenerated, and whatever the user wrote there is gone —
+    /// silently, with no error, on a change as small as nudging a duty slider.
+    ///
+    /// Constants belong inside. `init`, `Handle` and `DutyHandle` do not: they
+    /// are the parts a user rewrites.
+    #[test]
+    fn only_the_constants_are_regenerated() {
+        const BEGIN: &str = "// <<< GENERATED>>>";
+        const END: &str = "// <<< GENERATED END >>>";
+
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        for p in mcu.iter_all_pins_mut() {
+            match p.name.as_str() {
+                "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                "GP4" => p.selected_function = PinFunction::I2cSda(0),
+                "GP5" => p.selected_function = PinFunction::I2cScl(0),
+                "GP18" => p.selected_function = PinFunction::SpiSck(0),
+                "GP19" => p.selected_function = PinFunction::SpiMosi(0),
+                "GP16" => p.selected_function = PinFunction::SpiMiso(0),
+                "GP6" => p.selected_function = PinFunction::TimerPwm { timer: 3, channel: 1 },
+                _ => {}
+            }
+        }
+        let files = mcu.config_files();
+        assert_eq!(files.len(), 4, "one per peripheral: {:?}",
+            files.iter().map(|(n, _)| n).collect::<Vec<_>>());
+
+        for (name, body) in &files {
+            assert_eq!(body.matches(BEGIN).count(), 1, "{name}: one begin marker");
+            assert_eq!(body.matches(END).count(), 1, "{name}: one end marker");
+            let b = body.find(BEGIN).unwrap();
+            let e = body.find(END).unwrap();
+            assert!(b < e, "{name}: markers out of order");
+
+            let inside = &body[b..e];
+            let outside = &body[e..];
+            for forbidden in ["pub fn init", "pub trait", "pub type Handle"] {
+                assert!(
+                    !inside.contains(forbidden),
+                    "{name}: `{forbidden}` is inside the regenerated block, so a user's \
+                     edit to it would be wiped by the next duty change:\n{body}"
+                );
+            }
+            assert!(outside.contains("pub fn init"), "{name}: init must survive:\n{body}");
+            assert!(outside.contains("pub type Handle"), "{name}: Handle must survive");
+            // And the constants are where they belong.
+            assert!(
+                inside.contains("const "),
+                "{name}: nothing regenerated at all?\n{body}"
+            );
+        }
+    }
+}
