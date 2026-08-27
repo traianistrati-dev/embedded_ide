@@ -175,6 +175,16 @@ $CASES = @(
     # which is not the channel number.
     @{ n = "ESP32-C3, two PWM channels";   t = "emit_esp32c3_project";       e = @{ EIDE_ESP_PWM = "0,2" }; q = $true }
 
+    # A third HAL family, and the first that is not STM32 or Espressif. One
+    # harness, two boards: the RP2040 on thumbv6m and the RP2350 on thumbv8m,
+    # each printing its own `target:`.
+    #
+    # Worth its place because almost every API in that backend was written from
+    # documentation, and the compiler has already caught two of them - `.freq()`
+    # and `set_duty_cycle` both live on embedded-hal traits that have to be
+    # imported, and neither failure is visible by reading.
+    @{ n = "Raspberry Pi Pico 1 + 2";      t = "emit_rp_project";            e = @{};                       q = $true }
+
     # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired
     # individually rather than forced onto one triple.
