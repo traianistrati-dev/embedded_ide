@@ -986,6 +986,16 @@ mod header_layout {
             assert_eq!(name_of(20), "GP15", "{id}");
             assert_eq!(name_of(21), "GP16", "{id}");
             assert_eq!(name_of(40), "VBUS", "{id}");
+
+            // The four that are on the BOARD but not on the header. They sit on
+            // the top edge because that is where they are: the USB connector is
+            // at the pin-1 end, and the LED is beside it.
+            let top: Vec<String> = mcu.top_pins.iter().map(|p| p.name.clone()).collect();
+            assert!(
+                top.iter().any(|n| n.starts_with("GP25")),
+                "{id}: the LED must be reachable, or the first thing anyone tries cannot be done: {top:?}"
+            );
+            assert!(mcu.bottom_pins.is_empty(), "{id}: nothing belongs on the bottom edge");
         }
     }
 }
