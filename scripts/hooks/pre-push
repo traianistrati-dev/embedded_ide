@@ -157,7 +157,14 @@ cleanup_worktree() {
 trap cleanup_worktree EXIT
 
 if [ -n "$verify_sha" ]; then
-    worktree="${TMP:-${TEMP:-/tmp}}/eide-push-check"
+    # ONE PATH PER RUN. It used to be a fixed name, and two pushes at once then
+    # fought over the same directory: the second could not `rm -rf` a worktree
+    # the first was still checking, `set -e` turned that into a dead hook, and
+    # the push was refused with nothing to explain it.
+    #
+    # The lock further down serialises the MATRIX, but the worktree is made
+    # before the script that takes it - so the path has to be private on its own.
+    worktree="${TMP:-${TEMP:-/tmp}}/eide-push-check-$$"
     rm -rf "$worktree"
     # `rm -rf` deletes the DIRECTORY; git keeps its own registration under
     # .git/worktrees, and an orphaned one makes every later `add` fail with
