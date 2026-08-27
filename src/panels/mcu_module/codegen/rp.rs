@@ -286,10 +286,30 @@ fn pwm_adc_lines(mcu: &Mcu, hal: &str) -> String {
             o.push_str(&format!("    pwm{slice}.set_ph_correct();\n"));
             o.push_str(&format!("    pwm{slice}.enable();\n"));
         }
+        // The duty comes from the Virtual Module, in HUNDREDTHS of a percent -
+        // the unit every other backend carries, so 7.5 % survives.
+        //
+        // rp-hal counts to `max_duty_cycle()` rather than to a fixed 65535, and
+        // that ceiling depends on the slice's own divider - so the arithmetic
+        // has to happen at RUNTIME, against the value the slice reports.
+        let cfgs = crate::panels::mcu_module::modules::timer_configs(&mcu.modules);
         for (slice, channel, n) in &pwm {
             // 1 is channel A, 2 is B - the even GPIO of the pair and the odd one.
             let ch = if *channel == 1 { "channel_a" } else { "channel_b" };
             o.push_str(&format!("    pwm{slice}.{ch}.output_to(pins.gpio{n});\n"));
+            let x100 = cfgs.get(slice).map_or(0, |c| c.duty_x100_of(*channel));
+            if x100 > 0 {
+                o.push_str(&format!("    // {} %
+", super::common::duty_percent_str(x100)));
+                o.push_str(&format!(
+                    "    let max{slice}_{channel} = pwm{slice}.{ch}.max_duty_cycle() as u32;
+"
+                ));
+                o.push_str(&format!(
+                    "    pwm{slice}.{ch}.set_duty_cycle((max{slice}_{channel} * {x100} / 10_000) as u16).unwrap();
+"
+                ));
+            }
         }
     }
 
@@ -413,6 +433,10 @@ fn header(mcu: &Mcu) -> String {
          // peripheral clock for.\n\
          #[allow(unused_imports)]\n\
          use {hal_crate}::Clock;\n\
+         // `SetDutyCycle` carries `max_duty_cycle` and `set_duty_cycle`; they\n\
+         // are embedded-hal's, not rp-hal's own.\n\
+         #[allow(unused_imports)]\n\
+         use embedded_hal::pwm::SetDutyCycle;\n\
          \n",
         mcu.name,
         mcu_id_marker_line(&mcu.id),
@@ -647,6 +671,17 @@ mod emit_for_manual_compile {
                         p.selected_function = PinFunction::AdcChannel { adc: 0, channel: 0 }
                     }
                     _ => {}
+                }
+            }
+            // The modules the wiring implies, then non-default duties on the
+            // PWM slice: 7.5 % and 10 %, so the generated code cannot pass by
+            // accident on the module's default of zero.
+            mcu.reconcile_modules();
+            for m in &mut mcu.modules {
+                if let crate::panels::mcu_module::modules::ModuleConfig::Timer(c) = &mut m.config {
+                    c.freq_hz = 20_000;
+                    c.set_duty_x100(1, 750);
+                    c.set_duty_x100(2, 1_000);
                 }
             }
             let main_rs = mcu.fresh_main_rs();
