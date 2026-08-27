@@ -168,6 +168,12 @@ pub fn fresh_esp32c3_main_rs(
     can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
+    // The Configuration tab's watchdog `init(...)` lines. A slot of its own
+    // rather than a prefix on `custom_inits`, because it lands somewhere else:
+    // right after the scheduler start, ahead of every peripheral. A watchdog
+    // meant to catch a hang during start-up is worth configuring before the
+    // code that might hang.
+    wdg_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
     // variants exist, and they differ per part.
     chip: &str,
@@ -194,6 +200,7 @@ pub fn fresh_esp32c3_main_rs(
         can,
         timer,
         custom_inits,
+        wdg_inits,
         chip,
         runtime,
         dma,
@@ -230,6 +237,12 @@ pub fn update_esp32c3_main_rs(
     can: &BTreeMap<u8, CanModuleConfig>,
     timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
+    // The Configuration tab's watchdog `init(...)` lines. A slot of its own
+    // rather than a prefix on `custom_inits`, because it lands somewhere else:
+    // right after the scheduler start, ahead of every peripheral. A watchdog
+    // meant to catch a hang during start-up is worth configuring before the
+    // code that might hang.
+    wdg_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
     // variants exist, and they differ per part.
     chip: &str,
@@ -256,6 +269,7 @@ pub fn update_esp32c3_main_rs(
         can,
         timer,
         custom_inits,
+        wdg_inits,
         chip,
         runtime,
         dma,
@@ -389,6 +403,9 @@ fn make_gen_section(
     timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
     custom_inits: &str,
+    // Watchdog `init(...)` lines — see the same parameter on
+    // `fresh_esp32c3_main_rs`.
+    wdg_inits: &str,
     // The chip id (`esp32h2`) — it decides which `CpuClock`
     // variants exist, and they differ per part.
     chip: &str,
@@ -466,6 +483,9 @@ fn make_gen_section(
     ));
     // Async: start the scheduler before anything awaits (or spawns).
     body.push_str(runtime.start_block());
+
+    // ── Watchdogs ── first, so a hang in the inits below is still caught.
+    body.push_str(wdg_inits);
 
     // ── GPIO Output / Input ───────────────────────────────────────────────────
     let outputs: Vec<&Pin> = configured
@@ -1481,18 +1501,23 @@ pub(crate) fn dma_plan(
     let Some(dma) = dma else {
         return plan;
     };
-    // The runtime decides for the SPI masters alone. Their DMA is an opt-in on
-    // top of a driver that works without it, and esp-hal puts that surface on
-    // the async side — so a blocking master simply does not ask.
+    // The RUNTIME decides nothing here.
     //
-    // Everything else here has no second form to fall back to: `I2s::new` and
-    // the parallel port take a channel in their only constructor, and esp-hal's
-    // SPI SLAVE has no CPU path at all. Withholding a channel from those on a
-    // blocking project does not make them blocking, it makes them absent.
-    let async_rt = runtime == EspRuntime::Async;
+    // It used to gate the SPI masters, on the belief that esp-hal keeps DMA on
+    // the async side. It does not: `with_dma` is on `impl Spi<'d, Blocking>`
+    // (`spi/master/dma.rs`), and hands back a `SpiDma<'d, Blocking>`. The same
+    // reasoning was applied correctly to the SLAVE — which takes a channel on
+    // either runtime — and wrongly to the master, in this same filter.
+    //
+    // So a master takes a channel when its module ASKS for one, whatever the
+    // runtime; a slave takes one always, because esp-hal gives it no CPU path
+    // at all; and `I2s::new`, the parallel port and the video port take one in
+    // their only constructor. Withholding a channel from those last three does
+    // not make them blocking, it makes them absent.
+    let _ = runtime;
     let on_dma: Vec<u8> = spi_cfg
         .iter()
-        .filter(|(_, c)| c.role.is_slave() || (async_rt && c.async_mode == AsyncBusMode::AsyncDma))
+        .filter(|(_, c)| c.role.is_slave() || c.async_mode == AsyncBusMode::AsyncDma)
         .map(|(n, _)| *n)
         .collect();
 
@@ -2111,6 +2136,7 @@ mod tests {
             &no_can(),
             &timer,
             "",
+            "",
             "esp32c3",
             EspRuntime::Blocking,
             None,
@@ -2167,6 +2193,7 @@ mod tests {
             &no_dac(),
             &no_can(),
             &Default::default(),
+            "",
             "",
             "esp32c3",
             EspRuntime::Blocking,
@@ -2262,6 +2289,7 @@ mod tests {
             &no_can(),
             &Default::default(),
             "",
+            "",
             "esp32c3",
             EspRuntime::Blocking,
             None,
@@ -2295,6 +2323,7 @@ mod tests {
             &no_dac(),
             &no_can(),
             &Default::default(),
+            "",
             "",
             "esp32c3",
             EspRuntime::Blocking,
@@ -2330,6 +2359,7 @@ mod tests {
             &no_can(),
             &Default::default(),
             "",
+            "",
             "esp32c3",
             EspRuntime::Blocking,
             None,
@@ -2361,6 +2391,7 @@ mod tests {
             &no_can(),
             &Default::default(),
             "",
+            "",
             "esp32c3",
             EspRuntime::Blocking,
             None,
@@ -2386,6 +2417,7 @@ mod tests {
             &no_dac(),
             &no_can(),
             &Default::default(),
+            "",
             "",
             "esp32c3",
             EspRuntime::Blocking,
@@ -2421,6 +2453,7 @@ mod tests {
             &no_dac(),
             &no_can(),
             &Default::default(),
+            "",
             "",
             "esp32c3",
             EspRuntime::Blocking,
@@ -2458,6 +2491,7 @@ mod tests {
             &no_dac(),
             &no_can(),
             &Default::default(),
+            "",
             "",
             "esp32c3",
             EspRuntime::Async,
@@ -2503,6 +2537,7 @@ mod tests {
             &no_dac(),
             &no_can(),
             &Default::default(),
+            "",
             "",
             "esp32c3",
             EspRuntime::Async,
@@ -2555,6 +2590,7 @@ mod tests {
                 &no_dac(),
                 &no_can(),
                 &Default::default(),
+                "",
                 "",
                 "esp32c3",
                 runtime,
@@ -2641,6 +2677,7 @@ mod tests {
             &no_dac(),
             &no_can(),
             &Default::default(),
+            "",
             "",
             "esp32c3",
             EspRuntime::Blocking,
@@ -2889,27 +2926,33 @@ mod tests {
         assert!(dma_candidates(None, "SPI2").is_empty());
     }
 
-    /// esp-hal's DMA surface is on the async drivers — for the MASTERS, which
-    /// have a blocking driver to fall back to. See `a_slave_is_served_on_either
-    /// _runtime` for the peripherals that do not.
+    /// The RUNTIME decides nothing about DMA on an ESP.
+    ///
+    /// This test used to assert the opposite, from the belief that esp-hal
+    /// keeps DMA on the async drivers. `with_dma` is on `impl Spi<'d, Blocking>`
+    /// and returns a `SpiDma<'d, Blocking>` — a blocking master that asks for a
+    /// channel gets one, and used to be silently refused.
     #[test]
-    fn the_blocking_runtime_allocates_nothing_for_a_master() {
+    fn a_master_that_asks_is_served_on_either_runtime() {
         let dma = gdma(3);
         let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2))].into();
-        assert!(
-            dma_plan(
-                Some(&dma),
-                EspRuntime::Blocking,
-                &spi,
-                &[],
-                false,
-                false,
-                false
-            )
-            .uses()
-            .is_empty()
-        );
+        for rt in [EspRuntime::Blocking, EspRuntime::Async] {
+            let plan = dma_plan(Some(&dma), rt, &spi, &[], false, false, false);
+            assert!(plan.spi.contains_key(&2), "master on {rt:?}: {plan:?}");
+        }
+
+        // A master that does NOT ask keeps the CPU path — the choice is the
+        // module's, and it is the only thing that decides.
+        let mut off = spi_on_dma(2);
+        off.async_mode = AsyncBusMode::Blocking;
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, off)].into();
+        for rt in [EspRuntime::Blocking, EspRuntime::Async] {
+            let plan = dma_plan(Some(&dma), rt, &spi, &[], false, false, false);
+            assert!(plan.uses().is_empty(), "not asked, on {rt:?}: {plan:?}");
+        }
+
         // …and a chip with no channel data cannot be served on any runtime.
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(2u8, spi_on_dma(2))].into();
         assert!(
             dma_plan(None, EspRuntime::Async, &spi, &[], false, false, false)
                 .uses()

@@ -826,6 +826,7 @@ mod emit_for_manual_compile {
                     timeout_us: wwdg_range_us(&l, pclk1).unwrap().1,
                     window_us: 0,
                 }),
+                ..Default::default()
             };
             let w_main = w.fresh_main_rs();
             let wcfgs = w.config_files();
@@ -902,6 +903,7 @@ mod emit_for_manual_compile {
                     timeout_us: wwdg_range_us(&l, pclk1).unwrap().1,
                     window_us: 0,
                 }),
+                ..Default::default()
             };
             let w_main = w.fresh_main_rs();
             let wcfgs = w.config_files();
@@ -972,7 +974,7 @@ mod emit_for_manual_compile {
                     // every millisecond of that gap panics.
                     timeout_us: iwdg_range_us(&limits_for(&m1.family)).1,
                 }),
-                wwdg: None,
+                ..Default::default()
             };
         }
         let main_rs = m1.fresh_main_rs();

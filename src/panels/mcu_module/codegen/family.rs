@@ -338,6 +338,10 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &can,
         &timer,
         &mcu.custom_module_inits(),
+        // NOT `watchdog_and_custom_inits()`, which the STM32 backends use: on
+        // an ESP the two land in different places in `main`, so they travel as
+        // two arguments.
+        &super::watchdog_gen::init_lines(&mcu.watchdog, &mcu.family),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
         &mcu.family,
         runtime,
@@ -350,6 +354,9 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
 /// blocking esp-hal drivers on either runtime (esp-rtos does not change how a
 /// `Uart` is built), so Async gets exactly the same files.
 fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
+    // The watchdogs come from a TAB, not from the Pins canvas, so they are
+    // collected here rather than threaded through the pin-driven builder.
+    let mut out = super::watchdog_gen::config_files(&mcu.watchdog, &mcu.family);
     let all = pins_of(mcu);
     let configured: Vec<&Pin> = all
         .iter()
@@ -382,7 +389,7 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
     let touch_cfg = modules::touch_configs(&mcu.modules);
     let lcd_cam_cfg = esp_lcd_configs(mcu);
     let parl_cfg = modules::parl_io_configs(&mcu.modules);
-    crate::panels::mcu_module::codegen_esp_configs::config_files(
+    out.extend(crate::panels::mcu_module::codegen_esp_configs::config_files(
         &uart,
         &spi_n,
         &i2c_n,
@@ -445,7 +452,8 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         &pwm,
         &timers,
         runtime,
-    )
+    ));
+    out
 }
 
 /// Re-splice an existing ESP `main.rs` on `runtime` (see [`esp_fresh_main_rs`]).
@@ -485,6 +493,10 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &can,
         &timer,
         &mcu.custom_module_inits(),
+        // NOT `watchdog_and_custom_inits()`, which the STM32 backends use: on
+        // an ESP the two land in different places in `main`, so they travel as
+        // two arguments.
+        &super::watchdog_gen::init_lines(&mcu.watchdog, &mcu.family),
         // On an ESP the family key IS the chip - `esp32h2`, not a series.
         &mcu.family,
         runtime,
@@ -1754,6 +1766,23 @@ mod tests {
         } else {
             Runtime::Async
         };
+
+        // All three watchdogs, so the RWDT's `Rtc` and both MWDT files land in
+        // the same project. `ESP_WDG=0` leaves them out.
+        if std::env::var("ESP_WDG").as_deref() != Ok("0") {
+            use crate::panels::mcu_module::watchdog::EspWdtConfig;
+            mcu.watchdog.rwdt = Some(EspWdtConfig {
+                timeout_us: 2_000_000,
+            });
+            mcu.watchdog.mwdt0 = Some(EspWdtConfig {
+                timeout_us: 1_500_000,
+            });
+            if crate::panels::mcu_module::watchdog::esp_limits_for(&id).has_mwdt1 {
+                mcu.watchdog.mwdt1 = Some(EspWdtConfig {
+                    timeout_us: 500_000,
+                });
+            }
+        }
 
         let rx_chan: u8 = if id == "esp32s3" { 4 } else { 2 };
 

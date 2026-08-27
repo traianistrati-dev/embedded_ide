@@ -96,6 +96,19 @@ pub fn watchdog_section(w: &crate::panels::mcu_module::watchdog::WatchdogSetting
             x.timeout_us, x.window_us
         ));
     }
+    // The ESP three. Written on their own keys rather than reusing `iwdg`,
+    // because a project carried from an STM32 to an ESP keeps both sets and
+    // neither should be read as the other: 26 seconds of IWDG is not 26
+    // seconds of RWDT, and the tab shows only the pair its family uses.
+    for (key, cfg) in [("rwdt", w.rwdt), ("mwdt0", w.mwdt0), ("mwdt1", w.mwdt1)] {
+        if let Some(c) = cfg {
+            body.push_str(&format!(
+                "{key} {}
+",
+                c.timeout_us
+            ));
+        }
+    }
     if body.is_empty() {
         String::new()
     } else {
@@ -110,7 +123,9 @@ pub fn watchdog_section(w: &crate::panels::mcu_module::watchdog::WatchdogSetting
 /// defaulted: a watchdog the user cannot see in the tab must not end up in the
 /// generated firmware, and silently substituting a number would do exactly that.
 pub fn parse_watchdog(text: &str) -> crate::panels::mcu_module::watchdog::WatchdogSettings {
-    use crate::panels::mcu_module::watchdog::{IwdgConfig, WatchdogSettings, WwdgConfig};
+    use crate::panels::mcu_module::watchdog::{
+        EspWdtConfig, IwdgConfig, WatchdogSettings, WwdgConfig,
+    };
     let mut out = WatchdogSettings::default();
     let Some(body) = section_body(text, WATCHDOG_HEADER) else {
         return out;
@@ -119,6 +134,9 @@ pub fn parse_watchdog(text: &str) -> crate::panels::mcu_module::watchdog::Watchd
         let mut it = line.split_whitespace();
         match (it.next(), it.next().and_then(|v| v.parse().ok())) {
             (Some("iwdg"), Some(timeout_us)) => out.iwdg = Some(IwdgConfig { timeout_us }),
+            (Some("rwdt"), Some(timeout_us)) => out.rwdt = Some(EspWdtConfig { timeout_us }),
+            (Some("mwdt0"), Some(timeout_us)) => out.mwdt0 = Some(EspWdtConfig { timeout_us }),
+            (Some("mwdt1"), Some(timeout_us)) => out.mwdt1 = Some(EspWdtConfig { timeout_us }),
             (Some("wwdg"), Some(timeout_us)) => {
                 // The window is required: without it the pair is meaningless,
                 // and defaulting it to 0 would quietly change the behaviour the
@@ -733,7 +751,9 @@ mod tests {
 #[cfg(test)]
 mod watchdog_section_tests {
     use super::*;
-    use crate::panels::mcu_module::watchdog::{IwdgConfig, WatchdogSettings, WwdgConfig};
+    use crate::panels::mcu_module::watchdog::{
+        EspWdtConfig, IwdgConfig, WatchdogSettings, WwdgConfig,
+    };
 
     #[test]
     fn both_watchdogs_round_trip() {
@@ -745,8 +765,35 @@ mod watchdog_section_tests {
                 timeout_us: 41_472,
                 window_us: 5_000,
             }),
+            ..Default::default()
         };
         assert_eq!(parse_watchdog(&watchdog_section(&w)), w);
+    }
+
+    /// The ESP three round-trip on their own keys, and do NOT come back as the
+    /// STM32 pair — which is what reusing `iwdg` for the RWDT would have done.
+    #[test]
+    fn the_esp_watchdogs_round_trip_on_their_own_keys() {
+        let w = WatchdogSettings {
+            rwdt: Some(EspWdtConfig {
+                timeout_us: 2_000_000,
+            }),
+            mwdt0: Some(EspWdtConfig { timeout_us: 750_000 }),
+            mwdt1: Some(EspWdtConfig { timeout_us: 15 }),
+            ..Default::default()
+        };
+        let text = watchdog_section(&w);
+        assert_eq!(parse_watchdog(&text), w, "{text}");
+        assert!(!text.contains("iwdg"), "{text}");
+
+        // And an STM32 project keeps writing nothing for them.
+        let stm = WatchdogSettings {
+            iwdg: Some(IwdgConfig { timeout_us: 1_000 }),
+            ..Default::default()
+        };
+        let text = watchdog_section(&stm);
+        assert!(!text.contains("wdt"), "{text}");
+        assert_eq!(parse_watchdog(&text), stm);
     }
 
     #[test]
@@ -754,14 +801,20 @@ mod watchdog_section_tests {
         for w in [
             WatchdogSettings {
                 iwdg: Some(IwdgConfig { timeout_us: 1_000 }),
-                wwdg: None,
+                ..Default::default()
             },
             WatchdogSettings {
-                iwdg: None,
                 wwdg: Some(WwdgConfig {
                     timeout_us: 900,
                     window_us: 0,
                 }),
+                ..Default::default()
+            },
+            WatchdogSettings {
+                mwdt1: Some(EspWdtConfig {
+                    timeout_us: 5_000_000,
+                }),
+                ..Default::default()
             },
         ] {
             assert_eq!(parse_watchdog(&watchdog_section(&w)), w);

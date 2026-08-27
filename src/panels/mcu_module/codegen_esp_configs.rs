@@ -529,7 +529,7 @@ fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime)
     );
     // Only meaningful on the DMA path, and only emitted there: an unused
     // constant in a generated file is a warning in the user's project.
-    if rt == EspRuntime::Async && cfg.is_some_and(|c| c.async_mode == AsyncBusMode::AsyncDma) {
+    if cfg.is_some_and(|c| c.async_mode == AsyncBusMode::AsyncDma) {
         consts.push_str(
             "const DMA_BUFFER_BYTES: usize = 4096; // per direction, static-backed
 ",
@@ -540,21 +540,35 @@ fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime)
                 \x20       .with_mode(MODE);\n\
                 \x20   Spi::new(spi, config)\n\
                 \x20       .unwrap()\n";
-    let mut body = format!(
-        "/// SPI{n} master — blocking driver.\n\
-         ///\n\
-         /// Takes exactly the lines wired on the Pins canvas: no MISO wired means\n\
-         /// no `miso` parameter here.\n\
-         pub fn init<'d>(\n\
-         {params}) -> Spi<'d, Blocking> {{\n\
-         {ctor}\
-         {chain}}}\n"
-    );
-    let on_dma =
-        rt == EspRuntime::Async && cfg.is_some_and(|c| c.async_mode == AsyncBusMode::AsyncDma);
+    // The MODULE decides, not the runtime: `with_dma` is on the blocking
+    // driver too, so `init` itself is the DMA form when one was asked for.
+    let on_dma = cfg.is_some_and(|c| c.async_mode == AsyncBusMode::AsyncDma);
+    let mut body = if on_dma {
+        spi_dma_fn(n, &params, ctor, &chain, "init", "Blocking", "")
+    } else {
+        format!(
+            "/// SPI{n} master — blocking driver.\n\
+             ///\n\
+             /// Takes exactly the lines wired on the Pins canvas: no MISO wired\n\
+             /// means no `miso` parameter here.\n\
+             pub fn init<'d>(\n\
+             {params}) -> Spi<'d, Blocking> {{\n\
+             {ctor}\
+             {chain}}}\n"
+        )
+    };
     if rt == EspRuntime::Async {
+        body.push('\n');
         if on_dma {
-            body.push_str(&spi_dma_twin(n, &params, ctor, &chain));
+            body.push_str(&spi_dma_fn(
+                n,
+                &params,
+                ctor,
+                &chain,
+                "init_async",
+                "Async",
+                "\n\x20       .into_async()",
+            ));
         } else {
             body.push_str(&async_twin(
                 &format!("SPI{n} master — async driver."),
@@ -565,40 +579,88 @@ fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime)
             ));
         }
     }
-    let example = example_for(
-        &format!("Using SPI{n}"),
-        &format!("_spi{n}"),
-        &[
-            "In main.rs, after the init above:",
-            "",
-            "    // Write only",
-            "    {H}.write(&[0x9F]).ok();",
-            "",
-            "    // Read only",
-            "    let mut rx = [0u8; 3];",
-            "    {H}.read(&mut rx).ok();",
-            "",
-            "    // Full duplex: `buf` is sent, and is overwritten by what comes back",
-            "    let mut buf = [0x9F, 0x00, 0x00, 0x00];",
-            "    {H}.transfer(&mut buf).ok();",
-            "",
-            "    // CS is NOT toggled for you unless it was wired on the canvas —",
-            "    // drive it yourself around a transaction if you kept it as a GPIO.",
-        ],
-        &[
-            "main.rs calls `init_async`, so the handle is a `Spi<'_, Async>`.",
-            "esp-hal's async SPI surface is narrower than the blocking one: it is",
-            "full-duplex in place, plus a flush. Use `init` for write-only/read-only.",
-            "",
-            "    // `buf` is sent, then overwritten by the reply",
-            "    let mut buf = [0x9F, 0x00, 0x00, 0x00];",
-            "    {H}.transfer_in_place_async(&mut buf).await.ok();",
-            "    {H}.flush_async().await.ok();",
-            "",
-            "    // CS is NOT toggled for you unless it was wired on the canvas.",
-        ],
-        rt,
-    );
+    let example = if on_dma {
+        example_for(
+            &format!("Using SPI{n}"),
+            &format!("_spi{n}"),
+            &[
+                "In main.rs, after the init above. The handle is a `SpiDmaBus`, not",
+                "an `Spi`: the GDMA moves the bytes, and each call returns once it",
+                "has finished.",
+                "",
+                "    // Write only",
+                "    {H}.write(&[0x9F]).ok();",
+                "",
+                "    // Read only",
+                "    let mut rx = [0u8; 3];",
+                "    {H}.read(&mut rx).ok();",
+                "",
+                "    // Full duplex in place: `buf` is sent, then overwritten",
+                "    let mut buf = [0x9F, 0x00, 0x00, 0x00];",
+                "    {H}.transfer_in_place(&mut buf).ok();",
+                "",
+                "    // Or two buffers, which need NOT be the same length. Note the",
+                "    // order: the one you read into comes first.",
+                "    //     {H}.transfer(&mut rx, &[0x9F]).ok();",
+                "",
+                "    // Transfers longer than DMA_BUFFER_BYTES are chunked for you.",
+                "    // CS is NOT toggled for you unless it was wired on the canvas.",
+            ],
+            &[
+                "main.rs calls `init_async`, so the handle is a `SpiDmaBus<'_, Async>`.",
+                "There is no flush to call: every one of these waits for the GDMA.",
+                "",
+                "    // Write only",
+                "    {H}.write_async(&[0x9F]).await.ok();",
+                "",
+                "    // Full duplex in place: `buf` is sent, then overwritten",
+                "    let mut buf = [0x9F, 0x00, 0x00, 0x00];",
+                "    {H}.transfer_in_place_async(&mut buf).await.ok();",
+                "",
+                "    // Two buffers, the one you read into first:",
+                "    //     let mut rx = [0u8; 3];",
+                "    //     {H}.transfer_async(&mut rx, &[0x9F]).await.ok();",
+                "",
+                "    // CS is NOT toggled for you unless it was wired on the canvas.",
+            ],
+            rt,
+        )
+    } else {
+        example_for(
+            &format!("Using SPI{n}"),
+            &format!("_spi{n}"),
+            &[
+                "In main.rs, after the init above:",
+                "",
+                "    // Write only",
+                "    {H}.write(&[0x9F]).ok();",
+                "",
+                "    // Read only",
+                "    let mut rx = [0u8; 3];",
+                "    {H}.read(&mut rx).ok();",
+                "",
+                "    // Full duplex: `buf` is sent, and is overwritten by what comes back",
+                "    let mut buf = [0x9F, 0x00, 0x00, 0x00];",
+                "    {H}.transfer(&mut buf).ok();",
+                "",
+                "    // CS is NOT toggled for you unless it was wired on the canvas —",
+                "    // drive it yourself around a transaction if you kept it as a GPIO.",
+            ],
+            &[
+                "main.rs calls `init_async`, so the handle is a `Spi<'_, Async>`.",
+                "esp-hal's async SPI surface is narrower than the blocking one: it is",
+                "full-duplex in place, plus a flush. Use `init` for write-only/read-only.",
+                "",
+                "    // `buf` is sent, then overwritten by the reply",
+                "    let mut buf = [0x9F, 0x00, 0x00, 0x00];",
+                "    {H}.transfer_in_place_async(&mut buf).await.ok();",
+                "    {H}.flush_async().await.ok();",
+                "",
+                "    // CS is NOT toggled for you unless it was wired on the canvas.",
+            ],
+            rt,
+        )
+    };
     file(
         &format!(
             "{}\
@@ -622,44 +684,56 @@ fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime)
     )
 }
 
-/// The DMA twin of `init_async`: the same bus, moved by the GDMA instead of by
-/// the CPU.
+/// The bus moved by the GDMA instead of by the CPU.
 ///
-/// # Why this is a separate shape and not a flag on [`async_twin`]
+/// # Not a flag on [`async_twin`], and not async-only
 ///
 /// `.into_async()` alone gives an `Spi<'_, Async>` that still copies every byte
 /// through the CPU. Going to DMA changes the RETURN TYPE — `SpiDmaBus` — and
 /// needs two owned descriptor buffers built before the bus exists, so there is
 /// no line to append: the whole body differs.
 ///
+/// And it is NOT the async driver's privilege. `with_dma` is on
+/// `impl Spi<'d, Blocking>` and hands back a `SpiDma<'d, Blocking>`, so this
+/// emits `init` on a blocking project and `init_async` on an async one — same
+/// body, one `.into_async()` apart. It used to be reachable only on async,
+/// which quietly refused a blocking project the channel it had asked for.
+///
 /// The buffers are `static`-backed by `dma_buffers!`, which is why the size is a
 /// constant here rather than a parameter: they must outlive the transfer, and a
 /// caller-supplied slice could not.
-fn spi_dma_twin(n: u8, params: &str, ctor: &str, chain: &str) -> String {
+fn spi_dma_fn(
+    n: u8,
+    params: &str,
+    ctor: &str,
+    chain: &str,
+    fname: &str,
+    dm: &str,
+    tail: &str,
+) -> String {
     format!(
-        "\n\
-         /// SPI{n} master — async driver on DMA.\n\
+        "/// SPI{n} master — {} driver on DMA.\n\
          ///\n\
-         /// Same construction as `init`, then `.with_dma()` and a pair of DMA\n\
-         /// buffers. The GDMA moves the bytes, so a transfer costs the CPU one\n\
-         /// `.await` rather than one interrupt per word.\n\
+         /// Same construction as the CPU form, then `.with_dma()` and a pair of\n\
+         /// DMA buffers. The GDMA moves the bytes, so a transfer costs the CPU\n\
+         /// one wait rather than one interrupt per word.\n\
          ///\n\
          /// The channel comes from main.rs. On this chip any free channel serves\n\
          /// any peripheral, so which one you get is the IDE's choice — see the\n\
          /// DMA card in the Configuration tab, or pin one by hand in the SPI\n\
          /// module.\n\
-         pub fn init_async<'d>(\n\
+         pub fn {fname}<'d>(\n\
          {params}\x20   dma: impl DmaChannelFor<AnySpi<'d>>,\n\
-         ) -> SpiDmaBus<'d, Async> {{\n\
+         ) -> SpiDmaBus<'d, {dm}> {{\n\
          \x20   let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =\n\
          \x20       dma_buffers!(DMA_BUFFER_BYTES);\n\
          \x20   let dma_rx = DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();\n\
          \x20   let dma_tx = DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();\n\
          {ctor}\
          {chain}\x20       .with_dma(dma)\n\
-         \x20       .with_buffers(dma_rx, dma_tx)\n\
-         \x20       .into_async()\n\
-         }}\n"
+         \x20       .with_buffers(dma_rx, dma_tx){tail}\n\
+         }}\n",
+        if dm == "Async" { "async" } else { "blocking" },
     )
 }
 
@@ -3289,6 +3363,53 @@ mod tests {
         // the consts need are ABOVE them.
         assert!(f.find("pub fn init").unwrap() > end, "{f}");
         assert!(f.find("use esp_hal::uart").unwrap() < begin, "{f}");
+    }
+
+    /// A DMA master gets the DMA `init` on EITHER runtime, and the entry point
+    /// main.rs calls is the one that takes the channel.
+    ///
+    /// This is the shape that was broken: the DMA form was emitted only as an
+    /// `init_async`, so a BLOCKING project called `init` — which took no
+    /// channel — with the channel main.rs had already allocated for it, and
+    /// failed to compile with an "unexpected argument #5".
+    #[test]
+    fn a_dma_master_takes_its_channel_in_the_entry_point_main_calls() {
+        let mut cfg = SpiModuleConfig::new(2);
+        cfg.async_mode = AsyncBusMode::AsyncDma;
+        let sigs = ["sck", "mosi", "miso"];
+
+        let blocking = spi_file(2, &sigs, Some(&cfg), EspRuntime::Blocking);
+        assert!(
+            blocking.contains("pub fn init<'d>(") && blocking.contains("dma: impl DmaChannelFor"),
+            "blocking `init` takes the channel:\n{blocking}"
+        );
+        assert!(
+            blocking.contains("-> SpiDmaBus<'d, Blocking>"),
+            "and hands back the DMA bus:\n{blocking}"
+        );
+        // `.into_async()` on a blocking project would not even name a type it
+        // has imported.
+        assert!(!blocking.contains("into_async"), "{blocking}");
+        assert!(!blocking.contains("init_async"), "{blocking}");
+
+        // On async, main.rs calls `init_async` — so THAT one takes the channel.
+        let asy = spi_file(2, &sigs, Some(&cfg), EspRuntime::Async);
+        let at = asy.find("pub fn init_async<'d>(").expect("async twin");
+        assert!(
+            asy[at..].contains("dma: impl DmaChannelFor"),
+            "async twin takes the channel:\n{asy}"
+        );
+        assert!(asy.contains("-> SpiDmaBus<'d, Async>"), "{asy}");
+        assert!(asy.contains(".into_async()"), "{asy}");
+
+        // A master that did NOT ask keeps the plain driver on both runtimes,
+        // and never mentions a channel it was not given.
+        for rt in [EspRuntime::Blocking, EspRuntime::Async] {
+            let cpu = spi_file(2, &sigs, Some(&SpiModuleConfig::new(2)), rt);
+            assert!(cpu.contains("-> Spi<'d, Blocking>"), "{rt:?}:\n{cpu}");
+            assert!(!cpu.contains("DmaChannelFor"), "{rt:?}:\n{cpu}");
+            assert!(!cpu.contains("DMA_BUFFER_BYTES"), "{rt:?}:\n{cpu}");
+        }
     }
 
     /// A bus with no module still gets a complete file, on esp-hal's defaults.

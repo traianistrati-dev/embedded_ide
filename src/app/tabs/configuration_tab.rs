@@ -15,7 +15,9 @@
 
 use crate::app::AppIde;
 use crate::panels::mcu_module::comparator::{self, CompConfig, CompSettings};
-use crate::panels::mcu_module::watchdog::{self as wdg, IwdgConfig, WatchdogLimits, WwdgConfig};
+use crate::panels::mcu_module::watchdog::{
+    self as wdg, EspWatchdogLimits, EspWdtConfig, IwdgConfig, WatchdogLimits, WwdgConfig,
+};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
@@ -106,11 +108,15 @@ impl AppIde {
             comp_cards(ui, &mut mcu.comp, &comps, comp_gen, &family, is_async);
             ui.add_space(12.0);
 
-            ui.label(dim(
+            let esp = wdg::is_esp(&family);
+            ui.label(dim(if esp {
+                "Watchdog values are durations - esp-hal works out the prescaler and \
+                 counter from them at run time, against the clock as it then is."
+            } else {
                 "Watchdog values are durations - the HAL derives the prescaler and \
                  counter from them, so what matters here is whether the chip can reach \
-                 the time you ask for.",
-            ));
+                 the time you ask for."
+            }));
             ui.add_space(10.0);
 
             // Not wired for every backend yet: better to say so than to let
@@ -127,9 +133,36 @@ impl AppIde {
                 return;
             }
 
-            iwdg_card(ui, &mut mcu.watchdog.iwdg, &limits);
-            ui.add_space(12.0);
-            wwdg_card(ui, &mut mcu.watchdog.wwdg, &limits, pclk1, &family);
+            if esp {
+                // A different chip's watchdogs entirely — different names,
+                // different clocks, different lifecycles. Sharing the IWDG card
+                // and relabelling it would have been the shorter change and a
+                // lie: the ESP has no window watchdog and no boot panic to
+                // protect against.
+                let el = wdg::esp_limits_for(&family);
+                esp_wdt_card(
+                    ui,
+                    &mut mcu.watchdog.rwdt,
+                    "RWDT",
+                    "RTC watchdog",
+                    wdg::rwdt_range_us(&el),
+                    &format!(
+                        "In the RTC power domain, counting on the RTC SLOW clock \
+                         (~{} kHz), so its period does NOT move with the Clock tab. That \
+                         clock is an RC oscillator esp-hal calibrates at boot, so the \
+                         period is not crystal-accurate either.",
+                        el.rtc_slow_hz / 1000
+                    ),
+                );
+                ui.add_space(12.0);
+                esp_mwdt_card(ui, &mut mcu.watchdog.mwdt0, 0, &el, &family);
+                ui.add_space(12.0);
+                esp_mwdt_card(ui, &mut mcu.watchdog.mwdt1, 1, &el, &family);
+            } else {
+                iwdg_card(ui, &mut mcu.watchdog.iwdg, &limits);
+                ui.add_space(12.0);
+                wwdg_card(ui, &mut mcu.watchdog.wwdg, &limits, pclk1, &family);
+            }
             ui.add_space(10.0);
         });
     }
@@ -260,6 +293,86 @@ fn wwdg_card(
     });
 }
 
+/// One ESP watchdog: a checkbox, a period, and what it is clocked from.
+///
+/// Simpler than [`iwdg_card`] by one whole concern. On an STM32 an unreachable
+/// duration is a **panic at boot**, so that card exists largely to keep the
+/// user inside a range; `esp-hal`'s `set_timeout` cannot fail, and the counters
+/// outrun the microsecond `u32` this tab counts in. So the range shown here is
+/// a floor of one tick and a ceiling that belongs to the tab, not the chip.
+fn esp_wdt_card(
+    ui: &mut egui::Ui,
+    cfg: &mut Option<EspWdtConfig>,
+    title: &str,
+    subtitle: &str,
+    range: (u32, u32),
+    note: &str,
+) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        let mut on = cfg.is_some();
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut on, "").changed() {
+                *cfg = on.then(EspWdtConfig::default_for);
+            }
+            ui.label(egui::RichText::new(format!("{}  {title}", ph::SHIELD)).strong());
+            ui.label(dim(subtitle));
+        });
+        ui.label(dim(note));
+        let Some(c) = cfg.as_mut() else { return };
+        ui.add_space(6.0);
+        duration_row(ui, "Period", &mut c.timeout_us, range);
+        ui.add_space(4.0);
+        ui.label(dim(
+            "esp_hal::init() switches every watchdog OFF on the way in, and the \
+             generated code only configures this one - it starts biting when you call \
+             enable().",
+        ));
+        problem_and_reset(ui, wdg::esp_wdt_problem(c, range, title), || {
+            *c = EspWdtConfig::default_for()
+        });
+    });
+}
+
+/// A timer group's watchdog, or the reason this chip has no second one.
+fn esp_mwdt_card(
+    ui: &mut egui::Ui,
+    cfg: &mut Option<EspWdtConfig>,
+    n: u8,
+    l: &EspWatchdogLimits,
+    chip: &str,
+) {
+    // Shown disabled rather than hidden — the same rule the WWDG card follows
+    // on an F1.
+    if n == 1 && !l.has_mwdt1 {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
+                ui.label(
+                    egui::RichText::new(format!("{}  MWDT1", ph::SHIELD))
+                        .strong()
+                        .color(egui::Color32::GRAY),
+                );
+                ui.label(dim("timer group 1 watchdog"));
+            });
+            ui.label(dim(format!(
+                "Not available on this chip: the {chip} has one timer group, so there is \
+                 no TIMG1 to take a watchdog from."
+            )));
+        });
+        return;
+    }
+    esp_wdt_card(
+        ui,
+        cfg,
+        &format!("MWDT{n}"),
+        &format!("timer group {n} watchdog"),
+        wdg::mwdt_range_us(),
+        "Clocked from APB, but the period still means what it says: esp-hal reads the \
+         live clock and works out the prescaler itself, so the Clock tab does not \
+         stretch it.",
+    );
+}
+
 /// The shared footer: what is wrong (if anything) and the way back to a value
 /// that is known good.
 ///
@@ -307,15 +420,15 @@ fn dma_note(
         // ESP32. It reached them because the branch was excluded for
         // one family by name (`!= "stm32f1"`) rather than by asking
         // whether the family uses a `DmaDef` at all.
-        if !on_dma_runtime {
-            format!(
-                "No DMA on this runtime for {family}. esp-hal's DMA lives on the async drivers, so switch to the Async runtime (System tab), then set a SPI module's Async init to Async-DMA."
-            )
-        } else {
-            format!(
-                "No bus is on DMA yet. Set a SPI module's Async init to Async-DMA and the channel it takes appears here. On {family} a channel is not split into TX and RX: esp-hal's `with_dma` takes one and drives both halves."
-            )
-        }
+        // The runtime is not asked about at all. This branch used to send
+        // people to the Async runtime, on the belief that esp-hal keeps DMA
+        // on the async drivers — `with_dma` is on `impl Spi<'d, Blocking>`.
+        format!(
+            "No bus is on DMA yet. Set a SPI module's Transfers to DMA and the channel it \
+             takes appears here - on either runtime, since esp-hal's `with_dma` is on the \
+             blocking driver too. On {family} a channel is not split into TX and RX: one \
+             channel drives both halves."
+        )
     } else if !on_dma_runtime {
         format!(
             "No DMA on this runtime for {family}. Switch a bus to the Async runtime \

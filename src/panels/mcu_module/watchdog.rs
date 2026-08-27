@@ -85,14 +85,19 @@ pub fn wwdg_supported(family: &str) -> bool {
 /// Is watchdog code actually GENERATED for this family yet?
 ///
 /// Separate from [`wwdg_supported`], which is about the HAL. This is about
-/// the IDE: every STM32 backend now calls `watchdog_gen`, so this is `true`
-/// across the board and only non-STM32 targets (the ESP32-C3) are left out.
+/// the IDE: every STM32 backend calls `watchdog_gen`, and both ESP backends
+/// now do too.
 ///
 /// Kept as a function rather than folded away because it is what stops the
 /// tab offering controls that reach no generated file, and the next family
 /// added to the IDE starts out on the wrong side of it.
 pub fn codegen_supported(family: &str) -> bool {
-    family.starts_with("stm32")
+    family.starts_with("stm32") || is_esp(family)
+}
+
+/// An ESP32 family key. They are CHIP ids (`esp32c3`), not series.
+pub fn is_esp(family: &str) -> bool {
+    family.starts_with("esp32")
 }
 
 /// The watchdog limits for an IDE family key (`stm32f4`, `stm32g0`, …).
@@ -195,11 +200,119 @@ pub struct WwdgConfig {
     pub window_us: u32,
 }
 
-/// Both watchdogs, each `None` until switched on in the Configuration tab.
+/// One ESP watchdog: a period, and nothing else.
+///
+/// No window (the ESP has none) and no expiry action. The action is left at
+/// what `enable()` writes — stage 0 resets the system, stages 1..3 off — for
+/// two different reasons per watchdog:
+///
+/// * MWDT: `set_stage_action` is documented as taking effect **only under a
+///   custom bootloader** with `ESP_TASK_WDT_EN` and `ESP_INT_WDT` disabled. A
+///   control that silently does nothing on a stock build is worse than none.
+/// * RWDT: it works, but the useful non-reset action is `Interrupt`, which
+///   needs a handler bound — a Pins-canvas concern, not a duration field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EspWdtConfig {
+    pub timeout_us: u32,
+}
+
+/// What one ESP chip's watchdogs can express.
+///
+/// Far less than [`WatchdogLimits`] carries, and deliberately: on the STM32 an
+/// out-of-range duration is a **boot panic**, so that struct exists to prevent
+/// one. esp-hal's `set_timeout` cannot fail — it computes ticks and writes
+/// them. So the only question left here is the FLOOR, which is one tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EspWatchdogLimits {
+    /// Nominal RTC slow clock. NOT a fixed number in silicon: it is an RC
+    /// oscillator that esp-hal CALIBRATES at boot (`rtc_slow_cal_period`), so
+    /// this is what the part is specified at, not what a given die will run at.
+    /// It is used for one thing — the shortest RWDT period worth offering.
+    pub rtc_slow_hz: u32,
+    /// `Rwdt::set_timeout` shifts the tick count right by `1 + efuse
+    /// multiplier` on every part except the original ESP32. The efuse half is
+    /// read at runtime and is 0 on stock parts, so this is the shift alone.
+    pub rwdt_shift: u32,
+    /// The ESP32-C2 has one timer group; every other part has two.
+    pub has_mwdt1: bool,
+}
+
+/// The watchdog limits for an ESP chip id (`esp32c3`, `esp32s3`, …).
+pub fn esp_limits_for(chip: &str) -> EspWatchdogLimits {
+    EspWatchdogLimits {
+        // The original ESP32's RC runs at 150 kHz; every later part at 136.
+        rtc_slow_hz: if chip == "esp32" { 150_000 } else { 136_000 },
+        rwdt_shift: u32::from(chip != "esp32"),
+        has_mwdt1: chip != "esp32c2",
+    }
+}
+
+/// The RWDT periods worth offering, in microseconds.
+///
+/// The floor is one RTC tick AFTER the shift: below it the `hold` register
+/// takes 0 and the stage is degenerate. The ceiling is `u32::MAX` because that
+/// is the tab's own unit running out, not the chip: at 136 kHz a full u32 of
+/// microseconds is 5.8e8 ticks, and the register holds 32 bits of them.
+pub fn rwdt_range_us(l: &EspWatchdogLimits) -> (u32, u32) {
+    let per_tick_us = 1_000_000u64.div_ceil(l.rtc_slow_hz.max(1) as u64);
+    ((per_tick_us << l.rwdt_shift).max(1) as u32, u32::MAX)
+}
+
+/// The MWDT periods worth offering, in microseconds.
+///
+/// One flat range for every part, and that is not a simplification: the tick
+/// count is `micros * clock_MHz`, so any clock of at least 1 MHz reaches one
+/// tick within one microsecond — and the MWDT is clocked from APB or the
+/// crystal, never below 32 MHz on these parts. The ceiling is `u32::MAX` for
+/// the same reason as the RWDT's: a full u32 of microseconds at 80 MHz needs
+/// prescaler 80 out of the 65535 available.
+pub fn mwdt_range_us() -> (u32, u32) {
+    (1, u32::MAX)
+}
+
+/// Both ESP watchdogs, plus the STM32 pair. Each `None` until switched on.
+///
+/// One struct for every family rather than an enum: the tab reaches for the
+/// two fields its family uses and the generator ignores the rest, so carrying
+/// a configuration across a chip change loses nothing that can be kept.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WatchdogSettings {
     pub iwdg: Option<IwdgConfig>,
     pub wwdg: Option<WwdgConfig>,
+    /// ESP: the RTC watchdog, in the RTC power domain.
+    #[serde(default)]
+    pub rwdt: Option<EspWdtConfig>,
+    /// ESP: timer group 0's watchdog.
+    #[serde(default)]
+    pub mwdt0: Option<EspWdtConfig>,
+    /// ESP: timer group 1's watchdog — absent on the ESP32-C2.
+    #[serde(default)]
+    pub mwdt1: Option<EspWdtConfig>,
+}
+
+impl EspWdtConfig {
+    /// The default a freshly ticked box gets: one second.
+    ///
+    /// NOT the longest period, unlike [`IwdgConfig::default_for`]. That default
+    /// exists because on an STM32 the longest value is the only one certain to
+    /// be in range; here every value in the range is expressible, so the
+    /// default can be the one that is actually useful.
+    pub fn default_for() -> Self {
+        Self {
+            timeout_us: 1_000_000,
+        }
+    }
+}
+
+/// Why an ESP period would not do what it says, or `None` when it is fine.
+pub fn esp_wdt_problem(cfg: &EspWdtConfig, range: (u32, u32), what: &str) -> Option<String> {
+    let (lo, hi) = range;
+    (!(lo..=hi).contains(&cfg.timeout_us)).then(|| {
+        format!(
+            "{} is outside the {what} range {}..={} us",
+            cfg.timeout_us, lo, hi
+        )
+    })
 }
 
 impl IwdgConfig {
@@ -433,7 +546,38 @@ mod tests {
         // F1 and WBA joined once their backends called the generator.
         assert!(codegen_supported("stm32f1"));
         assert!(codegen_supported("stm32wba"));
-        // Non-STM32 targets have no watchdog codegen at all.
-        assert!(!codegen_supported("esp32c3"));
+        // The ESPs joined last, on their own peripherals: RWDT + MWDT, not
+        // IWDG + WWDG. This used to assert the opposite.
+        for chip in ["esp32", "esp32c2", "esp32c3", "esp32c6", "esp32h2", "esp32s3"] {
+            assert!(codegen_supported(chip), "{chip}");
+            assert!(is_esp(chip), "{chip}");
+        }
+        assert!(!is_esp("stm32f4"));
+        // A family the IDE does not generate for at all.
+        assert!(!codegen_supported("rp2040"));
+    }
+
+    /// The ESP32-C2 is the one part with a single timer group, so it is the
+    /// one that would generate a `TIMG1` that does not exist.
+    #[test]
+    fn only_the_c2_lacks_the_second_timer_group() {
+        assert!(!esp_limits_for("esp32c2").has_mwdt1);
+        for chip in ["esp32", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2", "esp32s2", "esp32s3"] {
+            assert!(esp_limits_for(chip).has_mwdt1, "{chip}");
+        }
+    }
+
+    /// The RWDT floor is one tick AFTER the shift esp-hal applies, and the
+    /// original ESP32 is the only part without that shift.
+    #[test]
+    fn the_rwdt_floor_follows_the_shift_and_the_rc_clock() {
+        // 150 kHz, no shift: one tick is 7 us.
+        assert_eq!(rwdt_range_us(&esp_limits_for("esp32")).0, 7);
+        // 136 kHz, shifted by one: 8 us per tick, two ticks per write.
+        assert_eq!(rwdt_range_us(&esp_limits_for("esp32c3")).0, 16);
+        // The ceiling belongs to the tab's `u32` of microseconds, not to the
+        // chip: at 136 kHz a full u32 of us is 5.8e8 ticks in a 32-bit hold.
+        assert_eq!(rwdt_range_us(&esp_limits_for("esp32c3")).1, u32::MAX);
+        assert_eq!(mwdt_range_us(), (1, u32::MAX));
     }
 }

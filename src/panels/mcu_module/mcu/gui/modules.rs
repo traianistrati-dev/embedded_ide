@@ -1085,12 +1085,10 @@ pub fn module_config_ui(
     pin_funcs: &HashMap<usize, Vec<PinFunction>>,
     // Set when a function is picked from a pin button; the caller applies it.
     pin_fn_choice: &mut Option<(usize, PinFunction)>,
+    // EMBASSY async. The ESP has an async runtime too, but none of its rows
+    // turn on it: `with_dma`, `UartTx::new` and `.with_cts()` are all on the
+    // blocking drivers, so what decides there is the FAMILY (`esp` below).
     is_async: bool,
-    // The ESP's async runtime (esp-rtos). A separate flag from `is_async`
-    // because the two backends share almost no rows: embassy's transport and
-    // channel names come from `embassy-stm32`, the ESP's DMA is `with_dma` on
-    // an esp-hal driver with a channel called `DMA_CH0`.
-    is_esp_async: bool,
     is_native: bool,
     // The chip's family key — the blocking DMA transport is stm32f1xx-hal's,
     // so only the F1 backend can emit it.
@@ -2543,11 +2541,12 @@ pub fn module_config_ui(
                             }
                         });
                     ui.end_row();
-                    if is_esp_async {
+                    if esp {
                         api_row(ui, &mut pending.0);
-                        // esp-hal puts the DMA surface on the ASYNC driver, so
-                        // this is an async-runtime choice on the ESP too — but
-                        // the mechanism is `with_dma`, not embassy's transport.
+                        // Not a runtime choice: `with_dma` is on
+                        // `impl Spi<'d, Blocking>` and hands back a
+                        // `SpiDma<'d, Blocking>`, so a blocking project puts a
+                        // master on DMA exactly as an async one does.
                         esp_dma_row(ui, &mut pending.1);
                         if pending.1 == AsyncBusMode::AsyncDma {
                             // ONE channel per bus on an ESP: `with_dma` drives

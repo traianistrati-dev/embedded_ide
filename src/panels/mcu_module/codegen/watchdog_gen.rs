@@ -13,7 +13,7 @@
 //! Neither takes a pin, so unlike every other `pins/configs/*.rs` these are
 //! driven by a tab, not by the Pins canvas.
 
-use super::super::watchdog::WatchdogSettings;
+use super::super::watchdog::{EspWdtConfig, WatchdogSettings};
 
 /// `src/pins/configs/iwdg.rs` — the STM32F1, whose HAL is not embassy.
 ///
@@ -129,6 +129,168 @@ pub fn init(wwdg: Peri<'static, WWDG>) -> Handle {
 //     }
 "#;
 
+/// `src/pins/configs/rwdt.rs` — the ESP's RTC watchdog.
+///
+/// # Why `init` hands back the whole `Rtc`
+///
+/// `Rwdt` is a field of it. Moving that field out would drop the `Rtc` — and
+/// with it the `LPWR` handle the rest of the low-power API needs — for the sake
+/// of a shorter type. Returning the `Rtc` costs one `.rwdt.` at each call and
+/// leaves sleep and the RTC clock reachable from the same binding.
+const RWDT_TMPL: &str = r#"// <<< GENERATED>>>
+// Watchdog config (from the Configuration tab) - auto-updated; edit it there.
+const TIMEOUT_US: u64 = {TIMEOUT};
+// <<< GENERATED END >>>
+
+// Everything below is editable - your changes are preserved on regeneration.
+//
+// The RTC watchdog lives in the RTC power domain and counts on the RTC SLOW
+// clock, an RC oscillator esp-hal calibrates at boot. So its period does not
+// move with the CPU clock - but it is not crystal-accurate either, and the same
+// code will not time out at exactly the same instant on two boards.
+//
+// `esp_hal::init()` DISABLES this watchdog on the way in, so nothing is armed
+// until you call `enable()`.
+use esp_hal::peripherals::LPWR;
+use esp_hal::rtc_cntl::{Rtc, RwdtStage};
+use esp_hal::time::Duration;
+
+/// Handle type, so it can be stored in a struct or a task's state.
+pub type Handle = Rtc<'static>;
+
+/// Configure the RTC watchdog. It is NOT running yet - call `rwdt.enable()`
+/// when your start-up is far enough along to keep feeding it.
+pub fn init(lpwr: LPWR<'static>) -> Handle {
+    let mut rtc = Rtc::new(lpwr);
+    rtc.rwdt
+        .set_timeout(RwdtStage::Stage0, Duration::from_micros(TIMEOUT_US));
+    rtc
+}
+
+// -- Using the RWDT --
+//
+//     let mut rtc = pins::configs::rwdt::init(peripherals.LPWR);
+//     rtc.rwdt.enable();             // from here on it will reset the chip
+//     loop {
+//         rtc.rwdt.feed();           // at least once every TIMEOUT_US
+//     }
+"#;
+
+/// `src/pins/configs/mwdt{N}.rs` — a timer group's watchdog.
+///
+/// # Why `init` takes nothing
+///
+/// `Wdt<TG>` is a `PhantomData` marker: it owns no register state, and esp-hal
+/// exposes `Wdt::new()` with no argument. esp-hal's own `init()` builds one
+/// exactly this way — `Wdt::<TIMG0<'static>>::new().disable()` — to switch the
+/// boot watchdogs off.
+///
+/// That matters on the ASYNC runtime, where `TimerGroup::new(peripherals.TIMG0)`
+/// has already consumed the peripheral for the scheduler's timer. Taking the
+/// peripheral here would not compile there; taking nothing works on both, and
+/// the timer half and the watchdog half do not share a register.
+const MWDT_TMPL: &str = r#"// <<< GENERATED>>>
+// Watchdog config (from the Configuration tab) - auto-updated; edit it there.
+const TIMEOUT_US: u64 = {TIMEOUT};
+// <<< GENERATED END >>>
+
+// Everything below is editable - your changes are preserved on regeneration.
+//
+// Timer group {N}'s watchdog. It counts on the APB clock, but the period above
+// still means what it says: `set_timeout` reads the live clock and works out
+// the prescaler itself, so changing the Clock tab does not stretch it.
+//
+// `esp_hal::init()` DISABLES this watchdog on the way in, so nothing is armed
+// until you call `enable()`. Note that `enable()` also REWRITES the stage
+// actions - stage 0 resets the system, stages 1..3 off - so call it BEFORE any
+// `set_stage_action` of your own, not after.
+use esp_hal::peripherals::TIMG{N};
+use esp_hal::time::Duration;
+use esp_hal::timer::timg::{MwdtStage, Wdt};
+
+/// Handle type, so it can be stored in a struct or a task's state.
+pub type Handle = Wdt<TIMG{N}<'static>>;
+
+/// Configure timer group {N}'s watchdog. It is NOT running yet - call
+/// `enable()` when your start-up is far enough along to keep feeding it.
+pub fn init() -> Handle {
+    let mut wdt = Wdt::new();
+    wdt.set_timeout(MwdtStage::Stage0, Duration::from_micros(TIMEOUT_US));
+    wdt
+}
+
+// -- Using MWDT{N} --
+//
+//     let mut wdt = pins::configs::mwdt{N}::init();
+//     wdt.enable();                  // from here on it will reset the chip
+//     loop {
+//         wdt.feed();                // at least once every TIMEOUT_US
+//     }
+"#;
+
+/// Does this chip have the second timer group? The ESP32-C2 does not.
+///
+/// Asked HERE and not only in the UI so that a configuration carried over from
+/// another chip cannot generate a file naming a `TIMG1` that does not exist.
+fn has_mwdt1(chip: &str) -> bool {
+    super::super::watchdog::esp_limits_for(chip).has_mwdt1
+}
+
+/// Every ESP watchdog that is switched on, as `(file stem, settings)`.
+///
+/// One list read by both [`esp_config_files`] and [`esp_init_lines`], so the
+/// file that is written and the line that calls it cannot disagree about which
+/// watchdogs exist.
+fn esp_enabled(w: &WatchdogSettings, chip: &str) -> Vec<(String, EspWdtConfig)> {
+    let mut out = Vec::new();
+    if let Some(c) = w.rwdt {
+        out.push(("rwdt".to_owned(), c));
+    }
+    for (n, cfg) in [(0u8, w.mwdt0), (1, w.mwdt1)] {
+        if n == 1 && !has_mwdt1(chip) {
+            continue;
+        }
+        if let Some(c) = cfg {
+            out.push((format!("mwdt{n}"), c));
+        }
+    }
+    out
+}
+
+/// The ESP half of [`config_files`].
+fn esp_config_files(w: &WatchdogSettings, chip: &str) -> Vec<(String, String)> {
+    esp_enabled(w, chip)
+        .into_iter()
+        .map(|(stem, c)| {
+            let body = if stem == "rwdt" {
+                RWDT_TMPL.replace("{TIMEOUT}", &c.timeout_us.to_string())
+            } else {
+                MWDT_TMPL
+                    .replace("{TIMEOUT}", &c.timeout_us.to_string())
+                    .replace("{N}", stem.trim_start_matches("mwdt"))
+            };
+            (format!("{stem}.rs"), body)
+        })
+        .collect()
+}
+
+/// The ESP half of [`init_lines`].
+fn esp_init_lines(w: &WatchdogSettings, chip: &str) -> String {
+    let mut s = String::new();
+    for (stem, _) in esp_enabled(w, chip) {
+        if stem == "rwdt" {
+            s.push_str("    // Configured, NOT started - call rwdt.enable() when ready.\n");
+            s.push_str("    let mut _rtc = pins::configs::rwdt::init(peripherals.LPWR);\n");
+        } else {
+            s.push_str("    // Configured, NOT started - call enable() when ready.\n");
+            s.push_str(&format!(
+                "    let mut _{stem} = pins::configs::{stem}::init();\n"
+            ));
+        }
+    }
+    s
+}
+
 /// The `pins/configs/*.rs` files the watchdog settings call for.
 ///
 /// `family` decides what is even possible: `stm32f1xx-hal` has no window
@@ -136,6 +298,9 @@ pub fn init(wwdg: Peri<'static, WWDG>) -> Handle {
 /// a file that cannot compile. Dropping it here rather than in the UI means the
 /// invariant holds however the settings got into the model.
 pub fn config_files(w: &WatchdogSettings, family: &str) -> Vec<(String, String)> {
+    if super::super::watchdog::is_esp(family) {
+        return esp_config_files(w, family);
+    }
     let mut out = Vec::new();
     if let Some(i) = w.iwdg {
         // The F1 HAL takes milliseconds, so the stored microseconds are
@@ -167,6 +332,22 @@ pub fn config_files(w: &WatchdogSettings, family: &str) -> Vec<(String, String)>
 /// Emitted BEFORE the custom-module inits: a watchdog that is meant to catch a
 /// hang during start-up is worth arming before the code that might hang.
 pub fn init_lines(w: &WatchdogSettings, family: &str) -> String {
+    // The ESP's names, types and lifecycles share nothing with the STM32
+    // pair's, so that branch REPLACES this one rather than adding to it. Only
+    // the header below is common.
+    let s = if super::super::watchdog::is_esp(family) {
+        esp_init_lines(w, family)
+    } else {
+        stm32_init_lines(w, family)
+    };
+    if s.is_empty() {
+        return s;
+    }
+    format!("\n    // ── Watchdogs ──\n{s}")
+}
+
+/// The STM32 half of [`init_lines`].
+fn stm32_init_lines(w: &WatchdogSettings, family: &str) -> String {
     let mut s = String::new();
     if w.iwdg.is_some() {
         if family == "stm32f1" {
@@ -181,15 +362,14 @@ pub fn init_lines(w: &WatchdogSettings, family: &str) -> String {
         s.push_str("    // Running from this line on; pet() too early also resets.\n");
         s.push_str("    let mut _wwdg = pins::configs::wwdg::init(p.WWDG);\n");
     }
-    if s.is_empty() {
-        return s;
-    }
-    format!("\n    // ── Watchdogs ──\n{s}")
+    s
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::watchdog::{IwdgConfig, WatchdogSettings, WwdgConfig};
+    use super::super::super::watchdog::{
+        EspWdtConfig, IwdgConfig, WatchdogSettings, WwdgConfig,
+    };
     use super::*;
 
     fn both() -> WatchdogSettings {
@@ -201,6 +381,7 @@ mod tests {
                 timeout_us: 41_472,
                 window_us: 1_000,
             }),
+            ..Default::default()
         }
     }
 
@@ -237,7 +418,7 @@ mod tests {
             iwdg: Some(IwdgConfig {
                 timeout_us: 26_214_000,
             }),
-            wwdg: None,
+            ..Default::default()
         };
         let f1 = &config_files(&w, "stm32f1")[0].1;
         assert!(f1.contains("const TIMEOUT_MS: u32 = 26214;"), "{f1}");
@@ -248,6 +429,78 @@ mod tests {
         let f4 = &config_files(&w, "stm32f4")[0].1;
         assert!(f4.contains("const TIMEOUT_US: u32 = 26214000;"), "{f4}");
         assert!(init_lines(&w, "stm32f4").contains("init(p.IWDG)"));
+    }
+
+    fn esp_all() -> WatchdogSettings {
+        WatchdogSettings {
+            rwdt: Some(EspWdtConfig {
+                timeout_us: 2_000_000,
+            }),
+            mwdt0: Some(EspWdtConfig {
+                timeout_us: 1_500_000,
+            }),
+            mwdt1: Some(EspWdtConfig {
+                timeout_us: 500_000,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// An ESP gets its OWN watchdogs, never the STM32 pair, and each duration
+    /// lands in the file that calls it.
+    #[test]
+    fn an_esp_gets_the_rtc_and_timer_group_watchdogs() {
+        let files = config_files(&esp_all(), "esp32c3");
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["rwdt.rs", "mwdt0.rs", "mwdt1.rs"]);
+
+        let rwdt = &files[0].1;
+        assert!(rwdt.contains("const TIMEOUT_US: u64 = 2000000;"), "{rwdt}");
+        assert!(rwdt.contains("Rtc::new(lpwr)"), "{rwdt}");
+        assert!(rwdt.contains("RwdtStage::Stage0"), "{rwdt}");
+        // Never the STM32 vocabulary.
+        assert!(!rwdt.contains("embassy"), "{rwdt}");
+        assert!(!rwdt.contains("unleash"), "{rwdt}");
+
+        // Each MWDT file names its OWN timer group — the number is in the
+        // type, the module path and the example, so one missed substitution
+        // would compile against the wrong peripheral.
+        let mwdt1 = &files[2].1;
+        assert!(mwdt1.contains("const TIMEOUT_US: u64 = 500000;"), "{mwdt1}");
+        assert!(mwdt1.contains("Wdt<TIMG1<'static>>"), "{mwdt1}");
+        assert!(mwdt1.contains("peripherals::TIMG1"), "{mwdt1}");
+        assert!(!mwdt1.contains("TIMG0"), "{mwdt1}");
+
+        let calls = init_lines(&esp_all(), "esp32c3");
+        assert!(calls.contains("rwdt::init(peripherals.LPWR)"), "{calls}");
+        // `init()` takes nothing — that is what lets it work on the async
+        // runtime, where TIMG0 already belongs to the scheduler.
+        assert!(calls.contains("_mwdt0 = pins::configs::mwdt0::init();"), "{calls}");
+        assert!(calls.contains("_mwdt1 = pins::configs::mwdt1::init();"), "{calls}");
+        assert!(!calls.contains("IWDG"), "{calls}");
+    }
+
+    /// The ESP32-C2 has one timer group, so MWDT1 is dropped HERE and not only
+    /// in the UI — a setting carried over from another chip would otherwise
+    /// generate a file naming a `TIMG1` that does not exist.
+    #[test]
+    fn the_c2_drops_the_second_timer_group() {
+        let files = config_files(&esp_all(), "esp32c2");
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["rwdt.rs", "mwdt0.rs"]);
+        let calls = init_lines(&esp_all(), "esp32c2");
+        assert!(calls.contains("mwdt0"), "{calls}");
+        assert!(!calls.contains("mwdt1"), "{calls}");
+    }
+
+    /// The two families do not leak into each other: an STM32 setting carried
+    /// to an ESP generates nothing, and the reverse holds too.
+    #[test]
+    fn a_setting_from_the_other_family_generates_nothing() {
+        assert!(config_files(&both(), "esp32c3").is_empty());
+        assert_eq!(init_lines(&both(), "esp32c3"), "");
+        assert!(config_files(&esp_all(), "stm32f4").is_empty());
+        assert_eq!(init_lines(&esp_all(), "stm32f4"), "");
     }
 
     #[test]
