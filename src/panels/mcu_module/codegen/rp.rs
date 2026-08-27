@@ -883,3 +883,52 @@ mod regeneration {
         );
     }
 }
+
+#[cfg(test)]
+mod header_layout {
+    use crate::panels::mcu_module::builtins;
+
+    /// The 40-pin header is numbered like a DIP: down the left side, then UP the
+    /// right. So pin 21 sits at the BOTTOM right, facing pin 20 — and since the
+    /// canvas draws each side top-to-bottom in list order, the right column has
+    /// to be stored descending.
+    ///
+    /// Generated ascending the first time, which put GP16 at the top right and
+    /// VBUS at the bottom: a board that matches no photograph and no silkscreen.
+    #[test]
+    fn the_header_is_numbered_like_the_silkscreen() {
+        for id in ["rp2040_pico", "rp2350_pico2"] {
+            let mcu = builtins::builtin_definitions()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("built-in {id}"))
+                .build_mcu();
+
+            let left: Vec<usize> = mcu.left_pins.iter().map(|p| p.number).collect();
+            let right: Vec<usize> = mcu.right_pins.iter().map(|p| p.number).collect();
+
+            assert_eq!(left, (1..=20).collect::<Vec<_>>(), "{id}: left side");
+            assert_eq!(
+                right,
+                (21..=40).rev().collect::<Vec<_>>(),
+                "{id}: the right side runs UP the board"
+            );
+            // The two that face each other at the bottom.
+            assert_eq!(*left.last().unwrap(), 20, "{id}");
+            assert_eq!(*right.last().unwrap(), 21, "{id}");
+
+            // And the pin those two carry, because the numbers alone would pass
+            // on a board whose names were shuffled.
+            let name_of = |n: usize| {
+                mcu.iter_all_pins()
+                    .find(|p| p.number == n)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default()
+            };
+            assert_eq!(name_of(1), "GP0", "{id}");
+            assert_eq!(name_of(20), "GP15", "{id}");
+            assert_eq!(name_of(21), "GP16", "{id}");
+            assert_eq!(name_of(40), "VBUS", "{id}");
+        }
+    }
+}
