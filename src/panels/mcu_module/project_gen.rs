@@ -597,6 +597,13 @@ pub enum AsyncFlavor<'a> {
     /// `esp-rtos` on the given chip feature (`"esp32c3"`), RISC-V — the executor
     /// arch comes from esp-rtos itself, so no `arch-*` feature is listed here.
     Esp(&'a str),
+    /// `embassy-rp` on the given chip feature (`"rp2040"`, `"rp235xa"`).
+    ///
+    /// Cortex-M like the STM32 flavour, but a DIFFERENT executor version:
+    /// embassy-rp 0.10 requires embassy-executor ^0.10, while the embassy-stm32
+    /// stack in this template is still on 0.9. Sharing one line would break
+    /// whichever family was not the one it was written for.
+    Rp(&'a str),
 }
 
 impl AsyncFlavor<'_> {
@@ -609,6 +616,9 @@ impl AsyncFlavor<'_> {
                 "embassy-executor = { version = \"0.9\", features = [\"arch-cortex-m\", \"executor-thread\"] }"
             }
             Self::Esp(_) => "embassy-executor = \"0.10\"",
+            Self::Rp(_) => {
+                "embassy-executor = { version = \"0.10\", features = [\"arch-cortex-m\", \"executor-thread\"] }"
+            }
         }
     }
 
@@ -618,6 +628,8 @@ impl AsyncFlavor<'_> {
         let chip = match self {
             Self::Stm32 => "esp32c3",
             Self::Esp(chip) => chip,
+            // Never read: the caller gates this on the flavour.
+            Self::Rp(_) => "esp32c3",
         };
         format!(
             "esp-rtos = {{ version = \"{ESP_RTOS_REQ}\", features = [\"{chip}\", \"embassy\"] }}"
