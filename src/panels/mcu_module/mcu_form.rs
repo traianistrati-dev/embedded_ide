@@ -1410,10 +1410,10 @@ mod tests {
     #[test]
     fn unknown_family_warns_but_does_not_block() {
         let mut f = McuForm::blank();
-        f.id = "rp2040".into();
+        f.id = "nrf52840".into();
         f.display_name = "RP2040".into();
         f.probe_chip = "RP2040".into();
-        f.family = "rp2040".into();
+        f.family = "nrf52840".into();
         assert!(f.errors().is_empty());
         assert!(
             f.warnings()

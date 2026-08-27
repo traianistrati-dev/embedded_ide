@@ -600,27 +600,7 @@ impl AppIde {
                                 // did, and the palette is now one button — with
                                 // Undo left behind at the other end there was
                                 // nothing between them to explain the distance.
-                                if mcu.can_undo_modules() {
-                                    let hover = format!(
-                                        "Undo: {}  (Ctrl+Z)",
-                                        mcu.last_module_undo_label().unwrap_or("last change")
-                                    );
-                                    if ui
-                                        .button(
-                                            egui::RichText::new(format!(
-                                                "{} Undo",
-                                                ph::ARROW_COUNTER_CLOCKWISE
-                                            ))
-                                            .size(11.0),
-                                        )
-                                        .on_hover_text(hover)
-                                        .clicked()
-                                    {
-                                        mcu.undo_modules();
-                                        modules_changed = true;
-                                    }
-                                    ui.separator();
-                                }
+
                                 ui.label(
                                     egui::RichText::new("Virtual modules:")
                                         .size(12.0)
@@ -731,6 +711,29 @@ impl AppIde {
                                         .italics()
                                         .color(egui::Color32::from_gray(130)),
                                     );
+                                }
+
+                                if mcu.can_undo_modules() {
+                                     ui.separator();
+                                    let hover = format!(
+                                        "Undo: {}  (Ctrl+Z)",
+                                        mcu.last_module_undo_label().unwrap_or("last change")
+                                    );
+                                    if ui
+                                        .button(
+                                            egui::RichText::new(format!(
+                                                "{} Undo",
+                                                ph::ARROW_COUNTER_CLOCKWISE
+                                            ))
+                                            .size(11.0),
+                                        )
+                                        .on_hover_text(hover)
+                                        .clicked()
+                                    {
+                                        mcu.undo_modules();
+                                        modules_changed = true;
+                                    }
+
                                 }
                             });
 

@@ -79,6 +79,19 @@ pub fn codegen_node_ids(family: &str) -> Vec<&'static str> {
         // no id to bind, so nothing renamed their `cpu` node, so the editor
         // protected a name code generation actually reads.
         f if is_esp(f) => vec!["cpu"],
+        // The Pico tree, as the backend actually reads it: the crystal, and each
+        // PLL's FBDIV / POSTDIV1 / POSTDIV2. Those three are what a `PLLConfig`
+        // is made of, so renaming any of them in the editor would silently
+        // change the frequency the chip boots at.
+        f if crate::panels::mcu_module::codegen::rp::is_rp(f) => vec![
+            "xosc",
+            "pll_sys_fb",
+            "pll_sys_pd1",
+            "pll_sys_pd2",
+            "pll_usb_fb",
+            "pll_usb_pd1",
+            "pll_usb_pd2",
+        ],
         _ => match rcc_recipe(family) {
             Some((spec, _)) => {
                 let mut ids = vec![
@@ -318,7 +331,15 @@ fn hand_written_skeleton() -> String {
 /// config — an ESP has no RCC — but the question this answers is whether clock
 /// code is generated, and it is.
 pub fn generates_clock_code(family: &str) -> bool {
-    family == "stm32f1" || is_esp(family) || rcc_recipe(family).is_some()
+    // The Pico families join F1 and ESP for the same reason those are here: their
+    // backend emits real clock setup through the chip's own HAL
+    // (`init_clocks_and_plls`), not through an RCC recipe. The Clock tab cannot
+    // retune it yet, but `main.rs` is NOT left with a commented skeleton — which
+    // is the question this predicate is actually asked.
+    family == "stm32f1"
+        || is_esp(family)
+        || crate::panels::mcu_module::codegen::rp::is_rp(family)
+        || rcc_recipe(family).is_some()
 }
 
 /// Does THIS chip's clock reach `main.rs` — family recipe or tree?

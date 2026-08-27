@@ -19,6 +19,7 @@ pub mod rcc_n6;
 pub mod rtic;
 pub mod stm32;
 pub mod watchdog_gen;
+pub mod rp;
 pub mod wba;
 
 use super::mcu::{Mcu, Runtime};

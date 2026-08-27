@@ -25,6 +25,13 @@ const ESP32H2_RON: &str = include_str!("../../../assets/mcus/esp32h2.ron");
 const ESP32S2_RON: &str = include_str!("../../../assets/mcus/esp32s2.ron");
 const ESP32S3_RON: &str = include_str!("../../../assets/mcus/esp32s3.ron");
 
+// Raspberry Pi. Boards, not bare chips: the pin numbers are the 40-pin header's,
+// because that is what is silkscreened and what a user counts to. GP23/24/25/29
+// are not on the header but are on the board — GP25 drives the LED, which is the
+// first thing anyone reaches for.
+const RP2040_PICO_RON: &str = include_str!("../../../assets/mcus/rp2040_pico.ron");
+const RP2350_PICO2_RON: &str = include_str!("../../../assets/mcus/rp2350_pico2.ron");
+
 /// Raw `(id, ron-text)` for every bundled chip.
 const BUILTINS: &[(&str, &str)] = &[
     ("stm32f103c8t6", STM32F103C8T6_RON),
@@ -37,6 +44,8 @@ const BUILTINS: &[(&str, &str)] = &[
     ("esp32h2", ESP32H2_RON),
     ("esp32s2", ESP32S2_RON),
     ("esp32s3", ESP32S3_RON),
+    ("rp2040_pico", RP2040_PICO_RON),
+    ("rp2350_pico2", RP2350_PICO2_RON),
 ];
 
 /// Parse all bundled built-in MCU definitions (bad files are skipped + logged).

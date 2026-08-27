@@ -825,6 +825,10 @@ const BACKENDS: &[&dyn FamilyBackend] = &[
     &Stm32f1Backend,
     &Esp32Backend,
     &WbaBackend,
+    // Before the generic STM32 one, which matches on a `stm32` prefix and would
+    // never see these anyway — kept adjacent so the list reads as "the specific
+    // ones, then the catch-all".
+    &super::rp::RpBackend,
     &StmEmbassyBackend,
 ];
 
@@ -1258,7 +1262,7 @@ mod tests {
     fn unknown_family_is_none() {
         assert!(backend_for("stm8").is_none());
         assert!(backend_for("").is_none());
-        assert!(backend_for("rp2040").is_none());
+        assert!(backend_for("nrf52840").is_none());
     }
 
     /// Any other STM32 family routes to the generic embassy backend, and it

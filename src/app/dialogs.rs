@@ -1704,7 +1704,11 @@ pub(super) fn definitions_from_file(
 /// `Some(0)` and reported *"no DMA channels found for it"* on every one of them.
 /// `None` is not zero, and neither is "the question does not apply".
 pub(super) fn uses_dma_def(family: &str) -> bool {
-    !(family == "stm32f1" || crate::panels::mcu_module::codegen::family::is_esp(family))
+    // RP2040/RP2350 join F1 and ESP: their DMA comes from the chip's own HAL,
+    // not from the definition's channel table, so an empty table means nothing.
+    !(family == "stm32f1"
+        || crate::panels::mcu_module::codegen::family::is_esp(family)
+        || crate::panels::mcu_module::codegen::rp::is_rp(family))
 }
 
 /// Everything about a chip that will not work, in one list.
@@ -2213,11 +2217,25 @@ mod chip_gaps_tests {
                 ("left", &mcu.left_pins),
                 ("right", &mcu.right_pins),
             ];
-            // A side with nothing on it draws as a bare edge. Every package here
-            // is a QFN or an LQFP, so all four carry pins.
-            for (name, pins) in sides {
-                assert!(!pins.is_empty(), "{}: the {name} side is empty", d.id);
-            }
+            // A side with nothing on it draws as a bare edge - but not every
+            // package claims four sides. The premise here used to be "all of
+            // these are QFN or LQFP", and it stopped being true the day a
+            // 40-pin header board arrived: that one is genuinely two-sided, and
+            // the Pins canvas already rotates two-sided layouts by 90 degrees.
+            //
+            // So the question is whether the pins form a drawable package: at
+            // least one pair of OPPOSITE sides carries them.
+            let used: Vec<&str> = sides
+                .iter()
+                .filter(|(_, p)| !p.is_empty())
+                .map(|(n, _)| *n)
+                .collect();
+            assert!(
+                (used.contains(&"left") && used.contains(&"right"))
+                    || (used.contains(&"top") && used.contains(&"bottom")),
+                "{}: sides {used:?} do not form a drawable package",
+                d.id
+            );
 
             let all: Vec<_> = mcu.iter_all_pins().collect();
             // Pin numbers are what the canvas labels and what `find_pin` looks

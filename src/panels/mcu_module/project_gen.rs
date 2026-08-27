@@ -1505,7 +1505,26 @@ fn main() -> ! {
 
 // ── RustEmbedded file generators ──────────────────────────────────────────────
 
+/// Is this an RP2040 / RP2350 project?
+///
+/// Read off the HAL line, which is the thing that actually decides: the target
+/// triple is shared with other Cortex-M parts, and `probe_chip` is a probe-rs
+/// name, not a build fact.
+fn is_rp_hal(c: &ProjectDef) -> bool {
+    c.hal_dep.starts_with("rp2040-hal") || c.hal_dep.starts_with("rp235x-hal")
+}
+
 fn cargo_toml_embedded(c: &ProjectDef) -> String {
+    // RP2040 and RP2350 have TWO cores, and `cortex-m`'s
+    // `critical-section-single-core` is exactly what its name says — it disables
+    // interrupts on the core it runs on and calls that a critical section, which
+    // the other core walks straight through. rp-hal ships a multicore-safe
+    // implementation built on the hardware spinlocks instead, so the feature is
+    // dropped here and `critical-section-impl` carries it. Enabling both is a
+    // link error, and enabling only the single-core one is worse: it links.
+    if is_rp_hal(c) {
+        return cargo_toml_rp(c);
+    }
     format!(
         "[package]\n\
          name    = \"{name}-project\"\n\
@@ -1542,6 +1561,63 @@ fn cargo_toml_embedded(c: &ProjectDef) -> String {
         name = c.pkg_name,
         hal = c.hal_dep,
         chip = c.probe_chip,
+    )
+}
+
+/// `Cargo.toml` for an RP2040 / RP2350 project.
+///
+/// Differs from the generic Cortex-M one in three ways, all forced by the chip:
+/// no single-core critical section (see above), `embedded-hal` 1.0 for the pin
+/// traits rp-hal implements, and — on RP2040 only — the second-stage bootloader
+/// crate. The RP2040 boot ROM copies 256 bytes from the start of flash and runs
+/// them; without that stage the chip cannot execute from flash at all. RP2350
+/// replaced it with an image block the HAL emits itself.
+fn cargo_toml_rp(c: &ProjectDef) -> String {
+    let boot2 = if c.hal_dep.starts_with("rp2040-hal") {
+        "rp2040-boot2 = \"0.3\"
+"
+    } else {
+        ""
+    };
+    format!(
+        "[package]
+         name    = \"{name}-project\"
+         version = \"0.1.0\"
+         edition = \"2021\"
+         
+         [[bin]]
+         name  = \"{name}-project\"
+         test  = false
+         bench = false
+         
+         # Flash with:  cargo flash --chip {chip} --release
+         # Or hold BOOTSEL and drop a UF2 on the mass-storage drive.
+         
+         [profile.release]
+         panic         = \"abort\"
+         codegen-units = 1
+         debug         = true
+         lto           = true
+         opt-level     = \"s\"
+         
+         [profile.dev]
+         panic     = \"abort\"
+         opt-level = 1
+         
+         [dependencies]
+         cortex-m     = \"0.7\"
+         cortex-m-rt  = \"0.7\"
+         panic-halt   = \"0.2\"
+         embedded-hal = \"1.0\"
+         {boot2}{hal}
+         
+         # Your own dependencies go BELOW the end marker: they continue this
+         # table, and anything written inside the block is replaced on refresh.
+",
+        name = c.pkg_name,
+        hal = c.hal_dep,
+        chip = c.probe_chip,
+        boot2 = boot2,
     )
 }
 

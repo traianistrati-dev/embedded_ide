@@ -51,6 +51,22 @@ pub fn reserved_role(name: &str) -> &'static str {
         "Reset, active LOW. Driven by the internal pull-up circuit at power-on."
     } else if n.starts_with("BOOT") {
         "Boot mode select, sampled at reset: it chooses whether the chip starts from flash or from the bootloader."
+    // Raspberry Pi Pico board pads. These are BOARD pins, not chip pins, and
+    // every one of them answers a question a user actually asks while wiring.
+    } else if n == "AGND" {
+        "Analog ground, for the ADC. Star-tie it to GND so converter noise does not ride on the digital return."
+    } else if n == "ADC_VREF" {
+        "ADC reference. Filtered 3V3 on the board; drive it separately for a cleaner conversion."
+    } else if n == "RUN" {
+        "Chip enable, active HIGH. Pull it LOW to reset the board; it is how an external circuit holds the Pico down."
+    } else if n == "3V3_OUT" {
+        "3.3 V from the on-board regulator. Good for about 300 mA, and it is what powers the chip."
+    } else if n == "3V3_EN" {
+        "Enables the 3.3 V regulator, pulled HIGH on the board. Pull it LOW to switch the Pico off."
+    } else if n == "VSYS" {
+        "Main input, 1.8 to 5.5 V. Feeds the regulator through a diode from VBUS, so it can also be back-powered."
+    } else if n == "VBUS" {
+        "5 V straight from the micro-USB connector, present only while USB is plugged in."
     } else if n.starts_with("NPOR") {
         "Power-on reset."
     } else if n.starts_with("CHIP_PU") || n.starts_with("CHIP_EN") {
