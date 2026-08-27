@@ -176,14 +176,18 @@ $CASES = @(
     @{ n = "ESP32-C3, two PWM channels";   t = "emit_esp32c3_project";       e = @{ EIDE_ESP_PWM = "0,2" }; q = $true }
 
     # A third HAL family, and the first that is not STM32 or Espressif. One
-    # harness, two boards: the RP2040 on thumbv6m and the RP2350 on thumbv8m,
-    # each printing its own `target:`.
+    # harness, FOUR boards: Pico and Pico W on thumbv6m, Pico 2 and Pico 2 W on
+    # thumbv8m, each printing its own `target:`.
+    #
+    # The W boards are not a formality: GP23/24/25/29 belong to the CYW43 radio
+    # there, so the emitter has to leave them alone — including GP25, which is
+    # the LED on every other board in the set.
     #
     # Worth its place because almost every API in that backend was written from
     # documentation, and the compiler has already caught two of them - `.freq()`
     # and `set_duty_cycle` both live on embedded-hal traits that have to be
     # imported, and neither failure is visible by reading.
-    @{ n = "Raspberry Pi Pico 1 + 2";      t = "emit_rp_project";            e = @{};                       q = $true }
+    @{ n = "Raspberry Pi Pico x4";         t = "emit_rp_project";            e = @{};                       q = $true }
 
     # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired
