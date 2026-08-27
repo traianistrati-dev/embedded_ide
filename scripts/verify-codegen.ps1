@@ -329,7 +329,14 @@ foreach ($c in $cases) {
         Set-Location $p.Dir
         $r = cargo check --target $p.Target 2>&1
         $errs = @($r | Select-String -Pattern "^error(\[|:)").Count
-        $w = @($r | Select-String -Pattern "^warning: ")
+        # Cargo's future-incompatibility notice is about a DEPENDENCY, not about
+        # the code being checked - `rp235x-hal` pulls in a proc-macro crate that
+        # carries one. Counting it made a case fail for something no generator
+        # can fix, and declaring it "expected" would be worse: the allowance
+        # would go stale the day that crate is updated, and the matrix compares
+        # warning counts in BOTH directions.
+        $w = @($r | Select-String -Pattern "^warning: " |
+            Where-Object { $_.Line -notmatch "will be rejected by a future version of Rust" })
         $seen += $w.Count
         if ($errs -gt 0) {
             $status = "$errs ERRORS"
