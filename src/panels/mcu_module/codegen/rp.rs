@@ -239,43 +239,53 @@ fn ambiguity_notes(mcu: &Mcu) -> String {
     o
 }
 
+fn uart_pins(mcu: &Mcu) -> Vec<(u8, &'static str, u8)> {
+    bus_pins(mcu, |f| match f {
+        PinFunction::UsartTx(i) => Some((*i, "tx")),
+        PinFunction::UsartRx(i) => Some((*i, "rx")),
+        _ => None,
+    })
+}
+
+fn spi_pins(mcu: &Mcu) -> Vec<(u8, &'static str, u8)> {
+    bus_pins(mcu, |f| match f {
+        PinFunction::SpiSck(i) => Some((*i, "sck")),
+        PinFunction::SpiMosi(i) => Some((*i, "mosi")),
+        PinFunction::SpiMiso(i) => Some((*i, "miso")),
+        _ => None,
+    })
+}
+
+fn i2c_pins(mcu: &Mcu) -> Vec<(u8, &'static str, u8)> {
+    bus_pins(mcu, |f| match f {
+        PinFunction::I2cSda(i) => Some((*i, "sda")),
+        PinFunction::I2cScl(i) => Some((*i, "scl")),
+        _ => None,
+    })
+}
+
 /// UART, SPI and I2C, in that order.
 ///
 /// Each is emitted only when BOTH of its required pads are wired. rp-hal's
 /// constructors take the pins by value in a fixed order and there is no
 /// `NoPin` — so half a bus is not a smaller bus here, it is a type error.
-fn bus_lines(mcu: &Mcu, hal: &str) -> String {
+fn bus_lines(mcu: &Mcu, _hal: &str) -> String {
     let mut o = ambiguity_notes(mcu);
 
-    let uart = bus_pins(mcu, |f| match f {
-        PinFunction::UsartTx(i) => Some((*i, "tx")),
-        PinFunction::UsartRx(i) => Some((*i, "rx")),
-        _ => None,
-    });
+    let uart = uart_pins(mcu);
     for i in instances(&uart) {
         let (Some(tx), Some(rx)) = (role_of(&uart, i, "tx"), role_of(&uart, i, "rx")) else {
             o.push_str(&format!(
-                "    // UART{i}: only one of TX/RX is wired, and `UartPeripheral::new`\n    // takes the pair. Wire the other pad on the Pins canvas.\n"
+                "    // UART{i}: only one of TX/RX is wired, and the constructor takes the\n    // pair. Wire the other pad on the Pins canvas.\n"
             ));
             continue;
         };
         o.push_str(&format!(
-            "    let uart{i} = {hal}::uart::UartPeripheral::new(\n"
+            "    let uart{i} = pins::configs::uart{i}::init(\n        pac.UART{i},\n        pins.gpio{tx},\n        pins.gpio{rx},\n        &mut pac.RESETS,\n        clocks.peripheral_clock.freq(),\n    );\n    let _ = &uart{i};\n"
         ));
-        o.push_str(&format!("        pac.UART{i},\n"));
-        o.push_str(&format!("        (\n            pins.gpio{tx}.into_function(),\n            pins.gpio{rx}.into_function(),\n        ),\n"));
-        o.push_str("        &mut pac.RESETS,\n    )\n    .enable(\n");
-        o.push_str(&format!("        {hal}::uart::UartConfig::default(),\n"));
-        o.push_str("        clocks.peripheral_clock.freq(),\n    )\n    .unwrap();\n");
-        o.push_str(&format!("    let _ = &uart{i};\n"));
     }
 
-    let spi = bus_pins(mcu, |f| match f {
-        PinFunction::SpiSck(i) => Some((*i, "sck")),
-        PinFunction::SpiMosi(i) => Some((*i, "mosi")),
-        PinFunction::SpiMiso(i) => Some((*i, "miso")),
-        _ => None,
-    });
+    let spi = spi_pins(mcu);
     for i in instances(&spi) {
         let (Some(sck), Some(mosi), Some(miso)) = (
             role_of(&spi, i, "sck"),
@@ -283,26 +293,16 @@ fn bus_lines(mcu: &Mcu, hal: &str) -> String {
             role_of(&spi, i, "miso"),
         ) else {
             o.push_str(&format!(
-                "    // SPI{i}: `Spi::new` takes (MOSI, MISO, SCK) together, so all three\n    // pads have to be wired before anything can be built.\n"
+                "    // SPI{i}: the constructor takes (MOSI, MISO, SCK) together, so all\n    // three pads have to be wired before anything can be built.\n"
             ));
             continue;
         };
         o.push_str(&format!(
-            "    let spi{i} = {hal}::spi::Spi::<_, _, _, 8>::new(\n"
+            "    let spi{i} = pins::configs::spi{i}::init(\n        pac.SPI{i},\n        pins.gpio{mosi},\n        pins.gpio{miso},\n        pins.gpio{sck},\n        &mut pac.RESETS,\n        clocks.peripheral_clock.freq(),\n    );\n    let _ = &spi{i};\n"
         ));
-        o.push_str(&format!("        pac.SPI{i},\n"));
-        o.push_str(&format!("        (\n            pins.gpio{mosi}.into_function(),\n            pins.gpio{miso}.into_function(),\n            pins.gpio{sck}.into_function(),\n        ),\n"));
-        o.push_str("    )\n    .init(\n        &mut pac.RESETS,\n        clocks.peripheral_clock.freq(),\n");
-        o.push_str(&format!("        {hal}::fugit::HertzU32::MHz(1),\n"));
-        o.push_str("        embedded_hal::spi::MODE_0,\n    );\n");
-        o.push_str(&format!("    let _ = &spi{i};\n"));
     }
 
-    let i2c = bus_pins(mcu, |f| match f {
-        PinFunction::I2cSda(i) => Some((*i, "sda")),
-        PinFunction::I2cScl(i) => Some((*i, "scl")),
-        _ => None,
-    });
+    let i2c = i2c_pins(mcu);
     for i in instances(&i2c) {
         let (Some(sda), Some(scl)) = (role_of(&i2c, i, "sda"), role_of(&i2c, i, "scl")) else {
             o.push_str(&format!(
@@ -310,11 +310,9 @@ fn bus_lines(mcu: &Mcu, hal: &str) -> String {
             ));
             continue;
         };
-        o.push_str(&format!("    let i2c{i} = {hal}::i2c::I2C::i2c{i}(\n"));
-        o.push_str(&format!("        pac.I2C{i},\n        pins.gpio{sda}.reconfigure(),\n        pins.gpio{scl}.reconfigure(),\n"));
-        o.push_str(&format!("        {hal}::fugit::RateExtU32::kHz(400u32),\n"));
-        o.push_str("        &mut pac.RESETS,\n        &clocks.system_clock,\n    );\n");
-        o.push_str(&format!("    let _ = &i2c{i};\n"));
+        o.push_str(&format!(
+            "    let i2c{i} = pins::configs::i2c{i}::init(\n        pac.I2C{i},\n        pins.gpio{sda},\n        pins.gpio{scl},\n        &mut pac.RESETS,\n        &clocks.system_clock,\n    );\n    let _ = &i2c{i};\n"
+        ));
     }
     o
 }
@@ -516,6 +514,76 @@ fn header(mcu: &Mcu) -> String {
     )
 }
 
+/// `src/pins/configs/uart{n}.rs`, `spi{n}.rs`, `i2c{n}.rs`.
+///
+/// Each owns its peripheral outright — unlike PWM, where all eight slices come
+/// from one block — so `init` takes it by value and hands back a `Handle` the
+/// caller keeps.
+fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)]) -> String {
+    let mut o = String::new();
+    o.push_str("// <<< GENERATED>>>\n");
+    o.push_str("// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.\n");
+    match kind {
+        "uart" => o.push_str("const BAUDRATE: u32 = 115_200;\n"),
+        "spi" => o.push_str("const SPI_HZ: u32 = 1_000_000;\n"),
+        _ => o.push_str("const I2C_HZ: u32 = 400_000;\n"),
+    }
+    o.push_str("// <<< GENERATED END >>>\n\n");
+    o.push_str("// Everything below is editable — your changes are preserved on regeneration.\n");
+    // No `use Clock` here: main.rs asks the clock for its frequency and passes
+    // the value in, so these modules never touch the trait.
+    let gpio = |n: u8| format!("{hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{n}, {hal}::gpio::Function{}, {hal}::gpio::PullDown>",
+        match kind { "uart" => "Uart", "spi" => "Spi", _ => "I2c" });
+
+    match kind {
+        "uart" => {
+            let tx = pads.iter().find(|(r, _)| *r == "tx").unwrap().1;
+            let rx = pads.iter().find(|(r, _)| *r == "rx").unwrap().1;
+            o.push_str(&format!(
+                "\n/// The concrete type `init` hands back, so it can be a struct field.\npub type Handle = {hal}::uart::UartPeripheral<\n    {hal}::uart::Enabled,\n    {hal}::pac::UART{n},\n    ({}, {}),\n>;\n\n",
+                gpio(tx), gpio(rx)
+            ));
+            o.push_str(&format!(
+                "/// UART{n} on GP{tx} (TX) and GP{rx} (RX), at BAUDRATE.\npub fn init(\n    uart: {hal}::pac::UART{n},\n    tx: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{tx}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    rx: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{rx}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    resets: &mut {hal}::pac::RESETS,\n    peri_freq: {hal}::fugit::HertzU32,\n) -> Handle {{\n"
+            ));
+            o.push_str(&format!(
+                "    {hal}::uart::UartPeripheral::new(uart, (tx.into_function(), rx.into_function()), resets)\n        .enable(\n            {hal}::uart::UartConfig::new(\n                {hal}::fugit::HertzU32::Hz(BAUDRATE),\n                {hal}::uart::DataBits::Eight,\n                None,\n                {hal}::uart::StopBits::One,\n            ),\n            peri_freq,\n        )\n        .unwrap()\n}}\n"
+            ));
+        }
+        "spi" => {
+            let sck = pads.iter().find(|(r, _)| *r == "sck").unwrap().1;
+            let mosi = pads.iter().find(|(r, _)| *r == "mosi").unwrap().1;
+            let miso = pads.iter().find(|(r, _)| *r == "miso").unwrap().1;
+            o.push_str(&format!(
+                "\n/// The concrete type `init` hands back.\npub type Handle = {hal}::spi::Spi<\n    {hal}::spi::Enabled,\n    {hal}::pac::SPI{n},\n    ({}, {}, {}),\n    8,\n>;\n\n",
+                gpio(mosi), gpio(miso), gpio(sck)
+            ));
+            o.push_str(&format!(
+                "/// SPI{n}: SCK GP{sck}, TX GP{mosi}, RX GP{miso}. `Spi::new` takes the three\n/// together and there is no `NoPin`, so a half-wired bus cannot be built.\npub fn init(\n    spi: {hal}::pac::SPI{n},\n    mosi: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{mosi}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    miso: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{miso}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    sck: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{sck}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    resets: &mut {hal}::pac::RESETS,\n    peri_freq: {hal}::fugit::HertzU32,\n) -> Handle {{\n"
+            ));
+            o.push_str(&format!(
+                "    {hal}::spi::Spi::<_, _, _, 8>::new(\n        spi,\n        (mosi.into_function(), miso.into_function(), sck.into_function()),\n    )\n    .init(\n        resets,\n        peri_freq,\n        {hal}::fugit::HertzU32::Hz(SPI_HZ),\n        embedded_hal::spi::MODE_0,\n    )\n}}\n"
+            ));
+        }
+        _ => {
+            let sda = pads.iter().find(|(r, _)| *r == "sda").unwrap().1;
+            let scl = pads.iter().find(|(r, _)| *r == "scl").unwrap().1;
+            let p = |n: u8| format!("{hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{n}, {hal}::gpio::FunctionI2c, {hal}::gpio::PullUp>");
+            o.push_str(&format!(
+                "\n/// The concrete type `init` hands back.\npub type Handle = {hal}::i2c::I2C<{hal}::pac::I2C{n}, ({}, {})>;\n\n",
+                p(sda), p(scl)
+            ));
+            o.push_str(&format!(
+                "/// I2C{n} on GP{sda} (SDA) and GP{scl} (SCL), at I2C_HZ.\npub fn init(\n    i2c: {hal}::pac::I2C{n},\n    sda: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{sda}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    scl: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{scl}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    resets: &mut {hal}::pac::RESETS,\n    sys_clock: &{hal}::clocks::SystemClock,\n) -> Handle {{\n"
+            ));
+            o.push_str(&format!(
+                "    {hal}::i2c::I2C::i2c{n}(\n        i2c,\n        sda.reconfigure(),\n        scl.reconfigure(),\n        {hal}::fugit::HertzU32::Hz(I2C_HZ),\n        resets,\n        sys_clock,\n    )\n}}\n"
+            ));
+        }
+    }
+    o
+}
+
 /// `src/pins/configs/pwm{slice}.rs` — one PWM slice, its frequency and the duty
 /// of each channel it drives.
 ///
@@ -650,7 +718,7 @@ impl FamilyBackend for RpBackend {
                 by_slice.entry(timer).or_default().push((channel, n));
             }
         }
-        by_slice
+        let mut out: Vec<(String, String)> = by_slice
             .into_iter()
             .map(|(slice, mut chans)| {
                 chans.sort_unstable();
@@ -659,7 +727,31 @@ impl FamilyBackend for RpBackend {
                     pwm_config_file(mcu, slice, &chans),
                 )
             })
-            .collect()
+            .collect();
+
+        // The three buses that own their peripheral. Only fully wired ones get a
+        // file: `init` names every pad in its signature, so half a bus has no
+        // signature to write.
+        let hal = hal_crate(&mcu.family);
+        for (kind, roles, pins) in [
+            ("uart", &["tx", "rx"][..], uart_pins(mcu)),
+            ("spi", &["sck", "mosi", "miso"][..], spi_pins(mcu)),
+            ("i2c", &["sda", "scl"][..], i2c_pins(mcu)),
+        ] {
+            for i in instances(&pins) {
+                let pads: Vec<(&str, u8)> = roles
+                    .iter()
+                    .filter_map(|r| role_of(&pins, i, r).map(|n| (*r, n)))
+                    .collect();
+                if pads.len() == roles.len() {
+                    out.push((
+                        format!("{kind}{i}.rs"),
+                        bus_config_file(hal, kind, i, &pads),
+                    ));
+                }
+            }
+        }
+        out
     }
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
@@ -1144,8 +1236,10 @@ mod ambiguous_wiring {
         assert!(code.contains("Only GP0 is configured"), "{code}");
         // The lowest pad is the one built, so the output does not depend on
         // which order the canvas happened to hand them over.
-        assert!(code.contains("pins.gpio0.into_function()"), "{code}");
-        assert!(!code.contains("pins.gpio16.into_function()"), "{code}");
+        // main.rs hands the pad to the config module now, rather than
+        // reconfiguring it in place.
+        assert!(code.contains("pins.gpio0,"), "{code}");
+        assert!(!code.contains("pins.gpio16,"), "{code}");
     }
 
     /// And an unambiguous project says nothing at all.
