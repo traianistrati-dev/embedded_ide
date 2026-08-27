@@ -597,13 +597,17 @@ pub enum AsyncFlavor<'a> {
     /// `esp-rtos` on the given chip feature (`"esp32c3"`), RISC-V — the executor
     /// arch comes from esp-rtos itself, so no `arch-*` feature is listed here.
     Esp(&'a str),
-    /// `embassy-rp` on the given chip feature (`"rp2040"`, `"rp235xa"`).
+    /// `embassy-rp`.
     ///
     /// Cortex-M like the STM32 flavour, but a DIFFERENT executor version:
     /// embassy-rp 0.10 requires embassy-executor ^0.10, while the embassy-stm32
     /// stack in this template is still on 0.9. Sharing one line would break
     /// whichever family was not the one it was written for.
-    Rp(&'a str),
+    ///
+    /// Carries no chip: the `embassy-rp` line itself comes from the chip's
+    /// `hal_dep_async`, because the feature is per-board (`rp235xa` vs
+    /// `rp235xb`) and cannot be derived from the family.
+    Rp,
 }
 
 impl AsyncFlavor<'_> {
@@ -616,8 +620,12 @@ impl AsyncFlavor<'_> {
                 "embassy-executor = { version = \"0.9\", features = [\"arch-cortex-m\", \"executor-thread\"] }"
             }
             Self::Esp(_) => "embassy-executor = \"0.10\"",
-            Self::Rp(_) => {
-                "embassy-executor = { version = \"0.10\", features = [\"arch-cortex-m\", \"executor-thread\"] }"
+            // `platform-cortex-m`, NOT `arch-cortex-m`: embassy-executor renamed
+            // those features between 0.9 and 0.10, and the STM32 line above is
+            // still on 0.9. Cargo refuses to resolve the wrong one, which is the
+            // only reason this was caught — nothing about the name looks wrong.
+            Self::Rp => {
+                "embassy-executor = { version = \"0.10\", features = [\"platform-cortex-m\", \"executor-thread\"] }"
             }
         }
     }
@@ -629,7 +637,7 @@ impl AsyncFlavor<'_> {
             Self::Stm32 => "esp32c3",
             Self::Esp(chip) => chip,
             // Never read: the caller gates this on the flavour.
-            Self::Rp(_) => "esp32c3",
+            Self::Rp => "esp32c3",
         };
         format!(
             "esp-rtos = {{ version = \"{ESP_RTOS_REQ}\", features = [\"{chip}\", \"embassy\"] }}"
@@ -1523,7 +1531,15 @@ fn main() -> ! {
 /// triple is shared with other Cortex-M parts, and `probe_chip` is a probe-rs
 /// name, not a build fact.
 fn is_rp_hal(c: &ProjectDef) -> bool {
-    c.hal_dep.starts_with("rp2040-hal") || c.hal_dep.starts_with("rp235x-hal")
+    // `embassy-rp` counts too: it is the SAME chip on the async runtime, and it
+    // brings the same multicore-safe critical section. Missing it here handed
+    // the async project the generic Cortex-M template, whose
+    // `critical-section-single-core` then collided with embassy-rp's own — two
+    // implementations, which is a compile error rather than the silent
+    // unsoundness of having only the wrong one.
+    c.hal_dep.starts_with("rp2040-hal")
+        || c.hal_dep.starts_with("rp235x-hal")
+        || c.hal_dep.starts_with("embassy-rp")
 }
 
 fn cargo_toml_embedded(c: &ProjectDef) -> String {

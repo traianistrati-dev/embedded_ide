@@ -836,6 +836,10 @@ const BACKENDS: &[&dyn FamilyBackend] = &[
 /// [`BACKENDS`]; a `static` gives the `&'static` the dispatch returns.
 static ASYNC_EMBASSY_BACKEND: AsyncEmbassyBackend = AsyncEmbassyBackend;
 
+/// Chosen by runtime like the other two, and outside [`BACKENDS`] for the same
+/// reason: a Pico on Async is a different HAL, not a different feature set.
+static ASYNC_RP_BACKEND: super::rp::AsyncRpBackend = super::rp::AsyncRpBackend;
+
 // ── RTIC (STM32F1) ──────────────────────────────────────────────────────────
 /// Same chip, same HAL, same init as the blocking backend — only the program
 /// shape differs (see [`super::rtic`]). It therefore reuses `Stm32f1Backend`'s
@@ -907,13 +911,21 @@ static RTIC_BACKEND: RticBackend = RticBackend;
 /// STM32 family (embassy-stm32) or the ESP32-C3 (esp-rtos). Drives both codegen
 /// dispatch and the System-tab toggle's enabled state.
 pub fn async_supported(family: &str) -> bool {
-    ASYNC_EMBASSY_BACKEND.handles(family) || ASYNC_ESP_BACKEND.handles(family)
+    ASYNC_EMBASSY_BACKEND.handles(family)
+        || ASYNC_ESP_BACKEND.handles(family)
+        || ASYNC_RP_BACKEND.handles(family)
 }
 
 /// Whether `family`'s async path is the ESP one (esp-rtos + embassy-executor)
 /// rather than embassy-stm32. The two need DIFFERENT `[dependencies]` — same
 /// crate names, different versions and features — so the Cargo.toml sync has to
 /// tell them apart (see `project_gen::AsyncFlavor`).
+/// Whether `family`'s async path is `embassy-rp` — which needs its own executor
+/// version AND its own HAL crate, unlike every other family here.
+pub fn async_is_rp(family: &str) -> bool {
+    ASYNC_RP_BACKEND.handles(family)
+}
+
 pub fn async_is_esp(family: &str) -> bool {
     ASYNC_ESP_BACKEND.handles(family)
 }
@@ -1238,6 +1250,9 @@ pub fn backend_for_runtime(family: &str, runtime: Runtime) -> Option<&'static dy
     if runtime == Runtime::Async && ASYNC_ESP_BACKEND.handles(family) {
         return Some(&ASYNC_ESP_BACKEND);
     }
+    if runtime == Runtime::Async && ASYNC_RP_BACKEND.handles(family) {
+        return Some(&ASYNC_RP_BACKEND);
+    }
     if runtime == Runtime::Async && async_supported(family) {
         return Some(&ASYNC_EMBASSY_BACKEND);
     }
@@ -1319,7 +1334,26 @@ mod tests {
         assert!(async_supported("esp32c3")); // esp-rtos
         assert!(!async_is_esp("stm32f4"));
         assert!(async_is_esp("esp32c3"));
-        assert!(!async_supported("rp2040"));
+        // The Pico families have an async path of their own now, and it must NOT
+        // be the embassy-stm32 one: `embassy-rp` is a different HAL crate and a
+        // different executor version.
+        assert!(async_supported("rp2040"));
+        assert!(async_supported("rp235x"));
+        assert!(async_is_rp("rp2040"));
+        assert!(!async_is_rp("stm32f4"));
+        assert!(!async_is_esp("rp2040"));
+        assert_eq!(
+            backend_for_runtime("rp2040", Runtime::Async)
+                .unwrap()
+                .family_id(),
+            "rp-async"
+        );
+        assert_eq!(
+            backend_for_runtime("rp2040", Runtime::Blocking)
+                .unwrap()
+                .family_id(),
+            "rp2040"
+        );
 
         // Blocking always uses the family default.
         assert_eq!(
