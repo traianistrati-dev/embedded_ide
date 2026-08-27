@@ -1224,6 +1224,47 @@ pub fn build_project_files(
 /// regenerated. `user_src_files` is a list of `(path_relative_to_src, content)`
 /// pairs. A file with empty content (e.g. `memory.x`/`build.rs` on ESP) is not
 /// written.
+/// The CYW43 radio's firmware, bundled so a Pico W project builds out of the box.
+///
+/// Infineon's Permissive Binary License 1.0 allows redistribution in binary
+/// form, which is why these can ship at all; the licence text travels with them
+/// because that licence requires it. Same files embassy carries, and the same
+/// three the driver asks for — note that the NVRAM is `rp2040` on BOTH boards,
+/// the name being the board it was measured on rather than the chip it runs on.
+const CYW43_FW: &[u8] = include_bytes!("../../../assets/cyw43-firmware/43439A0.bin");
+const CYW43_CLM: &[u8] = include_bytes!("../../../assets/cyw43-firmware/43439A0_clm.bin");
+const CYW43_NVRAM: &[u8] = include_bytes!("../../../assets/cyw43-firmware/nvram_rp2040.bin");
+const CYW43_LICENSE: &[u8] =
+    include_bytes!("../../../assets/cyw43-firmware/LICENSE-permissive-binary-license-1.0.txt");
+
+/// Put the radio firmware next to a project that includes it.
+///
+/// Keyed on the GENERATED CODE rather than on a flag: the blobs are needed
+/// exactly when `main.rs` has an `include_bytes!` reaching for them, so reading
+/// that is both the cheapest test and the one that cannot drift out of step.
+///
+/// Never overwrites. A user who swapped in a different build of the firmware —
+/// a newer one, or a different board's NVRAM — keeps it.
+fn write_cyw43_firmware(dest: &Path, main_rs: &str) -> io::Result<()> {
+    if !main_rs.contains("cyw43::aligned_bytes!") {
+        return Ok(());
+    }
+    let dir = dest.join("firmware");
+    fs::create_dir_all(&dir)?;
+    for (name, bytes) in [
+        ("43439A0.bin", CYW43_FW),
+        ("43439A0_clm.bin", CYW43_CLM),
+        ("nvram_rp2040.bin", CYW43_NVRAM),
+        ("LICENSE-permissive-binary-license-1.0.txt", CYW43_LICENSE),
+    ] {
+        let path = dir.join(name);
+        if !path.exists() {
+            fs::write(path, bytes)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn write_project(
     dest: &Path,
     files: &ProjectFiles,
@@ -1235,6 +1276,7 @@ pub fn write_project(
 ) -> io::Result<()> {
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
+    write_cyw43_firmware(dest, &files.main_rs)?;
 
     // ── Remove stale .rs files from src/ ─────────────────────────────────────
     // When the user switches between chip types (e.g. STM32 → ESP32-C3), the

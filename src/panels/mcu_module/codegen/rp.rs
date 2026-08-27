@@ -1913,15 +1913,13 @@ async fn cyw43_task(
     .to_owned();
 
     let body = format!(
-        "    // The radio's three firmware blobs. They are Infineon binaries under a
-    // permissive BINARY licence, so they are not generated with this project —
-    // until you put them in `firmware/`, the build stops on these three lines:
+        "    // The radio's firmware, written into `firmware/` with this project. They
+    // are Infineon binaries under the Permissive Binary License, which is what
+    // lets them ship; the licence text sits beside them. Replacing one with
+    // your own build is safe - the IDE never overwrites a file already there.
     //
-    //   43439A0.bin        the wifi firmware
-    //   43439A0_clm.bin    the regulatory (CLM) blob
-    //   nvram_rp2040.bin   the board's NVRAM - the same file on Pico 2 W
-    //
-    // All three: https://github.com/embassy-rs/embassy/tree/main/cyw43-firmware
+    // `nvram_rp2040.bin` is right on a Pico 2 W too: the name is the board it
+    // was measured on, not the chip it runs on.
     let fw = cyw43::aligned_bytes!(\"../firmware/43439A0.bin\");
     let clm = cyw43::aligned_bytes!(\"../firmware/43439A0_clm.bin\");
     let nvram = cyw43::aligned_bytes!(\"../firmware/nvram_rp2040.bin\");
@@ -2062,10 +2060,10 @@ mod emit_async_for_manual_compile {
     ///
     /// %TEMP%\eide_rp2040w_radio_check + eide_rp2350w_radio_check
     ///
-    /// The three firmware blobs are written here as RECOGNISABLE JUNK. They are
-    /// enough to make `include_bytes!` resolve, which is all the codegen needs
-    /// proving; a board flashed with them would simply never bring the radio up.
-    /// Infineon's real binaries are not redistributable from this repository.
+    /// The firmware ships with the IDE (Infineon's Permissive Binary License
+    /// allows it), so `write_project` lays it down and this compiles with the
+    /// same bytes a real board would run. Nothing here proves the RADIO comes
+    /// up - that needs hardware.
     #[test]
     #[ignore]
     fn emit_rp_radio_project() {
@@ -2129,11 +2127,22 @@ mod emit_async_for_manual_compile {
             let toml = project_gen::ensure_m0_atomics(&toml, true, &project.target, &[]);
             std::fs::write(&toml_path, toml).expect("write Cargo.toml");
 
-            let fw_dir = dir.join("firmware");
-            std::fs::create_dir_all(&fw_dir).expect("firmware dir");
-            for name in ["43439A0.bin", "43439A0_clm.bin", "nvram_rp2040.bin"] {
-                std::fs::write(fw_dir.join(name), b"NOT THE REAL CYW43 FIRMWARE")
-                    .expect("placeholder blob");
+            // `write_project` put the real blobs in `firmware/` already —
+            // this only proves it, because a silent miss here would look like
+            // a codegen failure two hundred lines away.
+            // SIZES, not existence. `write_cyw43_firmware` deliberately never
+            // overwrites, so a stub left by an older run survives — and
+            // `include_bytes!` resolves just as happily on 27 bytes as on
+            // 231 KB, which would take the whole case green on junk firmware.
+            for (name, want) in [
+                ("43439A0.bin", 231_077),
+                ("43439A0_clm.bin", 984),
+                ("nvram_rp2040.bin", 742),
+                ("LICENSE-permissive-binary-license-1.0.txt", 2_419),
+            ] {
+                let path = dir.join("firmware").join(name);
+                let got = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                assert_eq!(got, want, "{name}: shipped whole, not stubbed");
             }
             println!("wrote {}", dir.display());
             println!("target: {}", def.project.target);
@@ -2205,6 +2214,14 @@ mod emit_async_for_manual_compile {
                 &[],
             );
             std::fs::write(&toml_path, toml).expect("write Cargo.toml");
+            // The other half of the firmware gate: a board with no radio
+            // must not carry 231 KB of it. The gate reads the GENERATED
+            // CODE, so it is exactly the kind of thing that goes wrong
+            // quietly when the emitter changes.
+            assert!(
+                !dir.join("firmware").exists(),
+                "no radio wired, no firmware shipped"
+            );
             println!("wrote {}", dir.display());
             println!("target: {}", def.project.target);
         }
