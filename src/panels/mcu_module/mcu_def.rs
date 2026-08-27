@@ -171,6 +171,18 @@ pub struct ProjectDef {
     #[serde(default)]
     pub ram_size: String,
     pub hal_dep: String,
+    /// The HAL line to use INSTEAD on the Async runtime, when the family changes
+    /// crates rather than features.
+    ///
+    /// RP is the first family where it does: `rp2040-hal` drives the chip
+    /// blocking, `embassy-rp` drives it async, and they are different crates.
+    /// STM32 and ESP keep one HAL for both runtimes, so they leave this `None`.
+    ///
+    /// It lives on the CHIP rather than on the backend because the feature is
+    /// chip-specific: an RP2350A wants `rp235xa` and an RP2350B `rp235xb`, and a
+    /// backend deriving it from the family alone would get one of them wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hal_dep_async: Option<String>,
     pub probe_chip: String,
     #[serde(default)]
     pub memory_comment: String,
@@ -825,5 +837,20 @@ mod tests {
             saved.node("pllmul").map(|n| n.state.clone()),
             Some(NodeState::Value(4))
         );
+    }
+}
+
+impl ProjectDef {
+    /// This definition as it applies to `runtime` — the same thing, except that
+    /// a family which swaps HAL crates gets the other line.
+    pub fn for_async(&self, is_async: bool) -> std::borrow::Cow<'_, ProjectDef> {
+        match (is_async, &self.hal_dep_async) {
+            (true, Some(line)) => {
+                let mut out = self.clone();
+                out.hal_dep = line.clone();
+                std::borrow::Cow::Owned(out)
+            }
+            _ => std::borrow::Cow::Borrowed(self),
+        }
     }
 }

@@ -182,6 +182,7 @@ mod tests {
                 ram_origin: "0x20000000".into(),
                 ram_size: "20K".into(),
                 hal_dep: r#"stm32f1xx-hal = { version = "0.10", features = ["stm32f103", "medium", "rt"] }"#.into(),
+                hal_dep_async: None,
                 probe_chip: "STM32F103C8".into(),
                 memory_comment: "STM32F103C8T6  —  64 KiB Flash / 20 KiB RAM".into(),
             },
@@ -205,6 +206,7 @@ mod tests {
                 ram_size: String::new(),
                 hal_dep: r#"esp-hal = { version = "0.23", features = ["esp32c3", "unstable"] }"#
                     .into(),
+                hal_dep_async: None,
                 probe_chip: "esp32c3".into(),
                 memory_comment: String::new(),
             },
@@ -466,6 +468,7 @@ mod tests {
                 ram_origin: "0x20000000".into(),
                 ram_size: "20K".into(),
                 hal_dep: r#"stm32f1xx-hal = { version = "0.10", features = ["stm32f103", "medium", "rt"] }"#.into(),
+                hal_dep_async: None,
                 probe_chip: "STM32F103RB".into(),
                 memory_comment: "STM32F103RBT6  —  128 KiB Flash / 20 KiB RAM (LQFP64)".into(),
             },

@@ -1319,6 +1319,7 @@ pub fn definition(chip: &EspChip) -> Result<McuDefinition, String> {
             // never read on that path — the hand-written C3 still carries a
             // stale "esp-hal 0.23" here precisely because nothing consults it.
             hal_dep: String::new(),
+            hal_dep_async: None,
             // Feeds the esp-hal, esp-println and bootloader features AND
             // `espflash --chip`, all four from this one string.
             probe_chip: chip.id.clone(),

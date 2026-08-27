@@ -569,6 +569,7 @@ impl McuForm {
                 ram_origin: self.ram_origin.trim().to_string(),
                 ram_size: self.ram_size.trim().to_string(),
                 hal_dep: self.hal_dep.trim().to_string(),
+                hal_dep_async: None,
                 probe_chip: self.probe_chip.trim().to_string(),
                 memory_comment: self.memory_comment.trim().to_string(),
             },

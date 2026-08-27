@@ -1388,3 +1388,62 @@ mod wireless_boards {
         }
     }
 }
+
+#[cfg(test)]
+mod async_hal_line {
+    use crate::panels::mcu_module::builtins;
+
+    /// RP is the first family whose HAL CRATE changes with the runtime.
+    ///
+    /// `rp2040-hal` drives the chip blocking and `embassy-rp` drives it async —
+    /// two different crates, not two feature sets. Everything before this had
+    /// one HAL per chip, so the model had nowhere to say it.
+    ///
+    /// The feature is chip-specific, which is why the line lives on the chip and
+    /// not in the backend: an RP2350**A** wants `rp235xa`, a **B** wants
+    /// `rp235xb`, and a backend deriving it from the family would get one wrong.
+    #[test]
+    fn the_pico_boards_swap_hal_crate_on_async() {
+        for (id, feature) in [
+            ("rp2040_pico", "rp2040"),
+            ("rp2040_pico_w", "rp2040"),
+            ("rp2350_pico2", "rp235xa"),
+            ("rp2350_pico2_w", "rp235xa"),
+        ] {
+            let def = builtins::builtin_definitions()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("built-in {id}"));
+
+            let blocking = def.project.for_async(false);
+            assert!(
+                blocking.hal_dep.starts_with("rp2040-hal") || blocking.hal_dep.starts_with("rp235x-hal"),
+                "{id}: blocking keeps its own HAL: {}",
+                blocking.hal_dep
+            );
+
+            let asynchronous = def.project.for_async(true);
+            assert!(
+                asynchronous.hal_dep.starts_with("embassy-rp"),
+                "{id}: async swaps to embassy-rp: {}",
+                asynchronous.hal_dep
+            );
+            assert!(
+                asynchronous.hal_dep.contains(feature),
+                "{id}: the chip feature has to be this board's: {}",
+                asynchronous.hal_dep
+            );
+        }
+
+        // And a family that does NOT swap is untouched, whichever runtime.
+        let f1 = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "stm32f103c8t6")
+            .expect("built-in F103");
+        assert_eq!(
+            f1.project.for_async(true).hal_dep,
+            f1.project.hal_dep,
+            "STM32 keeps one HAL for both runtimes"
+        );
+    }
+}

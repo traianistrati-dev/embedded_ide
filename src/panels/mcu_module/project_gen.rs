@@ -1771,6 +1771,7 @@ mod tests {
             ram_origin: "0x20000000".into(),
             ram_size: "32K".into(),
             hal_dep: "embassy-stm32 = { version = \"0.6\", features = [\"stm32h5f4aj\"] }".into(),
+            hal_dep_async: None,
             probe_chip: "STM32H5".into(),
             memory_comment: "test".into(),
         }
@@ -2176,6 +2177,7 @@ mod tests {
             ram_origin: "0x20000000".into(),
             ram_size: "20K".into(),
             hal_dep: "stm32f1xx-hal = { version = \"0.10\" }".into(),
+            hal_dep_async: None,
             probe_chip: "STM32F103C8".into(),
             memory_comment: "STM32F103C8".into(),
         }
