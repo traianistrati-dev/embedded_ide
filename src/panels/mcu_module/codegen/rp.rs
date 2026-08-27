@@ -182,13 +182,70 @@ fn instances(pins: &[(u8, &'static str, u8)]) -> Vec<u8> {
     v
 }
 
+/// The signal a pin carries, as one name: `"UART0 TX"`, `"PWM3 A"`.
+///
+/// Two pads CAN claim the same signal on this chip — GP0 and GP16 are both
+/// UART0 TX, GP4 and GP20 are both UART1 TX, and so on the whole way up. That
+/// is the FUNCSEL table, not a mistake in the definition.
+fn signal_name(f: &PinFunction) -> Option<String> {
+    Some(match f {
+        PinFunction::UsartTx(i) => format!("UART{i} TX"),
+        PinFunction::UsartRx(i) => format!("UART{i} RX"),
+        PinFunction::SpiSck(i) => format!("SPI{i} SCK"),
+        PinFunction::SpiMosi(i) => format!("SPI{i} TX"),
+        PinFunction::SpiMiso(i) => format!("SPI{i} RX"),
+        PinFunction::I2cSda(i) => format!("I2C{i} SDA"),
+        PinFunction::I2cScl(i) => format!("I2C{i} SCL"),
+        PinFunction::TimerPwm { timer, channel } => {
+            format!("PWM{timer} {}", if *channel == 1 { "A" } else { "B" })
+        }
+        _ => return None,
+    })
+}
+
+/// Say so when two pads claim one signal.
+///
+/// rp-hal takes ONE pin per role, so only the lowest-numbered pad can be
+/// configured — and the code that did so simply used the first it found and
+/// dropped the rest without a word. The project then built, ran, and left a pad
+/// the user had deliberately wired doing nothing, with nothing anywhere saying
+/// why.
+///
+/// The generator does not choose between them: it takes the lowest so the output
+/// is stable, and names both so the person who wired them can decide.
+fn ambiguity_notes(mcu: &Mcu) -> String {
+    let mut by_signal: std::collections::BTreeMap<String, Vec<u8>> =
+        std::collections::BTreeMap::new();
+    for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
+        let (Some(n), Some(sig)) = (gpio_index(&p.name), signal_name(&p.selected_function)) else {
+            continue;
+        };
+        by_signal.entry(sig).or_default().push(n);
+    }
+    let mut o = String::new();
+    for (sig, mut pads) in by_signal {
+        if pads.len() < 2 {
+            continue;
+        }
+        pads.sort_unstable();
+        let used = pads[0];
+        let rest: Vec<String> = pads[1..].iter().map(|n| format!("GP{n}")).collect();
+        o.push_str(&format!(
+            "    // {sig} is wired to GP{used} and {}. Only GP{used} is configured:\n",
+            rest.join(" and ")
+        ));
+        o.push_str("    // the HAL takes one pin per role. Unassign the other on the Pins canvas.\n");
+    }
+    o
+}
+
 /// UART, SPI and I2C, in that order.
 ///
 /// Each is emitted only when BOTH of its required pads are wired. rp-hal's
 /// constructors take the pins by value in a fixed order and there is no
 /// `NoPin` — so half a bus is not a smaller bus here, it is a type error.
 fn bus_lines(mcu: &Mcu, hal: &str) -> String {
-    let mut o = String::new();
+    let mut o = ambiguity_notes(mcu);
 
     let uart = bus_pins(mcu, |f| match f {
         PinFunction::UsartTx(i) => Some((*i, "tx")),
@@ -930,5 +987,62 @@ mod header_layout {
             assert_eq!(name_of(21), "GP16", "{id}");
             assert_eq!(name_of(40), "VBUS", "{id}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ambiguous_wiring {
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    /// Two pads claiming one signal must be NAMED, not silently reduced to one.
+    ///
+    /// GP0 and GP16 are both UART0 TX on this chip — that is the FUNCSEL table,
+    /// so a user can wire both without doing anything wrong. rp-hal takes one
+    /// pin per role, and the code that chose silently left the other pad
+    /// unconfigured with nothing to explain it.
+    #[test]
+    fn two_pads_on_one_signal_are_both_named() {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        for p in mcu.iter_all_pins_mut() {
+            match p.name.as_str() {
+                // Both are UART0 TX. Both are legal. Only one can be built.
+                "GP0" | "GP16" => p.selected_function = PinFunction::UsartTx(0),
+                "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                _ => {}
+            }
+        }
+        let code = mcu.fresh_main_rs();
+        assert!(
+            code.contains("UART0 TX is wired to GP0 and GP16"),
+            "the clash must be named:\n{code}"
+        );
+        assert!(code.contains("Only GP0 is configured"), "{code}");
+        // The lowest pad is the one built, so the output does not depend on
+        // which order the canvas happened to hand them over.
+        assert!(code.contains("pins.gpio0.into_function()"), "{code}");
+        assert!(!code.contains("pins.gpio16.into_function()"), "{code}");
+    }
+
+    /// And an unambiguous project says nothing at all.
+    #[test]
+    fn a_clean_wiring_gets_no_note() {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        for p in mcu.iter_all_pins_mut() {
+            match p.name.as_str() {
+                "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                _ => {}
+            }
+        }
+        let code = mcu.fresh_main_rs();
+        assert!(!code.contains("is wired to GP"), "no clash, no note:\n{code}");
     }
 }
