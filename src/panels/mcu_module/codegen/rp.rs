@@ -248,6 +248,69 @@ fn bus_lines(mcu: &Mcu, hal: &str) -> String {
     o
 }
 
+/// PWM slices and ADC inputs.
+///
+/// A slice is not indexable on rp-hal — `Slices` exposes `pwm0`..`pwm7` as
+/// FIELDS — so the generated code names each one. Channel A is the even GPIO of
+/// the pair and B the odd one, which is why the definition stores the slice as
+/// the timer and 1/2 as the channel.
+fn pwm_adc_lines(mcu: &Mcu, hal: &str) -> String {
+    let mut o = String::new();
+
+    let mut pwm: Vec<(u8, u8, u8)> = Vec::new();
+    let mut adc: Vec<(u8, u8)> = Vec::new();
+    for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
+        let Some(n) = gpio_index(&p.name) else { continue };
+        match p.selected_function {
+            PinFunction::TimerPwm { timer, channel } => pwm.push((timer, channel, n)),
+            PinFunction::AdcChannel { channel, .. } => adc.push((channel, n)),
+            _ => {}
+        }
+    }
+    pwm.sort_unstable();
+    adc.sort_unstable();
+
+    if !pwm.is_empty() {
+        o.push_str("    // The whole PWM block is taken once; each wired slice is then\n");
+        o.push_str("    // enabled and its channel routed to the pad.\n");
+        o.push_str(&format!(
+            "    let mut pwm_slices = {hal}::pwm::Slices::new(pac.PWM, &mut pac.RESETS);\n"
+        ));
+        let mut done: Vec<u8> = Vec::new();
+        for (slice, _, _) in &pwm {
+            if done.contains(slice) {
+                continue;
+            }
+            done.push(*slice);
+            o.push_str(&format!("    let pwm{slice} = &mut pwm_slices.pwm{slice};\n"));
+            o.push_str(&format!("    pwm{slice}.set_ph_correct();\n"));
+            o.push_str(&format!("    pwm{slice}.enable();\n"));
+        }
+        for (slice, channel, n) in &pwm {
+            // 1 is channel A, 2 is B - the even GPIO of the pair and the odd one.
+            let ch = if *channel == 1 { "channel_a" } else { "channel_b" };
+            o.push_str(&format!("    pwm{slice}.{ch}.output_to(pins.gpio{n});\n"));
+        }
+    }
+
+    if !adc.is_empty() {
+        o.push_str(&format!(
+            "    let mut adc = {hal}::adc::Adc::new(pac.ADC, &mut pac.RESETS);\n"
+        ));
+        o.push_str("    let _ = &mut adc;\n");
+        for (channel, n) in &adc {
+            o.push_str(&format!(
+                "    // ADC{channel}, on GP{n}. Read it with `adc.read(&mut adc{channel})`.\n"
+            ));
+            o.push_str(&format!(
+                "    let mut adc{channel} = {hal}::adc::AdcPin::new(pins.gpio{n}).unwrap();\n"
+            ));
+            o.push_str(&format!("    let _ = &mut adc{channel};\n"));
+        }
+    }
+    o
+}
+
 /// The generated region: boot stage, clocks, the GPIO bank, and the pins.
 ///
 /// Built line by line rather than as one continued literal: rustfmt joins a
@@ -322,6 +385,7 @@ fn section(mcu: &Mcu) -> String {
     o.push_str("        pac.IO_BANK0,\n        pac.PADS_BANK0,\n        sio.gpio_bank0,\n        &mut pac.RESETS,\n    );\n\n");
     o.push_str(&gpio_lines(mcu));
     o.push_str(&bus_lines(mcu, hal));
+    o.push_str(&pwm_adc_lines(mcu, hal));
     o.push_str(GEN_END);
     o.push('\n');
     o
@@ -572,6 +636,16 @@ mod emit_for_manual_compile {
                     "GP18" => p.selected_function = PinFunction::SpiSck(0),
                     "GP19" => p.selected_function = PinFunction::SpiMosi(0),
                     "GP16" => p.selected_function = PinFunction::SpiMiso(0),
+                    // PWM slice 3 (both channels) and one ADC input.
+                    "GP6" => {
+                        p.selected_function = PinFunction::TimerPwm { timer: 3, channel: 1 }
+                    }
+                    "GP7" => {
+                        p.selected_function = PinFunction::TimerPwm { timer: 3, channel: 2 }
+                    }
+                    "GP26" => {
+                        p.selected_function = PinFunction::AdcChannel { adc: 0, channel: 0 }
+                    }
                     _ => {}
                 }
             }
