@@ -993,6 +993,13 @@ pub struct AppIde {
     /// The Virtual-module panel is collapsed to its toolbar, giving the height
     /// back to the chip diagram. The bar stays visible; the caret reopens it.
     vmod_collapsed: bool,
+    /// Which open module's DETAILS pane is showing, if any (its `id`).
+    ///
+    /// One at a time, and deliberately: the pane is a third column, so two of
+    /// them would leave the configs a strip. Cleared on its own when that
+    /// module is collapsed or removed — the pane is a view of a config that is
+    /// on screen, not a window that outlives it.
+    vmod_info_id: Option<String>,
     /// The header's "Reset pins" is ARMED and waiting for confirmation.
     ///
     /// It wipes every pin function on the chip — and with them the Virtual
@@ -1818,6 +1825,7 @@ impl AppIde {
             vmod_body_h: 150.0,
             vmod_open_sig: 0,
             vmod_collapsed: false,
+            vmod_info_id: None,
             reset_pins_confirm: false,
             structure_cache: None,
             structure_view: Default::default(),

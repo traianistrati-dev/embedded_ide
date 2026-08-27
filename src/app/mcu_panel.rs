@@ -11,6 +11,151 @@ use egui_phosphor::regular as ph;
 
 use crate::panels::mcu_module::modules::ModuleKind;
 
+/// The details pane: what one Virtual Module actually holds.
+///
+/// # What is in here, and what deliberately is not
+///
+/// Everything shown is read off the module and the chip — the peripheral it
+/// took, the pins it holds, what is still unwired. Nothing is a second
+/// description of the generated code kept in step by hand: the only link to it
+/// is the jump button, which goes through `request_pin_goto`, the same path the
+/// canvas already uses. A pane that re-stated the `init` signature would be one
+/// more list to keep in step with `codegen`, and it would be the one that rots.
+fn module_details_ui(
+    ui: &mut egui::Ui,
+    mcu: &crate::panels::mcu_module::mcu::model::Mcu,
+    id: &str,
+    pin_names: &std::collections::HashMap<usize, String>,
+    goto_pin: &mut Option<usize>,
+) {
+    use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
+
+    let Some(m) = mcu.modules.iter().find(|m| m.id == id) else {
+        return;
+    };
+    let color = mod_gui::module_color(m.kind, m.instance());
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(format!("{}  {}", ph::INFO, mod_gui::module_title(m)))
+            .strong()
+            .color(color),
+    );
+    ui.add_space(6.0);
+
+    // What the module is for, in the words the palette already uses — one
+    // sentence, and the same one, so the two cannot drift apart. Labelled as
+    // the palette's own text because it is written in the imperative ("Add
+    // a…"), which needs saying when it is read next to a module that exists.
+    ui.label(
+        egui::RichText::new("From the palette:")
+            .size(10.0)
+            .color(egui::Color32::from_gray(120)),
+    );
+    ui.label(
+        egui::RichText::new(add_module_hint(m.kind))
+            .size(11.0)
+            .color(egui::Color32::from_gray(170)),
+    );
+    ui.add_space(10.0);
+
+    // ── Pins ──
+    ui.label(
+        egui::RichText::new("Pins")
+            .size(11.0)
+            .strong()
+            .color(egui::Color32::from_gray(200)),
+    );
+    ui.add_space(2.0);
+    if m.connections.is_empty() {
+        ui.label(
+            egui::RichText::new(
+                "Nothing wired yet. Assign this peripheral's functions on the Pins canvas and \
+                 they appear here.",
+            )
+            .size(10.5)
+            .italics()
+            .color(egui::Color32::from_gray(140)),
+        );
+    } else {
+        egui::Grid::new(("vmod_info_pins", id))
+            .num_columns(3)
+            .spacing([8.0, 3.0])
+            .show(ui, |ui| {
+                for c in &m.connections {
+                    ui.label(
+                        egui::RichText::new(c.signal.label())
+                            .size(10.5)
+                            .monospace()
+                            .color(color),
+                    );
+                    let name = pin_names
+                        .get(&c.mcu_pin)
+                        .cloned()
+                        .unwrap_or_else(|| "?".to_owned());
+                    // `ph::ARROW_RIGHT`, not a raw U+2192: the UI font has no
+                    // glyph for it and it draws as tofu. The config rows below
+                    // this pane already learned that.
+                    ui.label(
+                        egui::RichText::new(format!("{} {name}", ph::ARROW_RIGHT))
+                            .size(10.5)
+                            .monospace(),
+                    );
+                    // The pad NUMBER, which is what the datasheet and the board
+                    // silkscreen agree on and the canvas does not always have
+                    // room for — and a way into the code it generated.
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("{}  {}", ph::CODE, c.mcu_pin))
+                                    .size(10.0),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Pin number - click to jump to its line in the code")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        *goto_pin = Some(c.mcu_pin);
+                    }
+                    ui.end_row();
+                }
+            });
+    }
+
+    ui.add_space(10.0);
+
+    // ── This kind, on this chip ──
+    ui.label(
+        egui::RichText::new("On this chip")
+            .size(11.0)
+            .strong()
+            .color(egui::Color32::from_gray(200)),
+    );
+    ui.add_space(2.0);
+    let same = mcu.modules.iter().filter(|o| o.kind == m.kind).count();
+    ui.label(
+        egui::RichText::new(format!(
+            "{same} {} module{} of this kind.",
+            m.kind.short(),
+            if same == 1 { "" } else { "s" }
+        ))
+        .size(10.5)
+        .color(egui::Color32::from_gray(170)),
+    );
+    ui.label(
+        egui::RichText::new(if mcu.can_add_module(m.kind) {
+            "Another one can still be added."
+        } else if m.kind.is_single_instance() {
+            "The chip has only this one."
+        } else {
+            "Every instance is taken."
+        })
+        .size(10.5)
+        .color(egui::Color32::from_gray(140)),
+    );
+    ui.add_space(8.0);
+}
+
 /// Why a palette entry is greyed out.
 ///
 /// Out here for the same reason as [`add_module_hint`]: these sentences are
@@ -471,6 +616,10 @@ impl AppIde {
                     let auto_cap = (ui.available_height() * 0.45).min(body_cap);
                     let mut body_h = self.vmod_body_h.min(body_cap);
                     let mut collapsed = self.vmod_collapsed;
+                    // `self` is borrowed for the whole panel closure below (it
+                    // holds `&mut self.mcu`), so this travels in and out as a
+                    // local, exactly like `collapsed` and `body_h`.
+                    let mut info_id = self.vmod_info_id.clone();
                     // The handle below IS this panel's top border, so egui's
                     // own separator line would be a second bar right above it —
                     // which is exactly what it looked like.
@@ -864,6 +1013,12 @@ impl AppIde {
                                 // applied after the loop.
                                 let confirm_id = mcu.module_remove_confirm.clone();
                                 let mut remove_id: Option<String> = None; // confirmed → remove
+                                // A pin the details pane wants shown in the
+                                // editor. `request_pin_goto` is the existing,
+                                // deferred path — `AppIde` consumes it after the
+                                // frame, so the pane never touches the editor
+                                // itself.
+                                let mut goto_pin: Option<usize> = None;
                                 let mut arm_confirm: Option<String> = None; // show the confirm
                                 let mut cancel_confirm = false;
                                 // Pull the staged per-module styles into a LOCAL map so
@@ -916,6 +1071,12 @@ impl AppIde {
                                 // the two loops borrow `mcu.modules` in turn.
                                 let mut open_ids: Vec<String> = Vec::new();
                                 let mut clicked: Option<String> = None;
+                                // Deferred, like `clicked`: the (i) button is
+                                // drawn inside the loop that borrows
+                                // `mcu.modules`, and flipping `info_id` there
+                                // would also make the pane appear or vanish
+                                // mid-column.
+                                let mut info_toggle: Option<String> = None;
                                 // Everything the panel spends ABOVE the columns
                                 // — the Apply bar, the palette row, the spacing.
                                 // Measured, not guessed: a new button in that
@@ -1048,8 +1209,23 @@ impl AppIde {
                                     // so without it the title and the Name row
                                     // laid out side by side and the config's grid
                                     // had nowhere left to go.
-                                    let cfg_size =
-                                        egui::vec2(ui.available_width(), ui.available_height());
+                                    // The pane is only ever shown for a module
+                                    // that is actually OPEN — collapsing one (or
+                                    // removing it) takes its details with it,
+                                    // rather than leaving a column describing
+                                    // something no longer on screen.
+                                    let info_for = info_id
+                                        .clone()
+                                        .filter(|id| open_ids.iter().any(|o| o == id));
+                                    let info_w = if info_for.is_some() {
+                                        (ui.available_width() * 0.40).clamp(220.0, 420.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let cfg_size = egui::vec2(
+                                        (ui.available_width() - info_w).max(120.0),
+                                        ui.available_height(),
+                                    );
                                     let out = ui
                                         .allocate_ui_with_layout(
                                             cfg_size,
@@ -1087,17 +1263,55 @@ impl AppIde {
                                                 // config: with several open at
                                                 // once, an unlabelled block would
                                                 // not say whose it is.
-                                                egui::Frame::new()
-                                                    .fill(bg)
-                                                    .inner_margin(egui::Margin::symmetric(6, 2))
-                                                    .corner_radius(egui::CornerRadius::same(4))
-                                                    .show(ui, |ui| {
-                                                        ui.label(
-                                                            egui::RichText::new(title)
-                                                                .strong()
-                                                                .color(mod_color),
-                                                        );
-                                                    });
+                                                ui.horizontal(|ui| {
+                                                    egui::Frame::new()
+                                                        .fill(bg)
+                                                        .inner_margin(egui::Margin::symmetric(
+                                                            6, 2,
+                                                        ))
+                                                        .corner_radius(egui::CornerRadius::same(4))
+                                                        .show(ui, |ui| {
+                                                            ui.label(
+                                                                egui::RichText::new(title)
+                                                                    .strong()
+                                                                    .color(mod_color),
+                                                            );
+                                                        });
+                                                    // Pushed to the far right of
+                                                    // the config column, which is
+                                                    // the edge the details pane
+                                                    // then opens along — so the
+                                                    // button sits on the thing it
+                                                    // summons.
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            let showing = info_id.as_deref()
+                                                                == Some(m.id.as_str());
+                                                            if ui
+                                                                .selectable_label(
+                                                                    showing,
+                                                                    egui::RichText::new(ph::INFO)
+                                                                        .size(14.0)
+                                                                        .color(mod_color),
+                                                                )
+                                                                .on_hover_text(if showing {
+                                                                    "Hide the details pane"
+                                                                } else {
+                                                                    "What this module holds and \
+                                                                     where its pins land in the \
+                                                                     generated code"
+                                                                })
+                                                                .clicked()
+                                                            {
+                                                                info_toggle =
+                                                                    Some(m.id.clone());
+                                                            }
+                                                        },
+                                                    );
+                                                });
                                                 // Rename field — appended to the generated
                                                 // variable name(s); also shown in the title.
                                                 ui.horizontal(|ui| {
@@ -1193,7 +1407,15 @@ impl AppIde {
                                                 {
                                                     arm_confirm = Some(m.id.clone());
                                                 }
-                                                ui.add_space(10.0);
+                                                // Where one module's config ends
+                                                // and the next begins. With
+                                                // several open the blocks ran
+                                                // together and only the coloured
+                                                // title said a new one had
+                                                // started.
+                                                ui.add_space(8.0);
+                                                ui.separator();
+                                                ui.add_space(6.0);
                                             }
                                                     })
                                             },
@@ -1202,6 +1424,29 @@ impl AppIde {
                                     // + a row of slack so the last button is not
                                     // flush against the panel edge.
                                     needed_h = out.content_size.y + 16.0;
+
+                                    // ── far right: the details pane ──
+                                    if let Some(id) = info_for {
+                                        ui.separator();
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(
+                                                ui.available_width(),
+                                                ui.available_height(),
+                                            ),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                egui::ScrollArea::vertical()
+                                                    .id_salt("vmod_info")
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        module_details_ui(
+                                                            ui, mcu, &id, &pin_names,
+                                                            &mut goto_pin,
+                                                        );
+                                                    });
+                                            },
+                                        );
+                                    }
                                 });
                                 });
 
@@ -1215,6 +1460,19 @@ impl AppIde {
                                 // Applied after both loops — each borrowed
                                 // `mcu.modules`, and the toggle only touches
                                 // egui's own state.
+                                if let Some(n) = goto_pin {
+                                    mcu.request_pin_goto(n);
+                                }
+                                // Toggling OFF is the same click again — the
+                                // button is a `selectable_label`, so it reads as
+                                // a switch and behaves like one.
+                                if let Some(id) = info_toggle {
+                                    info_id = if info_id.as_deref() == Some(id.as_str()) {
+                                        None
+                                    } else {
+                                        Some(id)
+                                    };
+                                }
                                 if let Some(id) = clicked {
                                     let mut st =
                                         egui::collapsing_header::CollapsingState::load_with_default_open(
@@ -1320,6 +1578,7 @@ impl AppIde {
                     self.vmod_open_sig = open_sig;
                     self.vmod_collapsed = collapsed;
                     self.vmod_body_h = body_h;
+                    self.vmod_info_id = info_id;
 
                     if modules_changed {
                         if let Some(mcu) = &self.mcu {

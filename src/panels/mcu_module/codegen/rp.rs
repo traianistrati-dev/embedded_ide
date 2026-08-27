@@ -16,7 +16,6 @@
 //! enable `cortex-m/critical-section-single-core` — see `cargo_toml_rp`.
 
 use super::common::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, var_suffix};
-use super::embassy_async::splice_section;
 use super::family::FamilyBackend;
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::pins::PinFunction;
@@ -58,7 +57,9 @@ const ALLOW: &str = "    #[allow(unused_mut, unused_variables)]
 fn gpio_lines(mcu: &Mcu) -> String {
     let mut out = String::new();
     for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
-        let Some(n) = gpio_index(&p.name) else { continue };
+        let Some(n) = gpio_index(&p.name) else {
+            continue;
+        };
         let sfx = var_suffix(&p.selected_function);
         match p.selected_function {
             PinFunction::GpioOutput => out.push_str(&format!(
@@ -113,7 +114,11 @@ fn pll_from(mcu: &Mcu, prefix: &str, xtal_hz: u32) -> Pll {
     use crate::panels::mcu_module::clock::model::ClockConfig;
     let ClockConfig::Graph(gc) = &mcu.clock else {
         // A chip with no tree cannot answer; the caller's defaults stand.
-        return Pll { vco_mhz: 1500, pd1: 6, pd2: 2 };
+        return Pll {
+            vco_mhz: 1500,
+            pd1: 6,
+            pd2: 2,
+        };
     };
     let value = |id: String| match gc.graph.node(&id).map(|n| &n.state) {
         Some(NodeState::Value(v)) => Some(*v),
@@ -146,10 +151,15 @@ fn xtal_hz(mcu: &Mcu) -> u32 {
 /// The definition already says it — every header pin lists the SPI/UART/I2C
 /// role its FUNCSEL table gives it — so the backend never has to know the table
 /// itself, only how to read the wiring back out.
-fn bus_pins(mcu: &Mcu, want: impl Fn(&PinFunction) -> Option<(u8, &'static str)>) -> Vec<(u8, &'static str, u8)> {
+fn bus_pins(
+    mcu: &Mcu,
+    want: impl Fn(&PinFunction) -> Option<(u8, &'static str)>,
+) -> Vec<(u8, &'static str, u8)> {
     let mut out = Vec::new();
     for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
-        let Some(n) = gpio_index(&p.name) else { continue };
+        let Some(n) = gpio_index(&p.name) else {
+            continue;
+        };
         if let Some((inst, role)) = want(&p.selected_function) {
             out.push((inst, role, n));
         }
@@ -192,7 +202,9 @@ fn bus_lines(mcu: &Mcu, hal: &str) -> String {
             ));
             continue;
         };
-        o.push_str(&format!("    let uart{i} = {hal}::uart::UartPeripheral::new(\n"));
+        o.push_str(&format!(
+            "    let uart{i} = {hal}::uart::UartPeripheral::new(\n"
+        ));
         o.push_str(&format!("        pac.UART{i},\n"));
         o.push_str(&format!("        (\n            pins.gpio{tx}.into_function(),\n            pins.gpio{rx}.into_function(),\n        ),\n"));
         o.push_str("        &mut pac.RESETS,\n    )\n    .enable(\n");
@@ -218,7 +230,9 @@ fn bus_lines(mcu: &Mcu, hal: &str) -> String {
             ));
             continue;
         };
-        o.push_str(&format!("    let spi{i} = {hal}::spi::Spi::<_, _, _, 8>::new(\n"));
+        o.push_str(&format!(
+            "    let spi{i} = {hal}::spi::Spi::<_, _, _, 8>::new(\n"
+        ));
         o.push_str(&format!("        pac.SPI{i},\n"));
         o.push_str(&format!("        (\n            pins.gpio{mosi}.into_function(),\n            pins.gpio{miso}.into_function(),\n            pins.gpio{sck}.into_function(),\n        ),\n"));
         o.push_str("    )\n    .init(\n        &mut pac.RESETS,\n        clocks.peripheral_clock.freq(),\n");
@@ -260,7 +274,9 @@ fn pwm_adc_lines(mcu: &Mcu, hal: &str) -> String {
     let mut pwm: Vec<(u8, u8, u8)> = Vec::new();
     let mut adc: Vec<(u8, u8)> = Vec::new();
     for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
-        let Some(n) = gpio_index(&p.name) else { continue };
+        let Some(n) = gpio_index(&p.name) else {
+            continue;
+        };
         match p.selected_function {
             PinFunction::TimerPwm { timer, channel } => pwm.push((timer, channel, n)),
             PinFunction::AdcChannel { channel, .. } => adc.push((channel, n)),
@@ -282,7 +298,9 @@ fn pwm_adc_lines(mcu: &Mcu, hal: &str) -> String {
                 continue;
             }
             done.push(*slice);
-            o.push_str(&format!("    let pwm{slice} = &mut pwm_slices.pwm{slice};\n"));
+            o.push_str(&format!(
+                "    let pwm{slice} = &mut pwm_slices.pwm{slice};\n"
+            ));
             o.push_str(&format!("    pwm{slice}.set_ph_correct();\n"));
             o.push_str(&format!("    pwm{slice}.enable();\n"));
         }
@@ -295,12 +313,19 @@ fn pwm_adc_lines(mcu: &Mcu, hal: &str) -> String {
         let cfgs = crate::panels::mcu_module::modules::timer_configs(&mcu.modules);
         for (slice, channel, n) in &pwm {
             // 1 is channel A, 2 is B - the even GPIO of the pair and the odd one.
-            let ch = if *channel == 1 { "channel_a" } else { "channel_b" };
+            let ch = if *channel == 1 {
+                "channel_a"
+            } else {
+                "channel_b"
+            };
             o.push_str(&format!("    pwm{slice}.{ch}.output_to(pins.gpio{n});\n"));
             let x100 = cfgs.get(slice).map_or(0, |c| c.duty_x100_of(*channel));
             if x100 > 0 {
-                o.push_str(&format!("    // {} %
-", super::common::duty_percent_str(x100)));
+                o.push_str(&format!(
+                    "    // {} %
+",
+                    super::common::duty_percent_str(x100)
+                ));
                 o.push_str(&format!(
                     "    let max{slice}_{channel} = pwm{slice}.{ch}.max_duty_cycle() as u32;
 "
@@ -360,8 +385,13 @@ fn section(mcu: &Mcu) -> String {
             cfg.pd2,
             cfg.vco_mhz / cfg.pd1 / cfg.pd2
         ));
-        o.push_str(&format!("const {name}: {hal}::pll::PLLConfig = {hal}::pll::PLLConfig {{\n"));
-        o.push_str(&format!("    vco_freq: {hal}::fugit::HertzU32::MHz({}),\n", cfg.vco_mhz));
+        o.push_str(&format!(
+            "const {name}: {hal}::pll::PLLConfig = {hal}::pll::PLLConfig {{\n"
+        ));
+        o.push_str(&format!(
+            "    vco_freq: {hal}::fugit::HertzU32::MHz({}),\n",
+            cfg.vco_mhz
+        ));
         o.push_str("    refdiv: 1,\n");
         o.push_str(&format!("    post_div1: {},\n", cfg.pd1));
         o.push_str(&format!("    post_div2: {},\n", cfg.pd2));
@@ -370,24 +400,36 @@ fn section(mcu: &Mcu) -> String {
 
     o.push_str(&format!("#[{hal}::entry]\n"));
     o.push_str("fn main() -> ! {\n");
-    o.push_str(&format!("    let mut pac = {hal}::pac::Peripherals::take().unwrap();\n"));
-    o.push_str(&format!("    let mut watchdog = {hal}::Watchdog::new(pac.WATCHDOG);\n"));
+    o.push_str(&format!(
+        "    let mut pac = {hal}::pac::Peripherals::take().unwrap();\n"
+    ));
+    o.push_str(&format!(
+        "    let mut watchdog = {hal}::Watchdog::new(pac.WATCHDOG);\n"
+    ));
     o.push_str("\n");
     o.push_str("    // Built from the Clock tab, not from the HAL's fixed default: the two\n");
     o.push_str("    // PLLConfigs above are this tree's FBDIV and POSTDIV values.\n");
     o.push_str("    //\n");
     o.push_str("    // `map_err(|_| false)` because these error types carry no Debug, so\n");
     o.push_str("    // `.unwrap()` alone cannot name them.\n");
-    o.push_str(&format!("    let xosc = {hal}::xosc::setup_xosc_blocking(\n"));
+    o.push_str(&format!(
+        "    let xosc = {hal}::xosc::setup_xosc_blocking(\n"
+    ));
     o.push_str("        pac.XOSC,\n");
-    o.push_str(&format!("        {hal}::fugit::HertzU32::Hz(XTAL_FREQ_HZ),\n"));
+    o.push_str(&format!(
+        "        {hal}::fugit::HertzU32::Hz(XTAL_FREQ_HZ),\n"
+    ));
     o.push_str("    )\n    .map_err(|_| false)\n    .unwrap();\n");
-    o.push_str(&format!("    let mut clocks = {hal}::clocks::ClocksManager::new(pac.CLOCKS);\n"));
+    o.push_str(&format!(
+        "    let mut clocks = {hal}::clocks::ClocksManager::new(pac.CLOCKS);\n"
+    ));
     for (var, peri, cfg) in [
         ("pll_sys", "PLL_SYS", "PLL_SYS_CFG"),
         ("pll_usb", "PLL_USB", "PLL_USB_CFG"),
     ] {
-        o.push_str(&format!("    let {var} = {hal}::pll::setup_pll_blocking(\n"));
+        o.push_str(&format!(
+            "    let {var} = {hal}::pll::setup_pll_blocking(\n"
+        ));
         o.push_str(&format!("        pac.{peri},\n"));
         o.push_str("        xosc.operating_frequency(),\n");
         o.push_str(&format!("        {cfg},\n"));
@@ -464,8 +506,28 @@ impl FamilyBackend for RpBackend {
         format!("{}{}{USER_TAIL}", header(mcu), section(mcu))
     }
 
+    /// Replace ONLY the marked block, keeping what the user wrote on either
+    /// side of it.
+    ///
+    /// Not `embassy_async::splice_section`: that one regenerates everything
+    /// ABOVE the markers too, so a runtime switch can rewrite the imports. It is
+    /// right for a backend with three runtimes and wrong for this one — reusing
+    /// it here rebuilt the file with embassy-stm32's header on a Pico, and took
+    /// the user's own `use` lines with it.
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
-        splice_section(existing, &section(mcu), &mcu.name, &mcu.id)
+        let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END))
+        else {
+            // No block to replace - the file is not ours, so start over rather
+            // than splice into something unrecognised.
+            return self.fresh_main_rs(mcu);
+        };
+        let end = end_start + GEN_END.len();
+        format!(
+            "{}{}{}",
+            &existing[..begin],
+            section(mcu).trim_end_matches('\n'),
+            &existing[end..]
+        )
     }
 }
 
@@ -567,16 +629,56 @@ mod clock_authoring {
                 },
             ],
             edges: vec![
-                Edge { from: "xosc".into(), to: "pll_sys_fb".into(), input: 0 },
-                Edge { from: "pll_sys_fb".into(), to: "pll_sys_pd1".into(), input: 0 },
-                Edge { from: "pll_sys_pd1".into(), to: "pll_sys_pd2".into(), input: 0 },
-                Edge { from: "pll_sys_pd2".into(), to: "clk_sys".into(), input: 0 },
-                Edge { from: "clk_sys".into(), to: "clk_peri".into(), input: 0 },
-                Edge { from: "xosc".into(), to: "pll_usb_fb".into(), input: 0 },
-                Edge { from: "pll_usb_fb".into(), to: "pll_usb_pd1".into(), input: 0 },
-                Edge { from: "pll_usb_pd1".into(), to: "pll_usb_pd2".into(), input: 0 },
-                Edge { from: "pll_usb_pd2".into(), to: "clk_usb".into(), input: 0 },
-                Edge { from: "xosc".into(), to: "clk_ref".into(), input: 0 },
+                Edge {
+                    from: "xosc".into(),
+                    to: "pll_sys_fb".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "pll_sys_fb".into(),
+                    to: "pll_sys_pd1".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "pll_sys_pd1".into(),
+                    to: "pll_sys_pd2".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "pll_sys_pd2".into(),
+                    to: "clk_sys".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "clk_sys".into(),
+                    to: "clk_peri".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "xosc".into(),
+                    to: "pll_usb_fb".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "pll_usb_fb".into(),
+                    to: "pll_usb_pd1".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "pll_usb_pd1".into(),
+                    to: "pll_usb_pd2".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "pll_usb_pd2".into(),
+                    to: "clk_usb".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "xosc".into(),
+                    to: "clk_ref".into(),
+                    input: 0,
+                },
             ],
         }
     }
@@ -610,8 +712,8 @@ mod clock_authoring {
                 graph,
                 bindings: Default::default(),
             };
-            let text = ron::ser::to_string_pretty(&gc, ron::ser::PrettyConfig::new())
-                .expect("serialise");
+            let text =
+                ron::ser::to_string_pretty(&gc, ron::ser::PrettyConfig::new()).expect("serialise");
             let path = std::env::temp_dir().join(format!("eide_{name}_clock.ron"));
             std::fs::write(&path, text).expect("write");
             println!("wrote {} ({} nodes)", path.display(), gc.graph.nodes.len());
@@ -662,14 +764,18 @@ mod emit_for_manual_compile {
                     "GP16" => p.selected_function = PinFunction::SpiMiso(0),
                     // PWM slice 3 (both channels) and one ADC input.
                     "GP6" => {
-                        p.selected_function = PinFunction::TimerPwm { timer: 3, channel: 1 }
+                        p.selected_function = PinFunction::TimerPwm {
+                            timer: 3,
+                            channel: 1,
+                        }
                     }
                     "GP7" => {
-                        p.selected_function = PinFunction::TimerPwm { timer: 3, channel: 2 }
+                        p.selected_function = PinFunction::TimerPwm {
+                            timer: 3,
+                            channel: 2,
+                        }
                     }
-                    "GP26" => {
-                        p.selected_function = PinFunction::AdcChannel { adc: 0, channel: 0 }
-                    }
+                    "GP26" => p.selected_function = PinFunction::AdcChannel { adc: 0, channel: 0 },
                     _ => {}
                 }
             }
@@ -692,8 +798,12 @@ mod emit_for_manual_compile {
             // produces. Which is exactly what happened: the invariant test went
             // green while `cargo check` said "file not found for module `pins`".
             let mut user: Vec<(String, String)> = vec![
-                ("src/pins/mod.rs".into(), "pub mod configs;
-".into()),
+                (
+                    "src/pins/mod.rs".into(),
+                    "pub mod configs;
+"
+                    .into(),
+                ),
                 ("src/pins/configs/mod.rs".into(), String::new()),
             ];
             user.extend(mcu.config_files());
@@ -704,5 +814,72 @@ mod emit_for_manual_compile {
             println!("wrote {}", dir.display());
             println!("target: {}", def.project.target);
         }
+    }
+}
+
+#[cfg(test)]
+mod regeneration {
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    /// Re-generating must replace the marked block and keep everything else.
+    ///
+    /// This is the one failure a compiler cannot catch: a splice that drops the
+    /// user's loop still produces a file that builds, and the loss is only
+    /// noticed later, by the person who wrote it.
+    #[test]
+    fn regeneration_keeps_the_users_code() {
+        let def = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico");
+        let mut mcu = def.build_mcu();
+        for p in mcu.iter_all_pins_mut() {
+            if p.name.starts_with("GP25") {
+                p.selected_function = PinFunction::GpioOutput;
+            }
+        }
+        let first = mcu.fresh_main_rs();
+
+        // What a user would add: an import above the block and code below it.
+        let edited = first
+            .replace(
+                "use panic_halt as _;",
+                "use panic_halt as _;\nuse my_crate::Thing;",
+            )
+            .replace(
+                "        // Your main loop code here.",
+                "        gp25.set_high().unwrap();\n        my_own_helper();",
+            );
+
+        // Wire a second pad, so the block genuinely has to change.
+        for p in mcu.iter_all_pins_mut() {
+            if p.name == "GP16" {
+                p.selected_function = PinFunction::GpioInput;
+            }
+        }
+        let again = mcu.update_main_rs(&edited);
+
+        assert!(
+            again.contains("use my_crate::Thing;"),
+            "import above the block:\n{again}"
+        );
+        assert!(
+            again.contains("my_own_helper();"),
+            "code below the block:\n{again}"
+        );
+        assert!(
+            again.contains("pins.gpio16.into_pull_up_input()"),
+            "the new pad:\n{again}"
+        );
+        assert!(
+            again.contains("pins.gpio25.into_push_pull_output()"),
+            "the old pad:\n{again}"
+        );
+        // And it must not have grown a second copy of the block.
+        assert_eq!(
+            again.matches("#[rp2040_hal::entry]").count(),
+            1,
+            "the generated block was duplicated:\n{again}"
+        );
     }
 }
