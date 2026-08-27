@@ -367,9 +367,7 @@ fn stm32_init_lines(w: &WatchdogSettings, family: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::watchdog::{
-        EspWdtConfig, IwdgConfig, WatchdogSettings, WwdgConfig,
-    };
+    use super::super::super::watchdog::{EspWdtConfig, IwdgConfig, WatchdogSettings, WwdgConfig};
     use super::*;
 
     fn both() -> WatchdogSettings {
@@ -475,8 +473,14 @@ mod tests {
         assert!(calls.contains("rwdt::init(peripherals.LPWR)"), "{calls}");
         // `init()` takes nothing — that is what lets it work on the async
         // runtime, where TIMG0 already belongs to the scheduler.
-        assert!(calls.contains("_mwdt0 = pins::configs::mwdt0::init();"), "{calls}");
-        assert!(calls.contains("_mwdt1 = pins::configs::mwdt1::init();"), "{calls}");
+        assert!(
+            calls.contains("_mwdt0 = pins::configs::mwdt0::init();"),
+            "{calls}"
+        );
+        assert!(
+            calls.contains("_mwdt1 = pins::configs::mwdt1::init();"),
+            "{calls}"
+        );
         assert!(!calls.contains("IWDG"), "{calls}");
     }
 

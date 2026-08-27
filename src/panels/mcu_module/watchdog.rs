@@ -548,7 +548,9 @@ mod tests {
         assert!(codegen_supported("stm32wba"));
         // The ESPs joined last, on their own peripherals: RWDT + MWDT, not
         // IWDG + WWDG. This used to assert the opposite.
-        for chip in ["esp32", "esp32c2", "esp32c3", "esp32c6", "esp32h2", "esp32s3"] {
+        for chip in [
+            "esp32", "esp32c2", "esp32c3", "esp32c6", "esp32h2", "esp32s3",
+        ] {
             assert!(codegen_supported(chip), "{chip}");
             assert!(is_esp(chip), "{chip}");
         }
@@ -562,7 +564,9 @@ mod tests {
     #[test]
     fn only_the_c2_lacks_the_second_timer_group() {
         assert!(!esp_limits_for("esp32c2").has_mwdt1);
-        for chip in ["esp32", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2", "esp32s2", "esp32s3"] {
+        for chip in [
+            "esp32", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2", "esp32s2", "esp32s3",
+        ] {
             assert!(esp_limits_for(chip).has_mwdt1, "{chip}");
         }
     }

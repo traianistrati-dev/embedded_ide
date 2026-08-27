@@ -389,70 +389,72 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
     let touch_cfg = modules::touch_configs(&mcu.modules);
     let lcd_cam_cfg = esp_lcd_configs(mcu);
     let parl_cfg = modules::parl_io_configs(&mcu.modules);
-    out.extend(crate::panels::mcu_module::codegen_esp_configs::config_files(
-        &uart,
-        &spi_n,
-        &i2c_n,
-        &i2s_n,
-        &modules::usart_configs(&mcu.modules),
-        &esp_spi_configs(mcu),
-        &modules::i2c_configs(&mcu.modules),
-        &modules::i2s_configs(&mcu.modules),
-        // The RMT channels the canvas wires, by number.
-        &codegen_esp::rmt_channels_wired(&configured),
-        &modules::rmt_configs(&mcu.modules),
-        crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(&mcu.family),
-        &codegen_esp::pcnt_units_wired(&configured),
-        &modules::pcnt_configs(&mcu.modules),
-        // The USB pads wired, and a chip whose esp-hal can drive them AS THE
-        // ROLE ASKS: the two controllers share the pads and not the support, so
-        // which one is wanted decides whether there is a file to write.
-        configured
-            .iter()
-            .any(|p| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp))
-            && if usb_cfg.get(&1).is_some_and(|c| c.role.is_otg()) {
-                codegen_esp::has_usb_otg(&mcu.family)
+    out.extend(
+        crate::panels::mcu_module::codegen_esp_configs::config_files(
+            &uart,
+            &spi_n,
+            &i2c_n,
+            &i2s_n,
+            &modules::usart_configs(&mcu.modules),
+            &esp_spi_configs(mcu),
+            &modules::i2c_configs(&mcu.modules),
+            &modules::i2s_configs(&mcu.modules),
+            // The RMT channels the canvas wires, by number.
+            &codegen_esp::rmt_channels_wired(&configured),
+            &modules::rmt_configs(&mcu.modules),
+            crate::panels::mcu_module::mcu::gui::modules::rmt_source_hz(&mcu.family),
+            &codegen_esp::pcnt_units_wired(&configured),
+            &modules::pcnt_configs(&mcu.modules),
+            // The USB pads wired, and a chip whose esp-hal can drive them AS THE
+            // ROLE ASKS: the two controllers share the pads and not the support, so
+            // which one is wanted decides whether there is a file to write.
+            configured
+                .iter()
+                .any(|p| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp))
+                && if usb_cfg.get(&1).is_some_and(|c| c.role.is_otg()) {
+                    codegen_esp::has_usb_otg(&mcu.family)
+                } else {
+                    codegen_esp::has_usb_serial_jtag(&mcu.family)
+                },
+            usb_cfg.get(&1),
+            // The touch channels wired, on a chip whose esp-hal has the driver:
+            // the S2 and S3 have the sensors and no `esp_hal::touch`.
+            &if codegen_esp::has_touch(&mcu.family) {
+                codegen_esp::touch_pads_wired(&configured)
             } else {
-                codegen_esp::has_usb_serial_jtag(&mcu.family)
+                Vec::new()
             },
-        usb_cfg.get(&1),
-        // The touch channels wired, on a chip whose esp-hal has the driver:
-        // the S2 and S3 have the sensors and no `esp_hal::touch`.
-        &if codegen_esp::has_touch(&mcu.family) {
-            codegen_esp::touch_pads_wired(&configured)
-        } else {
-            Vec::new()
-        },
-        touch_cfg.get(&0),
-        // BOTH TWAI pads, on a chip whose esp-hal has the driver. The pads are
-        // offered only where it does, so this is belt and braces — but the C5
-        // has TWAI silicon and no driver, which is the shape of trap it catches.
-        codegen_esp::twai_wired(&configured) && codegen_esp::has_twai(&mcu.family),
-        can_cfg.get(&1),
-        // The MCPWM outputs wired, their unit's settings, and the peripheral
-        // clock esp-hal's own examples pass - 32 MHz on the H2, 40 elsewhere.
-        &codegen_esp::mcpwm_outputs_wired(&configured),
-        &modules::mcpwm_configs(&mcu.modules),
-        if mcu.family == "esp32h2" { 32 } else { 40 },
-        // The parallel port, and whether a VALID pad went with it.
-        &codegen_esp::parl_io_wired(&configured),
-        parl_cfg.get(&0),
-        // The receiving half, wired and configured on its own.
-        &codegen_esp::parl_io_rx_wired(&configured),
-        parl_cfg.get(&1),
-        &codegen_esp::lcd_wired(&configured),
-        lcd_cam_cfg.get(&0),
-        // The camera half, wired and configured independently of the display.
-        &codegen_esp::cam_wired(&configured),
-        lcd_cam_cfg.get(&1),
-        // The DAC channels wired, and the module that holds their levels.
-        &codegen_esp::dac_channels_wired(&configured),
-        modules::dac_configs(&mcu.modules).get(&1),
-        mcu.family == "esp32",
-        &pwm,
-        &timers,
-        runtime,
-    ));
+            touch_cfg.get(&0),
+            // BOTH TWAI pads, on a chip whose esp-hal has the driver. The pads are
+            // offered only where it does, so this is belt and braces — but the C5
+            // has TWAI silicon and no driver, which is the shape of trap it catches.
+            codegen_esp::twai_wired(&configured) && codegen_esp::has_twai(&mcu.family),
+            can_cfg.get(&1),
+            // The MCPWM outputs wired, their unit's settings, and the peripheral
+            // clock esp-hal's own examples pass - 32 MHz on the H2, 40 elsewhere.
+            &codegen_esp::mcpwm_outputs_wired(&configured),
+            &modules::mcpwm_configs(&mcu.modules),
+            if mcu.family == "esp32h2" { 32 } else { 40 },
+            // The parallel port, and whether a VALID pad went with it.
+            &codegen_esp::parl_io_wired(&configured),
+            parl_cfg.get(&0),
+            // The receiving half, wired and configured on its own.
+            &codegen_esp::parl_io_rx_wired(&configured),
+            parl_cfg.get(&1),
+            &codegen_esp::lcd_wired(&configured),
+            lcd_cam_cfg.get(&0),
+            // The camera half, wired and configured independently of the display.
+            &codegen_esp::cam_wired(&configured),
+            lcd_cam_cfg.get(&1),
+            // The DAC channels wired, and the module that holds their levels.
+            &codegen_esp::dac_channels_wired(&configured),
+            modules::dac_configs(&mcu.modules).get(&1),
+            mcu.family == "esp32",
+            &pwm,
+            &timers,
+            runtime,
+        ),
+    );
     out
 }
 

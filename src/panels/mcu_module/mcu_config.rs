@@ -778,7 +778,9 @@ mod watchdog_section_tests {
             rwdt: Some(EspWdtConfig {
                 timeout_us: 2_000_000,
             }),
-            mwdt0: Some(EspWdtConfig { timeout_us: 750_000 }),
+            mwdt0: Some(EspWdtConfig {
+                timeout_us: 750_000,
+            }),
             mwdt1: Some(EspWdtConfig { timeout_us: 15 }),
             ..Default::default()
         };

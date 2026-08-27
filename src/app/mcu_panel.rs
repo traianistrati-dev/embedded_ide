@@ -9,6 +9,108 @@ use super::{AppIde, McuTab, ProjectFileId};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
+use crate::panels::mcu_module::modules::ModuleKind;
+
+/// Why a palette entry is greyed out.
+///
+/// Out here for the same reason as [`add_module_hint`]: these sentences are
+/// longer than `max_width`, and inline they take the whole panel function out
+/// of rustfmt's reach.
+fn add_module_block_reason(kind: ModuleKind, hw_only: Option<&'static str>) -> &'static str {
+    if let Some(why) = hw_only {
+        // The silicon has it; no driver in this HAL can reach it.
+        why
+    } else if kind.is_single_instance() {
+        "this chip has only one such peripheral and it's already used"
+    } else {
+        "every instance of this peripheral is already wired to a module — remove one to free it"
+    }
+}
+
+/// What one palette entry promises, for its hover text.
+///
+/// A free function, and not a `match` inside the palette loop, for one
+/// mechanical reason: every arm here is a sentence, so the arms run past
+/// `max_width` and **rustfmt gives up on the whole enclosing function**. It
+/// did, silently, and the palette's indentation had been hand-kept ever
+/// since. Out here the long lines cost only this table.
+fn add_module_hint(kind: ModuleKind) -> &'static str {
+    match kind {
+        ModuleKind::GenericInterfaceUsart => {
+            "Add a virtual USART device and auto-wire it to a free USART TX/RX pin pair"
+        }
+        ModuleKind::GenericInterfaceLpuart => {
+            "Add a virtual LPUART device and auto-wire it to a free LPUART TX/RX pin pair (a peripheral of its own, not a USART instance)"
+        }
+        ModuleKind::GenericInterfaceSpi => {
+            "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins"
+        }
+        ModuleKind::GenericInterfaceI2c => {
+            "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair"
+        }
+        ModuleKind::GenericInterfaceRmt => {
+            "Add an RMT channel and auto-wire its single line: a pulse-train engine for IR, WS2812 strips and 1-Wire (Espressif only)"
+        }
+        ModuleKind::GenericInterfacePcnt => {
+            "Add a PCNT unit and auto-wire its edge input: a hardware pulse counter for flow meters, tachometers and encoders (Espressif only)"
+        }
+        ModuleKind::GenericInterfaceMcpwm => {
+            "Add an MCPWM unit and auto-wire its first output: motor-control PWM with complementary pairs, for bridges and inverters (Espressif only)"
+        }
+        ModuleKind::GenericInterfaceParlIoRx => {
+            "Add the RECEIVING half of the parallel port: its own pads and its own settings, running alongside the sending half (Espressif only). The two share one DMA channel"
+        }
+        ModuleKind::GenericInterfaceParlIo => {
+            "Add the parallel port and auto-wire its first data line and clock: a byte per clock over DMA, for LED matrices and fast ADCs (Espressif only). Assign the rest of the bus on the canvas"
+        }
+        ModuleKind::GenericInterfaceCamera => {
+            "Add the DVP camera half of the video port: 8 or 16 bits in, on its own pads and its own DMA channel - it runs alongside a display on the other half (ESP32-S3 only)"
+        }
+        ModuleKind::GenericInterfaceTouch => {
+            "Add the capacitive touch controller and auto-wire its first pad: ten channels, each welded to one GPIO, read as a 16-bit count (original ESP32 only). Assign the other pads on the canvas"
+        }
+        ModuleKind::GenericInterfaceLcdCam => {
+            "Add the parallel video port: an i8080 or RGB display, or a DVP camera - 8 or 16 bits wide, always on DMA (ESP32-S3 only). Assign the control pads your mode needs on the canvas"
+        }
+        ModuleKind::GenericInterfaceHspi => {
+            "Add external memory on the HSPI (high-end U5): it auto-wires the single-line width, and the octal one joins by assigning IO2-IO7 and DQS0, which that call requires"
+        }
+        ModuleKind::GenericInterfaceXspi => {
+            "Add an external flash or RAM on an XSPI port (H7RS / N6): it auto-wires the two-line minimum on NCS1, and the wider modes join by assigning IO2-IO15 on the canvas"
+        }
+        ModuleKind::GenericInterfaceOspi => {
+            "Add an external flash or RAM on an OCTOSPI port: it auto-wires the two-line minimum (CLK, NCS, IO0-IO1), and the quad and octal modes join by assigning IO2-IO7 on the canvas"
+        }
+        ModuleKind::GenericInterfaceQspi => {
+            "Add an external-flash module on the QUADSPI: it auto-wires bank 1 whole (CLK, NCS, IO0-IO3), and bank 2 joins the same module when you assign its pads on the canvas"
+        }
+        ModuleKind::GenericInterfaceSdmmc => {
+            "Add an SD card / eMMC module: it auto-wires CK, CMD and D0, and the wider buses join by assigning D1-D3 (4-bit) or D1-D7 (8-bit) on the canvas"
+        }
+        ModuleKind::GenericInterfaceSai => {
+            "Add a SAI module for one audio unit: it auto-wires sub-block A (SCK/SD/FS), and sub-block B joins the same module when you assign its pads on the canvas"
+        }
+        ModuleKind::GenericInterfaceDac => {
+            "Add a DAC module for one peripheral: it takes a free OUT pad now, and the other channel of the SAME DAC joins it when you assign it on the canvas"
+        }
+        ModuleKind::GenericInterfaceI2s => {
+            "Add a virtual I2S audio device and auto-wire it to free I2S CK/WS/SD pins (MCK stays free unless you assign it). I2Sn runs on SPIn, so the two cannot both be built"
+        }
+        ModuleKind::GenericInterfaceTimer => {
+            "Add a PWM module for one TIMER: it takes a free channel now, and any other channel of the SAME timer you assign on the canvas joins it (they share the frequency)"
+        }
+        ModuleKind::GenericInterfaceCan => {
+            "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)"
+        }
+        ModuleKind::GenericInterfaceUsb => {
+            "Add a virtual USB device and auto-wire it to the USB D-/D+ pins"
+        }
+        ModuleKind::Custom => {
+            "Add a CUSTOM module — nothing is auto-wired: name it, add the pins you want, and a `configs/custom_<name>.rs` struct is generated for them"
+        }
+    }
+}
+
 impl AppIde {
     /// What an MCU tab shows when there is no [`Mcu`](crate::panels::mcu_module::mcu::model::Mcu)
     /// to draw.
@@ -492,108 +594,13 @@ impl AppIde {
                                     collapsed = !collapsed;
                                     expand_clicked = !collapsed;
                                 }
-                                ui.label(
-                                    egui::RichText::new("Virtual modules:")
-                                        .size(12.0)
-                                        .color(egui::Color32::from_rgb(150, 150, 160)),
-                                );
-                                // Only the kinds THIS chip's pins can host are
-                                // offered (derived from the pins, so a new chip
-                                // needs no per-family list). A supported-but-
-                                // exhausted kind stays visible but disabled with
-                                // the reason — a button that silently vanishes
-                                // is more confusing than one that explains.
-                                let mut any_supported = false;
-                                for kind in ModuleKind::ALL {
-                                    // A peripheral the silicon HAS but no driver
-                                    // can reach stays visible and disabled, with
-                                    // the reason — same as an exhausted one. It
-                                    // used to vanish, which reads as a bug to
-                                    // anyone holding the chip's datasheet.
-                                    let hw_only = mcu.hardware_only_reason(kind);
-                                    if !mcu.supports_module(kind) && hw_only.is_none() {
-                                        continue; // this chip has no such pins
-                                    }
-                                    any_supported = true;
-                                    let can_add = hw_only.is_none() && mcu.can_add_module(kind);
-                                    let hover = match kind {
-                                        ModuleKind::GenericInterfaceUsart => "Add a virtual USART device and auto-wire it to a free USART TX/RX pin pair",
-                                        ModuleKind::GenericInterfaceLpuart => "Add a virtual LPUART device and auto-wire it to a free LPUART TX/RX pin pair (a peripheral of its own, not a USART instance)",
-                                        ModuleKind::GenericInterfaceSpi => "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
-                                        ModuleKind::GenericInterfaceI2c => "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
-                                        ModuleKind::GenericInterfaceRmt => "Add an RMT channel and auto-wire its single line: a pulse-train engine for IR, WS2812 strips and 1-Wire (Espressif only)",
-                                        ModuleKind::GenericInterfacePcnt => "Add a PCNT unit and auto-wire its edge input: a hardware pulse counter for flow meters, tachometers and encoders (Espressif only)",
-                                        ModuleKind::GenericInterfaceMcpwm => "Add an MCPWM unit and auto-wire its first output: motor-control PWM with complementary pairs, for bridges and inverters (Espressif only)",
-                                        ModuleKind::GenericInterfaceParlIoRx => "Add the RECEIVING half of the parallel port: its own pads and its own settings, running alongside the sending half (Espressif only). The two share one DMA channel",
-                                        ModuleKind::GenericInterfaceParlIo => "Add the parallel port and auto-wire its first data line and clock: a byte per clock over DMA, for LED matrices and fast ADCs (Espressif only). Assign the rest of the bus on the canvas",
-                                        ModuleKind::GenericInterfaceCamera => "Add the DVP camera half of the video port: 8 or 16 bits in, on its own pads and its own DMA channel - it runs alongside a display on the other half (ESP32-S3 only)",
-                                        ModuleKind::GenericInterfaceTouch => "Add the capacitive touch controller and auto-wire its first pad: ten channels, each welded to one GPIO, read as a 16-bit count (original ESP32 only). Assign the other pads on the canvas",
-                                        ModuleKind::GenericInterfaceLcdCam => "Add the parallel video port: an i8080 or RGB display, or a DVP camera - 8 or 16 bits wide, always on DMA (ESP32-S3 only). Assign the control pads your mode needs on the canvas",
-                                        ModuleKind::GenericInterfaceHspi => "Add external memory on the HSPI (high-end U5): it auto-wires the single-line width, and the octal one joins by assigning IO2-IO7 and DQS0, which that call requires",
-                                        ModuleKind::GenericInterfaceXspi => "Add an external flash or RAM on an XSPI port (H7RS / N6): it auto-wires the two-line minimum on NCS1, and the wider modes join by assigning IO2-IO15 on the canvas",
-                                        ModuleKind::GenericInterfaceOspi => "Add an external flash or RAM on an OCTOSPI port: it auto-wires the two-line minimum (CLK, NCS, IO0-IO1), and the quad and octal modes join by assigning IO2-IO7 on the canvas",
-                                        ModuleKind::GenericInterfaceQspi => "Add an external-flash module on the QUADSPI: it auto-wires bank 1 whole (CLK, NCS, IO0-IO3), and bank 2 joins the same module when you assign its pads on the canvas",
-                                        ModuleKind::GenericInterfaceSdmmc => "Add an SD card / eMMC module: it auto-wires CK, CMD and D0, and the wider buses join by assigning D1-D3 (4-bit) or D1-D7 (8-bit) on the canvas",
-                                        ModuleKind::GenericInterfaceSai => "Add a SAI module for one audio unit: it auto-wires sub-block A (SCK/SD/FS), and sub-block B joins the same module when you assign its pads on the canvas",
-                                        ModuleKind::GenericInterfaceDac => "Add a DAC module for one peripheral: it takes a free OUT pad now, and the other channel of the SAME DAC joins it when you assign it on the canvas",
-                                        ModuleKind::GenericInterfaceI2s => "Add a virtual I2S audio device and auto-wire it to free I2S CK/WS/SD pins (MCK stays free unless you assign it). I2Sn runs on SPIn, so the two cannot both be built",
-                                        ModuleKind::GenericInterfaceTimer => "Add a PWM module for one TIMER: it takes a free channel now, and any other channel of the SAME timer you assign on the canvas joins it (they share the frequency)",
-                                        ModuleKind::GenericInterfaceCan => "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)",
-                                        ModuleKind::GenericInterfaceUsb => "Add a virtual USB device and auto-wire it to the USB D-/D+ pins",
-                                        ModuleKind::Custom => "Add a CUSTOM module — nothing is auto-wired: name it, add the pins you want, and a `configs/custom_<name>.rs` struct is generated for them",
-                                    };
-                                    // Colour the button's TEXT with the peripheral's
-                                    // colour ONLY when a module of this kind is already
-                                    // on the chip — a glance shows what's wired; the
-                                    // rest stay neutral. No background fill (it would
-                                    // hurt text clarity), matching the list names below.
-                                    let added = mcu.modules.iter().any(|m| m.kind == kind);
-                                    let label = format!("{} {}", ph::PLUS, kind.short());
-                                    // 11, like every other button on this bar.
-                                    // Without an explicit size they took the
-                                    // global `TextStyle::Button` (12.5) and were
-                                    // visibly bigger than the rest of the row.
-                                    let text = if added {
-                                        egui::RichText::new(label)
-                                            .size(11.0)
-                                            .color(mod_gui::module_color(kind, 1))
-                                    } else {
-                                        egui::RichText::new(label).size(11.0)
-                                    };
-                                    if ui
-                                        .add_enabled(can_add, egui::Button::new(text))
-                                        .on_hover_text(hover)
-                                        .on_disabled_hover_text(if let Some(why) = hw_only {
-                                            why
-                                        } else if kind.is_single_instance() {
-                                            "this chip has only one such peripheral and it's already used"
-                                        } else {
-                                            "every instance of this peripheral is already wired to a module — remove one to free it"
-                                        })
-                                        .clicked()
-                                    {
-                                        // Snapshot for Ctrl+Z BEFORE the add; drop it
-                                        // again if the add found no free pins.
-                                        mcu.push_module_undo(format!("Add {}", kind.short()));
-                                        if mcu.add_module(kind) {
-                                            modules_changed = true;
-                                            // Adding from a collapsed bar means
-                                            // "I want to set this up" — so the
-                                            // panel opens with the new module's
-                                            // config already unfolded, instead
-                                            // of leaving the click looking like
-                                            // it did nothing.
-                                            open_after_add =
-                                                mcu.modules.last().map(|m| m.id.clone());
-                                            collapsed = false;
-                                        } else {
-                                            mcu.discard_last_module_undo();
-                                        }
-                                    }
-                                }
                                 // Undo the last module add/remove (also Ctrl+Z).
+                                // Beside the collapse caret rather than at the
+                                // far end of the row: it undoes what the palette
+                                // did, and the palette is now one button — with
+                                // Undo left behind at the other end there was
+                                // nothing between them to explain the distance.
                                 if mcu.can_undo_modules() {
-                                    ui.separator();
                                     let hover = format!(
                                         "Undo: {}  (Ctrl+Z)",
                                         mcu.last_module_undo_label().unwrap_or("last change")
@@ -612,82 +619,110 @@ impl AppIde {
                                         mcu.undo_modules();
                                         modules_changed = true;
                                     }
+                                    ui.separator();
                                 }
-                                // View-only diagram rotation (persisted in
-                                // mcu.config). A 4-sided chip toggles a 45°
-                                // diamond, a 2-sided one 90° — to line pins &
-                                // modules up horizontally. See mcu/gui/rotate.rs.
-                                ui.separator();
-                                let rot_hint = if mcu.is_quad_package() {
-                                    "Rotate the chip 45° into a diamond — helps line up pins & modules. Toggle off to reset."
-                                } else {
-                                    "Rotate the chip 90° (vertical / horizontal) — helps line up pins & modules."
-                                };
-                                if ui
-                                    .selectable_label(
-                                        mcu.rotated,
+                                ui.label(
+                                    egui::RichText::new("Virtual modules:")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(150, 150, 160)),
+                                );
+                                // Only the kinds THIS chip's pins can host are
+                                // offered (derived from the pins, so a new chip
+                                // needs no per-family list). A supported-but-
+                                // exhausted kind stays visible but disabled with
+                                // the reason — a button that silently vanishes
+                                // is more confusing than one that explains.
+                                //
+                                // Collected BEFORE the menu, never inside it: a
+                                // menu closure runs only while the menu is OPEN,
+                                // so `any_supported` computed in there would read
+                                // false on every other frame and flash the "this
+                                // chip offers no interface" notice below.
+                                let offered: Vec<ModuleKind> = ModuleKind::ALL
+                                    .into_iter()
+                                    // A peripheral the silicon HAS but no driver
+                                    // can reach is kept and shown disabled, with
+                                    // the reason — same as an exhausted one. It
+                                    // used to vanish, which reads as a bug to
+                                    // anyone holding the chip's datasheet.
+                                    .filter(|k| {
+                                        mcu.supports_module(*k)
+                                            || mcu.hardware_only_reason(*k).is_some()
+                                    })
+                                    .collect();
+                                let any_supported = !offered.is_empty();
+                                // One dropdown instead of up to twenty-four
+                                // buttons. The row used to be a wall of `+ …`
+                                // that pushed everything else off the bar on a
+                                // chip with many peripherals — and every one of
+                                // them does the same thing.
+                                if any_supported {
+                                    ui.menu_button(
                                         egui::RichText::new(format!(
-                                            "{} Rotate",
-                                            ph::ARROW_CLOCKWISE
+                                            "{} Add module {}",
+                                            ph::PLUS,
+                                            ph::CARET_DOWN
                                         ))
                                         .size(11.0),
-                                    )
-                                    .on_hover_text(rot_hint)
-                                    .clicked()
-                                {
-                                    mcu.rotated = !mcu.rotated;
-                                    rotate_toggled = true;
-                                    // ANY orientation change → clean auto-layout:
-                                    // drop the manual drag positions (they don't
-                                    // transfer between 0° / 90° / diamond) so the
-                                    // modules + in/out fields snap beside their
-                                    // pins for the new orientation.
-                                    for m in &mut mcu.modules {
-                                        m.pos = (0.0, 0.0);
-                                    }
-                                    mcu.io_pin_pos.clear();
-                                }
-
-                                // Find a pin on the diagram: matches stay bright,
-                                // every other pin fades to half opacity. Purely a
-                                // view filter — nothing is selected or changed.
-                                ui.separator();
-                                ui.label(
-                                    egui::RichText::new(ph::MAGNIFYING_GLASS)
-                                        .size(12.0)
-                                        .color(egui::Color32::from_gray(160)),
-                                );
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut mcu.pin_search)
-                                        .hint_text("find pin")
-                                        .desired_width(96.0)
-                                        .font(egui::FontId::proportional(11.0)),
-                                )
-                                .on_hover_text(
-                                    "Highlight pins by NAME (any part: pa5, osc, pb) or by \
-                                     NUMBER (exact: 13). Everything else fades to 30%.",
-                                );
-                                if !mcu.pin_search.trim().is_empty() {
-                                    // Match count doubles as the "nothing found"
-                                    // signal — the diagram deliberately does NOT
-                                    // fade at all when a query matches nothing.
-                                    let n = mcu.pin_search_hits().len();
-                                    let (txt, col) = if n == 0 {
-                                        ("no match".to_owned(), egui::Color32::from_rgb(220, 160, 70))
-                                    } else {
-                                        (format!("{n} pin{}", if n == 1 { "" } else { "s" }),
-                                         egui::Color32::from_gray(150))
-                                    };
-                                    ui.label(egui::RichText::new(txt).size(10.5).color(col));
-                                    if ui
-                                        .button(egui::RichText::new(ph::X).size(11.0))
-                                        .on_hover_text("Clear the search")
-                                        .clicked()
-                                    {
-                                        mcu.pin_search.clear();
-                                    }
-                                }
-                                if !any_supported {
+                                        |ui| {
+                                            // A floor, so the items do not stagger to each
+                                            // label's own width.
+                                            ui.set_min_width(190.0);
+                                            for kind in offered {
+                                                let hw_only = mcu.hardware_only_reason(kind);
+                                                let can_add = hw_only.is_none() && mcu.can_add_module(kind);
+                                                let hover = add_module_hint(kind);
+                                                // Colour the button's TEXT with the peripheral's
+                                                // colour ONLY when a module of this kind is already
+                                                // on the chip — a glance shows what's wired; the
+                                                // rest stay neutral. No background fill (it would
+                                                // hurt text clarity), matching the list names below.
+                                                let added = mcu.modules.iter().any(|m| m.kind == kind);
+                                                // No `+` per item: the menu that holds them
+                                                // is already called "Add module".
+                                                let label = kind.short().to_owned();
+                                                // 11, like every other button on this bar.
+                                                // Without an explicit size they took the
+                                                // global `TextStyle::Button` (12.5) and were
+                                                // visibly bigger than the rest of the row.
+                                                let text = if added {
+                                                    egui::RichText::new(label)
+                                                        .size(11.0)
+                                                        .color(mod_gui::module_color(kind, 1))
+                                                } else {
+                                                    egui::RichText::new(label).size(11.0)
+                                                };
+                                                if ui
+                                                    .add_enabled(can_add, egui::Button::new(text))
+                                                    .on_hover_text(hover)
+                                                    .on_disabled_hover_text(
+                                                        add_module_block_reason(kind, hw_only),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    // Snapshot for Ctrl+Z BEFORE the add; drop it
+                                                    // again if the add found no free pins.
+                                                    mcu.push_module_undo(format!("Add {}", kind.short()));
+                                                    if mcu.add_module(kind) {
+                                                        modules_changed = true;
+                                                        // Adding from a collapsed bar means
+                                                        // "I want to set this up" — so the
+                                                        // panel opens with the new module's
+                                                        // config already unfolded, instead
+                                                        // of leaving the click looking like
+                                                        // it did nothing.
+                                                        open_after_add =
+                                                            mcu.modules.last().map(|m| m.id.clone());
+                                                        collapsed = false;
+                                                    } else {
+                                                        mcu.discard_last_module_undo();
+                                                    }
+                                                    ui.close();
+                                                }
+                                            }
+                                        },
+                                    );
+                                } else {
                                     ui.label(
                                         egui::RichText::new(
                                             "this chip's pins offer no USART / SPI / I2C / CAN / USB interface",
@@ -1289,8 +1324,97 @@ impl AppIde {
                             self.project_tree.sync_pin_files(&all_pins);
                         }
                     }
+                    // ── The diagram's own toolbar, at its top-left ────────
+                    // Rotate and the pin search are VIEW controls: they change
+                    // how the chip is DRAWN and nothing else. They used to sit
+                    // at the far right of the Virtual-modules bar, whose every
+                    // other control adds, removes or undoes a module — so the
+                    // two things you do to the picture were the two furthest
+                    // from it. Here they sit on the thing they act on.
+                    if self.mcu.is_some() {
+                        ui.horizontal(|ui| {
+                            let Some(mcu) = &mut self.mcu else { return };
+                            let rot_hint = if mcu.is_quad_package() {
+                                "Rotate the chip 45° into a diamond — helps line up pins & modules. Toggle off to reset."
+                            } else {
+                                "Rotate the chip 90° (vertical / horizontal) — helps line up pins & modules."
+                            };
+                            if ui
+                                .selectable_label(
+                                    mcu.rotated,
+                                    egui::RichText::new(format!("{} Rotate", ph::ARROW_CLOCKWISE))
+                                        .size(11.0),
+                                )
+                                .on_hover_text(rot_hint)
+                                .clicked()
+                            {
+                                mcu.rotated = !mcu.rotated;
+                                rotate_toggled = true;
+                                // ANY orientation change → clean auto-layout:
+                                // drop the manual drag positions (they don't
+                                // transfer between 0° / 90° / diamond) so the
+                                // modules + in/out fields snap beside their pins
+                                // for the new orientation.
+                                for m in &mut mcu.modules {
+                                    m.pos = (0.0, 0.0);
+                                }
+                                mcu.io_pin_pos.clear();
+                            }
+
+                            // Find a pin on the diagram: matches stay bright,
+                            // every other pin fades. Purely a view filter —
+                            // nothing is selected or changed.
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(ph::MAGNIFYING_GLASS)
+                                    .size(12.0)
+                                    .color(egui::Color32::from_gray(160)),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut mcu.pin_search)
+                                    .hint_text("find pin")
+                                    .desired_width(96.0)
+                                    .font(egui::FontId::proportional(11.0)),
+                            )
+                            .on_hover_text(
+                                "Highlight pins by NAME (any part: pa5, osc, pb) or by \
+                                 NUMBER (exact: 13). Everything else fades to 30%.",
+                            );
+                            if !mcu.pin_search.trim().is_empty() {
+                                // Match count doubles as the "nothing found"
+                                // signal — the diagram deliberately does NOT fade
+                                // at all when a query matches nothing.
+                                let n = mcu.pin_search_hits().len();
+                                let (txt, col) = if n == 0 {
+                                    (
+                                        "no match".to_owned(),
+                                        egui::Color32::from_rgb(220, 160, 70),
+                                    )
+                                } else {
+                                    (
+                                        format!("{n} pin{}", if n == 1 { "" } else { "s" }),
+                                        egui::Color32::from_gray(150),
+                                    )
+                                };
+                                ui.label(egui::RichText::new(txt).size(10.5).color(col));
+                                if ui
+                                    .button(egui::RichText::new(ph::X).size(11.0))
+                                    .on_hover_text("Clear the search")
+                                    .clicked()
+                                {
+                                    mcu.pin_search.clear();
+                                }
+                            }
+                        });
+                    }
+
                     // Rotating re-orients the whole chip, so drop any manual
                     // zoom/pan and let the canvas auto-fit the new layout.
+                    //
+                    // Read AFTER the toolbar above, which is what sets it now:
+                    // when the toggle lived on the bottom panel this ran first,
+                    // and moving the control without moving this check would
+                    // have left the re-fit one frame late.
                     if rotate_toggled {
                         self.mcu_view_adjusted = false;
                     }
