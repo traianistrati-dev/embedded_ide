@@ -37,7 +37,10 @@ fn resolve_bus_configs(
     let mut usart = modules::usart_configs(&mcu.modules);
     let mut spi = modules::spi_configs(&mcu.modules);
     let mut i2c = modules::i2c_configs(&mcu.modules);
-    if mcu.is_native() {
+    // The ESP ignores `api_style` outright — `codegen_esp_configs` always hands
+    // back the esp-hal driver — so the panel shows the row locked there. Pinning
+    // the value too keeps a saved project from CLAIMING a style it never had.
+    if mcu.is_native() || is_esp(&mcu.family) {
         for c in usart.values_mut() {
             c.api_style = ApiStyle::Native;
         }
@@ -4146,5 +4149,63 @@ mod tests {
         // embassy keeps every shape it always had.
         let emb = UsartDirection::options_for(UsartMode::Dma, "stm32f4");
         assert!(emb.iter().any(|d| d.is_half_duplex()), "{emb:?}");
+    }
+
+    /// The ESP has no Init API choice: `codegen_esp_configs` always hands back
+    /// the concrete esp-hal driver, and no ESP emitter reads `api_style`.
+    ///
+    /// The panel shows the row locked; this pins the VALUE too, so a project
+    /// carried over from an STM32 cannot keep claiming `Portable` on a chip
+    /// where nothing would honour it.
+    #[test]
+    fn the_esp_pins_its_api_style_because_nothing_reads_it() {
+        use crate::panels::mcu_module::modules::{
+            ApiStyle, ModuleConfig, ModuleKind, UsartModuleConfig, VirtualModule,
+        };
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32c6")
+            .unwrap()
+            .build_mcu();
+        // Blocking, so the Native-runtime pin is NOT what does the work here.
+        mcu.runtime = Runtime::Blocking;
+        let mut cfg = UsartModuleConfig::new(1);
+        cfg.api_style = ApiStyle::Portable;
+        mcu.modules.push(VirtualModule {
+            id: "usart_1".into(),
+            kind: ModuleKind::GenericInterfaceUsart,
+            name: "UART1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Usart(cfg),
+            connections: Vec::new(),
+        });
+
+        let (usart, _, _) = resolve_bus_configs(&mcu);
+        assert_eq!(
+            usart[&1].api_style,
+            ApiStyle::Native,
+            "the ESP pins it, whatever the project said"
+        );
+
+        // …and an STM32 on the same runtime keeps the user's choice, because
+        // there the bridge is real.
+        let mut f1 = crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6")
+            .unwrap()
+            .build_mcu();
+        f1.runtime = Runtime::Blocking;
+        let mut cfg = UsartModuleConfig::new(1);
+        cfg.api_style = ApiStyle::Portable;
+        f1.modules.push(VirtualModule {
+            id: "usart_1".into(),
+            kind: ModuleKind::GenericInterfaceUsart,
+            name: "USART1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Usart(cfg),
+            connections: Vec::new(),
+        });
+        let (usart, _, _) = resolve_bus_configs(&f1);
+        assert_eq!(
+            usart[&1].api_style,
+            ApiStyle::Portable,
+            "the F1 still chooses"
+        );
     }
 }

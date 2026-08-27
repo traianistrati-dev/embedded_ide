@@ -1152,9 +1152,35 @@ pub fn module_config_ui(
             .any(|c| matches!(c.signal, ModuleSignal::Rts | ModuleSignal::LpRts)),
     );
 
+    // Several rows turn on the FAMILY rather than the runtime: the ESP's UART
+    // direction and flow exist on both its runtimes, and its Init API exists on
+    // neither.
+    let esp = crate::panels::mcu_module::codegen::family::is_esp(family);
+
     // Portable (embedded-io/hal) vs native (concrete HAL) init — shown for the
     // bus modules (USART/SPI/I2C) that generate a `pins/configs/*.rs` init.
+    //
+    // On an ESP it is shown LOCKED. The choice is an STM32 one: the bridge it
+    // selects is `embedded-io`/`embedded-hal` over a stm32f1xx-hal type, and no
+    // ESP emitter reads `api_style` at all — `codegen_esp_configs` always
+    // returns the esp-hal driver. Left editable it was a control that changed
+    // nothing, which is worse than one that is visibly fixed.
     let api_row = |ui: &mut egui::Ui, style: &mut ApiStyle| {
+        if esp {
+            ui.label("Init API");
+            let resp = ui.add_enabled_ui(false, |ui| {
+                egui::ComboBox::from_id_salt("api_style_esp")
+                    .selected_text("Native (esp-hal type)")
+                    .show_ui(ui, |_ui| {});
+            });
+            resp.response.on_hover_text(
+                "esp-hal only. `init` hands back the concrete esp-hal driver - `Uart`, \
+                 `Spi`, `I2c` - because that is what its own traits are implemented on. \
+                 The Portable bridge is an STM32F1 choice.",
+            );
+            ui.end_row();
+            return;
+        }
         ui.label("Init API");
         egui::ComboBox::from_id_salt("api_style")
             .selected_text(match style {
@@ -1361,10 +1387,6 @@ pub fn module_config_ui(
         );
         ui.end_row();
     };
-
-    // The ESP's USART rows do not follow the runtime: `UartTx::new` and
-    // `.with_cts()` exist on both, so the family is the whole condition.
-    let is_esp_uart = crate::panels::mcu_module::codegen::family::is_esp(family);
 
     let usart_mode_row = |ui: &mut egui::Ui, mode: &mut UsartMode| {
         ui.label("Async transport");
@@ -2326,7 +2348,8 @@ pub fn module_config_ui(
                     // Blocking → editable Portable|Native; Native runtime → shown
                     // locked on Native; async USART → hidden (always the
                     // embedded-io-async BufferedUart bridge, no choice).
-                    if is_esp_uart {
+                    if esp {
+                        api_row(ui, &mut pending.0);
                         // Direction and flow control are NOT async concepts on
                         // an ESP — `UartTx::new` and `.with_cts()` are there on
                         // either runtime — so they show whatever the runtime is.
@@ -2521,6 +2544,7 @@ pub fn module_config_ui(
                         });
                     ui.end_row();
                     if is_esp_async {
+                        api_row(ui, &mut pending.0);
                         // esp-hal puts the DMA surface on the ASYNC driver, so
                         // this is an async-runtime choice on the ESP too — but
                         // the mechanism is `with_dma`, not embassy's transport.
