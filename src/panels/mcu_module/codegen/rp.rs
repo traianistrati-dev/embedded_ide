@@ -344,56 +344,29 @@ fn pwm_adc_lines(mcu: &Mcu, hal: &str) -> String {
     adc.sort_unstable();
 
     if !pwm.is_empty() {
-        o.push_str("    // The whole PWM block is taken once; each wired slice is then\n");
-        o.push_str("    // enabled and its channel routed to the pad.\n");
+        o.push_str("    // All eight slices come from one PWM peripheral, so main.rs owns
+");
+        o.push_str("    // the set and lends each wired one to its config module.
+");
         o.push_str(&format!(
-            "    let mut pwm_slices = {hal}::pwm::Slices::new(pac.PWM, &mut pac.RESETS);\n"
+            "    let mut pwm_slices = {hal}::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
+"
         ));
-        let mut done: Vec<u8> = Vec::new();
-        for (slice, _, _) in &pwm {
-            if done.contains(slice) {
-                continue;
-            }
-            done.push(*slice);
-            o.push_str(&format!(
-                "    let pwm{slice} = &mut pwm_slices.pwm{slice};\n"
-            ));
-            o.push_str(&format!("    pwm{slice}.set_ph_correct();\n"));
-            o.push_str(&format!("    pwm{slice}.enable();\n"));
-        }
-        // The duty comes from the Virtual Module, in HUNDREDTHS of a percent -
-        // the unit every other backend carries, so 7.5 % survives.
-        //
-        // rp-hal counts to `max_duty_cycle()` rather than to a fixed 65535, and
-        // that ceiling depends on the slice's own divider - so the arithmetic
-        // has to happen at RUNTIME, against the value the slice reports.
-        let cfgs = crate::panels::mcu_module::modules::timer_configs(&mcu.modules);
+        let mut by_slice: std::collections::BTreeMap<u8, Vec<(u8, u8)>> =
+            std::collections::BTreeMap::new();
         for (slice, channel, n) in &pwm {
-            // 1 is channel A, 2 is B - the even GPIO of the pair and the odd one.
-            let ch = if *channel == 1 {
-                "channel_a"
-            } else {
-                "channel_b"
-            };
-            o.push_str(&format!("    pwm{slice}.{ch}.output_to(pins.gpio{n});\n"));
-            let x100 = cfgs.get(slice).map_or(0, |c| c.duty_x100_of(*channel));
-            if x100 > 0 {
-                o.push_str(&format!(
-                    "    // {} %
+            by_slice.entry(*slice).or_default().push((*channel, *n));
+        }
+        for (slice, chans) in &by_slice {
+            let args: Vec<String> = chans.iter().map(|(_, n)| format!("pins.gpio{n}")).collect();
+            o.push_str(&format!(
+                "    pins::configs::pwm{slice}::init(&mut pwm_slices.pwm{slice}, {});
 ",
-                    super::common::duty_percent_str(x100)
-                ));
-                o.push_str(&format!(
-                    "    let max{slice}_{channel} = pwm{slice}.{ch}.max_duty_cycle() as u32;
-"
-                ));
-                o.push_str(&format!(
-                    "    pwm{slice}.{ch}.set_duty_cycle((max{slice}_{channel} * {x100} / 10_000) as u16).unwrap();
-"
-                ));
-            }
+                args.join(", ")
+            ));
         }
     }
+
 
     if !adc.is_empty() {
         o.push_str(&format!(
@@ -543,6 +516,114 @@ fn header(mcu: &Mcu) -> String {
     )
 }
 
+/// `src/pins/configs/pwm{slice}.rs` — one PWM slice, its frequency and the duty
+/// of each channel it drives.
+///
+/// The slice itself is NOT taken by value: on this chip `Slices::new` hands out
+/// all eight at once from one `PWM` peripheral, so `main.rs` owns the set and
+/// lends one out. That is the opposite of STM32, where each timer is its own
+/// peripheral and the config file can own it outright.
+fn pwm_config_file(mcu: &Mcu, slice: u8, chans: &[(u8, u8)]) -> String {
+    let hal = hal_crate(&mcu.family);
+    let cfg = crate::panels::mcu_module::modules::timer_configs(&mcu.modules);
+    let cfg = cfg.get(&slice);
+    let mut o = String::new();
+
+    o.push_str("// <<< GENERATED>>>\n");
+    o.push_str("// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.\n");
+    o.push_str("// Duty per channel, in HUNDREDTHS of a percent — 750 is 7.5 %, which is what a\n");
+    o.push_str("// hobby servo wants and what whole percent cannot say.\n");
+    for (channel, _) in chans {
+        let x100 = cfg.map_or(0, |c| c.duty_x100_of(*channel));
+        let name = if *channel == 1 { "A" } else { "B" };
+        o.push_str(&format!(
+            "const DUTY_{name}_X100: u32 = {x100}; // {} %\n",
+            super::common::duty_percent_str(x100)
+        ));
+    }
+    o.push_str("// <<< GENERATED END >>>\n\n");
+
+    o.push_str("// Everything below is editable — your changes are preserved on regeneration.\n");
+    o.push_str(&format!(
+        "use {hal}::pwm::{{FreeRunning, Pwm{slice}, Slice}};\n"
+    ));
+    o.push_str("use embedded_hal::pwm::SetDutyCycle;\n\n");
+
+    o.push_str(&format!(
+        "/// The slice this module drives. `main.rs` owns the whole set and lends\n/// this one out, because all eight come from one `PWM` peripheral.\npub type Handle = Slice<Pwm{slice}, FreeRunning>;\n\n"
+    ));
+
+    // init
+    let params: Vec<String> = chans
+        .iter()
+        .map(|(channel, n)| {
+            let name = if *channel == 1 { "a" } else { "b" };
+            format!(
+                "    gp{n}: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{n}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    // channel {}\n",
+                name.to_uppercase()
+            )
+        })
+        .collect();
+    o.push_str(&format!(
+        "/// Enable the slice and route each wired channel to its pad.\npub fn init(\n    slice: &mut Handle,\n{}) {{\n",
+        params.join("")
+    ));
+    o.push_str("    slice.set_ph_correct();\n    slice.enable();\n");
+    for (channel, n) in chans {
+        let ch = if *channel == 1 { "channel_a" } else { "channel_b" };
+        let name = if *channel == 1 { "A" } else { "B" };
+        o.push_str(&format!("    slice.{ch}.output_to(gp{n});\n"));
+        o.push_str(&format!(
+            "    let max = slice.{ch}.max_duty_cycle() as u32;\n"
+        ));
+        o.push_str(&format!(
+            "    slice.{ch}.set_duty_cycle((max * DUTY_{name}_X100 / 10_000) as u16).unwrap();\n"
+        ));
+    }
+    o.push_str("}\n\n");
+
+    // DutyHandle, the same shape as every other backend.
+    let first = chans.first().map_or(1, |(c, _)| *c);
+    let first_name = if first == 1 { "a" } else { "b" };
+    o.push_str("/// Set a channel's duty in the same units the `DUTY_*` constants above use —\n");
+    o.push_str("/// HUNDREDTHS of a percent, so `10_000` is 100 % and `750` is 7.5 %.\n///\n");
+    o.push_str("/// A trait rather than an inherent method because `Handle` is rp-hal's own\n");
+    o.push_str("/// type, which this crate does not own. One method per WIRED channel: the\n");
+    o.push_str("/// channel is part of the NAME rather than an argument, so a channel this\n");
+    o.push_str("/// slice has no pad for cannot be asked for at all.\n");
+    o.push_str("pub trait DutyHandle {\n");
+    o.push_str(&format!(
+        "    /// Channel {}, the first one wired to this slice.\n    fn set_duty_pwm_{slice}(&mut self, value: u32);\n",
+        first_name.to_uppercase()
+    ));
+    for (channel, _) in chans {
+        let name = if *channel == 1 { "a" } else { "b" };
+        o.push_str(&format!(
+            "\n    /// Channel {}.\n    fn set_duty_pwm_{slice}_{name}(&mut self, value: u32);\n",
+            name.to_uppercase()
+        ));
+    }
+    o.push_str("}\n\nimpl DutyHandle for Handle {\n");
+    o.push_str(&format!(
+        "    fn set_duty_pwm_{slice}(&mut self, value: u32) {{\n        self.set_duty_pwm_{slice}_{first_name}(value);\n    }}\n"
+    ));
+    for (channel, _) in chans {
+        let name = if *channel == 1 { "a" } else { "b" };
+        let ch = if *channel == 1 { "channel_a" } else { "channel_b" };
+        o.push_str(&format!(
+            "\n    fn set_duty_pwm_{slice}_{name}(&mut self, value: u32) {{\n"
+        ));
+        o.push_str(&format!(
+            "        let max = self.{ch}.max_duty_cycle() as u32;\n"
+        ));
+        o.push_str(&format!(
+            "        self.{ch}.set_duty_cycle((max * value / 10_000) as u16).unwrap();\n    }}\n"
+        ));
+    }
+    o.push_str("}\n");
+    o
+}
+
 impl FamilyBackend for RpBackend {
     fn family_id(&self) -> &'static str {
         "rp2040"
@@ -557,6 +638,28 @@ impl FamilyBackend for RpBackend {
     /// would be a lie.
     fn gpio_modes(&self, _func: &PinFunction) -> &'static [GpioMode] {
         &[]
+    }
+
+    /// One file per wired PWM slice.
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        let mut by_slice: std::collections::BTreeMap<u8, Vec<(u8, u8)>> =
+            std::collections::BTreeMap::new();
+        for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
+            let Some(n) = gpio_index(&p.name) else { continue };
+            if let PinFunction::TimerPwm { timer, channel } = p.selected_function {
+                by_slice.entry(timer).or_default().push((channel, n));
+            }
+        }
+        by_slice
+            .into_iter()
+            .map(|(slice, mut chans)| {
+                chans.sort_unstable();
+                (
+                    format!("pwm{slice}.rs"),
+                    pwm_config_file(mcu, slice, &chans),
+                )
+            })
+            .collect()
     }
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
@@ -854,16 +957,24 @@ mod emit_for_manual_compile {
             // supply it too, or it compiles a project shape the app never
             // produces. Which is exactly what happened: the invariant test went
             // green while `cargo check` said "file not found for module `pins`".
+            let configs = mcu.config_files();
             let mut user: Vec<(String, String)> = vec![
+                ("src/pins/mod.rs".into(), "pub mod configs;
+".into()),
                 (
-                    "src/pins/mod.rs".into(),
-                    "pub mod configs;
-"
-                    .into(),
+                    "src/pins/configs/mod.rs".into(),
+                    configs
+                        .iter()
+                        .map(|(n, _)| format!("pub mod {};
+", n.trim_end_matches(".rs")))
+                        .collect(),
                 ),
-                ("src/pins/configs/mod.rs".into(), String::new()),
             ];
-            user.extend(mcu.config_files());
+            user.extend(
+                configs
+                    .into_iter()
+                    .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+            );
             let dir = std::env::temp_dir().join(dir_name);
             let _ = std::fs::remove_dir_all(&dir);
             project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
