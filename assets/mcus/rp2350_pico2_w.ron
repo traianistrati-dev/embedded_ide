@@ -44,6 +44,14 @@ McuDefinition(
                 reserved: true,
                 functions: [],
             ),
+            PinDef(
+                number: 45,
+                name: "WL_LED",
+                reserved: false,
+                functions: [
+                    GpioOutput,
+                ],
+            ),
         ],
         left: [
             PinDef(

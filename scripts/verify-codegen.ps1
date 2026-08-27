@@ -196,6 +196,12 @@ $CASES = @(
     # its channels while `Uart::new` wants it before.
     @{ n = "Raspberry Pi Pico async x2";   t = "emit_rp_async_project";      e = @{};                       q = $true }
 
+    # The two W boards, whose on-board LED is not on the chip at all - it is
+    # GPIO0 of the CYW43 radio, reached through a PIO-driven half-duplex SPI and
+    # an async-only driver. The harness writes PLACEHOLDER firmware blobs: they
+    # make `include_bytes!` resolve, which is all the codegen needs proving.
+    @{ n = "Raspberry Pi Pico W radio x2"; t = "emit_rp_radio_project";      e = @{};                       q = $true }
+
     # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired
     # individually rather than forced onto one triple.

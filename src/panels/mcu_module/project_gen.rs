@@ -681,6 +681,45 @@ pub fn rtic_backend_feature(target: &str) -> &'static str {
 /// here: the base template already ships it for every RustEmbedded project
 /// (see `cargo_toml_embedded`), and adding a second authority for that line is
 /// how two features start fighting over it.
+/// The CYW43 radio's deps, for the on-board LED on a Pico W / Pico 2 W.
+///
+/// Its own function rather than another flag on [`ensure_async_deps`] for the
+/// same reason `ensure_rtic_deps` is: the flag list there is already six wide
+/// and every one of its twenty-odd call sites would have to learn a parameter
+/// that only two boards in the whole registry can ever set.
+///
+/// `static_cell` is only ever ADDED here, never removed. It is shared with the
+/// async USART path, which adds it from `ensure_async_deps` — running just
+/// before this one. Passing `needs_radio` straight through would strip it back
+/// out of every async-USART project that has no radio.
+pub fn ensure_cyw43_deps(cargo_toml: &str, needs_radio: bool, sources: &[&str]) -> String {
+    let s = ensure_dep(
+        cargo_toml,
+        "cyw43",
+        needs_radio,
+        // The radio's GPIO0 is the LED; `firmware-logs` and `bluetooth` are
+        // not on the path to it.
+        "cyw43 = \"0.7\"",
+        sources,
+    );
+    // Pinned together with `cyw43`: cyw43-pio 0.10 depends on embassy-rp 0.10,
+    // the version the RP async template generates. A newer pair would compile
+    // two embassy-rp crates into one binary.
+    let s = ensure_dep(
+        &s,
+        "cyw43-pio",
+        needs_radio,
+        "cyw43-pio = \"0.10\"",
+        sources,
+    );
+    if needs_radio {
+        // Holds `cyw43::State`, which the driver borrows for `'static`.
+        ensure_dep(&s, "static_cell", true, "static_cell = \"2\"", sources)
+    } else {
+        s
+    }
+}
+
 pub fn ensure_rtic_deps(
     cargo_toml: &str,
     needs_rtic: bool,

@@ -480,6 +480,31 @@ fn section(mcu: &Mcu) -> String {
     o.push_str("        pac.IO_BANK0,\n        pac.PADS_BANK0,\n        sio.gpio_bank0,\n        &mut pac.RESETS,\n    );\n\n");
     o.push_str(&gpio_lines(mcu));
     o.push_str(&bus_lines(mcu, hal));
+    if radio_led(mcu) {
+        // Not a gap in this backend — there IS no blocking path. `cyw43` is
+        // async to the bottom: embassy-sync, embassy-time, embedded-hal-async
+        // and a spawned runner task. Saying so beats emitting nothing.
+        o.push_str(
+            "    // WL_LED is driven, but this project is Blocking.
+",
+        );
+        o.push_str(
+            "    //
+",
+        );
+        o.push_str(
+            "    // The LED hangs off the CYW43 radio, and the radio's driver is async
+",
+        );
+        o.push_str(
+            "    // only - there is no blocking version of it to call. Switch Runtime to
+",
+        );
+        o.push_str(
+            "    // Async in the System tab and this becomes the wireless bring-up.
+",
+        );
+    }
     o.push_str(&pwm_adc_lines(mcu, hal));
     o.push_str(GEN_END);
     o.push('\n');
@@ -1450,7 +1475,6 @@ mod wireless_boards {
     }
 }
 
-#[cfg(test)]
 /// What the compiler taught me about embassy-rp's async constructors.
 ///
 /// Both facts here compiled to nothing visible in a test that only looked at
@@ -1491,7 +1515,7 @@ mod async_dma_bindings {
     /// `bind_interrupts!` grammar allows and nothing else in this repo uses.
     #[test]
     fn every_dma_channel_gets_a_handler() {
-        let (binding, body) = async_bus_lines(&pico_with_every_bus());
+        let (binding, body, _) = async_bus_lines(&pico_with_every_bus());
         // UART takes two channels and SPI two more.
         for ch in 0..4 {
             assert!(
@@ -1518,24 +1542,98 @@ mod async_dma_bindings {
     /// UART takes the binding BEFORE its channels, SPI after. Same crate.
     #[test]
     fn the_irq_argument_sits_where_each_driver_wants_it() {
-        let (_, body) = async_bus_lines(&pico_with_every_bus());
+        let (_, body, _) = async_bus_lines(&pico_with_every_bus());
         let uart = body.split("Uart::new").nth(1).expect("a uart");
         let uart = uart.split("let _").next().unwrap();
         assert!(
             uart.find("Irqs,").unwrap() < uart.find("p.DMA_CH").unwrap(),
-            "uart: irq then channels:
-{uart}"
+            "uart: irq then channels:\n{uart}"
         );
         let spi = body.split("Spi::new").nth(1).expect("a spi");
         let spi = spi.split("let _").next().unwrap();
         assert!(
             spi.find("Irqs,").unwrap() > spi.find("p.DMA_CH").unwrap(),
-            "spi: channels then irq:
-{spi}"
+            "spi: channels then irq:\n{spi}"
         );
     }
 }
 
+#[cfg(test)]
+mod radio_led {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    fn pico_w(runtime: Runtime, take_the_led: bool) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico_w")
+            .expect("built-in Pico W")
+            .build_mcu();
+        mcu.runtime = runtime;
+        if take_the_led {
+            for p in mcu.iter_all_pins_mut() {
+                if p.name == "WL_LED" {
+                    p.selected_function = PinFunction::GpioOutput;
+                }
+            }
+        }
+        mcu
+    }
+
+    /// A W board carries no wifi stack until someone asks for the LED.
+    ///
+    /// The deps are gated on the PAD, not on the board: `cyw43` pulls in a
+    /// whole wireless driver, and a Pico W project that only blinks a GPIO has
+    /// no business linking one.
+    #[test]
+    fn an_untouched_pad_emits_nothing() {
+        let code = pico_w(Runtime::Async, false).fresh_main_rs();
+        assert!(!code.contains("cyw43"), "no radio until asked:\n{code}");
+        // And the spawner stays underscored, or the project warns.
+        assert!(code.contains("async fn main(_spawner: Spawner)"), "{code}");
+    }
+
+    /// Taking it brings up the radio AND wakes the spawner.
+    #[test]
+    fn taking_the_pad_brings_up_the_radio() {
+        let code = pico_w(Runtime::Async, true).fresh_main_rs();
+        for want in [
+            "cyw43::new(",
+            "cyw43_pio::PioSpi::new(",
+            "cyw43_pio::RM2_CLOCK_DIVIDER",
+            "PIO0_IRQ_0 =>",
+            "control.init(clm).await;",
+            // The task is a TOP-LEVEL item; inside `main` it does not compile.
+            "#[embassy_executor::task]",
+        ] {
+            assert!(code.contains(want), "missing {want}:\n{code}");
+        }
+        assert!(
+            code.contains("async fn main(spawner: Spawner)"),
+            "spawning needs a live spawner:\n{code}"
+        );
+    }
+
+    /// On Blocking there is no radio code to emit, and no pretending otherwise.
+    ///
+    /// `cyw43` is async to the bottom. A blocking project that silently dropped
+    /// the LED would look like a codegen bug; one that emitted a blocking call
+    /// would be fiction. It says what to do instead.
+    #[test]
+    fn blocking_says_why_rather_than_emitting_fiction() {
+        let code = pico_w(Runtime::Blocking, true).fresh_main_rs();
+        assert!(
+            !code.contains("cyw43"),
+            "no async driver on blocking:\n{code}"
+        );
+        assert!(
+            code.contains("Switch Runtime to"),
+            "it says what to do:\n{code}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod async_hal_line {
     use crate::panels::mcu_module::builtins;
 
@@ -1639,7 +1737,7 @@ fn async_gpio_lines(mcu: &Mcu) -> String {
 ///
 /// Returns `(interrupt binding, body)` — the binding is a top-level item and
 /// cannot live inside `main`.
-fn async_bus_lines(mcu: &Mcu) -> (String, String) {
+fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
     let mut irqs: Vec<String> = Vec::new();
     let mut o = String::new();
     let mut dma = 0u8;
@@ -1733,6 +1831,18 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String) {
         }
     }
 
+    // The radio takes one more channel, from the same counter — two drivers
+    // both handed DMA_CH0 would compile and then fight at run time.
+    let radio = if radio_led(mcu) {
+        let (mut r_irqs, task, body) = radio_lines(dma);
+        dma += 1;
+        irqs.append(&mut r_irqs);
+        o.push_str(&body);
+        task
+    } else {
+        String::new()
+    };
+
     if dma > 0 {
         // Every channel drains through the one DMA interrupt, so the
         // handlers for all of them hang off DMA_IRQ_0 together.
@@ -1754,11 +1864,113 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String) {
             irqs.join("\n")
         )
     };
-    (binding, o)
+    (binding, o, radio)
+}
+
+/// Is the on-board LED wired up on a W board?
+///
+/// `WL_LED` is not a GPIO on the chip at all — it is pin 0 of the CYW43 radio's
+/// own GPIO block, which is why a Pico W cannot blink without a wifi driver
+/// running. The pad exists on the canvas so the board can OFFER the LED; this
+/// asks whether the user took it.
+fn radio_led(mcu: &Mcu) -> bool {
+    mcu.iter_all_pins()
+        .any(|p| p.name == "WL_LED" && p.selected_function == PinFunction::GpioOutput)
+}
+
+/// The bring-up for the CYW43 radio, purely so its GPIO0 can drive the LED.
+///
+/// Everything here is forced by the hardware, not chosen: the radio speaks a
+/// half-duplex SPI no SPI block on the chip can produce, so it goes through a
+/// PIO program; the driver is `async` all the way down, so there is no blocking
+/// path to this LED at all; and the firmware is three Infineon binaries that
+/// cannot ship in a generated project.
+///
+/// Returns `(irq entries, top-level items, main body)` — the task has to sit
+/// outside `main`, and the interrupt entries have to join the shared binding.
+fn radio_lines(dma: u8) -> (Vec<String>, String, String) {
+    let irqs = vec![
+        "    PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;"
+            .to_owned(),
+    ];
+
+    let task = "/// Drives the radio. `cyw43` does its own SPI, its own event loop and its own
+/// power management, so nothing on the LED path works until this runs.
+#[embassy_executor::task]
+async fn cyw43_task(
+    runner: cyw43::Runner<
+        'static,
+        cyw43::SpiBus<
+            embassy_rp::gpio::Output<'static>,
+            cyw43_pio::PioSpi<'static, embassy_rp::peripherals::PIO0, 0>,
+        >,
+    >,
+) -> ! {
+    runner.run().await
+}
+
+"
+    .to_owned();
+
+    let body = format!(
+        "    // The radio's three firmware blobs. They are Infineon binaries under a
+    // permissive BINARY licence, so they are not generated with this project —
+    // until you put them in `firmware/`, the build stops on these three lines:
+    //
+    //   43439A0.bin        the wifi firmware
+    //   43439A0_clm.bin    the regulatory (CLM) blob
+    //   nvram_rp2040.bin   the board's NVRAM - the same file on Pico 2 W
+    //
+    // All three: https://github.com/embassy-rs/embassy/tree/main/cyw43-firmware
+    let fw = cyw43::aligned_bytes!(\"../firmware/43439A0.bin\");
+    let clm = cyw43::aligned_bytes!(\"../firmware/43439A0_clm.bin\");
+    let nvram = cyw43::aligned_bytes!(\"../firmware/nvram_rp2040.bin\");
+
+    // GP23/24/25/29 are the radio's, which is why the canvas reserves them.
+    let pwr = embassy_rp::gpio::Output::new(p.PIN_23, Level::Low);
+    let cs = embassy_rp::gpio::Output::new(p.PIN_25, Level::High);
+    let mut pio = embassy_rp::pio::Pio::new(p.PIO0, Irqs);
+    let spi = cyw43_pio::PioSpi::new(
+        &mut pio.common,
+        pio.sm0,
+        // The RM2 divider, not the default one: the module on these boards does
+        // not hold the link together at the faster clock.
+        cyw43_pio::RM2_CLOCK_DIVIDER,
+        pio.irq0,
+        cs,
+        p.PIN_24,
+        p.PIN_29,
+        embassy_rp::dma::Channel::new(p.DMA_CH{dma}, Irqs),
+    );
+
+    static RADIO_STATE: static_cell::StaticCell<cyw43::State> = static_cell::StaticCell::new();
+    let state = RADIO_STATE.init(cyw43::State::new());
+    let (_net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw, nvram).await;
+    // embassy-executor 0.10: the task FUNCTION returns the Result (the pool can
+    // be exhausted), so the `unwrap` goes inside `spawn`, not after it.
+    spawner.spawn(cyw43_task(runner).unwrap());
+    control.init(clm).await;
+    control
+        .set_power_management(cyw43::PowerManagementMode::PowerSave)
+        .await;
+
+    // The LED is GPIO0 ON THE RADIO, so it is driven through `control` rather
+    // than through a pin: `wl_led.gpio_set(0, true).await` turns it on.
+    #[allow(unused_mut, unused_variables)]
+    let mut wl_led = control;
+"
+    );
+
+    (irqs, task, body)
 }
 
 fn async_section(mcu: &Mcu) -> String {
-    let (irq_binding, buses) = async_bus_lines(mcu);
+    let (irq_binding, buses, radio_task) = async_bus_lines(mcu);
+    let spawner = if radio_task.is_empty() {
+        "_spawner"
+    } else {
+        "spawner"
+    };
     let mut o = String::new();
     o.push_str(GEN_BEGIN);
     o.push('\n');
@@ -1769,8 +1981,9 @@ fn async_section(mcu: &Mcu) -> String {
         o.push_str("pub static IMAGE_DEF: embassy_rp::block::ImageDef = embassy_rp::block::ImageDef::secure_exe();\n\n");
     }
     o.push_str(&irq_binding);
+    o.push_str(&radio_task);
     o.push_str("#[embassy_executor::main]\n");
-    o.push_str("async fn main(_spawner: Spawner) {\n");
+    o.push_str(&format!("async fn main({spawner}: Spawner) {{\n"));
     o.push_str("    // embassy-rp brings up the clocks itself. On RP2040 it also supplies the\n");
     o.push_str("    // second-stage bootloader, which the blocking HAL makes you declare.\n");
     o.push_str("    let p = embassy_rp::init(Default::default());\n\n");
@@ -1844,6 +2057,88 @@ impl FamilyBackend for AsyncRpBackend {
 mod emit_async_for_manual_compile {
     use crate::panels::mcu_module::mcu::model::Runtime;
     use crate::panels::mcu_module::{builtins, pins::PinFunction, project_gen};
+
+    /// The Pico W's LED, which is not on the chip at all.
+    ///
+    /// %TEMP%\eide_rp2040w_radio_check + eide_rp2350w_radio_check
+    ///
+    /// The three firmware blobs are written here as RECOGNISABLE JUNK. They are
+    /// enough to make `include_bytes!` resolve, which is all the codegen needs
+    /// proving; a board flashed with them would simply never bring the radio up.
+    /// Infineon's real binaries are not redistributable from this repository.
+    #[test]
+    #[ignore]
+    fn emit_rp_radio_project() {
+        for (id, dir_name) in [
+            ("rp2040_pico_w", "eide_rp2040w_radio_check"),
+            ("rp2350_pico2_w", "eide_rp2350w_radio_check"),
+        ] {
+            let def = builtins::builtin_definitions()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("built-in {id}"));
+            let mut mcu = def.build_mcu();
+            mcu.runtime = Runtime::Async;
+            for p in mcu.iter_all_pins_mut() {
+                match p.name.as_str() {
+                    "WL_LED" => p.selected_function = PinFunction::GpioOutput,
+                    // One ordinary bus too, so the radio's DMA channel is proved
+                    // to come AFTER the ones the buses took, not on top of them.
+                    "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                    "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                    _ => {}
+                }
+            }
+            let main_rs = mcu.fresh_main_rs();
+            assert!(main_rs.contains("cyw43::new("), "the radio is brought up");
+            assert!(
+                main_rs.contains("p.DMA_CH2,"),
+                "the radio takes the channel after the UART's two:
+{main_rs}"
+            );
+            let project = def.project.for_async(true);
+            let files = project_gen::build_project_files(&project, &def.toolchain, &main_rs);
+            let user: Vec<(String, String)> = vec![
+                (
+                    "src/pins/mod.rs".into(),
+                    "pub mod configs;
+"
+                    .into(),
+                ),
+                ("src/pins/configs/mod.rs".into(), String::new()),
+            ];
+            let dir = std::env::temp_dir().join(dir_name);
+            let _ = std::fs::remove_dir_all(&dir);
+            project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+                .expect("write rp radio project");
+            let toml_path = dir.join("Cargo.toml");
+            let toml = std::fs::read_to_string(&toml_path).expect("read Cargo.toml");
+            let toml = project_gen::ensure_async_deps(
+                &toml,
+                true,
+                project_gen::AsyncFlavor::Rp,
+                false,
+                false,
+                false,
+                &[],
+            );
+            let toml = project_gen::ensure_cyw43_deps(&toml, true, &[]);
+            // `static_cell` holds the driver state, and on the Pico's M0 that
+            // needs a CAS the core does not have. The app adds this right after
+            // the same two calls; without it only the RP2350 half builds.
+            let toml = project_gen::ensure_m0_atomics(&toml, true, &project.target, &[]);
+            std::fs::write(&toml_path, toml).expect("write Cargo.toml");
+
+            let fw_dir = dir.join("firmware");
+            std::fs::create_dir_all(&fw_dir).expect("firmware dir");
+            for name in ["43439A0.bin", "43439A0_clm.bin", "nvram_rp2040.bin"] {
+                std::fs::write(fw_dir.join(name), b"NOT THE REAL CYW43 FIRMWARE")
+                    .expect("placeholder blob");
+            }
+            println!("wrote {}", dir.display());
+            println!("target: {}", def.project.target);
+        }
+    }
 
     /// A Pico project on the ASYNC runtime — a different HAL from the blocking
     /// one, so nothing about it is believable until a compiler has seen it.

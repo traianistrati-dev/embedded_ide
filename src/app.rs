@@ -2764,6 +2764,17 @@ impl AppIde {
                 needs_eh_async,
                 &sources,
             );
+            // The CYW43 radio, on a Pico W / Pico 2 W whose WL_LED is driven.
+            // Gated on the pin rather than on the board, because a W board with
+            // the LED untouched should not carry a wifi stack it never calls.
+            let needs_radio = self.mcu.as_ref().is_some_and(|m| {
+                m.iter_all_pins().any(|p| {
+                    p.name == "WL_LED"
+                        && p.selected_function
+                            == crate::panels::mcu_module::pins::PinFunction::GpioOutput
+                })
+            });
+            let new_toml = project_gen::ensure_cyw43_deps(&new_toml, needs_radio, &sources);
             // Cortex-M0 async: `static_cell` needs CAS the core does not have.
             let async_target = self
                 .selected_build_cfg()
