@@ -994,6 +994,11 @@ mod emit_for_manual_compile {
         for (id, dir_name) in [
             ("rp2040_pico", "eide_rp2040_check"),
             ("rp2350_pico2", "eide_rp2350_check"),
+            // The wireless boards generate through the same backend; what
+            // differs is that GP23/24/25/29 are the radio's, so the LED cannot
+            // be wired and the emitter has to skip it without complaining.
+            ("rp2040_pico_w", "eide_rp2040w_check"),
+            ("rp2350_pico2_w", "eide_rp2350w_check"),
         ] {
             let def = builtins::builtin_definitions()
                 .into_iter()
@@ -1324,6 +1329,61 @@ mod config_file_shape {
             assert!(
                 inside.contains("const "),
                 "{name}: nothing regenerated at all?\n{body}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod wireless_boards {
+    use crate::panels::mcu_module::builtins;
+    use crate::panels::mcu_module::pins::logic::pin::colors::reserved_role;
+
+    /// On a W board the LED is NOT a GPIO, and the board has to say so.
+    ///
+    /// GP25 drives the on-board LED on a Pico and the CYW43's chip select on a
+    /// Pico W. Someone coming from the non-W board will reach for it first, so
+    /// the pad is reserved and its explanation names the surprise rather than
+    /// leaving them to find it with a meter.
+    #[test]
+    fn the_led_is_not_a_gpio_on_a_wireless_board() {
+        for id in ["rp2040_pico_w", "rp2350_pico2_w"] {
+            let mcu = builtins::builtin_definitions()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("built-in {id}"))
+                .build_mcu();
+
+            let radio: Vec<&str> = mcu
+                .iter_all_pins()
+                .filter(|p| p.reserved && p.name.starts_with("WL_"))
+                .map(|p| p.name.as_str())
+                .collect();
+            assert_eq!(radio.len(), 4, "{id}: the radio's four lines: {radio:?}");
+
+            // Nothing on a W board may offer GP25 as a pin to configure.
+            assert!(
+                !mcu.iter_all_pins().any(|p| p.name.starts_with("GP25")),
+                "{id}: GP25 is the radio's chip select here, not the LED"
+            );
+            // And the explanation has to say the thing that surprises people.
+            let why = reserved_role("WL_CS");
+            assert!(
+                why.contains("LED is NOT here"),
+                "{id}: the pad must name the surprise, not just its function: {why}"
+            );
+        }
+
+        // The non-W boards keep their LED, or the change went too far.
+        for id in ["rp2040_pico", "rp2350_pico2"] {
+            let mcu = builtins::builtin_definitions()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("built-in {id}"))
+                .build_mcu();
+            assert!(
+                mcu.iter_all_pins().any(|p| p.name.starts_with("GP25")),
+                "{id}: the LED is still a plain GPIO here"
             );
         }
     }

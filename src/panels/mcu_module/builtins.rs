@@ -31,6 +31,11 @@ const ESP32S3_RON: &str = include_str!("../../../assets/mcus/esp32s3.ron");
 // first thing anyone reaches for.
 const RP2040_PICO_RON: &str = include_str!("../../../assets/mcus/rp2040_pico.ron");
 const RP2350_PICO2_RON: &str = include_str!("../../../assets/mcus/rp2350_pico2.ron");
+// The wireless boards. Same silicon, same header — but GP23/24/25/29 belong to
+// the CYW43 radio, and the LED with them. Everything else generates exactly as
+// on the non-W board.
+const RP2040_PICO_W_RON: &str = include_str!("../../../assets/mcus/rp2040_pico_w.ron");
+const RP2350_PICO2_W_RON: &str = include_str!("../../../assets/mcus/rp2350_pico2_w.ron");
 
 /// Raw `(id, ron-text)` for every bundled chip.
 const BUILTINS: &[(&str, &str)] = &[
@@ -46,6 +51,8 @@ const BUILTINS: &[(&str, &str)] = &[
     ("esp32s3", ESP32S3_RON),
     ("rp2040_pico", RP2040_PICO_RON),
     ("rp2350_pico2", RP2350_PICO2_RON),
+    ("rp2040_pico_w", RP2040_PICO_W_RON),
+    ("rp2350_pico2_w", RP2350_PICO2_W_RON),
 ];
 
 /// Parse all bundled built-in MCU definitions (bad files are skipped + logged).

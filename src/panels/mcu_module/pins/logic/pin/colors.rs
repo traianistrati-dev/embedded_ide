@@ -53,6 +53,17 @@ pub fn reserved_role(name: &str) -> &'static str {
         "Boot mode select, sampled at reset: it chooses whether the chip starts from flash or from the bootloader."
     // Raspberry Pi Pico board pads. These are BOARD pins, not chip pins, and
     // every one of them answers a question a user actually asks while wiring.
+    // The CYW43 radio's four lines on a Pico W / Pico 2 W. They are GP23, GP24,
+    // GP25 and GP29 on the die, but on a W board they are spoken for — and GP25
+    // is the one that surprises people, because on a non-W Pico it is the LED.
+    } else if n == "WL_ON" {
+        "Powers the CYW43 radio (GP23). Held low until the wireless driver brings it up."
+    } else if n == "WL_D" {
+        "The radio's SPI data line (GP24), driven by a PIO program rather than the SPI block."
+    } else if n == "WL_CS" {
+        "The radio's chip select (GP25). The on-board LED is NOT here on a W board - it hangs off the radio's own GPIO0, so blinking it needs the wireless driver."
+    } else if n == "WL_CLK" {
+        "The radio's SPI clock (GP29), shared with the VSYS sense divider."
     } else if n == "AGND" {
         "Analog ground, for the ADC. Star-tie it to GND so converter noise does not ride on the digital return."
     } else if n == "ADC_VREF" {
