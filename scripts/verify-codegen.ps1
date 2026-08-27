@@ -189,6 +189,13 @@ $CASES = @(
     # imported, and neither failure is visible by reading.
     @{ n = "Raspberry Pi Pico x4";         t = "emit_rp_project";            e = @{};                       q = $true }
 
+    # The same two boards on embassy-rp, which is a DIFFERENT HAL crate, not a
+    # feature of the first one. Every bus is wired, because that is where the
+    # compiler found the two things reading could not: a DMA channel needs its
+    # OWN handler bound on DMA_IRQ_0, and `Spi::new` wants the binding AFTER
+    # its channels while `Uart::new` wants it before.
+    @{ n = "Raspberry Pi Pico async x2";   t = "emit_rp_async_project";      e = @{};                       q = $true }
+
     # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired
     # individually rather than forced onto one triple.

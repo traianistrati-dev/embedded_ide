@@ -234,7 +234,9 @@ fn ambiguity_notes(mcu: &Mcu) -> String {
             "    // {sig} is wired to GP{used} and {}. Only GP{used} is configured:\n",
             rest.join(" and ")
         ));
-        o.push_str("    // the HAL takes one pin per role. Unassign the other on the Pins canvas.\n");
+        o.push_str(
+            "    // the HAL takes one pin per role. Unassign the other on the Pins canvas.\n",
+        );
     }
     o
 }
@@ -342,10 +344,14 @@ fn pwm_adc_lines(mcu: &Mcu, hal: &str) -> String {
     adc.sort_unstable();
 
     if !pwm.is_empty() {
-        o.push_str("    // All eight slices come from one PWM peripheral, so main.rs owns
-");
-        o.push_str("    // the set and lends each wired one to its config module.
-");
+        o.push_str(
+            "    // All eight slices come from one PWM peripheral, so main.rs owns
+",
+        );
+        o.push_str(
+            "    // the set and lends each wired one to its config module.
+",
+        );
         o.push_str(&format!(
             "    let mut pwm_slices = {hal}::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
 "
@@ -364,7 +370,6 @@ fn pwm_adc_lines(mcu: &Mcu, hal: &str) -> String {
             ));
         }
     }
-
 
     if !adc.is_empty() {
         o.push_str(&format!(
@@ -522,7 +527,9 @@ fn header(mcu: &Mcu) -> String {
 fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)]) -> String {
     let mut o = String::new();
     o.push_str("// <<< GENERATED>>>\n");
-    o.push_str("// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.\n");
+    o.push_str(
+        "// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.\n",
+    );
     match kind {
         "uart" => o.push_str("const BAUDRATE: u32 = 115_200;\n"),
         "spi" => o.push_str("const SPI_HZ: u32 = 1_000_000;\n"),
@@ -532,8 +539,16 @@ fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)]) -> String 
     o.push_str("// Everything below is editable — your changes are preserved on regeneration.\n");
     // No `use Clock` here: main.rs asks the clock for its frequency and passes
     // the value in, so these modules never touch the trait.
-    let gpio = |n: u8| format!("{hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{n}, {hal}::gpio::Function{}, {hal}::gpio::PullDown>",
-        match kind { "uart" => "Uart", "spi" => "Spi", _ => "I2c" });
+    let gpio = |n: u8| {
+        format!(
+            "{hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{n}, {hal}::gpio::Function{}, {hal}::gpio::PullDown>",
+            match kind {
+                "uart" => "Uart",
+                "spi" => "Spi",
+                _ => "I2c",
+            }
+        )
+    };
 
     match kind {
         "uart" => {
@@ -568,7 +583,11 @@ fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)]) -> String 
         _ => {
             let sda = pads.iter().find(|(r, _)| *r == "sda").unwrap().1;
             let scl = pads.iter().find(|(r, _)| *r == "scl").unwrap().1;
-            let p = |n: u8| format!("{hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{n}, {hal}::gpio::FunctionI2c, {hal}::gpio::PullUp>");
+            let p = |n: u8| {
+                format!(
+                    "{hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{n}, {hal}::gpio::FunctionI2c, {hal}::gpio::PullUp>"
+                )
+            };
             o.push_str(&format!(
                 "\n/// The concrete type `init` hands back.\npub type Handle = {hal}::i2c::I2C<{hal}::pac::I2C{n}, ({}, {})>;\n\n",
                 p(sda), p(scl)
@@ -598,7 +617,9 @@ fn pwm_config_file(mcu: &Mcu, slice: u8, chans: &[(u8, u8)]) -> String {
     let mut o = String::new();
 
     o.push_str("// <<< GENERATED>>>\n");
-    o.push_str("// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.\n");
+    o.push_str(
+        "// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.\n",
+    );
     o.push_str("// Duty per channel, in HUNDREDTHS of a percent — 750 is 7.5 %, which is what a\n");
     o.push_str("// hobby servo wants and what whole percent cannot say.\n");
     for (channel, _) in chans {
@@ -638,7 +659,11 @@ fn pwm_config_file(mcu: &Mcu, slice: u8, chans: &[(u8, u8)]) -> String {
     ));
     o.push_str("    slice.set_ph_correct();\n    slice.enable();\n");
     for (channel, n) in chans {
-        let ch = if *channel == 1 { "channel_a" } else { "channel_b" };
+        let ch = if *channel == 1 {
+            "channel_a"
+        } else {
+            "channel_b"
+        };
         let name = if *channel == 1 { "A" } else { "B" };
         o.push_str(&format!("    slice.{ch}.output_to(gp{n});\n"));
         o.push_str(&format!(
@@ -677,7 +702,11 @@ fn pwm_config_file(mcu: &Mcu, slice: u8, chans: &[(u8, u8)]) -> String {
     ));
     for (channel, _) in chans {
         let name = if *channel == 1 { "a" } else { "b" };
-        let ch = if *channel == 1 { "channel_a" } else { "channel_b" };
+        let ch = if *channel == 1 {
+            "channel_a"
+        } else {
+            "channel_b"
+        };
         o.push_str(&format!(
             "\n    fn set_duty_pwm_{slice}_{name}(&mut self, value: u32) {{\n"
         ));
@@ -713,7 +742,9 @@ impl FamilyBackend for RpBackend {
         let mut by_slice: std::collections::BTreeMap<u8, Vec<(u8, u8)>> =
             std::collections::BTreeMap::new();
         for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
-            let Some(n) = gpio_index(&p.name) else { continue };
+            let Some(n) = gpio_index(&p.name) else {
+                continue;
+            };
             if let PinFunction::TimerPwm { timer, channel } = p.selected_function {
                 by_slice.entry(timer).or_default().push((channel, n));
             }
@@ -1056,14 +1087,23 @@ mod emit_for_manual_compile {
             // green while `cargo check` said "file not found for module `pins`".
             let configs = mcu.config_files();
             let mut user: Vec<(String, String)> = vec![
-                ("src/pins/mod.rs".into(), "pub mod configs;
-".into()),
+                (
+                    "src/pins/mod.rs".into(),
+                    "pub mod configs;
+"
+                    .into(),
+                ),
                 (
                     "src/pins/configs/mod.rs".into(),
                     configs
                         .iter()
-                        .map(|(n, _)| format!("pub mod {};
-", n.trim_end_matches(".rs")))
+                        .map(|(n, _)| {
+                            format!(
+                                "pub mod {};
+",
+                                n.trim_end_matches(".rs")
+                            )
+                        })
                         .collect(),
                 ),
             ];
@@ -1203,7 +1243,10 @@ mod header_layout {
                 top.iter().any(|n| n.starts_with("GP25")),
                 "{id}: the LED must be reachable, or the first thing anyone tries cannot be done: {top:?}"
             );
-            assert!(mcu.bottom_pins.is_empty(), "{id}: nothing belongs on the bottom edge");
+            assert!(
+                mcu.bottom_pins.is_empty(),
+                "{id}: nothing belongs on the bottom edge"
+            );
         }
     }
 }
@@ -1263,7 +1306,10 @@ mod ambiguous_wiring {
             }
         }
         let code = mcu.fresh_main_rs();
-        assert!(!code.contains("is wired to GP"), "no clash, no note:\n{code}");
+        assert!(
+            !code.contains("is wired to GP"),
+            "no clash, no note:\n{code}"
+        );
     }
 }
 
@@ -1299,13 +1345,22 @@ mod config_file_shape {
                 "GP18" => p.selected_function = PinFunction::SpiSck(0),
                 "GP19" => p.selected_function = PinFunction::SpiMosi(0),
                 "GP16" => p.selected_function = PinFunction::SpiMiso(0),
-                "GP6" => p.selected_function = PinFunction::TimerPwm { timer: 3, channel: 1 },
+                "GP6" => {
+                    p.selected_function = PinFunction::TimerPwm {
+                        timer: 3,
+                        channel: 1,
+                    }
+                }
                 _ => {}
             }
         }
         let files = mcu.config_files();
-        assert_eq!(files.len(), 4, "one per peripheral: {:?}",
-            files.iter().map(|(n, _)| n).collect::<Vec<_>>());
+        assert_eq!(
+            files.len(),
+            4,
+            "one per peripheral: {:?}",
+            files.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
 
         for (name, body) in &files {
             assert_eq!(body.matches(BEGIN).count(), 1, "{name}: one begin marker");
@@ -1323,8 +1378,14 @@ mod config_file_shape {
                      edit to it would be wiped by the next duty change:\n{body}"
                 );
             }
-            assert!(outside.contains("pub fn init"), "{name}: init must survive:\n{body}");
-            assert!(outside.contains("pub type Handle"), "{name}: Handle must survive");
+            assert!(
+                outside.contains("pub fn init"),
+                "{name}: init must survive:\n{body}"
+            );
+            assert!(
+                outside.contains("pub type Handle"),
+                "{name}: Handle must survive"
+            );
             // And the constants are where they belong.
             assert!(
                 inside.contains("const "),
@@ -1390,6 +1451,91 @@ mod wireless_boards {
 }
 
 #[cfg(test)]
+/// What the compiler taught me about embassy-rp's async constructors.
+///
+/// Both facts here compiled to nothing visible in a test that only looked at
+/// the emitted text: a project whose buses were never emitted at all still
+/// "compiled", and the wrong argument order only shows up as a trait bound.
+#[cfg(test)]
+mod async_dma_bindings {
+    use super::async_bus_lines;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    fn pico_with_every_bus() -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        mcu.runtime = Runtime::Async;
+        for p in mcu.iter_all_pins_mut() {
+            match p.name.as_str() {
+                "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                "GP4" => p.selected_function = PinFunction::I2cSda(0),
+                "GP5" => p.selected_function = PinFunction::I2cScl(0),
+                "GP18" => p.selected_function = PinFunction::SpiSck(0),
+                "GP19" => p.selected_function = PinFunction::SpiMosi(0),
+                "GP16" => p.selected_function = PinFunction::SpiMiso(0),
+                _ => {}
+            }
+        }
+        mcu
+    }
+
+    /// A DMA channel handed to a driver needs its OWN handler bound.
+    ///
+    /// Not the peripheral's — the channel's. All sixteen drain through the one
+    /// DMA_IRQ_0, so the handlers stack up under a single entry, which the
+    /// `bind_interrupts!` grammar allows and nothing else in this repo uses.
+    #[test]
+    fn every_dma_channel_gets_a_handler() {
+        let (binding, body) = async_bus_lines(&pico_with_every_bus());
+        // UART takes two channels and SPI two more.
+        for ch in 0..4 {
+            assert!(
+                body.contains(&format!("p.DMA_CH{ch},")),
+                "channel {ch} is handed out:
+{body}"
+            );
+            assert!(
+                binding.contains(&format!(
+                    "dma::InterruptHandler<embassy_rp::peripherals::DMA_CH{ch}>"
+                )),
+                "channel {ch} is bound:
+{binding}"
+            );
+        }
+        assert_eq!(
+            binding.matches("DMA_IRQ_0").count(),
+            1,
+            "one entry, not four:
+{binding}"
+        );
+    }
+
+    /// UART takes the binding BEFORE its channels, SPI after. Same crate.
+    #[test]
+    fn the_irq_argument_sits_where_each_driver_wants_it() {
+        let (_, body) = async_bus_lines(&pico_with_every_bus());
+        let uart = body.split("Uart::new").nth(1).expect("a uart");
+        let uart = uart.split("let _").next().unwrap();
+        assert!(
+            uart.find("Irqs,").unwrap() < uart.find("p.DMA_CH").unwrap(),
+            "uart: irq then channels:
+{uart}"
+        );
+        let spi = body.split("Spi::new").nth(1).expect("a spi");
+        let spi = spi.split("let _").next().unwrap();
+        assert!(
+            spi.find("Irqs,").unwrap() > spi.find("p.DMA_CH").unwrap(),
+            "spi: channels then irq:
+{spi}"
+        );
+    }
+}
+
 mod async_hal_line {
     use crate::panels::mcu_module::builtins;
 
@@ -1417,7 +1563,8 @@ mod async_hal_line {
 
             let blocking = def.project.for_async(false);
             assert!(
-                blocking.hal_dep.starts_with("rp2040-hal") || blocking.hal_dep.starts_with("rp235x-hal"),
+                blocking.hal_dep.starts_with("rp2040-hal")
+                    || blocking.hal_dep.starts_with("rp235x-hal"),
                 "{id}: blocking keeps its own HAL: {}",
                 blocking.hal_dep
             );
@@ -1466,7 +1613,9 @@ pub struct AsyncRpBackend;
 fn async_gpio_lines(mcu: &Mcu) -> String {
     let mut out = String::new();
     for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
-        let Some(n) = gpio_index(&p.name) else { continue };
+        let Some(n) = gpio_index(&p.name) else {
+            continue;
+        };
         let sfx = var_suffix(&p.selected_function);
         match p.selected_function {
             PinFunction::GpioOutput => out.push_str(&format!(
@@ -1481,7 +1630,135 @@ fn async_gpio_lines(mcu: &Mcu) -> String {
     out
 }
 
+/// The buses, on embassy-rp.
+///
+/// Async constructors where they exist, which is why some of these need an
+/// interrupt binding and some need DMA channels. The channels are handed out in
+/// order: embassy-rp exposes twelve as separate peripherals, and nothing else
+/// here claims one.
+///
+/// Returns `(interrupt binding, body)` — the binding is a top-level item and
+/// cannot live inside `main`.
+fn async_bus_lines(mcu: &Mcu) -> (String, String) {
+    let mut irqs: Vec<String> = Vec::new();
+    let mut o = String::new();
+    let mut dma = 0u8;
+
+    let uart = uart_pins(mcu);
+    for i in instances(&uart) {
+        let (Some(tx), Some(rx)) = (role_of(&uart, i, "tx"), role_of(&uart, i, "rx")) else {
+            o.push_str(&format!("    // UART{i}: TX and RX are taken together.\n"));
+            continue;
+        };
+        let (tdma, rdma) = (dma, dma + 1);
+        dma += 2;
+        o.push_str(&format!(
+            "    let uart{i} = embassy_rp::uart::Uart::new(\n        p.UART{i},\n        p.PIN_{tx},\n        p.PIN_{rx},\n        Irqs,\n        p.DMA_CH{tdma},\n        p.DMA_CH{rdma},\n        embassy_rp::uart::Config::default(),\n    );\n    let _ = &uart{i};\n"
+        ));
+        irqs.push(format!(
+            "    UART{i}_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART{i}>;"
+        ));
+    }
+
+    let spi = spi_pins(mcu);
+    for i in instances(&spi) {
+        let (Some(sck), Some(mosi), Some(miso)) = (
+            role_of(&spi, i, "sck"),
+            role_of(&spi, i, "mosi"),
+            role_of(&spi, i, "miso"),
+        ) else {
+            o.push_str(&format!(
+                "    // SPI{i}: all three pads are taken together.\n"
+            ));
+            continue;
+        };
+        let (tdma, rdma) = (dma, dma + 1);
+        dma += 2;
+        o.push_str(&format!(
+            "    let spi{i} = embassy_rp::spi::Spi::new(\n        p.SPI{i},\n        p.PIN_{sck},\n        p.PIN_{mosi},\n        p.PIN_{miso},\n        p.DMA_CH{tdma},\n        p.DMA_CH{rdma},\n        Irqs,\n        embassy_rp::spi::Config::default(),\n    );\n    let _ = &spi{i};\n"
+        ));
+    }
+
+    let i2c = i2c_pins(mcu);
+    for i in instances(&i2c) {
+        let (Some(sda), Some(scl)) = (role_of(&i2c, i, "sda"), role_of(&i2c, i, "scl")) else {
+            o.push_str(&format!("    // I2C{i}: SDA and SCL are taken together.\n"));
+            continue;
+        };
+        o.push_str(&format!(
+            "    let i2c{i} = embassy_rp::i2c::I2c::new_async(\n        p.I2C{i},\n        p.PIN_{scl},\n        p.PIN_{sda},\n        Irqs,\n        embassy_rp::i2c::Config::default(),\n    );\n    let _ = &i2c{i};\n"
+        ));
+        irqs.push(format!(
+            "    I2C{i}_IRQ => embassy_rp::i2c::InterruptHandler<embassy_rp::peripherals::I2C{i}>;"
+        ));
+    }
+
+    let mut pwm: Vec<(u8, u8, u8)> = Vec::new();
+    let mut adc: Vec<(u8, u8)> = Vec::new();
+    for pin in mcu.iter_all_pins().filter(|p| !p.reserved) {
+        let Some(n) = gpio_index(&pin.name) else {
+            continue;
+        };
+        match pin.selected_function {
+            PinFunction::TimerPwm { timer, channel } => pwm.push((timer, channel, n)),
+            PinFunction::AdcChannel { channel, .. } => adc.push((channel, n)),
+            _ => {}
+        }
+    }
+    pwm.sort_unstable();
+    adc.sort_unstable();
+    let mut done: Vec<u8> = Vec::new();
+    for (slice, channel, n) in &pwm {
+        if done.contains(slice) {
+            continue;
+        }
+        done.push(*slice);
+        let ctor = if *channel == 1 {
+            "new_output_a"
+        } else {
+            "new_output_b"
+        };
+        o.push_str(&format!(
+            "    let pwm{slice} = embassy_rp::pwm::Pwm::{ctor}(\n        p.PWM_SLICE{slice},\n        p.PIN_{n},\n        embassy_rp::pwm::Config::default(),\n    );\n    let _ = &pwm{slice};\n"
+        ));
+    }
+
+    if !adc.is_empty() {
+        o.push_str("    let mut adc = embassy_rp::adc::Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default());\n    let _ = &mut adc;\n");
+        irqs.push("    ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;".to_owned());
+        for (channel, n) in &adc {
+            o.push_str(&format!(
+                "    let mut adc{channel} = embassy_rp::adc::Channel::new_pin(p.PIN_{n}, embassy_rp::gpio::Pull::None);\n    let _ = &mut adc{channel};\n"
+            ));
+        }
+    }
+
+    if dma > 0 {
+        // Every channel drains through the one DMA interrupt, so the
+        // handlers for all of them hang off DMA_IRQ_0 together.
+        let handlers: Vec<String> = (0..dma)
+            .map(|c| {
+                format!(
+                    "        embassy_rp::dma::InterruptHandler<embassy_rp::peripherals::DMA_CH{c}>"
+                )
+            })
+            .collect();
+        irqs.push(format!("    DMA_IRQ_0 =>\n{};", handlers.join(",\n")));
+    }
+
+    let binding = if irqs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "// The handlers embassy needs bound before an async peripheral can run.\nembassy_rp::bind_interrupts!(struct Irqs {{\n{}\n}});\n\n",
+            irqs.join("\n")
+        )
+    };
+    (binding, o)
+}
+
 fn async_section(mcu: &Mcu) -> String {
+    let (irq_binding, buses) = async_bus_lines(mcu);
     let mut o = String::new();
     o.push_str(GEN_BEGIN);
     o.push('\n');
@@ -1491,12 +1768,14 @@ fn async_section(mcu: &Mcu) -> String {
         o.push_str("#[link_section = \".start_block\"]\n#[used]\n");
         o.push_str("pub static IMAGE_DEF: embassy_rp::block::ImageDef = embassy_rp::block::ImageDef::secure_exe();\n\n");
     }
+    o.push_str(&irq_binding);
     o.push_str("#[embassy_executor::main]\n");
     o.push_str("async fn main(_spawner: Spawner) {\n");
     o.push_str("    // embassy-rp brings up the clocks itself. On RP2040 it also supplies the\n");
     o.push_str("    // second-stage bootloader, which the blocking HAL makes you declare.\n");
     o.push_str("    let p = embassy_rp::init(Default::default());\n\n");
     o.push_str(&async_gpio_lines(mcu));
+    o.push_str(&buses);
     o.push_str(GEN_END);
     o.push('\n');
     o
@@ -1588,7 +1867,20 @@ mod emit_async_for_manual_compile {
             for p in mcu.iter_all_pins_mut() {
                 match p.name.as_str() {
                     n if n.starts_with("GP25") => p.selected_function = PinFunction::GpioOutput,
-                    "GP16" => p.selected_function = PinFunction::GpioInput,
+                    "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                    "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                    "GP4" => p.selected_function = PinFunction::I2cSda(0),
+                    "GP5" => p.selected_function = PinFunction::I2cScl(0),
+                    "GP18" => p.selected_function = PinFunction::SpiSck(0),
+                    "GP19" => p.selected_function = PinFunction::SpiMosi(0),
+                    "GP16" => p.selected_function = PinFunction::SpiMiso(0),
+                    "GP6" => {
+                        p.selected_function = PinFunction::TimerPwm {
+                            timer: 3,
+                            channel: 1,
+                        }
+                    }
+                    "GP26" => p.selected_function = PinFunction::AdcChannel { adc: 0, channel: 0 },
                     _ => {}
                 }
             }
