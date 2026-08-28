@@ -178,6 +178,10 @@ pub(super) struct GenParts {
     /// type is spelled out here, where the timer, the remap and the pin types
     /// are all already known.
     pub inline_handles: Vec<(String, String, bool)>,
+    /// Module-level items for the bare-metal EXTI path: the statics that park
+    /// each armed input, and one `#[interrupt]` per vector. Empty on the RTIC
+    /// path, which turns the same pins into tasks instead.
+    pub irq_items: String,
 }
 
 /// Build the init pieces. `None` when no pin is configured — the caller decides
@@ -388,7 +392,12 @@ pub(super) fn gen_parts(
                 PinFunction::GpioOutput if !gpio_native => {
                     ("", "pins::configs::io::DigitalOut(", ")")
                 }
-                PinFunction::GpioInput if !gpio_native => {
+                // An ARMED input is raw even on the Portable API: `ExtiPin` is
+                // implemented for the HAL's pin, not for the `DigitalIn`
+                // wrapper — and the wrapper would buy nothing here anyway,
+                // because the pin is moved into a static and belongs to the
+                // interrupt handler, never to the reader's loop.
+                PinFunction::GpioInput if !gpio_native && pin.irq.is_none() => {
                     ("", "pins::configs::io::DigitalIn(", ")")
                 }
                 PinFunction::GpioOutput | PinFunction::GpioInput => ("", "", ""),
@@ -876,7 +885,22 @@ pub(super) fn gen_parts(
         port_splits.push_str(&jtag_release_line(&configured));
     }
 
-    let afio_line = if needs_afio {
+    // ── GPIO interrupts ──────────────────────────────────────────────────────
+    // Bare-metal only: the RTIC path turns the same pins into hardware TASKS,
+    // and emitting both would arm every line twice.
+    let (irq_items, irq_arming) = if binding_style == Binding::Owned {
+        (String::new(), String::new())
+    } else {
+        (f1_irq_items(all_pins), f1_irq_arming(all_pins))
+    };
+    if !irq_arming.is_empty() {
+        fn_calls.push('\n');
+        fn_calls.push_str(&irq_arming);
+    }
+
+    // `make_interrupt_source` needs the AFIO — the interrupt source multiplexer
+    // lives there — so an armed pin pulls it in even when no bus does.
+    let afio_line = if needs_afio || !irq_items.is_empty() {
         "let mut afio = dp.AFIO.constrain();\n"
     } else {
         ""
@@ -898,6 +922,7 @@ pub(super) fn gen_parts(
         pin_section,
         fn_calls,
         inline_handles,
+        irq_items,
     })
 }
 
@@ -946,7 +971,20 @@ pub fn make_generated_section(
         port_splits,
         pin_section,
         fn_calls,
+        irq_items,
     } = parts;
+    // `gpio::{self, Edge, ExtiPin}` only when a pin is armed: `ExtiPin` is NOT
+    // in the HAL's prelude, and an unconditional import would warn on every
+    // project without an interrupt.
+    let use_block = if irq_items.is_empty() {
+        use_block
+    } else {
+        format!("{use_block}\n    gpio::{{self, Edge, ExtiPin}},")
+    };
+    // `&mut dp.EXTI` — `trigger_on_edge` and `enable_interrupt` both take the
+    // controller mutably. Only when a pin is armed: an unused `mut` there would
+    // warn on a line inside the generated block, which the reader cannot edit.
+    let dp_mut = if irq_items.is_empty() { "" } else { "mut " };
     // Nothing is appended after `fn main` any more: USART/SPI/I2C init live in
     // `src/pins/configs/` and the ADC is a single line inside the GEN block.
     format!(
@@ -956,9 +994,10 @@ pub fn make_generated_section(
          }};\n\
          {extra_uses}\
          \n\
+         {irq_items}\
          #[entry]\n\
          fn main() -> ! {{\n\
-             let dp = pac::Peripherals::take().unwrap();\n\n\
+             let {dp_mut}dp = pac::Peripherals::take().unwrap();\n\n\
              let mut flash = dp.FLASH.constrain();\n\
              let rcc = dp.RCC.constrain();\n\
          {afio_line}\
@@ -3192,7 +3231,10 @@ fn needs_mut_binding(
     }
     let write_through = match pin.selected_function {
         PinFunction::GpioOutput => true,
-        PinFunction::GpioInput => !gpio_native,
+        // An armed input is written through even on the Native API:
+        // `make_interrupt_source` / `trigger_on_edge` / `enable_interrupt` all
+        // take `&mut self`.
+        PinFunction::GpioInput => !gpio_native || pin.irq.is_some(),
         PinFunction::AdcChannel { .. } => true,
         _ => false,
     };
@@ -3202,6 +3244,133 @@ fn needs_mut_binding(
     let moved = custom_inits.contains(&format!("{binding},"))
         || custom_inits.contains(&format!("{binding})"));
     !moved
+}
+
+/// The concrete `stm32f1xx-hal` type of an armed input, for the static that
+/// parks it.
+///
+/// The MODE is part of the type: a pull-up input is `Input<PullUp>`, and naming
+/// `Floating` there is a type error rather than a cosmetic slip. (The RTIC path
+/// hardcodes `Floating` — that is a separate bug, not a precedent.)
+fn f1_input_ty(pin: &Pin) -> Option<String> {
+    let m = parse_pin(&pin.name)?;
+    let mode = match pin.io_mode.unwrap_or(GpioMode::Floating) {
+        GpioMode::PullUp => "PullUp",
+        GpioMode::PullDown => "PullDown",
+        _ => "Floating",
+    };
+    Some(format!(
+        "gpio::gpio{lc}::P{port}{n}<gpio::Input<gpio::{mode}>>",
+        lc = m.port.to_ascii_lowercase(),
+        port = m.port,
+        n = m.pin_num,
+    ))
+}
+
+/// The module-level items a bare-metal EXTI needs: one static per armed input,
+/// and one `#[interrupt]` per VECTOR.
+///
+/// Statics because an interrupt handler takes no arguments and cannot borrow a
+/// local — the same reason the ESP blocking path needs them. One handler per
+/// vector rather than per pin because that is what the NVIC gives: `EXTI9_5`
+/// carries five lines, so its handler has to ask which pin fired.
+///
+/// `cortex_m::interrupt::Mutex`, not `critical_section::Mutex`: `cortex-m` is
+/// already a dependency of every generated project here, with the
+/// `critical-section-single-core` feature, so this adds nothing to Cargo.toml.
+fn f1_irq_items(all_pins: &[&Pin]) -> String {
+    let armed = super::rtic::irq_pins(all_pins);
+    if armed.is_empty() {
+        return String::new();
+    }
+    let ty_of = |name: &str| {
+        all_pins
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| f1_input_ty(p))
+            .unwrap_or_else(|| "gpio::Input<gpio::Floating>".to_owned())
+    };
+    let mut out = String::new();
+    out.push_str("use core::cell::RefCell;\n");
+    out.push_str("use cortex_m::interrupt::Mutex;\n");
+    out.push_str("use stm32f1xx_hal::pac::interrupt;\n\n");
+    for p in &armed {
+        out.push_str(&format!(
+            "/// {} — parked here so the interrupt handler can reach it.\n",
+            p.name
+        ));
+        out.push_str(&format!(
+            "static {up}: Mutex<RefCell<Option<{ty}>>> = Mutex::new(RefCell::new(None));\n",
+            up = p.binding.to_ascii_uppercase(),
+            ty = ty_of(&p.name),
+        ));
+    }
+    out.push('\n');
+    for (vector, group) in super::rtic::by_vector(&armed) {
+        if group.len() == 1 {
+            out.push_str(&format!(
+                "/// {} (EXTI line {}).\n",
+                group[0].name, group[0].line
+            ));
+        } else {
+            out.push_str(&format!(
+                "/// {vector} is shared by {} lines — each pin is asked in turn.\n",
+                group.len()
+            ));
+        }
+        out.push_str("#[interrupt]\n");
+        out.push_str(&format!("fn {vector}() {{\n"));
+        out.push_str("    cortex_m::interrupt::free(|cs| {\n");
+        for p in group {
+            let up = p.binding.to_ascii_uppercase();
+            out.push_str(&format!(
+                "        if let Some(pin) = {up}.borrow(cs).borrow_mut().as_mut() {{\n"
+            ));
+            // A private vector still asks: `check_interrupt` costs one register
+            // read, and it keeps the two shapes identical to read.
+            out.push_str("            if pin.check_interrupt() {\n");
+            out.push_str("                // Cleared FIRST: leave the pending bit set and the\n");
+            out.push_str("                // handler re-enters the moment it returns.\n");
+            out.push_str("                pin.clear_interrupt_pending_bit();\n");
+            out.push_str(&format!(
+                "                // {} {} edge: your handler code here.\n",
+                p.name,
+                p.edge.label().to_ascii_lowercase()
+            ));
+            out.push_str("            }\n");
+            out.push_str("        }\n");
+        }
+        out.push_str("    });\n}\n\n");
+    }
+    out
+}
+
+/// The `fn main` lines that arm each input and hand it to its static.
+fn f1_irq_arming(all_pins: &[&Pin]) -> String {
+    let armed = super::rtic::irq_pins(all_pins);
+    if armed.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("    // ── GPIO interrupts ──\n");
+    for p in &armed {
+        let b = &p.binding;
+        out.push_str(&format!("    {b}.make_interrupt_source(&mut afio);\n"));
+        out.push_str(&format!(
+            "    {b}.trigger_on_edge(&mut dp.EXTI, {});\n",
+            p.edge.hal_variant()
+        ));
+        out.push_str(&format!("    {b}.enable_interrupt(&mut dp.EXTI);\n"));
+        // Arming the line is not enough — the NVIC still masks the vector.
+        out.push_str(&format!(
+            "    unsafe {{ pac::NVIC::unmask(pac::Interrupt::{}) }};\n",
+            super::rtic::exti_vector(p.line)
+        ));
+        out.push_str(&format!(
+            "    cortex_m::interrupt::free(|cs| {up}.borrow(cs).replace(Some({b})));\n",
+            up = b.to_ascii_uppercase(),
+        ));
+    }
+    out
 }
 
 /// Whether main.rs passes this pin as `&mut …` instead of by value.
@@ -3676,6 +3845,134 @@ mod blocking_dma_tests {
         assert_eq!(pwm_remap(2, &[(1, "PA0"), (2, "PB3")]), None);
         assert_eq!(pwm_remap(5, &[(1, "PA0")]), None);
         assert_eq!(pwm_remap(2, &[]), None);
+    }
+
+    /// An armed input off the RTIC path becomes a bare-metal `#[interrupt]` over
+    /// a static — a different shape from the hardware task, same HAL sequence.
+    #[test]
+    fn an_armed_input_becomes_an_interrupt_over_a_static() {
+        use crate::panels::mcu_module::builtins::builtin_for;
+        use crate::panels::mcu_module::pins::logic::pin::Edge;
+
+        let mut mcu = builtin_for("stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu();
+        let num = mcu
+            .iter_all_pins()
+            .find(|p| p.name == "PB1")
+            .map(|p| p.number);
+        if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+            p.selected_function = PinFunction::GpioInput;
+            p.irq = Some(Edge::Rising);
+        }
+        let out = mcu.fresh_main_rs();
+
+        // `ExtiPin` is not in the HAL's prelude — the import has to be earned.
+        assert!(out.contains("gpio::{self, Edge, ExtiPin},"), "{out}");
+        assert!(out.contains("use cortex_m::interrupt::Mutex;"), "{out}");
+        // The static carries the pin's REAL type, mode included.
+        assert!(
+            out.contains(
+                "static PB1_IN: Mutex<RefCell<Option<gpio::gpiob::PB1<gpio::Input<gpio::Floating>>>>>"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("#[interrupt]\nfn EXTI1() {"), "{out}");
+        assert!(out.contains("pin.clear_interrupt_pending_bit();"), "{out}");
+        // The whole arming sequence, in order — and the NVIC, which arming the
+        // line alone does not touch.
+        assert!(
+            out.contains("pb1_in.make_interrupt_source(&mut afio);"),
+            "{out}"
+        );
+        assert!(
+            out.contains("pb1_in.trigger_on_edge(&mut dp.EXTI, Edge::Rising);"),
+            "{out}"
+        );
+        assert!(
+            out.contains("pb1_in.enable_interrupt(&mut dp.EXTI);"),
+            "{out}"
+        );
+        assert!(
+            out.contains("unsafe { pac::NVIC::unmask(pac::Interrupt::EXTI1) };"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "cortex_m::interrupt::free(|cs| PB1_IN.borrow(cs).replace(Some(pb1_in)));"
+            ),
+            "{out}"
+        );
+        // `&mut dp.EXTI` needs a mutable `dp`, and the pin needs a mutable
+        // binding — every `ExtiPin` method takes `&mut self`.
+        assert!(
+            out.contains("let mut dp = pac::Peripherals::take()"),
+            "{out}"
+        );
+        assert!(out.contains("let mut pb1_in = "), "{out}");
+        // AFIO is pulled in by the arming even with no bus wired: the interrupt
+        // source multiplexer lives there.
+        assert!(out.contains("let mut afio = dp.AFIO.constrain();"), "{out}");
+    }
+
+    /// Lines that share a vector share a handler, which asks each pin in turn —
+    /// the NVIC gives one `EXTI9_5` for five lines and there is no dividing it.
+    #[test]
+    fn lines_sharing_a_vector_share_the_handler() {
+        use crate::panels::mcu_module::builtins::builtin_for;
+        use crate::panels::mcu_module::pins::logic::pin::Edge;
+
+        let mut mcu = builtin_for("stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu();
+        for (name, edge) in [("PB5", Edge::Rising), ("PB6", Edge::Falling)] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = PinFunction::GpioInput;
+                p.irq = Some(edge);
+            }
+        }
+        let out = mcu.fresh_main_rs();
+
+        assert_eq!(out.matches("#[interrupt]").count(), 1, "{out}");
+        assert!(out.contains("fn EXTI9_5() {"), "{out}");
+        assert!(out.contains("PB5_IN.borrow(cs)"), "{out}");
+        assert!(out.contains("PB6_IN.borrow(cs)"), "{out}");
+        // Each keeps its own edge.
+        assert!(
+            out.contains("pb5_in.trigger_on_edge(&mut dp.EXTI, Edge::Rising);"),
+            "{out}"
+        );
+        assert!(
+            out.contains("pb6_in.trigger_on_edge(&mut dp.EXTI, Edge::Falling);"),
+            "{out}"
+        );
+    }
+
+    /// An input with no edge is one you poll: nothing armed, nothing imported,
+    /// and `dp` stays immutable.
+    #[test]
+    fn an_unarmed_input_arms_nothing_on_f1() {
+        use crate::panels::mcu_module::builtins::builtin_for;
+
+        let mut mcu = builtin_for("stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu();
+        let num = mcu
+            .iter_all_pins()
+            .find(|p| p.name == "PB1")
+            .map(|p| p.number);
+        if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+            p.selected_function = PinFunction::GpioInput;
+        }
+        let out = mcu.fresh_main_rs();
+        assert!(!out.contains("#[interrupt]"), "{out}");
+        assert!(!out.contains("ExtiPin"), "{out}");
+        assert!(!out.contains("cortex_m::interrupt::Mutex"), "{out}");
+        assert!(out.contains("let dp = pac::Peripherals::take()"), "{out}");
     }
 
     /// The Virtual Module owns ONE frequency (it is one prescaler in silicon)

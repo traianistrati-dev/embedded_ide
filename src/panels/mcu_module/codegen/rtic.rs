@@ -944,7 +944,7 @@ mod tests {
     fn the_blocking_generator_still_owns_its_output() {
         let mut a = Pin::new(1, "PA0");
         a.selected_function = PinFunction::GpioInput;
-        a.irq = Some(Edge::Rising); // ignored off the RTIC path
+        a.irq = Some(Edge::Rising); // honoured off the RTIC path too, differently
         let mut b = Pin::new(2, "PC13");
         b.selected_function = PinFunction::GpioOutput;
         b.custom_label = "led".into();
@@ -966,8 +966,10 @@ mod tests {
         // inline and no RTIC anywhere.
         assert!(out.contains("#[entry]"), "{out}");
         assert!(out.contains("fn main() -> ! {"), "{out}");
+        // `mut` here because the armed pin below needs `&mut dp.EXTI`; without
+        // one the binding stays immutable.
         assert!(
-            out.contains("let dp = pac::Peripherals::take().unwrap();"),
+            out.contains("let mut dp = pac::Peripherals::take().unwrap();"),
             "{out}"
         );
         assert!(
@@ -976,8 +978,16 @@ mod tests {
 {out}"
         );
         assert!(!out.contains("#[init]"), "{out}");
-        // And the interrupt edge changed nothing here.
-        assert!(!out.contains("trigger_on_edge"), "{out}");
+        // The same edge is honoured here, but as a bare-metal `#[interrupt]`
+        // over a static — NOT as an RTIC hardware task. Both arm the line with
+        // the same HAL sequence; only where the pin then LIVES differs.
+        assert!(
+            out.contains("trigger_on_edge(&mut dp.EXTI, Edge::Rising)"),
+            "{out}"
+        );
+        assert!(out.contains("#[interrupt]"), "{out}");
+        assert!(out.contains("fn EXTI0() {"), "{out}");
+        assert!(!out.contains("#[task("), "{out}");
     }
 
     /// The init sequence is the SAME sequence, just relocated — same clock

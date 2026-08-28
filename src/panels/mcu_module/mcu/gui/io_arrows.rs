@@ -465,7 +465,7 @@ pub fn draw_io_arrows(
                         "ESP + Blocking: it is parked in a static, and one shared handler asks it.\n",
                         "STM32 + Async: it becomes an ExtiInput, and a task awaits the edge.\n",
                         "STM32F1 + RTIC: it becomes a #[task(binds = EXTIn)].\n",
-                        "STM32F1 Blocking/Native generate nothing — main.rs says so in place.",
+                        "STM32F1 Blocking/Native: a #[interrupt] over a static holding the pin.",
                     ));
                 });
             }

@@ -1377,6 +1377,34 @@ mod emit_for_manual_compile {
                 p.selected_function = func;
             }
         }
+        // `EIDE_F1_IRQ=rising|falling|both` arms a GPIO input with an edge.
+        // Off the RTIC path this becomes a bare-metal `#[interrupt]` over a
+        // static — a different shape from the hardware task, and only a
+        // compiler settles whether it is the right one.
+        if let Ok(e) = std::env::var("EIDE_F1_IRQ") {
+            use crate::panels::mcu_module::pins::logic::pin::Edge;
+            let edge = match e.as_str() {
+                "falling" => Edge::Falling,
+                "both" => Edge::Both,
+                _ => Edge::Rising,
+            };
+            // An input if one is already wired, else the first free pad.
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.selected_function == PinFunction::GpioInput)
+                .or_else(|| {
+                    mcu.iter_all_pins()
+                        .find(|p| !p.reserved && p.selected_function == PinFunction::Unset)
+                })
+                .map(|p| p.number);
+            match num.and_then(|n| mcu.find_pin_mut(n)) {
+                Some(p) => {
+                    p.selected_function = PinFunction::GpioInput;
+                    p.irq = Some(edge);
+                }
+                None => println!("no pad free to arm"),
+            }
+        }
         mcu.reconcile_modules();
         // `EIDE_F1_DMA=tx|rx|both` picks which halves run on DMA. Each is a
         // DIFFERENT set of HAL types, so each needs its own compile - `TxDma`
@@ -1732,6 +1760,34 @@ mod emit_for_manual_compile {
                 .map(|p| p.number);
             if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
                 p.selected_function = func;
+            }
+        }
+        // `EIDE_F1_IRQ=rising|falling|both` arms a GPIO input with an edge.
+        // Off the RTIC path this becomes a bare-metal `#[interrupt]` over a
+        // static — a different shape from the hardware task, and only a
+        // compiler settles whether it is the right one.
+        if let Ok(e) = std::env::var("EIDE_F1_IRQ") {
+            use crate::panels::mcu_module::pins::logic::pin::Edge;
+            let edge = match e.as_str() {
+                "falling" => Edge::Falling,
+                "both" => Edge::Both,
+                _ => Edge::Rising,
+            };
+            // An input if one is already wired, else the first free pad.
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.selected_function == PinFunction::GpioInput)
+                .or_else(|| {
+                    mcu.iter_all_pins()
+                        .find(|p| !p.reserved && p.selected_function == PinFunction::Unset)
+                })
+                .map(|p| p.number);
+            match num.and_then(|n| mcu.find_pin_mut(n)) {
+                Some(p) => {
+                    p.selected_function = PinFunction::GpioInput;
+                    p.irq = Some(edge);
+                }
+                None => println!("no pad free to arm"),
             }
         }
         mcu.reconcile_modules();
