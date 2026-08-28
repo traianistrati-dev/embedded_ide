@@ -1834,6 +1834,25 @@ mod emit_for_manual_compile {
                 None => println!("[{chip}] no free pad for {func:?} - skipped"),
             }
         }
+        // `EIDE_ESP_IRQ=rising|falling|both` arms the GPIO input with an edge.
+        // Only the Async runtime builds it — into a task that awaits the edge —
+        // so this is where that compiles or does not.
+        if let Ok(e) = std::env::var("EIDE_ESP_IRQ") {
+            use crate::panels::mcu_module::pins::logic::pin::Edge;
+            let edge = match e.as_str() {
+                "falling" => Edge::Falling,
+                "both" => Edge::Both,
+                _ => Edge::Rising,
+            };
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.selected_function == PinFunction::GpioInput)
+                .map(|p| p.number);
+            match num.and_then(|n| mcu.find_pin_mut(n)) {
+                Some(p) => p.irq = Some(edge),
+                None => println!("[{chip}] no input pin to arm"),
+            }
+        }
         mcu.reconcile_modules();
         for m in &mut mcu.modules {
             if let ModuleConfig::Timer(c) = &mut m.config {

@@ -2574,6 +2574,38 @@ impl TimerModuleConfig {
         }
     }
 
+    /// Carry a channel's settings across when its PAD is re-pointed at another
+    /// channel of the same timer.
+    ///
+    /// Everything a channel owns is keyed by its NUMBER — the duty and the
+    /// per-channel shape (polarity, PWM mode). Re-pointing a pad from CH1 to
+    /// CH3 therefore looks, to this config, like CH1 disappearing and a
+    /// brand-new CH3 arriving at 0 %: the duty the user set would be silently
+    /// lost, and a duty is exactly the setting nobody re-checks.
+    ///
+    /// Refuses to overwrite: if `to` already carries settings it is because
+    /// another pad is driving it, and that pad's duty is not this one's to
+    /// replace. Returns whether anything moved.
+    pub fn move_channel(&mut self, from: u8, to: u8) -> bool {
+        if from == to {
+            return false;
+        }
+        let mut moved = false;
+        if !self.duty_x100.contains_key(&to)
+            && let Some(d) = self.duty_x100.remove(&from)
+        {
+            self.duty_x100.insert(to, d);
+            moved = true;
+        }
+        if !self.channels.contains_key(&to)
+            && let Some(c) = self.channels.remove(&from)
+        {
+            self.channels.insert(to, c);
+            moved = true;
+        }
+        moved
+    }
+
     /// This channel's duty cycle, 0 % when the user has not set one.
     /// Duty of `channel` in hundredths of a percent; 0 for a channel nobody
     /// has touched, which is a pin held low — the safe state for a driver stage.

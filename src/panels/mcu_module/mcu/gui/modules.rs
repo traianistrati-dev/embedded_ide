@@ -1031,6 +1031,50 @@ fn stop_label(s: StopBits) -> &'static str {
 /// package bonds only some of the pads a die carries — the truth is in the
 /// pins' own function lists, which is also where the codegen reads the channel
 /// set from (`pwm_wires`).
+/// `"CH3"` -> `Some(3)`; `None` for `CH3N`, `BKIN` and every non-PWM signal.
+///
+/// The complementary pad is deliberately excluded: it is welded to its channel
+/// on every part that has one, so there is nothing to choose.
+fn pwm_plain_channel(sig: &str) -> Option<u8> {
+    let rest = sig.strip_prefix("CH")?;
+    rest.parse::<u8>().ok()
+}
+
+/// Which channels of `timer` this PAD could drive, the one it drives now
+/// included.
+///
+/// # Why this is a question worth asking at all
+///
+/// On an STM32 it almost always answers with one: a pad carries one channel per
+/// timer, so the pad IS the choice and there is nothing to pick. On an ESP it
+/// answers with all of them — `LEDC` reaches the pins through the GPIO matrix,
+/// so `esp_gen` gives every pad every channel.
+///
+/// Read from the pad's own function list rather than from a per-family table,
+/// so the answer is the chip's and a part that breaks the rule breaks it here
+/// too. `taken` drops the channels another pad of this same timer is already
+/// driving: two pads on one channel is not something the generator can write.
+fn pwm_channel_choices(
+    timer: u8,
+    pin: usize,
+    pin_funcs: &HashMap<usize, Vec<PinFunction>>,
+    taken: &BTreeSet<u8>,
+) -> Vec<u8> {
+    let mut out: Vec<u8> = pin_funcs
+        .get(&pin)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| match f {
+            PinFunction::TimerPwm { timer: t, channel } if *t == timer => Some(*channel),
+            _ => None,
+        })
+        .filter(|c| !taken.contains(c))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 fn free_pwm_channels(
     timer: u8,
     wired: &BTreeSet<String>,
@@ -1123,8 +1167,15 @@ pub fn module_config_ui(
         dma_map::Bus::Usart
     };
     let m_id = m.id.clone();
+    // Read alongside `is_custom`, for the same reason: the rows at the bottom
+    // are drawn long after `m.config` is borrowed mutably.
+    let m_kind = m.kind;
+    let m_inst = m.instance();
     // Connection rows (generic over kind), computed before borrowing config.
-    let conn_rows: Vec<(&'static str, String)> = m
+    //
+    // The pin NUMBER rides along with the name: the timer rows below turn it
+    // into a channel picker, and `pin_funcs` is keyed by number.
+    let conn_rows: Vec<(&'static str, String, usize)> = m
         .connections
         .iter()
         .map(|c| {
@@ -1132,7 +1183,7 @@ pub fn module_config_ui(
                 .get(&c.mcu_pin)
                 .cloned()
                 .unwrap_or_else(|| format!("pin{}", c.mcu_pin));
-            (c.signal.label(), pin)
+            (c.signal.label(), pin, c.mcu_pin)
         })
         .collect();
     // Whether an SPI module has a receive line at all. Read from its own wiring
@@ -2637,9 +2688,9 @@ pub fn module_config_ui(
                     // signals' own labels, so these rows and the hint below
                     // cannot disagree.
                     let wired: BTreeSet<String> =
-                        conn_rows.iter().map(|(sig, _)| (*sig).to_owned()).collect();
+                        conn_rows.iter().map(|(sig, _, _)| (*sig).to_owned()).collect();
                     let mut pads: BTreeMap<u8, Vec<String>> = BTreeMap::new();
-                    for (sig, pin) in &conn_rows {
+                    for (sig, pin, _) in &conn_rows {
                         let digits = sig.strip_prefix("CH").map(|r| r.trim_end_matches('N'));
                         if let Some(ch) = digits.and_then(|d| d.parse::<u8>().ok()) {
                             pads.entry(ch).or_default().push(format!("{sig} {pin}"));
@@ -2878,9 +2929,9 @@ pub fn module_config_ui(
                 ModuleConfig::Hspi(cfg) => {
                     let lanes = conn_rows
                         .iter()
-                        .filter(|(sig, _)| sig.starts_with("IO"))
+                        .filter(|(sig, _, _)| sig.starts_with("IO"))
                         .count() as u8;
-                    let dqs0 = conn_rows.iter().any(|(sig, _)| *sig == "DQS0");
+                    let dqs0 = conn_rows.iter().any(|(sig, _, _)| *sig == "DQS0");
 
                     ui.label("Mode");
                     let fits: Vec<HspiMode> = HspiMode::ALL
@@ -2971,10 +3022,10 @@ pub fn module_config_ui(
                 ModuleConfig::Xspi(cfg) => {
                     let lanes = conn_rows
                         .iter()
-                        .filter(|(sig, _)| sig.starts_with("IO"))
+                        .filter(|(sig, _, _)| sig.starts_with("IO"))
                         .count() as u8;
-                    let dqs0 = conn_rows.iter().any(|(sig, _)| *sig == "DQS0");
-                    let dqs1 = conn_rows.iter().any(|(sig, _)| *sig == "DQS1");
+                    let dqs0 = conn_rows.iter().any(|(sig, _, _)| *sig == "DQS0");
+                    let dqs1 = conn_rows.iter().any(|(sig, _, _)| *sig == "DQS1");
 
                     ui.label("Mode");
                     let fits: Vec<XspiMode> = XspiMode::ALL
@@ -3082,9 +3133,9 @@ pub fn module_config_ui(
                 ModuleConfig::Ospi(cfg) => {
                     let lanes = conn_rows
                         .iter()
-                        .filter(|(sig, _)| sig.starts_with("IO"))
+                        .filter(|(sig, _, _)| sig.starts_with("IO"))
                         .count() as u8;
-                    let dqs = conn_rows.iter().any(|(sig, _)| *sig == "DQS");
+                    let dqs = conn_rows.iter().any(|(sig, _, _)| *sig == "DQS");
 
                     ui.label("Mode");
                     let fits: Vec<OspiMode> = OspiMode::ALL
@@ -3190,16 +3241,16 @@ pub fn module_config_ui(
                         let tag = format!("BK{b} ");
                         let ios = conn_rows
                             .iter()
-                            .filter(|(sig, _)| sig.starts_with(&tag) && sig.contains("IO"))
+                            .filter(|(sig, _, _)| sig.starts_with(&tag) && sig.contains("IO"))
                             .count();
-                        let ncs = conn_rows.iter().any(|(sig, _)| *sig == format!("BK{b} NCS"));
+                        let ncs = conn_rows.iter().any(|(sig, _, _)| *sig == format!("BK{b} NCS"));
                         (ios, ncs)
                     };
                     let (io1, ncs1) = bank(1);
                     let (io2, ncs2) = bank(2);
                     let ok1 = io1 == 4 && ncs1;
                     let ok2 = io2 == 4 && ncs2;
-                    let clk = conn_rows.iter().any(|(sig, _)| *sig == "CLK");
+                    let clk = conn_rows.iter().any(|(sig, _, _)| *sig == "CLK");
 
                     ui.label("Wiring");
                     let (text, colour) = match (clk, ok1, ok2) {
@@ -3294,7 +3345,7 @@ pub fn module_config_ui(
                 ModuleConfig::Sdmmc(cfg) => {
                     let lanes: Vec<u8> = conn_rows
                         .iter()
-                        .filter_map(|(sig, _)| sig.strip_prefix("D")?.parse::<u8>().ok())
+                        .filter_map(|(sig, _, _)| sig.strip_prefix("D")?.parse::<u8>().ok())
                         .collect();
                     let width = match lanes.len() {
                         1 => Some(1u8),
@@ -3372,7 +3423,7 @@ pub fn module_config_ui(
                         .into_iter()
                         .filter(|b| {
                             let tag = if *b == 1 { "A " } else { "B " };
-                            conn_rows.iter().any(|(sig, _)| sig.starts_with(tag))
+                            conn_rows.iter().any(|(sig, _, _)| sig.starts_with(tag))
                         })
                         .collect();
                     if wired.is_empty() {
@@ -3511,7 +3562,7 @@ pub fn module_config_ui(
                 ModuleConfig::Dac(cfg) => {
                     let chans: Vec<(u8, String)> = conn_rows
                         .iter()
-                        .filter_map(|(sig, pin)| {
+                        .filter_map(|(sig, pin, _)| {
                             Some((sig.strip_prefix("OUT")?.parse::<u8>().ok()?, pin.clone()))
                         })
                         .collect();
@@ -4235,8 +4286,83 @@ pub fn module_config_ui(
             // Peripheral modules list their wired pins here; a custom module
             // already shows (and edits) its own pins above.
             if !is_custom {
-                for (sig, pin) in &conn_rows {
-                    ui.label(format!("{sig} {} pin", ph::ARROW_RIGHT));
+                // Channels of this timer another pad already drives — they
+                // are not on offer here, whatever the pad could do.
+                let taken: BTreeSet<u8> = if m_kind == ModuleKind::GenericInterfaceTimer {
+                    conn_rows
+                        .iter()
+                        .filter_map(|(sig, _, _)| pwm_plain_channel(sig))
+                        .collect()
+                } else {
+                    BTreeSet::new()
+                };
+                for (sig, pin, num) in &conn_rows {
+                    // A timer channel is the one signal whose NUMBER a pad can
+                    // sometimes choose, so its label is a picker rather than a
+                    // caption — but only where the pad really offers more than
+                    // one. Elsewhere it stays the plain text it always was.
+                    let cur = if m_kind == ModuleKind::GenericInterfaceTimer {
+                        pwm_plain_channel(sig)
+                    } else {
+                        None
+                    };
+                    let choices = match cur {
+                        Some(c) => {
+                            let mut t = taken.clone();
+                            t.remove(&c);
+                            pwm_channel_choices(m_inst, *num, pin_funcs, &t)
+                        }
+                        None => Vec::new(),
+                    };
+                    if let Some(c) = cur
+                        && choices.len() > 1
+                    {
+                        ui.horizontal(|ui| {
+                            ui.menu_button(
+                                egui::RichText::new(format!("{sig} {}", ph::CARET_DOWN))
+                                    .size(11.0),
+                                |ui| {
+                                    ui.set_min_width(120.0);
+                                    ui.label(
+                                        egui::RichText::new("this pad drives")
+                                            .size(10.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    ui.separator();
+                                    for ch in &choices {
+                                        if ui
+                                            .selectable_label(
+                                                *ch == c,
+                                                egui::RichText::new(format!("CH{ch}")).size(10.5),
+                                            )
+                                            .clicked()
+                                        {
+                                            // Through the SAME door the canvas
+                                            // uses, so the duty follows the
+                                            // channel (`carry_pwm_channel`) and
+                                            // the module re-wires itself.
+                                            *pin_fn_choice = Some((
+                                                *num,
+                                                PinFunction::TimerPwm {
+                                                    timer: m_inst,
+                                                    channel: *ch,
+                                                },
+                                            ));
+                                            ui.close();
+                                        }
+                                    }
+                                },
+                            )
+                            .response
+                            .on_hover_text(
+                                "Which channel of this timer the pad drives. The duty you set \
+                                 moves with it.",
+                            );
+                            ui.label(format!("{} pin", ph::ARROW_RIGHT));
+                        });
+                    } else {
+                        ui.label(format!("{sig} {} pin", ph::ARROW_RIGHT));
+                    }
                     ui.label(pin);
                     ui.end_row();
                 }
@@ -4272,6 +4398,71 @@ pub fn module_config_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The picker offers what the PAD offers, and nothing else.
+    ///
+    /// This is the whole per-family answer in one function: an STM32 pad
+    /// carries one channel of a given timer, so it comes back with a single
+    /// entry and the row stays plain text; an ESP pad carries every LEDC
+    /// channel, because the GPIO matrix routes them, so the row becomes a
+    /// choice. Neither case is written down anywhere — both fall out of the
+    /// pad's own function list.
+    #[test]
+    fn a_pad_is_offered_only_the_channels_it_can_reach() {
+        let mut funcs: HashMap<usize, Vec<PinFunction>> = HashMap::new();
+        // ESP-shaped pad: every LEDC channel on timer 0.
+        funcs.insert(
+            10,
+            (0u8..6)
+                .map(|channel| PinFunction::TimerPwm { timer: 0, channel })
+                .collect(),
+        );
+        // STM32-shaped pad: one channel of TIM3, and one of another timer.
+        funcs.insert(
+            20,
+            vec![
+                PinFunction::TimerPwm {
+                    timer: 3,
+                    channel: 2,
+                },
+                PinFunction::TimerPwm {
+                    timer: 4,
+                    channel: 1,
+                },
+            ],
+        );
+
+        let none = BTreeSet::new();
+        assert_eq!(
+            pwm_channel_choices(0, 10, &funcs, &none),
+            vec![0, 1, 2, 3, 4, 5],
+            "an LEDC pad reaches every channel"
+        );
+        // One entry -> the caller keeps the plain label, because there is
+        // nothing to choose.
+        assert_eq!(pwm_channel_choices(3, 20, &funcs, &none), vec![2]);
+        // A timer this pad does not serve at all.
+        assert!(pwm_channel_choices(7, 20, &funcs, &none).is_empty());
+
+        // Channels another pad already drives are withheld: two pads on one
+        // channel is not something the generator can write.
+        let taken: BTreeSet<u8> = [0u8, 1, 5].into_iter().collect();
+        assert_eq!(pwm_channel_choices(0, 10, &funcs, &taken), vec![2, 3, 4]);
+    }
+
+    /// `CH3` is a channel; `CH3N` and `BKIN` are not.
+    ///
+    /// The complementary pad is welded to its channel on every part that has
+    /// one, so offering to move it would be offering something the chip cannot
+    /// do.
+    #[test]
+    fn only_a_plain_channel_row_becomes_a_picker() {
+        assert_eq!(pwm_plain_channel("CH0"), Some(0));
+        assert_eq!(pwm_plain_channel("CH7"), Some(7));
+        assert_eq!(pwm_plain_channel("CH3N"), None);
+        assert_eq!(pwm_plain_channel("BKIN"), None);
+        assert_eq!(pwm_plain_channel("TX"), None);
+    }
 
     /// A chip whose pins can serve `channels` of `timer`, one pad each, plus a
     /// decoy pad on another timer.

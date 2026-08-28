@@ -47,7 +47,7 @@ use super::modules::{
     SpiModuleConfig, TimerModuleConfig, TouchModuleConfig, UsartDirection, UsartModuleConfig,
     UsbModuleConfig,
 };
-use super::pins::logic::pin::Pin;
+use super::pins::logic::pin::{Edge, Pin};
 use super::pins::logic::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -79,9 +79,19 @@ pub enum EspRuntime {
 impl EspRuntime {
     /// The attribute + `fn` signature line(s) that open `main`, ending in `{\n`.
     fn entry(self) -> &'static str {
-        match self {
-            Self::Blocking => "#[esp_hal::main]\nfn main() -> ! {\n",
-            Self::Async => "#[esp_rtos::main]\nasync fn main(_spawner: Spawner) {\n",
+        self.entry_with(false)
+    }
+
+    /// The entry point, with the `Spawner` NAMED when the body spawns a task.
+    ///
+    /// Two spellings rather than always `spawner`: an async project with nothing
+    /// to spawn would carry an unused-variable warning on a line inside the
+    /// generated block, which the reader cannot edit away.
+    fn entry_with(self, spawns: bool) -> &'static str {
+        match (self, spawns) {
+            (Self::Blocking, _) => "#[esp_hal::main]\nfn main() -> ! {\n",
+            (Self::Async, false) => "#[esp_rtos::main]\nasync fn main(_spawner: Spawner) {\n",
+            (Self::Async, true) => "#[esp_rtos::main]\nasync fn main(spawner: Spawner) {\n",
         }
     }
 
@@ -114,6 +124,54 @@ impl EspRuntime {
             ],
         }
     }
+}
+
+/// The inputs the user armed with an interrupt edge, in pin order.
+///
+/// Inputs ONLY: an edge on an output is not a thing, and the picker only offers
+/// it on `GpioInput` for the same reason.
+fn irq_inputs<'a>(configured: &[&'a Pin]) -> Vec<(&'a Pin, Edge)> {
+    configured
+        .iter()
+        .filter(|p| p.selected_function == PinFunction::GpioInput)
+        .filter_map(|p| p.irq.map(|e| (*p, e)))
+        .collect()
+}
+
+/// The `Input` method that waits for `edge`.
+fn wait_fn(edge: Edge) -> &'static str {
+    match edge {
+        Edge::Rising => "wait_for_rising_edge",
+        Edge::Falling => "wait_for_falling_edge",
+        Edge::Both => "wait_for_any_edge",
+    }
+}
+
+/// One `#[embassy_executor::task]` per armed input, placed between the `use`
+/// block and the entry point — a task cannot live inside `fn main`.
+///
+/// The task OWNS its pin. That is the honest shape: `wait_for_*` takes
+/// `&mut self`, so the pin cannot also be read from `main` without a mutex, and
+/// a task that borrows nothing is a task the user can freely edit.
+fn irq_tasks(armed: &[(&Pin, Edge)]) -> String {
+    let mut out = String::new();
+    for (p, edge) in armed {
+        let var = esp_binding(p);
+        out.push_str(&format!(
+            "/// {name} — wakes on a {label} edge. The task owns the pin.\n\
+             #[embassy_executor::task]\n\
+             async fn {var}_irq(mut pin: Input<'static>) {{\n\
+             \x20   loop {{\n\
+             \x20       pin.{wait}().await;\n\
+             \x20       // {name} {label} edge: your handler code here.\n\
+             \x20   }}\n\
+             }}\n\n",
+            name = p.name,
+            label = edge.label().to_ascii_lowercase(),
+            wait = wait_fn(*edge),
+        ));
+    }
+    out
 }
 
 // ── Clock config → esp-hal `CpuClock` ─────────────────────────────────────────
@@ -527,6 +585,40 @@ fn make_gen_section(
         }
     }
 
+    // ── GPIO interrupts ──────────────────────────────────────────────────────
+    // esp-hal has no EXTI-style vector table to fill in: an armed input is just
+    // a task that awaits the edge, which is why this is Async-only. On the
+    // blocking runtime the edge would need `listen()` + a `#[handler]` and a
+    // static to reach the main loop — say so rather than dropping the setting on
+    // the floor.
+    let armed = irq_inputs(&configured);
+    if !armed.is_empty() {
+        body.push('\n');
+        body.push_str("    // ── GPIO interrupts ──\n");
+        if runtime == EspRuntime::Async {
+            for (p, _) in &armed {
+                let var = esp_binding(p);
+                // The shape embassy-executor 0.10 (macros 0.8) settled on: the
+                // TASK returns `Result<SpawnToken, SpawnError>` and `spawn`
+                // returns `()`. It was the other way round one version earlier,
+                // so a version bump is worth re-checking here. The `unwrap`
+                // cannot fire: one task function, one spawn, a pool of one.
+                body.push_str(&format!("    spawner.spawn({var}_irq({var}).unwrap());\n"));
+            }
+        } else {
+            for (p, edge) in &armed {
+                body.push_str(&format!(
+                    "    // {} is set to interrupt on a {} edge, which only the Async\n",
+                    p.name,
+                    edge.label().to_ascii_lowercase()
+                ));
+                body.push_str(
+                    "    // runtime generates (System tab) — it becomes a task that awaits it.\n",
+                );
+            }
+        }
+    }
+
     // ── ADC — grouped by ADC instance ────────────────────────────────────────
     if has_adc {
         let mut adc_pins: BTreeMap<u8, Vec<&Pin>> = BTreeMap::new();
@@ -806,13 +898,19 @@ fn make_gen_section(
     // Blank line before GEN_END
     body.push('\n');
 
+    let tasks = if runtime == EspRuntime::Async {
+        irq_tasks(&armed)
+    } else {
+        String::new()
+    };
     format!(
         "{GEN_BEGIN}\n\
          {use_block}\
+         {tasks}\
          {entry}\
          {body}\
          {GEN_END}\n",
-        entry = runtime.entry(),
+        entry = runtime.entry_with(!tasks.is_empty()),
     )
 }
 
@@ -2084,10 +2182,125 @@ fn module_label_sfx(label: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A generated `main.rs` for `pins` on `rt`, with nothing else configured.
+    fn esp_main(pins: &[&Pin], rt: EspRuntime) -> String {
+        fresh_esp32c3_main_rs(
+            pins,
+            &ClockConfig::None,
+            "ESP32-C3",
+            "esp32c3",
+            &no_usart(),
+            &no_spi(),
+            &no_i2c(),
+            &no_i2s(),
+            &no_rmt(),
+            &no_pcnt(),
+            &no_mcpwm(),
+            &no_parl(),
+            &no_lcd(),
+            &no_usb(),
+            &no_touch(),
+            &no_dac(),
+            &no_can(),
+            &Default::default(),
+            "",
+            "",
+            "esp32c3",
+            rt,
+            None,
+        )
+    }
+
     fn pwm_pin(name: &str, f: PinFunction) -> Pin {
         let mut p = Pin::new(1, name);
         p.selected_function = f;
         p
+    }
+
+    /// An armed input becomes a task that AWAITS the edge — esp-hal has no
+    /// EXTI-style vector table, so this is the whole mechanism.
+    #[test]
+    fn an_armed_input_becomes_a_task_that_awaits_the_edge() {
+        let mut p = pwm_pin("GPIO0", PinFunction::GpioInput);
+        p.custom_label = "mw ot2".into();
+        p.irq = Some(Edge::Rising);
+        let pins = vec![p];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let code = esp_main(&refs, EspRuntime::Async);
+
+        // The task lives OUTSIDE `fn main` — it cannot be nested in it.
+        assert!(code.contains("#[embassy_executor::task]"), "{code}");
+        assert!(
+            code.contains("async fn gpio0_in_mw_ot2_irq(mut pin: Input<'static>) {"),
+            "{code}"
+        );
+        assert!(code.contains("pin.wait_for_rising_edge().await;"), "{code}");
+        assert!(
+            code.find("#[embassy_executor::task]") < code.find("#[esp_rtos::main]"),
+            "the task must come before the entry point:\n{code}"
+        );
+        // …and main hands it the pin.
+        assert!(
+            code.contains("spawner.spawn(gpio0_in_mw_ot2_irq(gpio0_in_mw_ot2).unwrap());"),
+            "{code}"
+        );
+        // The Spawner is NAMED now — an unused `_spawner` would warn on a line
+        // inside the generated block.
+        assert!(code.contains("async fn main(spawner: Spawner)"), "{code}");
+        // The pin's own `let` is untouched: it is the only record
+        // `parse_main_rs` rebuilds the diagram from.
+        assert!(
+            code.contains("let gpio0_in_mw_ot2 = Input::new(peripherals.GPIO0"),
+            "{code}"
+        );
+    }
+
+    /// Each edge picks its own `wait_for_*`, and `Both` is `any`.
+    #[test]
+    fn each_edge_picks_its_own_wait() {
+        for (edge, want) in [
+            (Edge::Rising, "wait_for_rising_edge"),
+            (Edge::Falling, "wait_for_falling_edge"),
+            (Edge::Both, "wait_for_any_edge"),
+        ] {
+            let mut p = pwm_pin("GPIO0", PinFunction::GpioInput);
+            p.irq = Some(edge);
+            let pins = vec![p];
+            let refs: Vec<&Pin> = pins.iter().collect();
+            let code = esp_main(&refs, EspRuntime::Async);
+            assert!(
+                code.contains(&format!("pin.{want}().await;")),
+                "{edge:?}: {code}"
+            );
+        }
+    }
+
+    /// An input with no edge is one you poll — no task, and the Spawner keeps
+    /// its underscore.
+    #[test]
+    fn an_unarmed_input_spawns_nothing() {
+        let pins = vec![pwm_pin("GPIO0", PinFunction::GpioInput)];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let code = esp_main(&refs, EspRuntime::Async);
+        assert!(!code.contains("embassy_executor::task"), "{code}");
+        assert!(!code.contains("GPIO interrupts"), "{code}");
+        assert!(code.contains("async fn main(_spawner: Spawner)"), "{code}");
+    }
+
+    /// The blocking runtime cannot build this, so it SAYS so where the spawn
+    /// would have been — the setting is not dropped on the floor.
+    #[test]
+    fn the_blocking_runtime_says_why_it_generates_nothing() {
+        let mut p = pwm_pin("GPIO0", PinFunction::GpioInput);
+        p.irq = Some(Edge::Falling);
+        let pins = vec![p];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let code = esp_main(&refs, EspRuntime::Blocking);
+        assert!(!code.contains("embassy_executor::task"), "{code}");
+        assert!(
+            code.contains("GPIO0 is set to interrupt on a falling edge, which only the Async"),
+            "{code}"
+        );
     }
 
     /// The LEDC is ONE peripheral for the whole chip, so `Ledc::new` belongs in

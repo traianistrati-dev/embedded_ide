@@ -1027,10 +1027,62 @@ impl Mcu {
             self.auto_assign_partners(pin_num, &func);
         }
 
+        // A pad re-pointed at another channel of the SAME timer keeps what the
+        // user set for it. Done HERE, before `reconcile_modules` rebuilds the
+        // wires, because this is the one door both entrances use — the canvas's
+        // function list and the module panel's channel picker.
+        self.carry_pwm_channel(&old_func, &func);
+
         // A pin re-purposed away from USART must drop any virtual-module wire.
         self.reconcile_modules();
 
         Some(changed)
+    }
+
+    /// Move a channel's duty (and its shape) when a pad changes which channel
+    /// of the same timer it drives.
+    ///
+    /// Only when the OLD channel is left with no pad at all: two pads on one
+    /// timer swapping channels between them must not have one of them drag the
+    /// other's duty away.
+    fn carry_pwm_channel(&mut self, old: &PinFunction, new: &PinFunction) {
+        use crate::panels::mcu_module::modules::ModuleConfig;
+        let (
+            PinFunction::TimerPwm {
+                timer: t_old,
+                channel: from,
+            },
+            PinFunction::TimerPwm {
+                timer: t_new,
+                channel: to,
+            },
+        ) = (old, new)
+        else {
+            return;
+        };
+        if t_old != t_new || from == to {
+            return;
+        }
+        let (timer, from, to) = (*t_old, *from, *to);
+        // Still driven from somewhere else? Then its duty is not orphaned and
+        // moving it would steal a live setting.
+        let still_used = self.iter_all_pins().any(|p| {
+            p.selected_function
+                == PinFunction::TimerPwm {
+                    timer,
+                    channel: from,
+                }
+        });
+        if still_used {
+            return;
+        }
+        for m in &mut self.modules {
+            if let ModuleConfig::Timer(cfg) = &mut m.config
+                && cfg.instance == timer
+            {
+                cfg.move_channel(from, to);
+            }
+        }
     }
 
     /// Drop each module connection whose pin no longer carries the matching

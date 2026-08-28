@@ -376,6 +376,128 @@ mod tests {
         );
     }
 
+    /// Every LEDC channel gets its OWN name.
+    ///
+    /// `ModuleSignal` used to stop at `PwmCh4`, with a catch-all arm, so on an
+    /// ESP — six or eight channels through the GPIO matrix — channels 0, 5, 6
+    /// and 7 all came back as `CH4`. The pins were right, because the ESP
+    /// generator reads them and not the module's wires; every panel row that
+    /// reads the wires was wrong.
+    #[test]
+    fn every_timer_channel_has_its_own_signal() {
+        use crate::panels::mcu_module::modules::{ModuleSignal, module_signal_of};
+
+        for ch in 0u8..=7 {
+            let (kind, timer, sig) = module_signal_of(&PinFunction::TimerPwm {
+                timer: 3,
+                channel: ch,
+            })
+            .expect("a PWM pad belongs to a timer module");
+            assert_eq!(kind, ModuleKind::GenericInterfaceTimer);
+            assert_eq!(timer, 3);
+            assert_eq!(sig.label(), format!("CH{ch}"), "channel {ch}");
+            // And back again — the reverse map is what the canvas uses to
+            // assign a signal's pad, so a one-way name would strand it.
+            assert_eq!(
+                sig.pin_function(3),
+                PinFunction::TimerPwm {
+                    timer: 3,
+                    channel: ch
+                },
+                "channel {ch} round-trips"
+            );
+        }
+
+        // The order is the row order: `reconcile_modules` sorts by signal, so
+        // CH0 must come before CH1 rather than after CH7.
+        assert!(ModuleSignal::PwmCh0 < ModuleSignal::PwmCh1);
+        assert!(ModuleSignal::PwmCh4 < ModuleSignal::PwmCh5);
+    }
+
+    /// Re-pointing a pad at another channel of the same timer keeps its duty.
+    ///
+    /// Everything a channel owns is keyed by its NUMBER, so without this the
+    /// move reads as "CH1 disappeared, a fresh CH3 arrived at 0 %" — and a duty
+    /// silently falling to zero is the kind of change nobody re-checks.
+    ///
+    /// On an ESP, deliberately: it is the part where a pad HAS a choice of
+    /// channel, because LEDC reaches the pins through the GPIO matrix. An F1
+    /// pad carries one channel per timer, so the same test there would take the
+    /// early exit and prove nothing.
+    #[test]
+    fn a_pads_duty_follows_it_to_another_channel() {
+        use crate::panels::mcu_module::modules::ModuleConfig;
+
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32c3")
+            .expect("a bundled ESP32-C3")
+            .build_mcu();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceTimer));
+        let timer = mcu.modules[0].instance();
+        let pin = mcu.modules[0].connections[0].mcu_pin;
+        let from = match mcu.find_pin(pin).unwrap().selected_function {
+            PinFunction::TimerPwm { channel, .. } => channel,
+            ref f => panic!("the seeded pad is a PWM channel, not {f:?}"),
+        };
+
+        let ModuleConfig::Timer(cfg) = &mut mcu.modules[0].config else {
+            panic!("a timer module carries a timer config");
+        };
+        cfg.duty_x100.insert(from, 2_000); // 20 %
+
+        // Another channel the SAME pad can drive.
+        let to = mcu
+            .find_pin(pin)
+            .unwrap()
+            .available_functions
+            .iter()
+            .filter_map(|f| match f {
+                PinFunction::TimerPwm { timer: t, channel } if *t == timer && *channel != from => {
+                    Some(*channel)
+                }
+                _ => None,
+            })
+            .min()
+            .expect("an LEDC pad offers every channel");
+
+        mcu.apply_pin_function(pin, PinFunction::TimerPwm { timer, channel: to });
+        let ModuleConfig::Timer(cfg) = &mcu.modules[0].config else {
+            panic!("still a timer config");
+        };
+        assert_eq!(cfg.duty_x100.get(&to), Some(&2_000), "the duty moved");
+        assert!(
+            cfg.duty_x100.get(&from).is_none(),
+            "and did not stay behind"
+        );
+
+        // And the module now names the channel it really drives — the thing
+        // the four-signal `ModuleSignal` used to get wrong.
+        assert_eq!(
+            mcu.modules[0].connections[0].signal.label(),
+            format!("CH{to}")
+        );
+    }
+
+    /// …but it never steals a duty from a channel that is still driven.
+    #[test]
+    fn a_live_channels_duty_is_left_alone() {
+        use crate::panels::mcu_module::modules::{ModuleConfig, TimerModuleConfig};
+
+        let mut cfg = TimerModuleConfig::new(3);
+        cfg.duty_x100.insert(1, 2_000);
+        cfg.duty_x100.insert(3, 500);
+        // CH3 is already somebody's, so CH1 does not get to overwrite it.
+        assert!(!cfg.move_channel(1, 3));
+        assert_eq!(cfg.duty_x100.get(&1), Some(&2_000));
+        assert_eq!(cfg.duty_x100.get(&3), Some(&500));
+
+        // A free destination does take it.
+        assert!(cfg.move_channel(1, 2));
+        assert_eq!(cfg.duty_x100.get(&2), Some(&2_000));
+        assert!(cfg.duty_x100.get(&1).is_none());
+
+        let _ = ModuleConfig::Timer(cfg);
+    }
+
     /// The PWM module is the TIMER: adding one takes a single channel, and a
     /// channel of the SAME timer assigned by hand later JOINS that module rather
     /// than making a second one. That fold-in is how channels 2..4 are added, so

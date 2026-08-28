@@ -456,10 +456,15 @@ pub fn draw_io_arrows(
                         )
                         .response
                     })
-                    .on_hover_text(
-                        "Raise an interrupt on this input. Used by the RTIC runtime, 
-                         which turns each armed pin into a #[task(binds = EXTIn)].",
-                    );
+                    // One string per line: a raw newline inside the literal
+                    // carries its indentation into the tooltip, which is how
+                    // this one used to render with a gap through the middle.
+                    .on_hover_text(concat!(
+                        "Raise an interrupt on this input.\n",
+                        "ESP + Async: the pin becomes its own task, awaiting the edge.\n",
+                        "STM32F1 + RTIC: it becomes a #[task(binds = EXTIn)].\n",
+                        "Other runtimes generate nothing — main.rs says so in place.",
+                    ));
                 });
             }
         }
