@@ -1103,6 +1103,15 @@ pub fn module_config_ui(
     // than derived here, because it is a fact about the CHIP and this function
     // only sees one module.
     line_extras: bool,
+    // Standing remarks about this module that are NOT controls — "duty is taken
+    // in whole percent", "assign CH2 on the canvas to add it". Collected here
+    // and drawn by the details pane instead of inside the config grid.
+    //
+    // Out-parameter rather than a second function, because working them out
+    // means the same reading of `m.config` and the pin map the controls above
+    // already did — recomputing it elsewhere is how the note and the control
+    // end up disagreeing.
+    notes: &mut Vec<String>,
 ) {
     // Read what we need off `m` BEFORE `m.config` is borrowed mutably below.
     let is_custom = m.kind.is_custom();
@@ -1396,7 +1405,7 @@ pub fn module_config_ui(
             .show_ui(ui, |ui| {
                 ui.selectable_value(mode, UsartMode::Buffered, "Buffered (interrupt)")
                     .on_hover_text(
-                        "embassy BufferedUart -> embedded-io-async Read + Write, one interrupt                          per byte into a software ring buffer. Needs no DMA channel, so it                          compiles out of the box.",
+                        "embassy BufferedUart -> embedded-io-async Read + Write, one interrupt per byte into a software ring buffer. Needs no DMA channel, so it compiles out of the box.",
                     );
                 ui.selectable_value(mode, UsartMode::Dma, "DMA (ring buffer)")
                     .on_hover_text(
@@ -1424,7 +1433,7 @@ pub fn module_config_ui(
         ui.label("");
         ui.label(
             egui::RichText::new(
-                "stm32f1xx-hal has no flow control, half duplex or one-way UART                  (its Serial takes the TX+RX pair), and the F1 USART has no                  swap/invert bits",
+                "stm32f1xx-hal has no flow control, half duplex or one-way UART (its Serial takes the TX+RX pair), and the F1 USART has no swap/invert bits",
             )
             .size(10.5)
             .color(egui::Color32::from_gray(140)),
@@ -1481,7 +1490,7 @@ pub fn module_config_ui(
             })
             .response
             .on_hover_text(
-                "embassy has no buffered TX-only / RX-only: BufferedUartTx and                  BufferedUartRx come only from splitting a BufferedUart, so both                  pins are used either way. Switch the transport to DMA for a                  one-way UART that frees the other pin.",
+                "embassy has no buffered TX-only / RX-only: BufferedUartTx and BufferedUartRx come only from splitting a BufferedUart, so both pins are used either way. Switch the transport to DMA for a one-way UART that frees the other pin.",
             );
         } else {
             egui::ComboBox::from_id_salt("usart_dir")
@@ -1501,7 +1510,7 @@ pub fn module_config_ui(
             if line_extras {
                 ui.checkbox(&mut cfg.swap_rx_tx, "Swap RX/TX pads")
                     .on_hover_text(
-                        "The peripheral crosses the two itself — for a cable or a                          board that is wired the other way round, with no rework.",
+                        "The peripheral crosses the two itself — for a cable or a board that is wired the other way round, with no rework.",
                     );
                 ui.checkbox(&mut cfg.invert_tx, "Invert TX")
                     .on_hover_text("Idle low instead of idle high, for an inverting transceiver.");
@@ -1521,7 +1530,7 @@ pub fn module_config_ui(
             ui.label("Read back own TX");
             ui.checkbox(&mut cfg.half_duplex_readback, "")
                 .on_hover_text(
-                    "One wire carries both directions, so everything this node                      sends is also on its receiver. OFF (the default) disables the                      receiver while transmitting, which is what a bus with other                      talkers wants; ON keeps the echo, which is how you verify a                      driver that can be shouted down.",
+                    "One wire carries both directions, so everything this node sends is also on its receiver. OFF (the default) disables the receiver while transmitting, which is what a bus with other talkers wants; ON keeps the echo, which is how you verify a driver that can be shouted down.",
                 );
             ui.end_row();
         }
@@ -1589,7 +1598,7 @@ pub fn module_config_ui(
                 })
                 .response
                 .on_hover_text(
-                    "This chip carries no DMA channel data - re-import it from the                      STM32Cube database to choose a channel by hand.",
+                    "This chip carries no DMA channel data - re-import it from the STM32Cube database to choose a channel by hand.",
                 );
                 ui.end_row();
                 return;
@@ -2311,9 +2320,9 @@ pub fn module_config_ui(
                         })
                         .response
                         .on_hover_text(if dma {
-                            "The circular buffer the DMA controller fills on its own. Reception                              never stops, so this only has to cover the longest GAP between your                              reads - overrun it and the OLDEST bytes are dropped, silently."
+                            "The circular buffer the DMA controller fills on its own. Reception never stops, so this only has to cover the longest GAP between your reads - overrun it and the OLDEST bytes are dropped, silently."
                         } else {
-                            "Size of both software ring buffers, TX and RX. The CPU copies byte                              by byte on each interrupt, so this has to cover what arrives between                              your reads."
+                            "Size of both software ring buffers, TX and RX. The CPU copies byte by byte on each interrupt, so this has to cover what arrives between your reads."
                         });
                         ui.end_row();
                     }
@@ -2499,7 +2508,7 @@ pub fn module_config_ui(
                                     "LSB first",
                                 )
                                 .on_hover_text(
-                                    "Some sensors and shift registers. Getting this wrong gives                                      bit-reversed data rather than silence, which is why it is                                      worth setting deliberately.",
+                                    "Some sensors and shift registers. Getting this wrong gives bit-reversed data rather than silence, which is why it is worth setting deliberately.",
                                 );
                             });
                         ui.end_row();
@@ -2618,7 +2627,7 @@ pub fn module_config_ui(
                             })
                             .response
                             .on_hover_text(
-                                "Center-aligned is what motor drive wants: the pulse sits in the                                  middle of the period, so several channels do not all switch at                                  the same instant. The three centred modes differ only in when                                  the compare interrupt fires.",
+                                "Center-aligned is what motor drive wants: the pulse sits in the middle of the period, so several channels do not all switch at the same instant. The three centred modes differ only in when the compare interrupt fires.",
                             );
                         ui.end_row();
                     }
@@ -2695,7 +2704,7 @@ pub fn module_config_ui(
                                     })
                                     .response
                                     .on_hover_text(
-                                        "Active low inverts the pin: 100 % duty then HOLDS IT                                          LOW, which is what a current-sinking driver stage wants.",
+                                        "Active low inverts the pin: 100 % duty then HOLDS IT LOW, which is what a current-sinking driver stage wants.",
                                     );
                                 egui::ComboBox::from_id_salt(("pwm_mode", ch))
                                     .width(96.0)
@@ -2707,7 +2716,7 @@ pub fn module_config_ui(
                                     })
                                     .response
                                     .on_hover_text(
-                                        "Mode 2 reverses the comparison — a second route to the                                          same inversion the polarity offers. CubeMX exposes both.",
+                                        "Mode 2 reverses the comparison — a second route to the same inversion the polarity offers. CubeMX exposes both.",
                                     );
                             });
                             if shape != before {
@@ -2740,14 +2749,14 @@ pub fn module_config_ui(
                                     .suffix(" ticks"),
                             )
                             .on_hover_text(
-                                "Ticks on the same scale as the duty compare value; embassy                                  encodes them into the timer's CKD + DTG fields. 0 means the two                                  pads switch at the same instant — fine for independent loads,                                  fatal for a half-bridge.",
+                                "Ticks on the same scale as the duty compare value; embassy encodes them into the timer's CKD + DTG fields. 0 means the two pads switch at the same instant — fine for independent loads, fatal for a half-bridge.",
                             );
                             ui.end_row();
                         } else {
                             ui.label("");
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "TIM{} has complementary pads wired, but embassy drives them                                      through `ComplementaryPwm`, which covers the advanced-control                                      timers (TIM1/8/20) only — they will not be initialised",
+                                    "TIM{} has complementary pads wired, but embassy drives them through `ComplementaryPwm`, which covers the advanced-control timers (TIM1/8/20) only — they will not be initialised",
                                     cfg.instance
                                 ))
                                 .size(10.5)
@@ -2823,30 +2832,25 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    // These two used to be rows in the grid. Neither is a
+                    // control, and both are long enough that the column could
+                    // not shrink below them — which left the details pane a
+                    // strip a word wide.
                     if family.starts_with("esp") {
-                        ui.label("");
-                        ui.label(
-                            egui::RichText::new(
-                                "esp-hal's LEDC takes duty in WHOLE percent — a fraction is                                  rounded up in the generated file",
-                            )
-                            .size(10.5)
-                            .color(egui::Color32::from_gray(140)),
+                        notes.push(
+                            "esp-hal's LEDC takes duty in WHOLE percent - a fraction is \
+                             rounded up in the generated file."
+                                .to_owned(),
                         );
-                        ui.end_row();
                     }
                     let free = free_pwm_channels(cfg.instance, &wired, pin_funcs);
                     if !free.is_empty() {
                         let list = free.join(" / ");
-                        ui.label("");
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "add a channel by assigning TIM{} {list} on the canvas",
-                                cfg.instance
-                            ))
-                            .size(10.5)
-                            .color(egui::Color32::from_gray(140)),
-                        );
-                        ui.end_row();
+                        notes.push(format!(
+                            "This timer has channels left. Assign TIM{} {list} on the Pins \
+                             canvas and they join this module - they share its frequency.",
+                            cfg.instance
+                        ));
                     }
                     // Say why the output controls are absent instead of just
                     // dropping them: the reason differs per backend, and the
@@ -2856,9 +2860,9 @@ pub fn module_config_ui(
                     if !is_async && !family.starts_with("esp") {
                         ui.label("");
                         let why = if family == "stm32f1" {
-                            "counter mode, drive, polarity and PWM mode need the Async runtime                              — stm32f1xx-hal's `pwm_hz` cannot set them"
+                            "counter mode, drive, polarity and PWM mode need the Async runtime — stm32f1xx-hal's `pwm_hz` cannot set them"
                         } else {
-                            "this runtime emits no PWM code at all — only Async generates it                              (System tab)"
+                            "this runtime emits no PWM code at all — only Async generates it (System tab)"
                         };
                         ui.label(
                             egui::RichText::new(why)
@@ -3547,7 +3551,7 @@ pub fn module_config_ui(
                         })
                         .response
                         .on_hover_text(
-                            "The value the pad holds once `init` returns. There is no unset:                              the channel drives the pin the moment it is enabled, so the only                              honest choice is to say what it drives.",
+                            "The value the pad holds once `init` returns. There is no unset: the channel drives the pin the moment it is enabled, so the only honest choice is to say what it drives.",
                         );
                         ui.end_row();
                     }
@@ -3574,7 +3578,7 @@ pub fn module_config_ui(
                         ui.label("");
                         ui.label(
                             egui::RichText::new(
-                                "only the Async runtime emits DAC code today — the blocking                                  backends generate GPIO and watchdogs only",
+                                "only the Async runtime emits DAC code today — the blocking backends generate GPIO and watchdogs only",
                             )
                             .size(10.5)
                             .color(egui::Color32::from_gray(140)),
@@ -3744,7 +3748,7 @@ pub fn module_config_ui(
                         })
                         .response
                         .on_hover_text(
-                            "How long a transfer may take before it gives up. I2C hangs are a                              real failure mode - a device that stretches the clock forever, or a                              bus with no pull-ups, blocks for as long as this allows.",
+                            "How long a transfer may take before it gives up. I2C hangs are a real failure mode - a device that stretches the clock forever, or a bus with no pull-ups, blocks for as long as this allows.",
                         );
                         ui.end_row();
                     }
@@ -3883,7 +3887,7 @@ pub fn module_config_ui(
                                 .color(egui::Color32::GRAY),
                         )
                         .on_hover_text(
-                            "The USB Serial/JTAG peripheral enumerates with Espressif's own                              VID:PID and a fixed descriptor set. Nothing here can change it                              - a board that needs its own identity uses a USB stack over the                              OTG controller instead, which this chip may not have.",
+                            "The USB Serial/JTAG peripheral enumerates with Espressif's own VID:PID and a fixed descriptor set. Nothing here can change it                              - a board that needs its own identity uses a USB stack over the OTG controller instead, which this chip may not have.",
                         );
                         ui.end_row();
                         ui.label("Port");
@@ -3893,7 +3897,7 @@ pub fn module_config_ui(
                                 .color(egui::Color32::GRAY),
                         )
                         .on_hover_text(
-                            "A board with a USB-UART bridge chip shows that as well; the two                              are different devices to the host.",
+                            "A board with a USB-UART bridge chip shows that as well; the two are different devices to the host.",
                         );
                         ui.end_row();
                         return;

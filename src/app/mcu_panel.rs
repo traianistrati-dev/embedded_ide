@@ -26,6 +26,9 @@ fn module_details_ui(
     mcu: &crate::panels::mcu_module::mcu::model::Mcu,
     id: &str,
     pin_names: &std::collections::HashMap<usize, String>,
+    // What this module's config had to say that was not a control — see the
+    // `notes` out-parameter on `module_config_ui`.
+    notes: Option<&[String]>,
     goto_pin: &mut Option<usize>,
 ) {
     use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
@@ -56,6 +59,28 @@ fn module_details_ui(
             .size(11.0)
             .color(egui::Color32::from_gray(170)),
     );
+    // ── Good to know ──
+    // These came out of the config column, where each one was a grid row wide
+    // enough that the column could not shrink below it.
+    if let Some(notes) = notes.filter(|n| !n.is_empty()) {
+        ui.add_space(10.0);
+        ui.label(
+            egui::RichText::new("Good to know")
+                .size(11.0)
+                .strong()
+                .color(egui::Color32::from_gray(200)),
+        );
+        ui.add_space(2.0);
+        for n in notes {
+            ui.label(
+                egui::RichText::new(n)
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(150)),
+            );
+            ui.add_space(3.0);
+        }
+    }
+
     ui.add_space(10.0);
 
     // ── Pins ──
@@ -1019,6 +1044,12 @@ impl AppIde {
                                 // frame, so the pane never touches the editor
                                 // itself.
                                 let mut goto_pin: Option<usize> = None;
+                                // Standing remarks each open config produced,
+                                // by module id. Filled below, drawn by the
+                                // details pane — which is further right in the
+                                // same row, so it reads them the same frame.
+                                let mut notes: std::collections::HashMap<String, Vec<String>> =
+                                    std::collections::HashMap::new();
                                 let mut arm_confirm: Option<String> = None; // show the confirm
                                 let mut cancel_confirm = false;
                                 // Pull the staged per-module styles into a LOCAL map so
@@ -1235,6 +1266,16 @@ impl AppIde {
                                                     .id_salt("vmod_cfg")
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
+                                            // A HARD cap, not just an allocation:
+                                            // a child wider than the rect it was
+                                            // given still overflows, and the
+                                            // horizontal row then places the
+                                            // details pane after the width
+                                            // actually used. That is how one long
+                                            // label squeezed the pane down to a
+                                            // word. With a max width, labels wrap
+                                            // instead.
+                                            ui.set_max_width(cfg_size.x);
                                             if open_ids.is_empty() {
                                                 ui.add_space(6.0);
                                                 ui.label(
@@ -1354,6 +1395,7 @@ impl AppIde {
                                                 // mutably, so the salt cannot
                                                 // borrow out of it.
                                                 let salt = m.id.clone();
+                                                let mut my_notes: Vec<String> = Vec::new();
                                                 ui.push_id(salt, |ui| {
                                                     mod_gui::module_config_ui(
                                                         ui, m, &pin_names, &pin_sigs,
@@ -1361,9 +1403,12 @@ impl AppIde {
                                                         &pin_funcs_current, &pin_funcs,
                                                         &mut pin_fn_choice, is_async, is_native,
                                                         &family, pending, chip_dma.as_ref(),
-                                                        usart_line_extras,
+                                                        usart_line_extras, &mut my_notes,
                                                     );
                                                 });
+                                                if !my_notes.is_empty() {
+                                                    notes.insert(m.id.clone(), my_notes);
+                                                }
                                                 ui.add_space(4.0);
                                                 if confirm_id.as_deref() == Some(m.id.as_str()) {
                                                     // Armed → inline confirm (removing
@@ -1440,7 +1485,11 @@ impl AppIde {
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
                                                         module_details_ui(
-                                                            ui, mcu, &id, &pin_names,
+                                                            ui,
+                                                            mcu,
+                                                            &id,
+                                                            &pin_names,
+                                                            notes.get(&id).map(Vec::as_slice),
                                                             &mut goto_pin,
                                                         );
                                                     });
