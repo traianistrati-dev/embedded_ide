@@ -40,6 +40,16 @@ pub fn invariant_header(mcu_name: &str, mcu_id: &str) -> String {
 /// entry point differs). An empty pin set yields an empty `use` line and a
 /// placeholder-comment body.
 pub(super) fn gpio_bindings(pins: &[&Pin]) -> (String, String) {
+    gpio_bindings_exti(pins, &[])
+}
+
+/// [`gpio_bindings`], with the inputs that were given an EXTI line.
+///
+/// `exti` is `(singleton, line)` — an armed input binds as an `ExtiInput`
+/// instead of an `Input`, because the two are different types and only the
+/// second can be awaited. The pull and the trailing `// GPIO Input` comment are
+/// unchanged, so [`super::parse_main_rs`] still reads the pin back.
+pub(super) fn gpio_bindings_exti(pins: &[&Pin], exti: &[(String, u8)]) -> (String, String) {
     let configured: Vec<&&Pin> = pins
         .iter()
         .filter(|p| p.selected_function != PinFunction::Unset)
@@ -94,15 +104,21 @@ pub(super) fn gpio_bindings(pins: &[&Pin]) -> (String, String) {
     }
     imports.sort_unstable();
     imports.dedup();
-    let use_line = if imports.is_empty() {
+    let mut use_line = if imports.is_empty() {
         String::new()
     } else {
         format!("use embassy_stm32::gpio::{{{}}};\n", imports.join(", "))
     };
+    // `ExtiInput` lives in its own module, and its type carries the MODE — the
+    // tasks below name `ExtiInput<'static, Async>`, so both come in here.
+    if !exti.is_empty() {
+        use_line.push_str("use embassy_stm32::exti::ExtiInput;\n");
+        use_line.push_str("use embassy_stm32::mode::Async;\n");
+    }
 
     let mut body = String::new();
     for p in &configured {
-        body.push_str(&pin_binding_line(p));
+        body.push_str(&pin_binding_line(p, exti));
         body.push('\n');
     }
     // NB: no "no pins" placeholder here — the caller decides, since the async
@@ -168,7 +184,7 @@ pub fn splice_section(existing: &str, new_section: &str, mcu_name: &str, mcu_id:
 /// `let pXY = Input::new(...)`; anything else → the raw singleton `let pXY =
 /// p.PXY;` (hand to a driver). The trailing `// <Label>` is what
 /// [`super::parse_main_rs`] reads back.
-fn pin_binding_line(p: &Pin) -> String {
+fn pin_binding_line(p: &Pin, exti: &[(String, u8)]) -> String {
     let func = &p.selected_function;
     // The GPIO that actually provides the chosen function - normally the pin's
     // own name, but a package pin with two pads bonded together answers to a
@@ -189,7 +205,15 @@ fn pin_binding_line(p: &Pin) -> String {
                 Some(GpioMode::PullDown) => "Pull::Down",
                 _ => "Pull::None",
             };
-            format!("    let {var} = Input::new(p.{singleton}, {pull}); // {label}")
+            match exti.iter().find(|(g, _)| g == singleton) {
+                // `Irqs` is the same struct the DMA peripherals bind into —
+                // `ExtiInput::new` takes the binding, not just the channel.
+                Some((_, line)) => format!(
+                    "    let {var} = ExtiInput::new(p.{singleton}, p.EXTI{line}, {pull}, Irqs); \
+                     // {label}"
+                ),
+                None => format!("    let {var} = Input::new(p.{singleton}, {pull}); // {label}"),
+            }
         }
         // A generic alternate function whose AF index the vendor publishes: bind
         // the pad AS that function. `Flex` + `set_as_af_unchecked` is embassy's
@@ -2083,6 +2107,52 @@ mod emit_for_manual_compile {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        // `EIDE_EXTI=rising|falling|both` wires TWO GPIO inputs on the SAME line
+        // number (PA<n> and PB<n>) and arms both. One gets the EXTI channel; the
+        // other has to be refused, because the channel is a peripheral and
+        // embassy hands it to exactly one pad. Both halves in one run.
+        if let Ok(e) = std::env::var("EIDE_EXTI") {
+            use crate::panels::mcu_module::pins::logic::pin::Edge;
+            let edge = match e.as_str() {
+                "falling" => Edge::Falling,
+                "both" => Edge::Both,
+                _ => Edge::Rising,
+            };
+            // A line number carried by two ports on this package, so the clash is
+            // real rather than staged.
+            let free: Vec<(usize, String)> = mcu
+                .iter_all_pins()
+                .filter(|p| !p.reserved && p.selected_function == PinFunction::Unset)
+                .map(|p| (p.number, p.gpio().to_owned()))
+                .collect();
+            let mut pair: Vec<usize> = Vec::new();
+            for (num, name) in &free {
+                let tail = name.get(2..).unwrap_or_default();
+                if free
+                    .iter()
+                    .any(|(n2, g2)| n2 != num && g2.get(2..) == Some(tail))
+                {
+                    pair.push(*num);
+                    let same = free
+                        .iter()
+                        .find(|(n2, g2)| n2 != num && g2.get(2..) == Some(tail))
+                        .map(|(n2, _)| *n2);
+                    if let Some(n2) = same {
+                        pair.push(n2);
+                    }
+                    break;
+                }
+            }
+            if pair.is_empty() {
+                println!("no two free pads share a line number - EXTI clash not exercised");
+            }
+            for num in pair {
+                if let Some(p) = mcu.find_pin_mut(num) {
+                    p.selected_function = PinFunction::GpioInput;
+                    p.irq = Some(edge);
+                }
+            }
+        }
         // `EIDE_HSPI=lanes` wires an HSPI device on controller 1 with that many
         // data lines (2 or 8 — embassy has nothing between); `EIDE_HSPI_DQS=1`
         // adds the strobe, which the octal call REQUIRES.
@@ -2517,6 +2587,12 @@ mod emit_for_manual_compile {
             true,
             true,
             &[],
+        );
+        // Same rule as the app: an armed input needs the `exti` FEATURE, or the
+        // generated `use embassy_stm32::exti` does not resolve.
+        files.cargo_toml = project_gen::ensure_exti_feature(
+            &files.cargo_toml,
+            main_rs.contains("embassy_stm32::exti"),
         );
         files.cargo_toml =
             project_gen::ensure_m0_atomics(&files.cargo_toml, true, &def.project.target, &[]);

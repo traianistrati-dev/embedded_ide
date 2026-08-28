@@ -2764,6 +2764,15 @@ impl AppIde {
                 needs_eh_async,
                 &sources,
             );
+            // `embassy_stm32::exti` is behind a Cargo feature, so an input the
+            // user armed with an edge needs the FEATURE as well as the code.
+            // Read off the generated main.rs rather than off the pins: a pin
+            // refused for a line clash generates no `exti` use, and asking for a
+            // feature nothing imports would be a lie in the manifest.
+            let new_toml = project_gen::ensure_exti_feature(
+                &new_toml,
+                self.generated_code.contains("embassy_stm32::exti"),
+            );
             // The CYW43 radio, on a Pico W / Pico 2 W whose WL_LED is driven.
             // Gated on the pin rather than on the board, because a W board with
             // the LED untouched should not carry a wifi stack it never calls.

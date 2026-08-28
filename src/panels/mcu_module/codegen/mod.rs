@@ -1627,7 +1627,7 @@ mod tests {
         assert!(blocking.contains("Custom modules"));
 
         // Async embassy.
-        let async_ = embassy_async::make_generated_section("X", &pins, "", "", "", line);
+        let async_ = embassy_async::make_generated_section("X", &pins, "", "", "", line, &[]);
         assert!(
             async_.contains(line),
             "embassy async:

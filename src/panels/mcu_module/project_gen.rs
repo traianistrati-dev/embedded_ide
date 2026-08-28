@@ -1192,6 +1192,35 @@ fn toggle_hal_feature(line: &str, feature: &str, add: bool) -> String {
     }
 }
 
+/// Toggle the `exti` feature on the `embassy-stm32` line.
+///
+/// `embassy_stm32::exti` is behind a plain Cargo feature, so an armed input pin
+/// is not just codegen: without this the generated `use embassy_stm32::exti::…`
+/// does not resolve at all. Separate from [`ensure_async_deps`] because it is
+/// driven by the PINS, not by the runtime — and idempotent, like the rest.
+pub fn ensure_exti_feature(cargo_toml: &str, needs: bool) -> String {
+    let is_embassy = |line: &str| line.trim_start().starts_with("embassy-stm32");
+    let has = cargo_toml
+        .lines()
+        .any(|l| is_embassy(l) && l.contains("\"exti\""));
+    if needs == has {
+        return cargo_toml.to_owned();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for line in cargo_toml.lines() {
+        if is_embassy(line) && line.contains("features = [") {
+            out.push(toggle_hal_feature(line, "exti", needs));
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    let mut joined = out.join("\n");
+    if cargo_toml.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Builds all file contents in memory without touching the filesystem.

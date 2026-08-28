@@ -815,6 +815,7 @@ fn async_section(mcu: &Mcu) -> String {
         &periphs.init_calls,
         &periphs.dma_irqs,
         &mcu.watchdog_and_custom_inits(),
+        &periphs.exti,
     )
 }
 
