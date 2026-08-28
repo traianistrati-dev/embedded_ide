@@ -1559,6 +1559,108 @@ mod async_dma_bindings {
 }
 
 #[cfg(test)]
+mod pio_accounting {
+    use super::{PIO_SMS, pio_blocks, pio_uses};
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    fn pico(id: &str, runtime: Runtime, take_led: bool) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu();
+        mcu.runtime = runtime;
+        if take_led {
+            for p in mcu.iter_all_pins_mut() {
+                if p.name == "WL_LED" {
+                    p.selected_function = PinFunction::GpioOutput;
+                }
+            }
+        }
+        mcu
+    }
+
+    /// THE point of the card: what it lists is what the code actually takes.
+    ///
+    /// A resource list maintained beside the generator instead of BY it drifts,
+    /// and a wrong answer with a confident face is worse than no answer. So the
+    /// claim is checked against the emitted text, not against a second table.
+    #[test]
+    fn the_list_agrees_with_the_generated_code() {
+        let mcu = pico("rp2040_pico_w", Runtime::Async, true);
+        let code = mcu.fresh_main_rs();
+        let uses = pio_uses(&mcu);
+        assert_eq!(uses.len(), 1, "the radio takes exactly one state machine");
+        let u = &uses[0];
+        // Each field has to be findable in the code it claims to describe.
+        assert!(
+            code.contains(&format!("Pio::new(p.{}", u.block)),
+            "{} is the block the code opens:
+{code}",
+            u.block
+        );
+        assert!(
+            code.contains(&format!("pio.{}", u.sm)),
+            "{} is the state machine the code moves out:
+{code}",
+            u.sm
+        );
+        assert!(
+            code.contains(&format!("{} =>", u.irq)),
+            "{} is bound:
+{code}",
+            u.irq
+        );
+    }
+
+    /// Blocking takes nothing, because there is nothing to take.
+    ///
+    /// The codegen emits an explanation there rather than a driver, so a card
+    /// claiming PIO0 was busy would be describing code that does not exist.
+    #[test]
+    fn a_blocking_project_holds_no_state_machine() {
+        let mcu = pico("rp2040_pico_w", Runtime::Blocking, true);
+        assert!(pio_uses(&mcu).is_empty());
+        assert!(!mcu.fresh_main_rs().contains("Pio::new"));
+    }
+
+    /// And an untouched pad holds nothing either, on either board.
+    #[test]
+    fn an_untouched_pad_holds_nothing() {
+        for id in ["rp2040_pico_w", "rp2350_pico2_w", "rp2040_pico"] {
+            let mcu = pico(id, Runtime::Async, false);
+            assert!(pio_uses(&mcu).is_empty(), "{id}");
+        }
+    }
+
+    /// The third block is the RP2350's headline difference for anyone counting.
+    #[test]
+    fn the_rp2350_has_a_third_block() {
+        assert_eq!(pio_blocks("rp2040") * PIO_SMS, 8);
+        assert_eq!(pio_blocks("rp235x") * PIO_SMS, 12);
+    }
+
+    /// A chip with no PIO reports none, so the tab can hide the card rather
+    /// than print "0 of 0" for hardware that was never there.
+    #[test]
+    fn a_chip_without_pio_reports_none() {
+        use crate::panels::mcu_module::codegen::family;
+        let f1 = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "stm32f103c8t6")
+            .expect("built-in F1")
+            .build_mcu();
+        assert!(family::pio_uses(&f1).is_empty());
+        // ...while the Pico reaches the RP producer at all.
+        assert_eq!(
+            family::pio_uses(&pico("rp2040_pico_w", Runtime::Async, true)).len(),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
 mod radio_led {
     use crate::panels::mcu_module::mcu::model::Runtime;
     use crate::panels::mcu_module::{builtins, pins::PinFunction};
@@ -1865,6 +1967,52 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
         )
     };
     (binding, o, radio)
+}
+
+/// ONE PIO state machine a project actually uses, as REPORTED BY CODEGEN.
+///
+/// The twin of [`super::dma_map::DmaUse`], and for the same reason: a list of
+/// resources that is maintained separately from the code that takes them drifts,
+/// and a wrong answer with a confident face is worse than no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PioUse {
+    /// The block, as the HAL spells the peripheral — `PIO0`.
+    pub block: String,
+    /// The state machine inside it — `sm0`.
+    pub sm: String,
+    /// Who holds it, in words a person can act on.
+    pub user: String,
+    /// The `bind_interrupts!` vector it needs, empty when it needs none.
+    pub irq: String,
+}
+
+/// State machines per PIO block. Four on every RP part so far.
+pub const PIO_SMS: usize = 4;
+
+/// How many PIO blocks this chip has.
+///
+/// Two on the RP2040, three on the RP2350 — the third is the headline
+/// difference between them for anyone counting state machines.
+pub fn pio_blocks(family: &str) -> usize {
+    if family == "rp235x" { 3 } else { 2 }
+}
+
+/// The PIO state machines the generated project takes.
+///
+/// Exactly one today: the CYW43 radio's half-duplex SPI, which no SPI block on
+/// the chip can produce. It is async-only, so a Blocking project takes nothing
+/// even with the LED pad driven — the same asymmetry the codegen has.
+pub fn pio_uses(mcu: &Mcu) -> Vec<PioUse> {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    if !matches!(mcu.runtime, Runtime::Async) || !radio_led(mcu) {
+        return Vec::new();
+    }
+    vec![PioUse {
+        block: "PIO0".to_owned(),
+        sm: "sm0".to_owned(),
+        user: "CYW43 radio - the wifi chip's half-duplex SPI".to_owned(),
+        irq: "PIO0_IRQ_0".to_owned(),
+    }]
 }
 
 /// Is the on-board LED wired up on a W board?

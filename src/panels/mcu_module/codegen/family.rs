@@ -1035,6 +1035,19 @@ pub fn rtic_unavailable_reason(family: &str) -> Option<String> {
 /// tables its templates read — so the list cannot describe an allocation the
 /// project does not have. Empty when nothing is on DMA, which is the normal
 /// case and reads as "nothing to see" rather than as an error.
+/// The PIO state machines a project takes, for the Configuration tab.
+///
+/// Only the RP parts have a PIO at all. Everything else reports none, and the
+/// tab hides the card rather than showing "0 of 0" for a block the chip has
+/// never had.
+pub fn pio_uses(mcu: &Mcu) -> Vec<super::rp::PioUse> {
+    if super::rp::is_rp(&mcu.family) {
+        super::rp::pio_uses(mcu)
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
     use crate::panels::mcu_module::mcu::model::Runtime;
     match mcu.runtime {

@@ -68,6 +68,13 @@ impl AppIde {
         // exactly how a list starts describing an allocation the project no
         // longer has.
         let uses = crate::panels::mcu_module::codegen::family::dma_uses(mcu);
+        // Same rule, same reason: straight from codegen, per frame, never cached.
+        let pio = crate::panels::mcu_module::codegen::family::pio_uses(mcu);
+        // Only the RP parts have a PIO; elsewhere the card is absent, not empty.
+        let has_pio = crate::panels::mcu_module::codegen::rp::is_rp(&family);
+        // Whether this board can ever put anything ON it, which is what tells an
+        // empty list apart from a chip that has nothing to put there.
+        let has_radio_pad = mcu.iter_all_pins().any(|p| p.name == "WL_LED");
         // Whether DMA is even reachable from here, which is what an empty list
         // means most of the time.
         let is_async = matches!(
@@ -104,6 +111,11 @@ impl AppIde {
 
             dma_card(ui, &uses, mcu.dma.as_ref(), &family, on_dma_runtime);
             ui.add_space(12.0);
+
+            if has_pio {
+                pio_card(ui, &pio, &family, is_async, has_radio_pad);
+                ui.add_space(12.0);
+            }
 
             comp_cards(ui, &mut mcu.comp, &comps, comp_gen, &family, is_async);
             ui.add_space(12.0);
@@ -444,6 +456,96 @@ fn dma_note(
              channels it takes appear here."
             .to_owned()
     }
+}
+
+/// The PIO card: which state machines the project takes, and who has them.
+///
+/// The RP parts only — no other family in the registry has a PIO, and a card
+/// reading "0 of 0" on every STM32 would be noise. Read-only for the same reason
+/// the DMA card is: nothing here is chosen, it is the RESULT of what is wired.
+///
+/// It exists because the radio takes PIO0/sm0 SILENTLY. Someone who wanted PIO
+/// for something else on a Pico W had no way to learn it was gone short of the
+/// compiler saying so — which is the situation the DMA card was built to end.
+fn pio_card(
+    ui: &mut egui::Ui,
+    uses: &[crate::panels::mcu_module::codegen::rp::PioUse],
+    family: &str,
+    is_async: bool,
+    has_radio_pad: bool,
+) {
+    use crate::panels::mcu_module::codegen::rp;
+    let blocks = rp::pio_blocks(family);
+    let total = blocks * rp::PIO_SMS;
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{}  PIO", ph::CPU))
+                    .size(13.0)
+                    .strong(),
+            );
+            let s = if uses.len() == 1 { "" } else { "s" };
+            ui.label(dim(format!(
+                "{} of {total} state machine{s} used - {blocks} blocks of {} each",
+                uses.len(),
+                rp::PIO_SMS
+            )));
+        });
+        ui.add_space(6.0);
+
+        if uses.is_empty() {
+            // Say WHY it is empty. The three reasons are genuinely different,
+            // and only the last one is something the user can act on.
+            ui.label(dim(if !has_radio_pad {
+                "Nothing on this board uses PIO. Every state machine is yours."
+            } else if !is_async {
+                "Nothing uses PIO on this runtime. The radio's driver is async only, so a Blocking project leaves every state machine free."
+            } else {
+                "Nothing uses PIO yet. Driving WL_LED puts the radio on PIO0/sm0 - the wifi chip's half-duplex SPI is not something an SPI block on this chip can produce."
+            }));
+            return;
+        }
+
+        egui::Grid::new("pio_uses")
+            .num_columns(3)
+            .spacing([18.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label(dim("State machine"));
+                ui.label(dim("Used by"));
+                ui.label(dim("Interrupt"));
+                ui.end_row();
+                for u in uses {
+                    ui.label(
+                        egui::RichText::new(format!("{}/{}", u.block, u.sm))
+                            .size(11.5)
+                            .strong(),
+                    );
+                    ui.label(egui::RichText::new(&u.user).size(11.5));
+                    ui.label(dim(if u.irq.is_empty() { "-" } else { &u.irq }));
+                    ui.end_row();
+                }
+            });
+
+        ui.add_space(6.0);
+        // Which blocks are wholly untouched - the real answer to "can I still
+        // use PIO for something?".
+        let taken: Vec<&str> = uses.iter().map(|u| u.block.as_str()).collect();
+        let free: Vec<String> = (0..blocks)
+            .map(|i| format!("PIO{i}"))
+            .filter(|b| !taken.contains(&b.as_str()))
+            .collect();
+        ui.label(dim(if free.is_empty() {
+            "Every block has something on it.".to_owned()
+        } else {
+            format!("Untouched: {}", free.join(", "))
+        }));
+        // Easy to miss: a block is not free because three of its four state
+        // machines are.
+        ui.label(dim(
+            "A block's instruction memory is shared by its four state machines, so a second program there has to fit alongside the first.",
+        ));
+    });
 }
 
 /// The DMA card: every channel the project takes, and who has it.
