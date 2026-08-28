@@ -124,6 +124,81 @@ pub const CUSTOM_FIELD_W: f32 = 160.0;
 /// fixed width. `Name:` lives in the module list (`mcu_panel`) and `Struct` in
 /// the config grid here — two different containers, so only a shared width keeps
 /// their fields aligned.
+/// Why an RP shows no DMA channel picker.
+///
+/// On this chip the channel is not a decision anyone can get right or wrong:
+/// every channel serves every peripheral (the driver writes TREQ_SEL into
+/// whichever one it was handed) and they all raise DMA_IRQ_0. The picker could
+/// not be SET here in any case — a Pico carries no vendor `DmaDef`, so
+/// `channels_for` returns nothing and the combo drew itself disabled with a
+/// hover telling a Raspberry Pi owner to "re-import it from the STM32Cube
+/// database". That was the most actively wrong string on the panel.
+/// The USART transport, locked on an RP.
+///
+/// A real choice that is not generated YET, so it is shown and disabled rather
+/// than hidden: embassy-rp has a complete `BufferedUart`, and it is the only RP
+/// path implementing `embedded_io_async::Read` — the DMA `Uart<Async>`
+/// implements no embedded-io-async trait at all. Hiding it would say the choice
+/// does not exist, which is a different and false statement.
+fn rp_usart_transport_locked(ui: &mut egui::Ui) {
+    ui.label("Async transport");
+    let resp = ui.add_enabled_ui(false, |ui| {
+        egui::ComboBox::from_id_salt("rp_usart_transport_locked")
+            .selected_text("DMA (ring buffer)")
+            .show_ui(ui, |_ui| {});
+    });
+    resp.response.on_hover_text(
+        "embassy-rp's Uart is always on two DMA channels, and this backend does not emit its BufferedUart yet - so both options would generate the same code.",
+    );
+    ui.end_row();
+}
+
+/// The SPI init style, locked on an RP, for the same reason.
+///
+/// `Spi::new_blocking` exists in embassy-rp; this backend only emits the
+/// DMA form. The choice is real and unbuilt, not absent.
+fn rp_spi_init_locked(ui: &mut egui::Ui) {
+    ui.label("Async init");
+    let resp = ui.add_enabled_ui(false, |ui| {
+        egui::ComboBox::from_id_salt("rp_spi_init_locked")
+            .selected_text("Async-DMA (embedded-hal-async)")
+            .show_ui(ui, |_ui| {});
+    });
+    resp.response.on_hover_text(
+        "embassy-rp has Spi::new_blocking, but this backend emits only the DMA form - so choosing Blocking here would change nothing.",
+    );
+    ui.end_row();
+}
+
+fn rp_dma_note(ui: &mut egui::Ui) {
+    ui.label("");
+    ui.label(
+        egui::RichText::new(
+            "embassy-rp allocates DMA itself - any channel serves any peripheral, and the Configuration tab's DMA card shows which ones were taken",
+        )
+        .size(10.5)
+        .color(egui::Color32::from_gray(140)),
+    );
+    ui.end_row();
+}
+
+/// Why an RP shows no I2C transport choice.
+///
+/// Not "unimplemented": embassy-rp's `i2c.rs` contains no DMA at all, and
+/// `new_async` takes no channel. Offering Blocking / Async-DMA here would teach
+/// a hardware model that is not true of this chip.
+fn rp_i2c_note(ui: &mut egui::Ui) {
+    ui.label("");
+    ui.label(
+        egui::RichText::new(
+            "embassy-rp's async I2C is interrupt driven and takes no DMA channel, so there is no transport to choose",
+        )
+        .size(10.5)
+        .color(egui::Color32::from_gray(140)),
+    );
+    ui.end_row();
+}
+
 pub fn custom_field_label(ui: &mut egui::Ui, text: &str) {
     ui.allocate_ui_with_layout(
         egui::vec2(CUSTOM_LABEL_W, ui.spacing().interact_size.y),
@@ -2465,7 +2540,11 @@ pub fn module_config_ui(
                     } else if is_async {
                         // The API style is fixed on async (embedded-io-async
                         // either way); what IS a choice is the transport.
-                        usart_mode_row(ui, &mut cfg.mode);
+                        if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+                            rp_usart_transport_locked(ui);
+                        } else {
+                            usart_mode_row(ui, &mut cfg.mode);
+                        }
                         // The transport decides which directions exist, and the
                         // pair decides which flow options do — so this order is
                         // load-bearing, not cosmetic.
@@ -2484,7 +2563,9 @@ pub fn module_config_ui(
                         {
                             cfg.flow = UsartFlow::None;
                         }
-                        if cfg.mode == UsartMode::Dma {
+                        if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+                            rp_dma_note(ui);
+                        } else if cfg.mode == UsartMode::Dma {
                             let inst = cfg.instance;
                             dma_row(ui, uart_bus, inst, &mut cfg.dma_tx, &mut cfg.dma_rx);
                         }
@@ -2634,16 +2715,24 @@ pub fn module_config_ui(
                             esp_dma_channel_row(ui, dma, &req, &mut cfg.dma_tx);
                         }
                     } else if is_async {
-                        async_row(ui, &mut pending.1);
-                        if pending.1 == AsyncBusMode::AsyncDma {
-                            let inst = cfg.instance;
-                            dma_row(
-                                ui,
-                                dma_map::Bus::Spi,
-                                inst,
-                                &mut cfg.dma_tx,
-                                &mut cfg.dma_rx,
-                            );
+                        if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+                            rp_spi_init_locked(ui);
+                            rp_dma_note(ui);
+                        } else {
+                            // NOT folded into the chain above: dropping this
+                            // call took the Async-init combo off every STM32,
+                            // and nothing but reading the screen would say so.
+                            async_row(ui, &mut pending.1);
+                            if pending.1 == AsyncBusMode::AsyncDma {
+                                let inst = cfg.instance;
+                                dma_row(
+                                    ui,
+                                    dma_map::Bus::Spi,
+                                    inst,
+                                    &mut cfg.dma_tx,
+                                    &mut cfg.dma_rx,
+                                );
+                            }
                         }
                     } else if is_native {
                         api_row_locked(ui);
@@ -2981,7 +3070,15 @@ pub fn module_config_ui(
                     // second one is worth knowing before wiring a pad.
                     // The ESP is the exception: its LEDC driver is the same on
                     // both runtimes, so there is nothing missing to explain.
-                    if !is_async && !family.starts_with("esp") {
+                    // The RP is a second exception, and the note was WRONG for it:
+                    // `RpBackend::config_files` writes `pins/configs/pwm<slice>.rs`
+                    // on Blocking, so telling a Pico owner that nothing is
+                    // generated sent them to a runtime they did not need. The gate
+                    // was written before the RP backend existed.
+                    if !is_async
+                        && !family.starts_with("esp")
+                        && !crate::panels::mcu_module::codegen::rp::is_rp(family)
+                    {
                         ui.label("");
                         let why = if family == "stm32f1" {
                             "counter mode, drive, polarity and PWM mode need the Async runtime — stm32f1xx-hal's `pwm_hz` cannot set them"
@@ -3883,7 +3980,9 @@ pub fn module_config_ui(
                             .hexadecimal(2, false, true),
                     );
                     ui.end_row();
-                    if is_async {
+                    if is_async && crate::panels::mcu_module::codegen::rp::is_rp(family) {
+                        rp_i2c_note(ui);
+                    } else if is_async {
                         async_row(ui, &mut pending.1);
                         if pending.1 == AsyncBusMode::AsyncDma {
                             let inst = cfg.instance;

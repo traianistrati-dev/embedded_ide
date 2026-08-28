@@ -1590,6 +1590,41 @@ mod async_dma_bindings {
 }
 
 #[cfg(test)]
+mod blocking_pwm_is_generated {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    /// The panel used to tell a Blocking Pico owner that "this runtime emits no
+    /// PWM code at all". It does. This is the proof the note was false.
+    #[test]
+    fn a_blocking_pico_writes_its_pwm_config_file() {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        mcu.runtime = Runtime::Blocking;
+        for p in mcu.iter_all_pins_mut() {
+            if p.name == "GP6" {
+                p.selected_function = PinFunction::TimerPwm {
+                    timer: 3,
+                    channel: 1,
+                };
+            }
+        }
+        let files = mcu.config_files();
+        assert!(
+            files.iter().any(|(name, _)| name == "pwm3.rs"),
+            "Blocking writes pwm3.rs: {:?}",
+            files.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+        // ...and main.rs calls into it, so the file is not written to be unused.
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("pins::configs::pwm3::init("), "{code}");
+    }
+}
+
+#[cfg(test)]
 mod pwm_frequency {
     use super::{pwm_actual_hz, pwm_div_top};
 
