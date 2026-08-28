@@ -1075,6 +1075,25 @@ fn pwm_channel_choices(
     out
 }
 
+/// The widest LEDC duty resolution `freq_hz` leaves room for, in bits.
+///
+/// Delegates to the GENERATOR rather than restating its formula: the picker must
+/// not offer a width the generated file would refuse, and two copies of the same
+/// arithmetic is exactly how that stops being true.
+fn esp_ledc_max_bits(freq_hz: u32) -> u8 {
+    crate::panels::mcu_module::codegen_esp_configs::ledc_duty_bits(freq_hz) as u8
+}
+
+/// The NARROWEST LEDC duty resolution `freq_hz` allows, in bits.
+///
+/// esp-hal bounds the divisor at BOTH ends, and only the upper one used to be
+/// checked. At 50 Hz a 1-bit resolution leaves a divisor of 409_600 — over the
+/// `0x3FFFF` ceiling — so `configure` returns Err(Divisor) and the generated
+/// `unwrap` panics on the board.
+fn esp_ledc_min_bits(freq_hz: u32) -> u8 {
+    crate::panels::mcu_module::codegen_esp_configs::ledc_min_duty_bits(freq_hz) as u8
+}
+
 fn free_pwm_channels(
     timer: u8,
     wired: &BTreeSet<String>,
@@ -2663,6 +2682,60 @@ pub fn module_config_ui(
                         }
                     });
                     ui.end_row();
+                    // Duty RESOLUTION — ESP only. On an STM32 the resolution is
+                    // whatever the reload value gives you; on the LEDC it is a
+                    // register field, and one the frequency constrains: esp-hal
+                    // refuses a divisor under 256, so 2^bits may not exceed
+                    // 80 MHz / frequency. The picker therefore offers only the
+                    // widths this frequency can actually carry, and "Auto" —
+                    // the widest of them — stays the default.
+                    if family.starts_with("esp") {
+                        let max = esp_ledc_max_bits(cfg.freq_hz);
+                        let min = esp_ledc_min_bits(cfg.freq_hz);
+                        ui.label("Duty resolution");
+                        ui.horizontal(|ui| {
+                            let text = match cfg.duty_res_bits {
+                                None => format!("Auto ({max} bit)"),
+                                Some(b) => format!("{b} bit"),
+                            };
+                            egui::ComboBox::from_id_salt("pwm_duty_res")
+                                .selected_text(text)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut cfg.duty_res_bits,
+                                        None,
+                                        format!("Auto ({max} bit)"),
+                                    );
+                                    for b in min..=max {
+                                        ui.selectable_value(
+                                            &mut cfg.duty_res_bits,
+                                            Some(b),
+                                            format!("{b} bit  ({} steps)", 1u32 << b),
+                                        );
+                                    }
+                                });
+                            // A resolution pinned at one frequency can stop
+                            // fitting when the frequency rises. Said here rather
+                            // than silently clamped: the number the user chose
+                            // is the one they want to see.
+                            // A width pinned at one frequency can stop fitting
+                            // when the frequency moves — at EITHER end. Said
+                            // here rather than silently clamped: the number the
+                            // user chose is the one they should see.
+                            if let Some(b) = cfg.duty_res_bits.filter(|b| *b > max || *b < min) {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} {b} bit does not fit {} Hz — {min}..={max} does",
+                                        ph::WARNING,
+                                        cfg.freq_hz
+                                    ))
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(220, 180, 90)),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                    }
                     // The counter belongs to the TIMER, like the frequency —
                     // one counter, one shape. embassy takes it in
                     // `SimplePwm::new`; the note below says why the other

@@ -20,6 +20,7 @@ use super::family::FamilyBackend;
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::pins::PinFunction;
 use crate::panels::mcu_module::pins::logic::pin::GpioMode;
+use crate::panels::mcu_module::pins::logic::pin::model::Edge;
 
 pub struct RpBackend;
 
@@ -65,9 +66,18 @@ fn gpio_lines(mcu: &Mcu) -> String {
             PinFunction::GpioOutput => out.push_str(&format!(
                 "{ALLOW}    let mut gp{n}{sfx} = pins.gpio{n}.into_push_pull_output();\n"
             )),
-            PinFunction::GpioInput => out.push_str(&format!(
-                "{ALLOW}    let gp{n}{sfx} = pins.gpio{n}.into_pull_up_input();\n"
-            )),
+            PinFunction::GpioInput => {
+                out.push_str(&format!(
+                    "{ALLOW}    let gp{n}{sfx} = pins.gpio{n}.into_pull_up_input();\n"
+                ));
+                // The edge is set in the pin panel on every runtime, but only
+                // Async can act on it here. Saying so beats dropping it.
+                if p.irq.is_some() {
+                    out.push_str(&format!(
+                        "    // GP{n} is armed for an interrupt, which this Blocking project\n    // does not generate. Switch Runtime to Async in the System tab and\n    // the pin becomes a task that awaits the edge.\n"
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -549,16 +559,37 @@ fn header(mcu: &Mcu) -> String {
 /// Each owns its peripheral outright — unlike PWM, where all eight slices come
 /// from one block — so `init` takes it by value and hands back a `Handle` the
 /// caller keeps.
-fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)]) -> String {
+/// The speed this bus runs at, as the Virtual Module has it.
+///
+/// The generated block says "from the Virtual Module — auto-updated", and it
+/// used to be a hard-coded literal: a UART set to 9600 in the panel came out
+/// at 115200 in the firmware, which the user meets as garbage on a terminal
+/// rather than as a message from the IDE.
+fn bus_speed(mcu: &Mcu, kind: &str, n: u8) -> u32 {
+    use crate::panels::mcu_module::modules;
+    match kind {
+        "uart" => modules::usart_configs(&mcu.modules)
+            .get(&n)
+            .map_or(115_200, |c| c.baud_rate),
+        "spi" => modules::spi_configs(&mcu.modules)
+            .get(&n)
+            .map_or(1_000_000, |c| c.clock_hz),
+        _ => modules::i2c_configs(&mcu.modules)
+            .get(&n)
+            .map_or(400_000, |c| c.clock_hz),
+    }
+}
+
+fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)], hz: u32) -> String {
     let mut o = String::new();
     o.push_str("// <<< GENERATED>>>\n");
     o.push_str(
         "// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.\n",
     );
     match kind {
-        "uart" => o.push_str("const BAUDRATE: u32 = 115_200;\n"),
-        "spi" => o.push_str("const SPI_HZ: u32 = 1_000_000;\n"),
-        _ => o.push_str("const I2C_HZ: u32 = 400_000;\n"),
+        "uart" => o.push_str(&format!("const BAUDRATE: u32 = {hz};\n")),
+        "spi" => o.push_str(&format!("const SPI_HZ: u32 = {hz};\n")),
+        _ => o.push_str(&format!("const I2C_HZ: u32 = {hz};\n")),
     }
     o.push_str("// <<< GENERATED END >>>\n\n");
     o.push_str("// Everything below is editable — your changes are preserved on regeneration.\n");
@@ -802,7 +833,7 @@ impl FamilyBackend for RpBackend {
                 if pads.len() == roles.len() {
                     out.push((
                         format!("{kind}{i}.rs"),
-                        bus_config_file(hal, kind, i, &pads),
+                        bus_config_file(hal, kind, i, &pads, bus_speed(mcu, kind, i)),
                     ));
                 }
             }
@@ -1515,7 +1546,7 @@ mod async_dma_bindings {
     /// `bind_interrupts!` grammar allows and nothing else in this repo uses.
     #[test]
     fn every_dma_channel_gets_a_handler() {
-        let (binding, body, _) = async_bus_lines(&pico_with_every_bus());
+        let (binding, body, _, _) = async_bus_lines(&pico_with_every_bus());
         // UART takes two channels and SPI two more.
         for ch in 0..4 {
             assert!(
@@ -1542,7 +1573,7 @@ mod async_dma_bindings {
     /// UART takes the binding BEFORE its channels, SPI after. Same crate.
     #[test]
     fn the_irq_argument_sits_where_each_driver_wants_it() {
-        let (_, body, _) = async_bus_lines(&pico_with_every_bus());
+        let (_, body, _, _) = async_bus_lines(&pico_with_every_bus());
         let uart = body.split("Uart::new").nth(1).expect("a uart");
         let uart = uart.split("let _").next().unwrap();
         assert!(
@@ -1555,6 +1586,217 @@ mod async_dma_bindings {
             spi.find("Irqs,").unwrap() > spi.find("p.DMA_CH").unwrap(),
             "spi: channels then irq:\n{spi}"
         );
+    }
+}
+
+#[cfg(test)]
+mod pwm_frequency {
+    use super::{pwm_actual_hz, pwm_div_top};
+
+    /// The pair actually reaches the asked-for frequency, on both chips.
+    ///
+    /// The two differ: `embassy_rp::init(Default::default())` leaves the RP2040
+    /// at 125 MHz and the RP2350 at 150 MHz, so the same request needs a
+    /// different `top` on each. One table for both would be wrong on one.
+    #[test]
+    fn common_frequencies_land_on_the_number_asked_for() {
+        for family in ["rp2040", "rp235x"] {
+            for want in [50, 1_000, 20_000, 100_000] {
+                let (div, top) = pwm_div_top(family, want);
+                let got = pwm_actual_hz(family, div, top);
+                let err = (got as i64 - want as i64).abs();
+                assert!(
+                    err * 1000 <= want as i64,
+                    "{family} at {want} Hz came out {got} Hz (div {div}, top {top})"
+                );
+            }
+        }
+    }
+
+    /// Below what the hardware can reach, it clamps and does not wrap.
+    ///
+    /// `top` is 16 bits and the divider's integer part is 8. Asking for 1 Hz is
+    /// out of range on both chips, and the arithmetic must saturate rather than
+    /// produce a `top` of 0 - which is a slice that never counts.
+    #[test]
+    fn an_unreachable_frequency_clamps() {
+        for family in ["rp2040", "rp235x"] {
+            let (div, top) = pwm_div_top(family, 1);
+            assert!(div <= 255, "{family}: divider fits its 8 bits: {div}");
+            assert!(top >= 1, "{family}: a top of 0 never counts");
+            // ...and 0 Hz cannot divide by zero.
+            let (d0, t0) = pwm_div_top(family, 0);
+            assert!(d0 >= 1 && t0 >= 1, "{family}: {d0}/{t0}");
+        }
+    }
+
+    /// A high frequency needs no divider at all.
+    #[test]
+    fn a_fast_slice_keeps_the_divider_at_one() {
+        assert_eq!(pwm_div_top("rp2040", 100_000).0, 1);
+    }
+}
+
+#[cfg(test)]
+mod bus_speeds {
+    use super::bus_speed;
+    use crate::panels::mcu_module::builtins;
+
+    /// With no module configured, each bus keeps a sane default.
+    ///
+    /// The point of the change was that these USED to be the only value - the
+    /// generated block claimed "from the Virtual Module" over a literal.
+    #[test]
+    fn an_unconfigured_bus_falls_back() {
+        let mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        assert_eq!(bus_speed(&mcu, "uart", 0), 115_200);
+        assert_eq!(bus_speed(&mcu, "spi", 0), 1_000_000);
+        assert_eq!(bus_speed(&mcu, "i2c", 0), 400_000);
+    }
+}
+
+#[cfg(test)]
+mod pin_interrupts {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::pins::logic::pin::model::Edge;
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    fn pico(runtime: Runtime, arm: Option<Edge>) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        mcu.runtime = runtime;
+        for p in mcu.iter_all_pins_mut() {
+            match p.name.as_str() {
+                "GP15" => {
+                    p.selected_function = PinFunction::GpioInput;
+                    p.irq = arm;
+                }
+                // A plain input beside it, so the two are proved to differ.
+                "GP14" => p.selected_function = PinFunction::GpioInput,
+                _ => {}
+            }
+        }
+        mcu
+    }
+
+    /// An armed input becomes a task that OWNS the pin.
+    ///
+    /// It cannot stay a binding in `main`: `wait_for_*` takes `&mut self` for as
+    /// long as the program runs, so something has to hold it for `'static`.
+    #[test]
+    fn an_armed_input_becomes_a_task() {
+        for (edge, wait) in [
+            (Edge::Rising, "wait_for_rising_edge"),
+            (Edge::Falling, "wait_for_falling_edge"),
+            (Edge::Both, "wait_for_any_edge"),
+        ] {
+            let code = pico(Runtime::Async, Some(edge)).fresh_main_rs();
+            assert!(code.contains("#[embassy_executor::task]"), "{code}");
+            assert!(
+                code.contains(&format!("pin.{wait}().await;")),
+                "{edge:?} waits with {wait}:\n{code}"
+            );
+            assert!(
+                code.contains("spawner.spawn(gp15in_irq(gp15in).unwrap());"),
+                "main hands the pin over:\n{code}"
+            );
+            // The task is a TOP-LEVEL item; nested in `main` it does not compile.
+            assert!(
+                code.find("#[embassy_executor::task]") < code.find("async fn main"),
+                "the task comes first:\n{code}"
+            );
+            // ...and the plain input beside it is still just a binding.
+            assert!(code.contains("let gp14in = Input::new(p.PIN_14"), "{code}");
+            assert!(!code.contains("gp14in_irq"), "{code}");
+        }
+    }
+
+    /// An UNARMED input is untouched — arming is opt-in, not implied.
+    #[test]
+    fn an_unarmed_input_stays_a_binding() {
+        let code = pico(Runtime::Async, None).fresh_main_rs();
+        assert!(!code.contains("_irq("), "no task without an edge:\n{code}");
+        assert!(code.contains("async fn main(_spawner: Spawner)"), "{code}");
+    }
+
+    /// Blocking cannot generate it, and says so rather than dropping it.
+    ///
+    /// The pin panel offers the edge on every runtime. Before this, setting one
+    /// on a Blocking Pico persisted the value and generated nothing at all.
+    #[test]
+    fn blocking_says_why_rather_than_dropping_it() {
+        let code = pico(Runtime::Blocking, Some(Edge::Rising)).fresh_main_rs();
+        assert!(!code.contains("embassy_executor::task"), "{code}");
+        assert!(
+            code.contains("armed for an interrupt"),
+            "it says so:\n{code}"
+        );
+        assert!(code.contains("Switch Runtime to Async"), "{code}");
+    }
+}
+
+#[cfg(test)]
+mod dma_reporting {
+    use crate::panels::mcu_module::codegen::family;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    fn pico_with_buses(runtime: Runtime) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        mcu.runtime = runtime;
+        for p in mcu.iter_all_pins_mut() {
+            match p.name.as_str() {
+                "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                "GP18" => p.selected_function = PinFunction::SpiSck(0),
+                "GP19" => p.selected_function = PinFunction::SpiMosi(0),
+                "GP16" => p.selected_function = PinFunction::SpiMiso(0),
+                _ => {}
+            }
+        }
+        mcu
+    }
+
+    /// The card reports the channels the code ACTUALLY takes.
+    ///
+    /// The Pico has no vendor DMA database, so nothing else can answer this —
+    /// and before, the card said "nothing used" while four channels were gone.
+    #[test]
+    fn every_reported_channel_appears_in_the_code() {
+        let mcu = pico_with_buses(Runtime::Async);
+        let uses = family::dma_uses(&mcu);
+        assert_eq!(uses.len(), 4, "UART takes two and SPI two: {uses:?}");
+        let code = mcu.fresh_main_rs();
+        for u in &uses {
+            assert!(
+                code.contains(&format!("p.{},", u.peri)),
+                "{} is handed out in the code:\n{code}",
+                u.peri
+            );
+            assert_eq!(u.irq, "DMA_IRQ_0");
+        }
+        // And they are DISTINCT - two drivers on one channel would compile.
+        let mut peris: Vec<&str> = uses.iter().map(|u| u.peri.as_str()).collect();
+        peris.sort_unstable();
+        peris.dedup();
+        assert_eq!(peris.len(), 4, "no channel handed out twice");
+    }
+
+    /// Blocking takes none, because this backend's buses are polled.
+    #[test]
+    fn blocking_reports_no_channel() {
+        assert!(family::dma_uses(&pico_with_buses(Runtime::Blocking)).is_empty());
     }
 }
 
@@ -1810,7 +2052,60 @@ pub struct AsyncRpBackend;
 
 /// The GPIO bindings, in header order. embassy-rp names pads `PIN_25`, not
 /// `gpio25`, and hands them over from one `Peripherals` struct.
-fn async_gpio_lines(mcu: &Mcu) -> String {
+/// What `(divider, top)` actually produces — the number the comment prints.
+///
+/// Printing the ASKED-FOR frequency beside a divider that cannot reach it is
+/// how a generated comment starts lying quietly.
+fn pwm_actual_hz(family: &str, div: u32, top: u16) -> u32 {
+    let sys: u32 = if family == "rp235x" {
+        150_000_000
+    } else {
+        125_000_000
+    };
+    sys / (div * (top as u32 + 1))
+}
+
+/// `(divider, top)` for a PWM slice asked to run at `freq_hz`.
+///
+/// The counter runs at `sys / divider` and wraps at `top + 1`, so the output is
+/// `sys / (divider * (top + 1))`. `top` is 16 bits and the divider's integer
+/// part is 8, which together reach down to about 7 Hz — below that the pair is
+/// clamped and the caller says what was actually programmed rather than
+/// pretending the asked-for number was met.
+fn pwm_div_top(family: &str, freq_hz: u32) -> (u32, u16) {
+    // What `embassy_rp::init(Default::default())` leaves the system clock at.
+    let sys: u32 = if family == "rp235x" {
+        150_000_000
+    } else {
+        125_000_000
+    };
+    let freq = freq_hz.max(1);
+    let mut div: u32 = 1;
+    while div < 255 && sys / (div * freq) > 65_536 {
+        div += 1;
+    }
+    let top = (sys / (div * freq)).saturating_sub(1).clamp(1, 65_535) as u16;
+    (div, top)
+}
+
+/// The `Input` method that waits for `edge` — the same three embassy-rp offers
+/// as embassy-stm32 and esp-hal, which is why an armed pin looks the same here.
+fn wait_fn(edge: Edge) -> &'static str {
+    match edge {
+        Edge::Rising => "wait_for_rising_edge",
+        Edge::Falling => "wait_for_falling_edge",
+        Edge::Both => "wait_for_any_edge",
+    }
+}
+
+/// GPIO on the async runtime. Returns `(top-level tasks, main body)`.
+///
+/// An ARMED input does not become a binding — it becomes a task that OWNS the
+/// pin and awaits the edge, so main never sees it again. The same shape ESP on
+/// Async uses, for the same reason: `wait_for_*` takes `&mut self` for as long
+/// as the program runs, and a task is the cheapest thing that can hold it.
+fn async_gpio_lines(mcu: &Mcu) -> (String, String) {
+    let mut tasks = String::new();
     let mut out = String::new();
     for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
         let Some(n) = gpio_index(&p.name) else {
@@ -1821,13 +2116,38 @@ fn async_gpio_lines(mcu: &Mcu) -> String {
             PinFunction::GpioOutput => out.push_str(&format!(
                 "{ALLOW}    let mut gp{n}{sfx} = Output::new(p.PIN_{n}, Level::Low);\n"
             )),
-            PinFunction::GpioInput => out.push_str(&format!(
-                "{ALLOW}    let gp{n}{sfx} = Input::new(p.PIN_{n}, Pull::Up);\n"
-            )),
+            PinFunction::GpioInput => {
+                let Some(edge) = p.irq else {
+                    out.push_str(&format!(
+                        "{ALLOW}    let gp{n}{sfx} = Input::new(p.PIN_{n}, Pull::Up);\n"
+                    ));
+                    continue;
+                };
+                let wait = wait_fn(edge);
+                let what = match edge {
+                    Edge::Rising => "A rising edge",
+                    Edge::Falling => "A falling edge",
+                    Edge::Both => "Either edge",
+                };
+                let name = format!("gp{n}{sfx}");
+                tasks.push_str(&format!("/// {what} on GP{n}. The task owns the pin.\n"));
+                tasks.push_str("#[embassy_executor::task]\n");
+                tasks.push_str(&format!(
+                    "async fn {name}_irq(mut pin: Input<'static>) {{\n"
+                ));
+                tasks.push_str(&format!("    loop {{\n        pin.{wait}().await;\n"));
+                tasks.push_str("        // The edge arrived. Your code here.\n    }\n}\n\n");
+                out.push_str(&format!(
+                    "    let {name} = Input::new(p.PIN_{n}, Pull::Up);\n"
+                ));
+                out.push_str(&format!(
+                    "    spawner.spawn({name}_irq({name}).unwrap());\n"
+                ));
+            }
             _ => {}
         }
     }
-    out
+    (tasks, out)
 }
 
 /// The buses, on embassy-rp.
@@ -1839,10 +2159,22 @@ fn async_gpio_lines(mcu: &Mcu) -> String {
 ///
 /// Returns `(interrupt binding, body)` — the binding is a top-level item and
 /// cannot live inside `main`.
-fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
+fn async_bus_lines(mcu: &Mcu) -> (String, String, String, Vec<super::dma_map::DmaUse>) {
     let mut irqs: Vec<String> = Vec::new();
     let mut o = String::new();
     let mut dma = 0u8;
+    // Reported to the Configuration tab straight from this counter. A second
+    // table listing the same channels is exactly how a card starts describing
+    // an allocation the code no longer makes.
+    let mut uses: Vec<super::dma_map::DmaUse> = Vec::new();
+    let take = |ch: u8, user: &str, uses: &mut Vec<super::dma_map::DmaUse>| {
+        uses.push(super::dma_map::DmaUse {
+            peri: format!("DMA_CH{ch}"),
+            irq: "DMA_IRQ_0".to_owned(),
+            user: user.to_owned(),
+            manual: false,
+        });
+    };
 
     let uart = uart_pins(mcu);
     for i in instances(&uart) {
@@ -1852,8 +2184,14 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
         };
         let (tdma, rdma) = (dma, dma + 1);
         dma += 2;
+        take(tdma, &format!("UART{i} TX"), &mut uses);
+        take(rdma, &format!("UART{i} RX"), &mut uses);
+        let hz = bus_speed(mcu, "uart", i);
         o.push_str(&format!(
-            "    let uart{i} = embassy_rp::uart::Uart::new(\n        p.UART{i},\n        p.PIN_{tx},\n        p.PIN_{rx},\n        Irqs,\n        p.DMA_CH{tdma},\n        p.DMA_CH{rdma},\n        embassy_rp::uart::Config::default(),\n    );\n    let _ = &uart{i};\n"
+            "    let mut ucfg{i} = embassy_rp::uart::Config::default();\n    // From the Virtual Module, not a default: a bus at the wrong speed\n    // is met as garbage on the wire, never as a message.\n    ucfg{i}.baudrate = {hz};\n"
+        ));
+        o.push_str(&format!(
+            "    let uart{i} = embassy_rp::uart::Uart::new(\n        p.UART{i},\n        p.PIN_{tx},\n        p.PIN_{rx},\n        Irqs,\n        p.DMA_CH{tdma},\n        p.DMA_CH{rdma},\n        ucfg{i},\n    );\n    let _ = &uart{i};\n"
         ));
         irqs.push(format!(
             "    UART{i}_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART{i}>;"
@@ -1874,8 +2212,14 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
         };
         let (tdma, rdma) = (dma, dma + 1);
         dma += 2;
+        take(tdma, &format!("SPI{i} TX"), &mut uses);
+        take(rdma, &format!("SPI{i} RX"), &mut uses);
+        let hz = bus_speed(mcu, "spi", i);
         o.push_str(&format!(
-            "    let spi{i} = embassy_rp::spi::Spi::new(\n        p.SPI{i},\n        p.PIN_{sck},\n        p.PIN_{mosi},\n        p.PIN_{miso},\n        p.DMA_CH{tdma},\n        p.DMA_CH{rdma},\n        Irqs,\n        embassy_rp::spi::Config::default(),\n    );\n    let _ = &spi{i};\n"
+            "    let mut ucfg{i} = embassy_rp::spi::Config::default();\n    // From the Virtual Module, not a default: a bus at the wrong speed\n    // is met as garbage on the wire, never as a message.\n    ucfg{i}.frequency = {hz};\n"
+        ));
+        o.push_str(&format!(
+            "    let spi{i} = embassy_rp::spi::Spi::new(\n        p.SPI{i},\n        p.PIN_{sck},\n        p.PIN_{mosi},\n        p.PIN_{miso},\n        p.DMA_CH{tdma},\n        p.DMA_CH{rdma},\n        Irqs,\n        ucfg{i},\n    );\n    let _ = &spi{i};\n"
         ));
     }
 
@@ -1885,8 +2229,12 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
             o.push_str(&format!("    // I2C{i}: SDA and SCL are taken together.\n"));
             continue;
         };
+        let hz = bus_speed(mcu, "i2c", i);
         o.push_str(&format!(
-            "    let i2c{i} = embassy_rp::i2c::I2c::new_async(\n        p.I2C{i},\n        p.PIN_{scl},\n        p.PIN_{sda},\n        Irqs,\n        embassy_rp::i2c::Config::default(),\n    );\n    let _ = &i2c{i};\n"
+            "    let mut ucfg{i} = embassy_rp::i2c::Config::default();\n    // From the Virtual Module, not a default: a bus at the wrong speed\n    // is met as garbage on the wire, never as a message.\n    ucfg{i}.frequency = {hz};\n"
+        ));
+        o.push_str(&format!(
+            "    let i2c{i} = embassy_rp::i2c::I2c::new_async(\n        p.I2C{i},\n        p.PIN_{scl},\n        p.PIN_{sda},\n        Irqs,\n        ucfg{i},\n    );\n    let _ = &i2c{i};\n"
         ));
         irqs.push(format!(
             "    I2C{i}_IRQ => embassy_rp::i2c::InterruptHandler<embassy_rp::peripherals::I2C{i}>;"
@@ -1906,6 +2254,7 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
         }
     }
     pwm.sort_unstable();
+    let tcfg = crate::panels::mcu_module::modules::timer_configs(&mcu.modules);
     adc.sort_unstable();
     let mut done: Vec<u8> = Vec::new();
     for (slice, channel, n) in &pwm {
@@ -1918,8 +2267,36 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
         } else {
             "new_output_b"
         };
+        // The duty the Virtual Module carries. `Config::default()` used to go
+        // out here whatever the user had set - a setting that looks applied
+        // and is not, the same silent drop an armed input used to be.
+        let duty = tcfg
+            .get(slice)
+            .map_or(0, |c| c.duty_x100_of(*channel))
+            .min(10_000);
+        let ch = if *channel == 1 { "a" } else { "b" };
         o.push_str(&format!(
-            "    let pwm{slice} = embassy_rp::pwm::Pwm::{ctor}(\n        p.PWM_SLICE{slice},\n        p.PIN_{n},\n        embassy_rp::pwm::Config::default(),\n    );\n    let _ = &pwm{slice};\n"
+            "    let mut cfg{slice} = embassy_rp::pwm::Config::default();\n"
+        ));
+        let freq = tcfg.get(slice).map_or(0, |c| c.freq_hz);
+        if freq > 0 {
+            let (div, top) = pwm_div_top(&mcu.family, freq);
+            let got = pwm_actual_hz(&mcu.family, div, top);
+            o.push_str(&format!(
+                "    // {freq} Hz asked for; this divider and top give {got} Hz.\n"
+            ));
+            o.push_str(&format!("    cfg{slice}.divider = {div}u8.into();\n"));
+            o.push_str(&format!("    cfg{slice}.top = {top};\n"));
+        }
+        o.push_str(&format!(
+            "    // {} % of the period.\n",
+            super::common::duty_percent_str(duty)
+        ));
+        o.push_str(&format!(
+            "    cfg{slice}.compare_{ch} = ((cfg{slice}.top as u32 * {duty}) / 10_000) as u16;\n"
+        ));
+        o.push_str(&format!(
+            "    let pwm{slice} = embassy_rp::pwm::Pwm::{ctor}(\n        p.PWM_SLICE{slice},\n        p.PIN_{n},\n        cfg{slice},\n    );\n    let _ = &pwm{slice};\n"
         ));
     }
 
@@ -1937,6 +2314,7 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
     // both handed DMA_CH0 would compile and then fight at run time.
     let radio = if radio_led(mcu) {
         let (mut r_irqs, task, body) = radio_lines(dma);
+        take(dma, "CYW43 radio - PIO SPI", &mut uses);
         dma += 1;
         irqs.append(&mut r_irqs);
         o.push_str(&body);
@@ -1966,7 +2344,29 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String) {
             irqs.join("\n")
         )
     };
-    (binding, o, radio)
+    (binding, o, radio, uses)
+}
+
+/// The DMA channels the generated project takes.
+///
+/// Produced by RUNNING the allocator and throwing the code away, rather than by
+/// a second table that lists what it is believed to do. The Pico carries no
+/// `DmaDef` — there is no vendor database for it — so this is the ONLY thing
+/// that can answer "which channel is free", and a list built beside the
+/// allocator would answer it wrong the first time either one changed.
+///
+/// Blocking takes none: `rp2040-hal` bus setup in this backend is polled.
+pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    if !matches!(mcu.runtime, Runtime::Async) {
+        return Vec::new();
+    }
+    async_bus_lines(mcu).3
+}
+
+/// How many DMA channels this chip has — 12 on the RP2040, 16 on the RP2350.
+pub fn dma_channels(family: &str) -> usize {
+    if family == "rp235x" { 16 } else { 12 }
 }
 
 /// ONE PIO state machine a project actually uses, as REPORTED BY CODEGEN.
@@ -2111,8 +2511,10 @@ async fn cyw43_task(
 }
 
 fn async_section(mcu: &Mcu) -> String {
-    let (irq_binding, buses, radio_task) = async_bus_lines(mcu);
-    let spawner = if radio_task.is_empty() {
+    let (irq_binding, buses, radio_task, _) = async_bus_lines(mcu);
+    let (gpio_tasks, gpio_body) = async_gpio_lines(mcu);
+    // An armed input needs a live spawner just as much as the radio does.
+    let spawner = if radio_task.is_empty() && gpio_tasks.is_empty() {
         "_spawner"
     } else {
         "spawner"
@@ -2128,12 +2530,13 @@ fn async_section(mcu: &Mcu) -> String {
     }
     o.push_str(&irq_binding);
     o.push_str(&radio_task);
+    o.push_str(&gpio_tasks);
     o.push_str("#[embassy_executor::main]\n");
     o.push_str(&format!("async fn main({spawner}: Spawner) {{\n"));
     o.push_str("    // embassy-rp brings up the clocks itself. On RP2040 it also supplies the\n");
     o.push_str("    // second-stage bootloader, which the blocking HAL makes you declare.\n");
     o.push_str("    let p = embassy_rp::init(Default::default());\n\n");
-    o.push_str(&async_gpio_lines(mcu));
+    o.push_str(&gpio_body);
     o.push_str(&buses);
     o.push_str(GEN_END);
     o.push('\n');
@@ -2202,6 +2605,7 @@ impl FamilyBackend for AsyncRpBackend {
 #[cfg(test)]
 mod emit_async_for_manual_compile {
     use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::pins::logic::pin::model::Edge;
     use crate::panels::mcu_module::{builtins, pins::PinFunction, project_gen};
 
     /// The Pico W's LED, which is not on the chip at all.
@@ -2262,7 +2666,9 @@ mod emit_async_for_manual_compile {
             let toml = project_gen::ensure_async_deps(
                 &toml,
                 true,
-                project_gen::AsyncFlavor::Rp,
+                // Through the SAME chooser the app uses. Naming the flavour
+                // here is what let the app and this harness disagree.
+                project_gen::async_flavor_for(&mcu.family, ""),
                 false,
                 false,
                 false,
@@ -2333,6 +2739,16 @@ mod emit_async_for_manual_compile {
                         }
                     }
                     "GP26" => p.selected_function = PinFunction::AdcChannel { adc: 0, channel: 0 },
+                    // An ARMED input: the edge has to become a task that owns
+                    // the pin, and only the compiler can say whether
+                    // embassy-rp agrees with the shape we emit for it.
+                    "GP15" => {
+                        p.selected_function = PinFunction::GpioInput;
+                        p.irq = Some(Edge::Rising);
+                    }
+                    // ...and a PLAIN input beside it, so the two paths are
+                    // proved to differ rather than both collapsing into one.
+                    "GP14" => p.selected_function = PinFunction::GpioInput,
                     _ => {}
                 }
             }
@@ -2355,7 +2771,9 @@ mod emit_async_for_manual_compile {
             let toml = project_gen::ensure_async_deps(
                 &toml,
                 true,
-                project_gen::AsyncFlavor::Rp,
+                // Through the SAME chooser the app uses. Naming the flavour
+                // here is what let the app and this harness disagree.
+                project_gen::async_flavor_for(&mcu.family, ""),
                 false,
                 false,
                 false,

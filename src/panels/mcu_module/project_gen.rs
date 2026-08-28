@@ -776,6 +776,89 @@ pub fn ensure_m0_atomics(
     )
 }
 
+/// Which async stack a family needs — the ONE place that decides it.
+///
+/// It exists because the app and the test harness each decided separately, and
+/// they disagreed: the harness passed [`AsyncFlavor::Rp`] while `app.rs` had
+/// only an ESP arm and an else, so every Pico a real user saved on Async got
+/// embassy-executor 0.9 with `arch-cortex-m` while embassy-rp 0.10 demands
+/// ^0.10 with `platform-cortex-m`. Cargo refused to resolve it, and the codegen
+/// matrix stayed green throughout because it never asked this question the way
+/// the app asks it.
+///
+/// A harness that builds the project differently from the app tests a project
+/// nobody ships.
+pub fn async_flavor_for<'a>(family: &str, esp_chip: &'a str) -> AsyncFlavor<'a> {
+    use crate::panels::mcu_module::codegen::family as fam;
+    if fam::async_is_esp(family) {
+        AsyncFlavor::Esp(esp_chip)
+    } else if fam::async_is_rp(family) {
+        AsyncFlavor::Rp
+    } else {
+        AsyncFlavor::Stm32
+    }
+}
+
+#[cfg(test)]
+mod async_flavor_choice {
+    use super::*;
+
+    /// Every async-capable family gets the stack it actually needs.
+    ///
+    /// This test exists because the app and the harness answered it separately
+    /// and disagreed for months of work: `app.rs` had an ESP arm and an else,
+    /// so a Pico fell to `Stm32` and was saved with embassy-executor 0.9 while
+    /// embassy-rp 0.10 requires ^0.10. Cargo refused it, and NOTHING caught it -
+    /// the matrix passed `AsyncFlavor::Rp` by hand and so tested a project the
+    /// app never builds.
+    #[test]
+    fn each_family_gets_its_own_stack() {
+        assert!(matches!(async_flavor_for("rp2040", ""), AsyncFlavor::Rp));
+        assert!(matches!(async_flavor_for("rp235x", ""), AsyncFlavor::Rp));
+        assert!(matches!(
+            async_flavor_for("esp32c3", "esp32c3"),
+            AsyncFlavor::Esp("esp32c3")
+        ));
+        assert!(matches!(
+            async_flavor_for("stm32g4", ""),
+            AsyncFlavor::Stm32
+        ));
+        assert!(matches!(
+            async_flavor_for("stm32f4", ""),
+            AsyncFlavor::Stm32
+        ));
+    }
+
+    /// And the executor line differs, which is the whole point.
+    #[test]
+    fn the_rp_stack_is_not_the_stm32_one() {
+        let rp = ensure_async_deps(
+            "[dependencies]\n",
+            true,
+            AsyncFlavor::Rp,
+            false,
+            false,
+            false,
+            &[],
+        );
+        assert!(rp.contains("platform-cortex-m"), "{rp}");
+        assert!(
+            !rp.contains("arch-cortex-m"),
+            "0.9 spelling would not resolve: {rp}"
+        );
+        let stm = ensure_async_deps(
+            "[dependencies]\n",
+            true,
+            AsyncFlavor::Stm32,
+            false,
+            false,
+            false,
+            &[],
+        );
+        assert!(stm.contains("arch-cortex-m"), "{stm}");
+    }
+}
+
 pub fn ensure_async_deps(
     cargo_toml: &str,
     needs_async: bool,

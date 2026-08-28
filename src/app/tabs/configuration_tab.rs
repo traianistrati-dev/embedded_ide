@@ -109,7 +109,14 @@ impl AppIde {
             ));
             ui.add_space(10.0);
 
-            dma_card(ui, &uses, mcu.dma.as_ref(), &family, on_dma_runtime);
+            dma_card(
+                ui,
+                &uses,
+                mcu.dma.as_ref(),
+                &family,
+                on_dma_runtime,
+                has_pio.then(|| crate::panels::mcu_module::codegen::rp::dma_channels(&family)),
+            );
             ui.add_space(12.0);
 
             if has_pio {
@@ -560,6 +567,10 @@ fn dma_card(
     dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
     family: &str,
     on_dma_runtime: bool,
+    // Channels the chip has when no vendor `DmaDef` describes it. The Pico
+    // has no CubeMX database behind it, and a card that could not count its
+    // channels answered neither of the two questions anyone asks here.
+    plain_total: Option<usize>,
 ) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -568,6 +579,13 @@ fn dma_card(
                     .size(13.0)
                     .strong(),
             );
+            let plain = plain_total.filter(|_| dma.is_none());
+            if let Some(total) = plain {
+                ui.label(dim(format!(
+                    "{} of {total} channels used - any channel serves any peripheral",
+                    uses.len()
+                )));
+            }
             if let Some(d) = dma {
                 let total = d.channels.len();
                 ui.label(dim(format!(
@@ -626,6 +644,18 @@ fn dma_card(
 
         // What is still free, which is the question asked right before adding
         // one more peripheral.
+        if let Some(total) = plain_total.filter(|_| dma.is_none()) {
+            let free: Vec<String> = (0..total)
+                .map(|i| format!("DMA_CH{i}"))
+                .filter(|c| !uses.iter().any(|u| &u.peri == c))
+                .collect();
+            ui.add_space(6.0);
+            ui.label(dim(if free.is_empty() {
+                "No channel left.".to_owned()
+            } else {
+                format!("Free: {}", free.join(", "))
+            }));
+        }
         if let Some(d) = dma {
             let free: Vec<&str> = d
                 .channels

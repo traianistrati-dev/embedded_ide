@@ -374,12 +374,21 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
     // `main.rs` (they are the only record of the wiring) and arrive as `init`
     // arguments.
     let timers = modules::timer_configs(&mcu.modules);
-    let pwm: Vec<(u8, Vec<(u8, u16)>)> = codegen_esp::pwm_channels(&configured)
+    // `(channel, duty, pad)`. The PAD rides along because it is the one identity
+    // that does NOT move when a channel is re-pointed — which is exactly what
+    // the generated constant names key on when a timer drives several pads.
+    let pwm: Vec<(u8, Vec<(u8, u16, String)>)> = codegen_esp::pwm_channels(&configured)
         .into_iter()
         .map(|(t, chans)| {
             let duties = chans
                 .iter()
-                .map(|(c, _)| (*c, timers.get(&t).map_or(0, |cfg| cfg.duty_x100_of(*c))))
+                .map(|(c, pin)| {
+                    (
+                        *c,
+                        timers.get(&t).map_or(0, |cfg| cfg.duty_x100_of(*c)),
+                        pin.name.clone(),
+                    )
+                })
                 .collect();
             (t, duties)
         })
@@ -452,6 +461,18 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
             mcu.family == "esp32",
             &pwm,
             &timers,
+            // Read off the CHIP's own pin table rather than a per-part list:
+            // the highest LEDC channel any pad offers is the highest the part
+            // has, and that is what the generated mapping may name.
+            all.iter()
+                .filter(|p| !p.reserved)
+                .flat_map(|p| p.available_functions.iter())
+                .filter_map(|f| match f {
+                    PinFunction::TimerPwm { channel, .. } => Some(*channel),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0),
             runtime,
         ),
     );
@@ -1064,6 +1085,12 @@ pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
             !codegen_esp::cam_wired(&pins_of(mcu)).is_empty(),
         )
         .uses(),
+        // BEFORE `async_supported`, which already answers true for RP: an
+        // arm after it is unreachable, and the DMA card stayed empty on a
+        // Pico for exactly that reason. The Pico has no vendor database,
+        // so its channels are only knowable by asking the generator what
+        // it just allocated.
+        Runtime::Async if super::rp::is_rp(&mcu.family) => super::rp::dma_uses(mcu),
         Runtime::Async if async_supported(&mcu.family) => async_periphs(mcu).dma_uses,
         // Only the F1 backend has a blocking DMA transport; every other family
         // reaches DMA through embassy, i.e. through the async runtime.

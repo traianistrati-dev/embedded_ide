@@ -182,6 +182,41 @@ pub fn collapsed_panel_height(ui: &egui::Ui, handle_h: f32) -> f32 {
     ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 + FRAME_V_MARGIN + handle_h
 }
 
+/// An F12 pressed while rust-analyzer could not answer, kept until it can.
+///
+/// The position is captured HERE, at the keypress, because it only exists
+/// inside the editor's render path (the caret lives in the `TextEdit`'s state
+/// and the column is computed from the live buffer) — the frame loop that
+/// waits for the analyzer has neither.
+pub struct PendingGoto {
+    /// The file the caret was in. A deferred jump that fired against a
+    /// different file would be nonsense.
+    pub file: ProjectFileId,
+    /// Workspace-relative path, as the LSP request wants it.
+    pub rel: String,
+    /// 0-based line, and the column in UTF-16 units (LSP's own unit).
+    pub line: u32,
+    pub col: u32,
+    /// Ctrl+F12 rather than F12.
+    pub implementation: bool,
+    /// Hash of the buffer the position was taken in. A cold analyzer start
+    /// takes tens of seconds, in which one pin click regenerates main.rs
+    /// wholesale — the same line and column would then point at a different
+    /// symbol, and the jump would be a lie.
+    pub text_hash: u64,
+    /// When it was asked for, for the give-up deadline.
+    pub since: std::time::Instant,
+    /// The one-shot restart has been fired. Without this the wait would reset
+    /// the analyzer it just spawned on the very next frame, for ever.
+    pub restart_fired: bool,
+}
+
+/// How long to wait for a cold analyzer before giving up on a deferred jump.
+/// Generous on purpose: a first index of an embedded project routinely takes
+/// half a minute, and the alternative is telling the user it failed while it is
+/// still working.
+const GOTO_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// Background of a diagnostic row in the bottom panel. Every one of those rows
 /// navigates to the code it names, so hovering has to say so: the row lights up,
 /// its `file:line` is underlined, and the cursor becomes a pointing hand (see
@@ -1392,6 +1427,10 @@ pub struct AppIde {
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
+    /// A Go-to-definition the user asked for while rust-analyzer could not
+    /// answer it. Held until the analyzer is genuinely usable, then re-issued —
+    /// see [`AppIde::poll_pending_goto`].
+    pending_goto: Option<PendingGoto>,
     /// One-shot: scroll the Definition tab to the highlighted line on the first
     /// render after a new F12 snippet loads (then the user scrolls freely).
     def_scroll_pending: bool,
@@ -1953,6 +1992,7 @@ impl AppIde {
             file_cycle: editor_panel::file_cycle::FileCycle::default(),
             last_selected_file: ProjectFileId::MainRs,
             definition_in_flight: false,
+            pending_goto: None,
             def_scroll_pending: false,
             definition_view: None,
             reference_file: None,
@@ -2168,6 +2208,143 @@ impl AppIde {
     /// True when a real chip is selected (replaces `project_config().is_some()`).
     fn has_project(&self) -> bool {
         self.selected_def().is_some()
+    }
+
+    /// Drive a Go-to-definition that was asked for while rust-analyzer could not
+    /// answer: start the analyzer once, wait for it to be genuinely usable, then
+    /// re-issue the request. The normal result handler takes it from there, so
+    /// the jump (or the Definition tab) happens on its own.
+    ///
+    /// Every branch here exists because of a way this can go wrong:
+    ///
+    /// * the restart is **one-shot**. Anything shaped as "not ready yet, restart"
+    ///   would kill the analyzer it spawned last frame — for ever, and each
+    ///   round costs a synchronous `taskkill` and a project rewrite.
+    /// * the fire waits for `indexed`, not `Ready`. `Ready` flips on the first
+    ///   `$/progress` end of any rust-prefixed token (it can be "Fetching
+    ///   metadata"), and the F12 path's `did_change` AUTO-OPENS the document —
+    ///   opening it that early is exactly the detached-file analysis that
+    ///   produces phantom type errors.
+    /// * a cold start takes tens of seconds, in which the user may configure a
+    ///   pin and have main.rs regenerated under the captured position. The text
+    ///   hash catches that.
+    /// * with no chip selected there is nothing to start, and the wait would
+    ///   never end — say so instead.
+    fn poll_pending_goto(&mut self) {
+        let Some(p) = &self.pending_goto else { return };
+
+        // Give up quietly rather than leave a spinner running for ever.
+        if p.since.elapsed() > GOTO_WAIT {
+            self.pending_goto = None;
+            self.set_status_msg(format!(
+                "{} Go to definition: the analyzer did not finish loading",
+                egui_phosphor::regular::X_CIRCLE
+            ));
+            return;
+        }
+
+        // The position was taken in a buffer that has since changed — the same
+        // line and column now mean something else.
+        let current = self.file_text_hash(p.file);
+        if current.is_some_and(|h| h != p.text_hash) {
+            self.pending_goto = None;
+            self.set_status_msg(format!(
+                "{} Go to definition: the file changed while the analyzer was loading",
+                egui_phosphor::regular::X_CIRCLE
+            ));
+            return;
+        }
+
+        let (status, indexed) = {
+            let lsp = self.lsp_state.lock().unwrap();
+            (lsp.status.clone(), lsp.indexed)
+        };
+
+        match status {
+            // Usable at last: re-issue exactly what was asked for.
+            crate::lsp::LspStatus::Ready if indexed => {
+                let p = self.pending_goto.take().expect("checked above");
+                let sent = {
+                    let mut lsp = self.lsp_state.lock().unwrap();
+                    if p.implementation {
+                        lsp.request_implementation(&p.rel, p.line, p.col)
+                    } else {
+                        lsp.request_definition(&p.rel, p.line, p.col)
+                    }
+                };
+                // Only wait for an answer that can actually come.
+                self.definition_in_flight = sent;
+                if !sent {
+                    self.set_status_msg(format!(
+                        "{} Go to definition: the analyzer is not reachable",
+                        egui_phosphor::regular::X_CIRCLE
+                    ));
+                }
+                self.egui_ctx.request_repaint();
+            }
+            // Dead. Start it — once.
+            crate::lsp::LspStatus::Stopped | crate::lsp::LspStatus::Failed(_) => {
+                if !self.has_project() {
+                    // `has_project` is "a chip is selected": without one the
+                    // Stopped arm never starts anything, so the wait could not
+                    // end. Better a sentence than a spinner for ever.
+                    self.pending_goto = None;
+                    self.set_status_msg(format!(
+                        "{} Go to definition needs the analyzer, which needs a chip selected",
+                        egui_phosphor::regular::X_CIRCLE
+                    ));
+                    return;
+                }
+                if let crate::lsp::LspStatus::Failed(why) = &status {
+                    // `reset()` wipes `load_log`, the only record of WHY the
+                    // last session died — keep the reason before it goes.
+                    let why = why.clone();
+                    self.lsp_state.lock().unwrap().push_load_log(format!(
+                        "• restarting after a failure, on Go to definition: {why}"
+                    ));
+                }
+                let fired = self.pending_goto.as_ref().is_some_and(|p| p.restart_fired);
+                if fired {
+                    // Already restarted once and it is dead again — do not spin.
+                    self.pending_goto = None;
+                    let why = match &status {
+                        crate::lsp::LspStatus::Failed(w) => w.clone(),
+                        _ => "it did not start".to_owned(),
+                    };
+                    self.set_status_msg(format!(
+                        "{} Analyzer: {why}",
+                        egui_phosphor::regular::X_CIRCLE
+                    ));
+                    return;
+                }
+                if let Some(p) = &mut self.pending_goto {
+                    p.restart_fired = true;
+                }
+                self.restart_lsp();
+                self.egui_ctx.request_repaint();
+            }
+            // Starting / Indexing / Ready-but-not-indexed: just wait.
+            _ => {}
+        }
+    }
+
+    /// Hash of a file's CURRENT in-memory text, for staleness checks.
+    fn file_text_hash(&self, id: ProjectFileId) -> Option<u64> {
+        let text = match id {
+            ProjectFileId::MainRs => &self.generated_code,
+            ProjectFileId::UserFile(i) => &self.project_tree.user_src_files.get(i)?.1,
+            _ => return None,
+        };
+        Some(Self::content_hash(text))
+    }
+
+    /// Show a short-lived message in the status bar (the same channel the
+    /// export / save results use).
+    fn set_status_msg(&mut self, msg: String) {
+        self.export_msg = msg;
+        self.export_status_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(6));
+        self.egui_ctx.request_repaint();
     }
 
     /// Display name of the selected chip (empty if none).
@@ -2745,16 +2922,13 @@ impl AppIde {
                 .selected_build_cfg()
                 .map(|(p, _)| p.probe_chip)
                 .unwrap_or_default();
-            use crate::panels::mcu_module::codegen::family;
-            let async_flavor = if self
-                .mcu
-                .as_ref()
-                .is_some_and(|m| family::async_is_esp(&m.family))
-            {
-                project_gen::AsyncFlavor::Esp(&esp_chip)
-            } else {
-                project_gen::AsyncFlavor::Stm32
-            };
+            // One decision, shared with the harness - see `async_flavor_for`.
+            // Choosing here as well is how a Pico on Async came to be saved with
+            // the STM32 executor line while every test stayed green.
+            let async_flavor = project_gen::async_flavor_for(
+                self.mcu.as_ref().map_or("", |m| m.family.as_str()),
+                &esp_chip,
+            );
             let new_toml = project_gen::ensure_async_deps(
                 &new_toml,
                 is_async,
@@ -3034,6 +3208,8 @@ impl AppIde {
             }
         }
 
+        self.poll_pending_goto();
+
         // ── Handle a completed F12 go-to-definition ──────────────────────────
         // A definition in the CURRENT project opens editable in the main editor
         // (navigate + scroll the line into view). A definition in another file
@@ -3068,6 +3244,15 @@ impl AppIde {
                         // like it did nothing. Open the zone back up.
                         self.side_panels_collapsed = false;
                     }
+                } else {
+                    // Answered, but with nothing. Silence here read as "the key
+                    // did nothing", and a just-started analyzer answers this way
+                    // more often than a warm one — an empty result and a
+                    // JSON-RPC error arrive in the same shape.
+                    self.set_status_msg(format!(
+                        "{} No definition found for the symbol at the caret",
+                        egui_phosphor::regular::X_CIRCLE
+                    ));
                 }
                 self.egui_ctx.request_repaint();
             }

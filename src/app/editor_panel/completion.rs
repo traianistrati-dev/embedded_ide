@@ -316,16 +316,52 @@ impl AppIde {
         // method would land on the trait's declaration.
         if is_main && (f12_pressed || ctrl_f12_pressed) && lsp_file_tracked {
             if let (Some(idx), Some(rel)) = (cursor_char_idx, current_rel_path.clone()) {
-                let (line, col) = lsp_cursor_pos(&display_code, idx);
-                let mut lsp = self.lsp_state.lock().unwrap();
-                lsp.did_change(&rel, &display_code, false);
-                if ctrl_f12_pressed {
-                    lsp.request_implementation(&rel, line, col);
-                } else {
-                    lsp.request_definition(&rel, line, col);
+                // `lsp_file_tracked` is a file-IDENTITY test, so a library's
+                // Cargo.toml passes it. rust-analyzer has nothing to say about
+                // one, and without this check an F12 there would restart the
+                // analyzer for a request that can never be answered.
+                if rel.ends_with(".rs") {
+                    let (line, col) = lsp_cursor_pos(&display_code, idx);
+                    // Can it answer RIGHT NOW? `Ready` alone is not enough: it
+                    // flips on the first `$/progress` end of any rust-prefixed
+                    // token, and `did_change` below auto-opens the document —
+                    // doing that before the index is built is what produces
+                    // phantom type errors on a detached file.
+                    let usable = {
+                        let lsp = self.lsp_state.lock().unwrap();
+                        lsp.indexed && matches!(lsp.status, lsp::LspStatus::Ready)
+                    };
+                    if usable {
+                        let sent = {
+                            let mut lsp = self.lsp_state.lock().unwrap();
+                            lsp.did_change(&rel, &display_code, false);
+                            if ctrl_f12_pressed {
+                                lsp.request_implementation(&rel, line, col)
+                            } else {
+                                lsp.request_definition(&rel, line, col)
+                            }
+                        };
+                        // Only wait for an answer that was actually asked for.
+                        // This used to be unconditional: with the analyzer down
+                        // the request was dropped inside `request_definition`
+                        // and the flag stayed true for the rest of the session,
+                        // polling a reply that could never arrive.
+                        self.definition_in_flight = sent;
+                    } else {
+                        // Park it: the frame loop starts the analyzer, waits for
+                        // it, and re-issues this exact request.
+                        self.pending_goto = Some(crate::app::PendingGoto {
+                            file: owner_file,
+                            rel,
+                            line,
+                            col,
+                            implementation: ctrl_f12_pressed,
+                            text_hash: Self::content_hash(&display_code),
+                            since: std::time::Instant::now(),
+                            restart_fired: false,
+                        });
+                    }
                 }
-                drop(lsp);
-                self.definition_in_flight = true;
             }
         }
 

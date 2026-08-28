@@ -2507,6 +2507,15 @@ pub struct TimerModuleConfig {
     pub instance: u8,
     /// Shared output frequency in Hz.
     pub freq_hz: u32,
+    /// Duty RESOLUTION in bits — ESP LEDC only, where it is a real register
+    /// field rather than a property of the timer's reload value.
+    ///
+    /// `None` means "as wide as this frequency allows", which is what the
+    /// generator computed on its own before this was settable. It is not a free
+    /// choice: esp-hal refuses a divisor under 256, so `2^bits` may not exceed
+    /// `apb / freq` — see `codegen_esp_configs::ledc_duty_bits`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty_res_bits: Option<u8>,
     /// Channel number (1..=4) → duty in HUNDREDTHS of a percent (0..=10_000).
     ///
     /// Not whole percent, because whole percent cannot express the first duty
@@ -2561,6 +2570,7 @@ impl TimerModuleConfig {
         Self {
             instance,
             freq_hz: 1_000,
+            duty_res_bits: None,
             duty_x100: std::collections::BTreeMap::new(),
             duty: std::collections::BTreeMap::new(),
             counting: PwmCounting::default(),

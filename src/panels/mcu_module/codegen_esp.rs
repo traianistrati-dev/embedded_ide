@@ -788,7 +788,13 @@ fn make_gen_section(
     if !pwm.is_empty() {
         body.push('\n');
         body.push_str("    // ── PWM (LEDC) ──\n");
-        body.push_str("    let ledc = Ledc::new(peripherals.LEDC);\n");
+        // `Ledc::new` only ungates the peripheral — it does NOT pick the LEDC
+        // clock source, and the reset value of that mux selects nothing at all.
+        // Without this line every duty register is written correctly and the pad
+        // never toggles. `mut` because `set_global_slow_clock` takes `&mut self`,
+        // and this line is inside the generated block, so the user cannot add it.
+        body.push_str("    let mut ledc = Ledc::new(peripherals.LEDC);\n");
+        body.push_str("    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);\n");
         for (t, chans) in &pwm {
             let sfx = timer
                 .get(t)
@@ -1076,7 +1082,7 @@ fn build_use_block(
     // The LEDC is the one peripheral `main.rs` builds itself: it is a single
     // chip-wide block, so `Ledc::new` cannot live in a per-timer config module.
     if has_pwm {
-        lines.push("use esp_hal::ledc::Ledc;".into());
+        lines.push("use esp_hal::ledc::{LSGlobalClkSource, Ledc};".into());
     }
     // The blocking interrupt path needs a place to park each pin (an interrupt
     // handler takes no arguments) and the `Io` the handler is registered on.
@@ -1161,7 +1167,17 @@ pub fn pwm_channels<'a>(configured: &[&'a Pin]) -> Vec<(u8, Vec<(u8, &'a Pin)>)>
     }
     by_timer
         .into_iter()
-        .map(|(t, chans)| (t, chans.into_iter().collect()))
+        .map(|(t, chans)| {
+            // Ordered by the PAD, not by the channel. The config file's `init`
+            // takes one `impl PeripheralOutput` per pad and lives in the
+            // EDITABLE half, which a re-point only re-splices the consts of —
+            // so a channel-sorted order would leave a frozen signature while
+            // this argument list moved, and every parameter has the same type,
+            // so the swap type-checks and silently drives the wrong pad.
+            let mut v: Vec<(u8, &Pin)> = chans.into_iter().collect();
+            v.sort_by_key(|(_, p)| p.number);
+            (t, v)
+        })
         .collect()
 }
 
@@ -2535,7 +2551,17 @@ mod tests {
             1,
             "{code}"
         );
-        assert!(code.contains("use esp_hal::ledc::Ledc;"), "{code}");
+        // `Ledc::new` only ungates the peripheral. Without the source select the
+        // duty registers are written correctly and the pad never toggles.
+        assert!(
+            code.contains("ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);"),
+            "{code}"
+        );
+        assert!(code.contains("let mut ledc = "), "{code}");
+        assert!(
+            code.contains("use esp_hal::ledc::{LSGlobalClkSource, Ledc};"),
+            "{code}"
+        );
         // The pads keep their own `let … = peripherals.GPIOn;` lines: they are
         // the only record `parse_main_rs` rebuilds the diagram from.
         assert!(

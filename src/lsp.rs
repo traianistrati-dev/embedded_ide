@@ -822,9 +822,15 @@ impl LspState {
     /// Request the definition of the symbol at `(line, character)` in `rel_path`
     /// (`textDocument/definition`). Result arrives async; poll
     /// [`take_definition_result`].
-    pub fn request_definition(&mut self, rel_path: &str, line: u32, character: u32) {
+    /// Returns `false` when nothing went out because there is no live session —
+    /// the caller must NOT then wait for an answer. It used to return `()`, and
+    /// the F12 path armed `definition_in_flight` regardless: with rust-analyzer
+    /// down the app polled for a reply that could never arrive, for the rest of
+    /// the session, and the keypress looked like it did nothing.
+    #[must_use]
+    pub fn request_definition(&mut self, rel_path: &str, line: u32, character: u32) -> bool {
         if self.sender.is_none() {
-            return;
+            return false;
         }
         self.next_req_id += 1;
         let id = self.next_req_id;
@@ -844,6 +850,7 @@ impl LspState {
             })
             .to_string(),
         );
+        true
     }
 
     /// Request the implementation(s) of the symbol at `(line, character)` —
@@ -851,9 +858,11 @@ impl LspState {
     /// lands on the trait's declaration, this resolves the `impl … for …`
     /// sites instead (the first one, when several exist). Shares the
     /// definition result slot: poll [`take_definition_result`].
-    pub fn request_implementation(&mut self, rel_path: &str, line: u32, character: u32) {
+    /// As [`request_definition`](Self::request_definition): `false` = not sent.
+    #[must_use]
+    pub fn request_implementation(&mut self, rel_path: &str, line: u32, character: u32) -> bool {
         if self.sender.is_none() {
-            return;
+            return false;
         }
         self.next_req_id += 1;
         let id = self.next_req_id;
@@ -873,6 +882,7 @@ impl LspState {
             })
             .to_string(),
         );
+        true
     }
 
     /// Take the definition result once RA responded. `Some(Some(loc))` = found,

@@ -88,6 +88,18 @@ impl AppIde {
         if let Some(op) = self.git.state.lock().unwrap().busy {
             return Some((true, format!("Git: {op}…"), amber));
         }
+        // Waiting on a cold analyzer for a Go-to-definition the user asked for.
+        // Above the generic "Indexing…" because it says WHY the wait is
+        // happening — and because it is the only feedback there is: F12 with the
+        // analyzer down is otherwise silent, and `Stopped` / `Failed` fall
+        // through the match below without a status of their own.
+        if self.pending_goto.is_some() {
+            return Some((
+                true,
+                "Go to definition: loading the analyzer…".to_owned(),
+                amber,
+            ));
+        }
         {
             let lsp = self.lsp_state.lock().unwrap();
             match lsp.status {

@@ -2960,7 +2960,21 @@ pub fn ledc_duty_bits(freq_hz: u32) -> u32 {
     if ratio == 0 {
         return 1;
     }
-    (u32::BITS - ratio.leading_zeros() - 1).clamp(1, 14)
+    (u32::BITS - ratio.leading_zeros() - 1).clamp(ledc_min_duty_bits(freq_hz), 14)
+}
+
+/// The NARROWEST duty resolution `freq_hz` allows, in bits.
+///
+/// The other half of the bound, and it was missing. esp-hal computes
+/// `divisor = (apb << 8) / freq / 2^bits` and refuses it OUTSIDE `256..=0x3FFFF`
+/// — too MANY bits push it under 256, too FEW push it over the ceiling. Only the
+/// first half was checked, which is right at 20 kHz and wrong at 50 Hz: there a
+/// 1-bit resolution leaves a divisor of 409_600 and `configure` returns
+/// `Err(Divisor)`, so the generated `unwrap` panics on the board.
+pub fn ledc_min_duty_bits(freq_hz: u32) -> u32 {
+    const MAX_DIV: u64 = 0x3FFFF;
+    let num = (u64::from(LEDC_APB_HZ) << 8) / u64::from(freq_hz.max(1));
+    (1..=14).find(|b| num >> b <= MAX_DIV).unwrap_or(14)
 }
 
 /// `src/pins/configs/pwm{n}.rs`: one LEDC timer and the channels wired to it.
@@ -2969,38 +2983,108 @@ pub fn ledc_duty_bits(freq_hz: u32) -> u32 {
 /// its timer for as long as it lives (`Config { timer: &dyn TimerIFace }`), so
 /// a single `init` returning both would be a self-referential struct. `timer()`
 /// hands the timer back to `main.rs`, which owns it and lends it to `init()`.
-fn pwm_file(n: u8, chans: &[(u8, u16)], cfg: Option<&TimerModuleConfig>) -> String {
+///
+/// # Why the constants carry no channel number
+///
+/// Only the block between the GENERATED markers is rewritten; everything below
+/// it is the user's, and is written ONCE. So a constant whose NAME moves with
+/// the wiring breaks the file the moment the wiring changes: re-point a pad from
+/// CH1 to CH2 and `DUTY_CH1_PCT` becomes `DUTY_CH2_PCT` in the block, while the
+/// `init` below still says `DUTY_CH1_PCT` and no longer compiles.
+///
+/// Hence: every generated name is FIXED (`CHANNEL`, `DUTY`, `DUTY_RESOLUTION_BIT`),
+/// and the hardware choice they encode is a plain number. The `u8` → enum
+/// mapping lives below the markers, where the user can read and edit it, and
+/// where a rewrite never reaches.
+///
+/// With SEVERAL pads on one timer the names take a PAD suffix, because several
+/// constants cannot all be called `DUTY`. That suffix moves only when the pad
+/// does — never when a channel is re-pointed, and never when a lower channel is
+/// wired later (which a positional suffix would not survive).
+///
+/// Crossing between one pad and two DOES rename `DUTY` to `DUTY_<pad>`, in
+/// both directions. That is not a regression: adding OR removing a pad already
+/// changes `init`'s signature and its return type, both of which live in the
+/// editable half, so that edit was unavoidable either way. Re-pointing a channel
+/// changed nothing there — and that is the case this exists to fix.
+///
+/// Moving the PWM to a different GPIO renames that pad's constants too. There
+/// is no wiring-independent identity to key on; the pad is simply the one that
+/// survives the edit people actually make.
+fn pwm_file(
+    n: u8,
+    // `(channel, duty in hundredths of a percent, pad)`.
+    chans: &[(u8, u16, String)],
+    cfg: Option<&TimerModuleConfig>,
+    // The highest LEDC channel this CHIP has. `channel::Number::Channel6` is
+    // `#[cfg]`-ed out on the C2/C3/C6/H2, so a match arm naming it there does
+    // not compile — the mapping can only offer what the part carries.
+    max_ch: u8,
+) -> String {
     let freq = cfg.map_or(1_000, |c| c.freq_hz);
-    let bits = ledc_duty_bits(freq);
+    // The module's choice when it has one; otherwise as wide as the frequency
+    // allows, which is what this generated on its own before it was settable.
+    // The window THIS frequency allows. A pinned resolution is clamped into it
+    // rather than emitted as chosen: the frequency can be raised long after the
+    // width was picked, and `configure(...).unwrap()` would then panic on the
+    // board — a clean build that dies at boot is the worst of the three
+    // outcomes.
+    let widest = ledc_duty_bits(freq) as u8;
+    let narrowest = ledc_min_duty_bits(freq) as u8;
+    let wanted = cfg.and_then(|c| c.duty_res_bits).unwrap_or(widest);
+    let bits = wanted.clamp(narrowest, widest);
 
+    // ── the GENERATED block: fixed names, plain numbers ─────────────────────
     let mut consts = format!("const FREQUENCY_HZ: u32 = {freq};\n");
     // One `push_str` per line on purpose: rustfmt joins a `\`-continued literal
     // and keeps the SOURCE indentation, which drops the `//` off every line but
     // the first — inside a generated file that is a syntax error, not a typo.
-    consts.push_str(
-        "// Duty resolution. Tied to FREQUENCY_HZ: 2^bits must stay under
-",
-    );
-    consts.push_str(
-        "// 80_000_000 / FREQUENCY_HZ (the LEDC runs off the 80 MHz APB
-",
-    );
-    consts.push_str(
-        "// clock), or `configure` returns Err(Divisor). Change one, check
-",
-    );
-    consts.push_str(
-        "// the other.
-",
-    );
-    consts.push_str(&format!(
-        "const DUTY_RESOLUTION: timer::config::Duty = timer::config::Duty::Duty{bits}Bit;\n"
-    ));
-    // esp-hal takes duty in WHOLE percent, so a module set to 7.5 % cannot be
-    // carried across as-is. Say so in the file rather than silently rounding.
-    for (ch, x100) in chans {
+    consts.push_str("// Duty resolution in BITS. Tied to FREQUENCY_HZ: 2^bits must stay\n");
+    consts.push_str("// under 80_000_000 / FREQUENCY_HZ (the LEDC runs off the 80 MHz APB\n");
+    consts.push_str("// clock), or `configure` returns Err(Divisor). Change one, check the\n");
+    consts.push_str("// other. `get_duty_resolution_bit()` below turns it into the enum.\n");
+    consts.push_str(&format!("const DUTY_RESOLUTION_BIT: u8 = {bits};"));
+    // Reduced in the open, never in silence.
+    if bits != wanted {
+        consts.push_str(&format!(
+            " // {wanted} does not fit {freq} Hz - {narrowest}..={widest} does"
+        ));
+    }
+    consts.push('\n');
+
+    let one = chans.len() == 1;
+    // With one pad there is no suffix at all — which is the whole point: the
+    // name cannot move because there is nothing in it to move.
+    //
+    // With several, the suffix is the PAD, never the channel and never the
+    // position. The pad is the one identity that survives the edit this exists
+    // to fix (re-pointing a pad at another channel), and it also survives a
+    // LOWER channel being wired later, which would shift every position.
+    let sfx = |pad: &str| {
+        if one {
+            String::new()
+        } else {
+            format!("_{}", pad.to_ascii_uppercase())
+        }
+    };
+    let lsfx = |pad: &str| {
+        if one {
+            String::new()
+        } else {
+            format!("_{}", pad.to_ascii_lowercase())
+        }
+    };
+
+    for (ch, x100, pad) in chans {
+        consts.push_str(&format!(
+            "// Which LEDC channel this pad drives, 0..={max_ch}.\n"
+        ));
+        consts.push_str(&format!("const CHANNEL{}: u8 = {ch};\n", sfx(pad)));
         let pct = (*x100 as u32).div_ceil(100).min(100);
-        consts.push_str(&format!("const DUTY_CH{ch}_PCT: u8 = {pct};"));
+        consts.push_str(&format!("const DUTY{}: u8 = {pct};", sfx(pad)));
+        // esp-hal takes duty in WHOLE percent, so a module set to 7.5 % cannot
+        // be carried across as-is. Say so in the file rather than rounding in
+        // silence.
         if x100 % 100 != 0 {
             consts.push_str(&format!(
                 " // {}.{:02} % rounded up — esp-hal's LEDC takes whole percent",
@@ -3011,150 +3095,181 @@ fn pwm_file(n: u8, chans: &[(u8, u16)], cfg: Option<&TimerModuleConfig>) -> Stri
         consts.push('\n');
     }
 
-    let mut params = String::new();
-    let mut body = String::new();
-    let mut rets = Vec::new();
-    for (ch, _) in chans {
-        params.push_str(&format!("    ch{ch}: impl PeripheralOutput<'d>,\n"));
-        body.push_str(&format!(
-            "    let mut ch{ch} = ledc.channel(channel::Number::Channel{ch}, ch{ch});\n\
-             \x20   ch{ch}\n\
-             \x20       .configure(channel::config::Config {{\n\
-             \x20           timer,\n\
-             \x20           duty_pct: DUTY_CH{ch}_PCT,\n\
-             \x20           drive_mode: DriveMode::PushPull,\n\
-             \x20       }})\n\
-             \x20       .unwrap();\n"
+    // ── the editable zone ───────────────────────────────────────────────────
+    let mut func = String::new();
+    func.push_str("/// The `Duty` variant `DUTY_RESOLUTION_BIT` names.\n");
+    func.push_str("///\n");
+    func.push_str("/// The constant is a plain `u8` so the Virtual Module can rewrite it\n");
+    func.push_str("/// without touching this mapping, which is yours.\n");
+    func.push_str("const fn get_duty_resolution_bit() -> timer::config::Duty {\n");
+    func.push_str("    match DUTY_RESOLUTION_BIT {\n");
+    for b in 1..=14u8 {
+        // 8 is the fallback arm, so it is not listed twice.
+        if b == 8 {
+            continue;
+        }
+        func.push_str(&format!(
+            "        {b} => timer::config::Duty::Duty{b}Bit,\n"
         ));
-        rets.push(format!("ch{ch}"));
     }
-    // One channel is a bare value, not a 1-tuple — same rule the STM32 pin
-    // tuples follow, and it keeps the common case readable.
-    let (ret_ty, ret_expr) = if rets.len() == 1 {
-        ("channel::Channel<'d, LowSpeed>".to_owned(), rets[0].clone())
-    } else {
-        (
-            format!(
-                "({})",
-                vec!["channel::Channel<'d, LowSpeed>"; rets.len()].join(", ")
-            ),
-            format!("({})", rets.join(", ")),
-        )
-    };
+    func.push_str("        _ => timer::config::Duty::Duty8Bit,\n");
+    func.push_str("    }\n}\n\n");
 
+    for (_, _, pad) in chans {
+        func.push_str(&format!(
+            "/// The `channel::Number` `CHANNEL{}` names.\n",
+            sfx(pad)
+        ));
+        func.push_str(&format!(
+            "fn get_channel{}() -> channel::Number {{\n    match CHANNEL{} {{\n",
+            lsfx(pad),
+            sfx(pad)
+        ));
+        for c in 1..=max_ch {
+            func.push_str(&format!("        {c} => channel::Number::Channel{c},\n"));
+        }
+        func.push_str("        _ => channel::Number::Channel0,\n");
+        func.push_str("    }\n}\n\n");
+    }
+
+    // The handle + duty helper, the same shape the STM32 backends expose so a
+    // call site reads alike. THREE things differ, and esp-hal forces all of
+    // them: `set_duty` takes `&self`, it returns a `Result` (a duty the
+    // resolution cannot express is a real failure, not something to swallow),
+    // and the channel is part of the METHOD NAME rather than an argument,
+    // because one `Channel` value owns exactly one channel.
+    let one_ty = "channel::Channel<'d, LowSpeed>";
+    let handle_ty = if one {
+        one_ty.to_owned()
+    } else {
+        format!("({})", vec![one_ty; chans.len()].join(", "))
+    };
+    func.push_str("/// What `init` hands back.\n");
+    func.push_str(&format!("pub type Handle<'d> = {handle_ty};\n\n"));
+    func.push_str("/// Hundredths of a percent into the whole percent esp-hal's LEDC takes,\n");
+    func.push_str("/// rounded UP and clamped — the same rounding the `DUTY` constants show.\n");
+    func.push_str("fn whole_percent(x100: u32) -> u8 {\n");
+    func.push_str("    x100.div_ceil(100).min(100) as u8\n");
+    func.push_str("}\n\n");
+    func.push_str("/// Set the duty in the units the Virtual Module uses — HUNDREDTHS of a\n");
+    func.push_str("/// percent — so a value read off its slider means the same thing here.\n");
+    func.push_str("pub trait DutyHandle {\n");
+    for (_, _, pad) in chans {
+        func.push_str(&format!(
+            "    fn set_duty_x100{}(&self, value: u32) -> Result<(), channel::Error>;\n",
+            lsfx(pad)
+        ));
+    }
+    func.push_str("}\n\n");
+    func.push_str("impl DutyHandle for Handle<'_> {\n");
+    for (i, (_, _, pad)) in chans.iter().enumerate() {
+        // The tuple FIELD is positional even though the method name is not: the
+        // return type is a tuple, and that is how a tuple is indexed.
+        let this = if one {
+            "self".to_owned()
+        } else {
+            format!("self.{i}")
+        };
+        if i > 0 {
+            func.push('\n');
+        }
+        func.push_str(&format!(
+            "    fn set_duty_x100{}(&self, value: u32) -> Result<(), channel::Error> {{\n",
+            lsfx(pad)
+        ));
+        func.push_str(&format!(
+            "        {this}.set_duty(whole_percent(value))\n    }}\n"
+        ));
+    }
+    func.push_str("}\n\n");
+
+    // The PADS, not the channels: this line sits in the editable half, and a
+    // channel number here would move with the wiring exactly like the constant
+    // names used to.
     let list = chans
         .iter()
-        .map(|(c, _)| format!("CH{c}"))
+        .map(|(_, _, pad)| pad.clone())
         .collect::<Vec<_>>()
         .join("+");
-    let handle = format!("_pwm{n}");
-    let mut func = format!(
-        "/// The LEDC timer PWM{n} runs on. One frequency for every channel on it.\n\
-         ///\n\
-         /// `main.rs` keeps the value alive and lends it to `init` — the channels\n\
-         /// hold a reference to it for as long as they exist.\n\
-         pub fn timer<'d>(ledc: &Ledc<'d>) -> timer::Timer<'d, LowSpeed> {{\n\
-         \x20   let mut t = ledc.timer::<LowSpeed>(timer::Number::Timer{n});\n\
-         \x20   t.configure(timer::config::Config {{\n\
-         \x20       duty: DUTY_RESOLUTION,\n\
-         \x20       clock_source: timer::LSClockSource::APBClk,\n\
-         \x20       frequency: Rate::from_hz(FREQUENCY_HZ),\n\
-         \x20   }})\n\
-         \x20   .unwrap();\n\
-         \x20   t\n\
-         }}\n\
-         \n\
-         /// PWM{n} {list} — the channels wired on the canvas, at their module duty.\n\
-         pub fn init<'d>(\n\
-         \x20   ledc: &Ledc<'d>,\n\
-         \x20   timer: &'d timer::Timer<'d, LowSpeed>,\n\
-         {params}) -> {ret_ty} {{\n\
-         {body}\x20   {ret_expr}\n\
-         }}\n"
-    );
+    func.push_str(&format!(
+        "/// The LEDC timer PWM{n} runs on. One frequency for every channel on it.\n"
+    ));
+    func.push_str("///\n");
+    func.push_str("/// `main.rs` keeps the value alive and lends it to `init` — the channels\n");
+    func.push_str("/// hold a reference to it for as long as they exist.\n");
+    func.push_str("pub fn timer<'d>(ledc: &Ledc<'d>) -> timer::Timer<'d, LowSpeed> {\n");
+    func.push_str(&format!(
+        "    let mut t = ledc.timer::<LowSpeed>(timer::Number::Timer{n});\n"
+    ));
+    func.push_str("    t.configure(timer::config::Config {\n");
+    func.push_str("        duty: get_duty_resolution_bit(),\n");
+    func.push_str("        clock_source: timer::LSClockSource::APBClk,\n");
+    func.push_str("        frequency: Rate::from_hz(FREQUENCY_HZ),\n");
+    func.push_str("    })\n    .unwrap();\n    t\n}\n\n");
 
-    let first = chans.first().map(|(c, _)| *c).unwrap_or(0);
-
-    // The same duty trait the STM32 backends generate, so a call site reads the
-    // same on any chip. TWO things about it differ, and esp-hal forces both:
-    // `set_duty` takes `&self`, and it returns a `Result` \u{2014} a duty above what
-    // DUTY_RESOLUTION allows is a real failure, and swallowing it inside a
-    // generated helper would hide it.
-    if !chans.is_empty() {
-        func.push_str(
-            "\n/// Hundredths of a percent into the whole percent esp-hal's LEDC takes,\n",
-        );
-        func.push_str("/// rounded UP and clamped \u{2014} the same rounding the `DUTY_CH*_PCT`\n");
-        func.push_str("/// constants above already show.\n");
-        func.push_str("fn whole_percent(x100: u32) -> u8 {\n");
-        func.push_str("    x100.div_ceil(100).min(100) as u8\n");
-        func.push_str("}\n\n");
-        func.push_str(
-            "/// Set a channel's duty in the same units the STM32 backends use \u{2014}\n",
-        );
-        func.push_str(
-            "/// HUNDREDTHS of a percent \u{2014} so the call site reads the same on any chip.\n",
-        );
-        func.push_str("///\n");
-        func.push_str(
-            "/// The channel is part of the NAME rather than an argument, and the value\n",
-        );
-        func.push_str("/// is rounded UP to whole percent, because that is all the LEDC takes.\n");
+    func.push_str(&format!(
+        "/// PWM{n} {list} — the pads wired on the canvas, each on the channel\n"
+    ));
+    func.push_str("/// its own `CHANNEL` names, at its own `DUTY`.\n");
+    func.push_str("pub fn init<'d>(\n");
+    func.push_str("    ledc: &Ledc<'d>,\n");
+    func.push_str("    timer: &'d timer::Timer<'d, LowSpeed>,\n");
+    for (_, _, pad) in chans {
         func.push_str(&format!(
-            "pub trait DutyHandle {{\n    /// CH{first}, the lowest channel wired to PWM{n}.\n"
+            "    out_pin{}: impl PeripheralOutput<'d>,\n",
+            lsfx(pad)
         ));
-        func.push_str(&format!(
-            "    fn set_duty_tim_{n}(&self, value: u32) -> Result<(), channel::Error>;\n"
-        ));
-        for (c, _) in chans {
-            func.push_str(&format!("\n    /// CH{c}.\n"));
-            func.push_str(&format!(
-                "    fn set_duty_tim_{n}_ch{c}(&self, value: u32) -> Result<(), channel::Error>;\n"
-            ));
-        }
-        func.push_str("}\n\n");
-        func.push_str(&format!("impl<'d> DutyHandle for {ret_ty} {{\n"));
-        func.push_str(&format!(
-            "    fn set_duty_tim_{n}(&self, value: u32) -> Result<(), channel::Error> {{\n"
-        ));
-        func.push_str(&format!(
-            "        self.set_duty_tim_{n}_ch{first}(value)\n    }}\n"
-        ));
-        for (i, (c, _)) in chans.iter().enumerate() {
-            // One channel is a bare value, not a 1-tuple \u{2014} the same rule the
-            // return type follows two dozen lines up.
-            let this = if chans.len() == 1 {
-                "self".to_owned()
-            } else {
-                format!("self.{i}")
-            };
-            func.push_str(&format!(
-                "\n    fn set_duty_tim_{n}_ch{c}(&self, value: u32) -> Result<(), channel::Error> {{\n"
-            ));
-            func.push_str(&format!(
-                "        {this}.set_duty(whole_percent(value))\n    }}\n"
-            ));
-        }
-        func.push_str("}\n");
     }
+    func.push_str(") -> Handle<'d> {\n");
+    let mut rets = Vec::new();
+    for (_, _, pad) in chans {
+        let v = format!("ch{}", lsfx(pad));
+        func.push_str(&format!(
+            "    let mut {v} = ledc.channel(get_channel{}(), out_pin{});\n",
+            lsfx(pad),
+            lsfx(pad)
+        ));
+        func.push_str(&format!("    {v}\n"));
+        func.push_str("        .configure(channel::config::Config {\n");
+        func.push_str("            timer,\n");
+        func.push_str(&format!("            duty_pct: DUTY{},\n", sfx(pad)));
+        func.push_str("            drive_mode: DriveMode::PushPull,\n");
+        func.push_str("        })\n        .unwrap();\n");
+        rets.push(v);
+    }
+    func.push_str(&format!(
+        "    {}\n}}\n",
+        if one {
+            rets[0].clone()
+        } else {
+            format!("({})", rets.join(", "))
+        }
+    ));
+
+    let handle = format!("_pwm{n}");
     let mut usage = vec![
         "In main.rs, after the init above:".to_owned(),
         String::new(),
-        "    // Duty is whole percent, 0..=100.".to_owned(),
+        "    use pins::configs::pwm{N}::DutyHandle as _;".to_owned(),
+        "    use esp_hal::ledc::channel::ChannelIFace as _; // for start_duty_fade".to_owned(),
+        String::new(),
+        "    // Hundredths of a percent — the Virtual Module's own scale.".to_owned(),
     ];
-    if chans.len() == 1 {
-        usage.push("    {H}.set_duty(50).ok();".to_owned());
+    if one {
+        usage.push("    {H}.set_duty_x100(5_000).ok(); // 50 %".to_owned());
     } else {
-        usage.push(format!("    let (ch{first}, ..) = &{{H}};"));
-        usage.push(format!("    ch{first}.set_duty(50).ok();"));
+        usage.push(format!(
+            "    {{H}}.set_duty_x100{}(5_000).ok(); // 50 % on that pad",
+            lsfx(&chans[0].2)
+        ));
     }
     usage.extend([
         String::new(),
         "    // Or let the hardware fade for you — no CPU involved:".to_owned(),
-        if chans.len() == 1 {
+        if one {
             "    {H}.start_duty_fade(0, 100, 1000).ok();".to_owned()
         } else {
-            format!("    ch{first}.start_duty_fade(0, 100, 1000).ok();")
+            "    {H}.0.start_duty_fade(0, 100, 1000).ok();".to_owned()
         },
     ]);
     let usage: Vec<&str> = usage.iter().map(String::as_str).collect();
@@ -3165,7 +3280,8 @@ fn pwm_file(n: u8, chans: &[(u8, u16)], cfg: Option<&TimerModuleConfig>) -> Stri
         &usage,
         &usage,
         EspRuntime::Blocking,
-    );
+    )
+    .replace("{N}", &n.to_string());
 
     file(
         "use esp_hal::gpio::DriveMode;\n\
@@ -3241,8 +3357,12 @@ pub fn config_files(
     esp32_mclk: bool,
     // LEDC timer → the channels wired on it, with each channel duty in
     // hundredths of a percent.
-    pwm: &[(u8, Vec<(u8, u16)>)],
+    pwm: &[(u8, Vec<(u8, u16, String)>)],
     timer_cfg: &BTreeMap<u8, TimerModuleConfig>,
+    // The highest LEDC channel THIS chip carries: `channel::Number::Channel6`
+    // does not exist on a C2/C3/C6/H2, so the generated mapping can only offer
+    // what the part has.
+    pwm_max_ch: u8,
     rt: EspRuntime,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -3331,7 +3451,10 @@ pub fn config_files(
         ));
     }
     for (n, chans) in pwm {
-        out.push((format!("pwm{n}.rs"), pwm_file(*n, chans, timer_cfg.get(n))));
+        out.push((
+            format!("pwm{n}.rs"),
+            pwm_file(*n, chans, timer_cfg.get(n), pwm_max_ch),
+        ));
     }
     out
 }
@@ -3547,16 +3670,9 @@ mod tests {
         let mut cfg = TimerModuleConfig::new(0);
         cfg.freq_hz = 20_000;
         cfg.set_duty_x100(1, 2_000);
-        let f = pwm_file(0, &[(1, 2_000)], Some(&cfg));
+        let f = pwm_file(0, &[(1, 2_000, "GPIO19".into())], Some(&cfg), 5);
 
         assert!(f.contains("const FREQUENCY_HZ: u32 = 20000;"), "{f}");
-        assert!(
-            f.contains(
-                "const DUTY_RESOLUTION: timer::config::Duty = timer::config::Duty::Duty11Bit;"
-            ),
-            "{f}"
-        );
-        assert!(f.contains("const DUTY_CH1_PCT: u8 = 20;"), "{f}");
         assert!(
             f.contains("pub fn timer<'d>(ledc: &Ledc<'d>) -> timer::Timer<'d, LowSpeed>"),
             "{f}"
@@ -3564,49 +3680,184 @@ mod tests {
         assert!(f.contains("timer::Number::Timer0"), "{f}");
         // The channel takes the timer BY REFERENCE, for its own lifetime.
         assert!(f.contains("timer: &'d timer::Timer<'d, LowSpeed>,"), "{f}");
-        assert!(f.contains("channel::Number::Channel1"), "{f}");
         // One channel is a bare value, not a 1-tuple.
-        assert!(f.contains(") -> channel::Channel<'d, LowSpeed> {"), "{f}");
+        assert!(
+            f.contains("pub type Handle<'d> = channel::Channel<'d, LowSpeed>;"),
+            "{f}"
+        );
+        assert!(f.contains(") -> Handle<'d> {"), "{f}");
+    }
+
+    /// The names in the GENERATED block carry NO channel number, because only
+    /// that block is rewritten: a name that moved with the wiring would leave
+    /// the user's own `init` below pointing at a constant that no longer exists.
+    #[test]
+    fn the_generated_names_do_not_move_with_the_channel() {
+        let one = |ch: u8| pwm_file(0, &[(ch, 2_000, "GPIO19".into())], None, 5);
+        let a = one(1);
+        let b = one(2);
+
+        for f in [&a, &b] {
+            assert!(f.contains("const DUTY: u8 = 20;"), "{f}");
+            assert!(f.contains("const DUTY_RESOLUTION_BIT: u8 = "), "{f}");
+            // The old, channel-bearing spellings are gone for good.
+            assert!(!f.contains("DUTY_CH"), "{f}");
+            assert!(!f.contains("const DUTY_RESOLUTION:"), "{f}");
+        }
+        // Only the VALUE moves.
+        assert!(a.contains("const CHANNEL: u8 = 1;"), "{a}");
+        assert!(b.contains("const CHANNEL: u8 = 2;"), "{b}");
+
+        // Everything outside the marker block is byte-identical between the two
+        // — which is the property that keeps a re-wire from breaking the file.
+        let tail = |f: &str| {
+            f.split("// <<< GENERATED END >>>")
+                .nth(1)
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(tail(&a), tail(&b), "the editable half must not move");
+    }
+
+    /// The `u8` → enum mappings live BELOW the markers, where a rewrite never
+    /// reaches, and only offer what the chip has.
+    #[test]
+    fn the_mappings_are_editable_and_chip_bounded() {
+        let f = pwm_file(0, &[(1, 2_000, "GPIO19".into())], None, 5);
+        let editable = f.split("// <<< GENERATED END >>>").nth(1).unwrap();
+
+        assert!(editable.contains("const fn get_duty_resolution_bit() -> timer::config::Duty {"));
+        assert!(editable.contains("11 => timer::config::Duty::Duty11Bit,"));
+        // 8 is the fallback arm, so it is never listed twice.
+        assert_eq!(editable.matches("Duty8Bit").count(), 1, "{editable}");
+        assert!(editable.contains("_ => timer::config::Duty::Duty8Bit,"));
+        // 15..=20 exist only on the esp32, so they are never named.
+        assert!(!f.contains("Duty15Bit"), "{f}");
+
+        assert!(editable.contains("fn get_channel() -> channel::Number {"));
+        assert!(editable.contains("5 => channel::Number::Channel5,"));
+        assert!(editable.contains("_ => channel::Number::Channel0,"));
+        // A C3 has no Channel6 — naming it would not compile there.
+        assert!(!f.contains("Channel6"), "{f}");
+        assert!(f.contains("ledc.channel(get_channel(), out_pin)"), "{f}");
+
+        // A part that HAS more channels gets the wider mapping.
+        let wide = pwm_file(0, &[(1, 0, "GPIO19".into())], None, 7);
+        assert!(wide.contains("7 => channel::Number::Channel7,"), "{wide}");
+    }
+
+    /// The module's own resolution wins when it has one; otherwise the widest
+    /// the frequency allows, which is what this computed before it was settable.
+    #[test]
+    fn the_module_can_pin_the_duty_resolution() {
+        let mut cfg = TimerModuleConfig::new(0);
+        cfg.freq_hz = 20_000;
+        let derived = pwm_file(0, &[(1, 0, "GPIO19".into())], Some(&cfg), 5);
+        assert!(
+            derived.contains("const DUTY_RESOLUTION_BIT: u8 = 11;"),
+            "{derived}"
+        );
+
+        cfg.duty_res_bits = Some(8);
+        let pinned = pwm_file(0, &[(1, 0, "GPIO19".into())], Some(&cfg), 5);
+        assert!(
+            pinned.contains("const DUTY_RESOLUTION_BIT: u8 = 8;"),
+            "{pinned}"
+        );
     }
 
     /// esp-hal's LEDC takes WHOLE percent. A module set to 7.5 % cannot be
     /// carried across, so the file says what it did instead of pretending.
     #[test]
     fn a_fractional_duty_is_rounded_and_says_so() {
-        let f = pwm_file(0, &[(0, 750)], None);
-        assert!(f.contains("const DUTY_CH0_PCT: u8 = 8;"), "{f}");
+        let f = pwm_file(0, &[(0, 750, "GPIO19".into())], None, 5);
+        assert!(f.contains("const DUTY: u8 = 8;"), "{f}");
         assert!(
             f.contains("7.50 % rounded up — esp-hal's LEDC takes whole percent"),
             "{f}"
         );
         // A whole percent gets no note — there is nothing to explain.
-        let f = pwm_file(0, &[(0, 2_000)], None);
-        assert!(f.contains("const DUTY_CH0_PCT: u8 = 20;\n"), "{f}");
+        let f = pwm_file(0, &[(0, 2_000, "GPIO19".into())], None, 5);
+        assert!(f.contains("const DUTY: u8 = 20;\n"), "{f}");
         assert!(!f.contains("rounded up"), "{f}");
     }
 
-    /// Several channels on one timer come back as a tuple, in channel order.
+    /// Several pads on one timer come back as a tuple, and each name is keyed
+    /// on its PAD — the one identity that survives a channel change.
     #[test]
-    fn several_channels_come_back_as_a_tuple() {
-        let f = pwm_file(0, &[(0, 1_000), (1, 5_000), (2, 0)], None);
+    fn several_channels_are_keyed_on_their_pad() {
+        let chans = vec![
+            (0u8, 1_000u16, "GPIO4".to_owned()),
+            (1, 5_000, "GPIO5".to_owned()),
+            (2, 0, "GPIO6".to_owned()),
+        ];
+        let f = pwm_file(0, &chans, None, 5);
         assert!(
             f.contains(
-                ") -> (channel::Channel<'d, LowSpeed>, channel::Channel<'d, LowSpeed>, \
-                 channel::Channel<'d, LowSpeed>) {"
+                "pub type Handle<'d> = (channel::Channel<'d, LowSpeed>, \
+                 channel::Channel<'d, LowSpeed>, channel::Channel<'d, LowSpeed>);"
             ),
             "{f}"
         );
-        assert!(f.contains("    (ch0, ch1, ch2)\n"), "{f}");
-        for ch in 0..3 {
-            assert!(f.contains(&format!("channel::Number::Channel{ch}")), "{f}");
+        for pad in ["GPIO4", "GPIO5", "GPIO6"] {
+            // Constants shout; functions and parameters are snake_case, or the
+            // generated file warns on every one of them.
+            let low = pad.to_ascii_lowercase();
+            assert!(f.contains(&format!("const CHANNEL_{pad}: u8 = ")), "{f}");
+            assert!(f.contains(&format!("const DUTY_{pad}: u8 = ")), "{f}");
+            assert!(
+                f.contains(&format!("fn get_channel_{low}() -> channel::Number")),
+                "{f}"
+            );
+            assert!(
+                f.contains(&format!("out_pin_{low}: impl PeripheralOutput<'d>,")),
+                "{f}"
+            );
         }
+        // No SHOUTING identifier anywhere outside a `const` — `non_snake_case`
+        // is a warning the reader cannot answer inside a generated file.
+        for line in f.lines() {
+            let t = line.trim_start();
+            if t.starts_with("const ") {
+                continue;
+            }
+            assert!(!t.contains("GPIO4("), "shouting fn name: {line}");
+            assert!(!t.contains("out_pin_GPIO"), "shouting parameter: {line}");
+        }
+        assert!(f.contains("    (ch_gpio4, ch_gpio5, ch_gpio6)\n"), "{f}");
+        // Re-pointing GPIO5 from CH1 to CH4 moves the VALUE and nothing else.
+        let mut moved = chans.clone();
+        moved[1].0 = 4;
+        let g = pwm_file(0, &moved, None, 5);
+        let tail = |f: &str| {
+            f.split("// <<< GENERATED END >>>")
+                .nth(1)
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(tail(&f), tail(&g), "the editable half must not move");
+        assert!(g.contains("const CHANNEL_GPIO5: u8 = 4;"), "{g}");
+    }
+
+    /// The duty helper speaks the Virtual Module's units, and `set_duty` on ESP
+    /// takes `&self` and returns a `Result` — both unlike the STM32 twin.
+    #[test]
+    fn the_duty_helper_speaks_the_modules_units() {
+        let f = pwm_file(0, &[(1, 2_000, "GPIO19".into())], None, 5);
+        assert!(f.contains("pub trait DutyHandle {"), "{f}");
+        assert!(
+            f.contains("fn set_duty_x100(&self, value: u32) -> Result<(), channel::Error>;"),
+            "{f}"
+        );
+        assert!(f.contains("impl DutyHandle for Handle<'_> {"), "{f}");
+        assert!(f.contains("self.set_duty(whole_percent(value))"), "{f}");
     }
 
     /// Every line of the generated file is a line: no `\`-continued literal has
     /// swallowed a comment marker on its way through rustfmt.
     #[test]
     fn no_generated_comment_lost_its_marker() {
-        let f = pwm_file(0, &[(1, 2_000)], None);
+        let f = pwm_file(0, &[(1, 2_000, "GPIO19".into())], None, 5);
         for line in f.lines() {
             assert!(
                 !line.starts_with(' ') || line.starts_with("    ") || line.starts_with("     "),
@@ -3677,8 +3928,9 @@ mod tests {
             &[1, 2],
             None,
             false,
-            &[(0, vec![(1, 2_000)])],
+            &[(0, vec![(1, 2_000, "GPIO19".to_owned())])],
             &BTreeMap::new(),
+            5,
             EspRuntime::Blocking,
         );
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
@@ -3708,46 +3960,40 @@ mod tests {
 mod esp_duty_handle_tests {
     use super::*;
 
-    /// One channel is a bare `Channel`, not a 1-tuple, so the impl target and
-    /// the method body both lose the index.
-    #[test]
-    fn a_single_channel_impls_on_the_bare_type() {
-        let f = pwm_file(0, &[(2, 750)], None);
-        assert!(
-            f.contains("impl<'d> DutyHandle for channel::Channel<'d, LowSpeed> {"),
-            "{f}"
-        );
-        assert!(
-            f.contains("        self.set_duty(whole_percent(value))"),
-            "{f}"
-        );
-        // CH2 is the only pad, so it is also what the bare method drives.
-        assert!(f.contains("        self.set_duty_tim_0_ch2(value)"), "{f}");
-        for ch in [0, 1, 3] {
-            assert!(!f.contains(&format!("set_duty_tim_0_ch{ch}")), "{f}");
-        }
-    }
-
     /// The trap this test exists for: the TUPLE POSITION is not the channel
-    /// number. CH0+CH2 wired means `self.0` drives CH0 and `self.1` drives CH2;
-    /// writing `self.2` there would compile on a 3-channel timer and drive the
-    /// wrong pad on this one.
+    /// number, and it is not the pad either. CH0 on GPIO4 + CH2 on GPIO6 means
+    /// `self.0` drives GPIO4 and `self.1` drives GPIO6 — while the METHOD names
+    /// stay keyed on the pad, so neither moves when a channel is re-pointed.
     #[test]
-    fn the_tuple_index_is_the_position_not_the_channel() {
-        let f = pwm_file(0, &[(0, 1_000), (2, 5_000)], None);
+    fn the_tuple_index_is_the_position_not_the_pad() {
+        let f = pwm_file(
+            0,
+            &[
+                (0, 1_000, "GPIO4".to_owned()),
+                (2, 5_000, "GPIO6".to_owned()),
+            ],
+            None,
+            5,
+        );
         assert!(
             f.contains(
-                "_ch0(&self, value: u32) -> Result<(), channel::Error> {\n        self.0.set_duty("
+                "_gpio4(&self, value: u32) -> Result<(), channel::Error> {
+        self.0.set_duty("
             ),
             "{f}"
         );
         assert!(
             f.contains(
-                "_ch2(&self, value: u32) -> Result<(), channel::Error> {\n        self.1.set_duty("
+                "_gpio6(&self, value: u32) -> Result<(), channel::Error> {
+        self.1.set_duty("
             ),
             "{f}"
         );
-        assert!(!f.contains("self.2."), "there is no third channel:\n{f}");
+        assert!(
+            !f.contains("self.2."),
+            "there is no third channel:
+{f}"
+        );
     }
 
     /// esp-hal takes WHOLE percent, so the trait rounds up rather than losing
@@ -3755,10 +4001,10 @@ mod esp_duty_handle_tests {
     /// a duty the resolution cannot hold.
     #[test]
     fn the_duty_is_rounded_up_and_the_result_survives() {
-        let f = pwm_file(0, &[(0, 750)], None);
+        let f = pwm_file(0, &[(0, 750, "GPIO19".into())], None, 5);
         assert!(f.contains("    x100.div_ceil(100).min(100) as u8"), "{f}");
         assert!(
-            f.contains("fn set_duty_tim_0(&self, value: u32) -> Result<(), channel::Error>;"),
+            f.contains("fn set_duty_x100(&self, value: u32) -> Result<(), channel::Error>;"),
             "{f}"
         );
     }
