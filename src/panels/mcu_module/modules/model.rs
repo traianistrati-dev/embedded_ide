@@ -432,11 +432,20 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::TimerPwm { timer, channel } => (
             GenericInterfaceTimer,
             *timer,
+            // 0..=7 covers every channel any supported part has: four on an
+            // STM32 timer (1..=4), eight on the ESP's LEDC (0..=7). The
+            // catch-all is the eighth rather than a silent fold, so a part with
+            // a ninth channel would land on CH7 and be visibly wrong instead of
+            // quietly sharing a name with CH4.
             match channel {
+                0 => PwmCh0,
                 1 => PwmCh1,
                 2 => PwmCh2,
                 3 => PwmCh3,
-                _ => PwmCh4,
+                4 => PwmCh4,
+                5 => PwmCh5,
+                6 => PwmCh6,
+                _ => PwmCh7,
             },
         ),
         // The break pad joins the timer it protects.
@@ -940,10 +949,21 @@ pub enum ModuleSignal {
     SdD6,
     SdD7,
     // PWM — one per timer channel.
+    //
+    // Eight, not four. An STM32 timer has four, and this list used to stop
+    // there; the ESP's LEDC has six or eight, and every channel past the fourth
+    // was folded into `PwmCh4` by the catch-all in `module_signal_of`. The pins
+    // were right (`codegen_esp::pwm_channels` reads them, not this), but every
+    // panel row that reads a module's connections named them wrong: wire CH0 and
+    // it said CH4.
+    PwmCh0,
     PwmCh1,
     PwmCh2,
     PwmCh3,
     PwmCh4,
+    PwmCh5,
+    PwmCh6,
+    PwmCh7,
     // …and their complementary halves. A separate signal rather than a flag on
     // the channel, because the pad is a different pin with its own wire.
     PwmCh1N,
@@ -1169,10 +1189,14 @@ impl ModuleSignal {
             ModuleSignal::SdD5 => "D5",
             ModuleSignal::SdD6 => "D6",
             ModuleSignal::SdD7 => "D7",
+            ModuleSignal::PwmCh0 => "CH0",
             ModuleSignal::PwmCh1 => "CH1",
             ModuleSignal::PwmCh2 => "CH2",
             ModuleSignal::PwmCh3 => "CH3",
             ModuleSignal::PwmCh4 => "CH4",
+            ModuleSignal::PwmCh5 => "CH5",
+            ModuleSignal::PwmCh6 => "CH6",
+            ModuleSignal::PwmCh7 => "CH7",
             ModuleSignal::PwmCh1N => "CH1N",
             ModuleSignal::PwmCh2N => "CH2N",
             ModuleSignal::PwmCh3N => "CH3N",
@@ -1611,6 +1635,10 @@ impl ModuleSignal {
                 lane: 7,
             },
             // `instance` is the TIMER for these, and the variant is the channel.
+            ModuleSignal::PwmCh0 => PinFunction::TimerPwm {
+                timer: instance,
+                channel: 0,
+            },
             ModuleSignal::PwmCh1 => PinFunction::TimerPwm {
                 timer: instance,
                 channel: 1,
@@ -1626,6 +1654,18 @@ impl ModuleSignal {
             ModuleSignal::PwmCh4 => PinFunction::TimerPwm {
                 timer: instance,
                 channel: 4,
+            },
+            ModuleSignal::PwmCh5 => PinFunction::TimerPwm {
+                timer: instance,
+                channel: 5,
+            },
+            ModuleSignal::PwmCh6 => PinFunction::TimerPwm {
+                timer: instance,
+                channel: 6,
+            },
+            ModuleSignal::PwmCh7 => PinFunction::TimerPwm {
+                timer: instance,
+                channel: 7,
             },
             ModuleSignal::PwmCh1N => PinFunction::TimerPwmN {
                 timer: instance,

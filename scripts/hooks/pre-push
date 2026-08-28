@@ -238,6 +238,21 @@ if [ -n "$verify_sha" ]; then
     fi
 fi
 
+# Ask the script that will actually RUN whether it knows the flag.
+#
+# This hook comes from the working tree (`core.hooksPath` points there), but the
+# script comes from the worktree at the pushed sha — two revisions of one pair.
+# Push a commit from before `-Hook` existed and the flag reaches a script that
+# refuses it; a pre-push hook that errors ABORTS THE PUSH, so a speed
+# optimisation would have become a wall you cannot push through.
+#
+# Degrade to the full set, the same way a worktree we cannot create degrades to
+# the working tree: slower is a nuisance, blocked is a regression.
+if [ -n "$hook_arg" ] && ! grep -q 'string\[\]\]\$Hook' scripts/verify-codegen.ps1 2>/dev/null; then
+    echo "pre-push: this revision's verify-codegen.ps1 predates -Hook - running the full set"
+    hook_arg=""
+fi
+
 echo "pre-push: cross-compiling the generated projects…"
 if [ -n "$hook_arg" ]; then
     echo "pre-push: only $hook_arg touched - one representative case each"
