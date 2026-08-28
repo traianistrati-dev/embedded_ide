@@ -42,7 +42,7 @@ impl Mcu {
             // A ball-grid package has no edge pins to size the body from — the
             // body must instead be big enough to HOLD the grid.
             Some(g) => layout::calculate_grid_layout(geometry::grid_body_size(g)),
-            None => layout::calculate_layout(top_count, left_count),
+            None => layout::calculate_layout(top_count, left_count, geometry::top_pad(self)),
         };
 
         // Diagram rotation (view-only): a 2-sided chip turns 90°, a 4-sided one
@@ -114,9 +114,15 @@ impl Mcu {
         };
 
         // ── Chip body ───────────────────────────────────────────────────────
+        // A board is a PCB with a chip on it, and it says so in one colour.
+        let body_fill = if self.board_chip.is_some() {
+            chip::BOARD_FILL
+        } else {
+            chip::CHIP_FILL
+        };
         match rot_mode {
             rotate::RotMode::Diamond => chip::draw_chip_body_diamond(&painter, local_chip, rot),
-            _ => chip::draw_chip_body(&painter, display_chip),
+            _ => chip::draw_chip_body(&painter, display_chip, body_fill),
         }
 
         // ── Pins + click detection ───────────────────────────────────────────
@@ -182,11 +188,21 @@ impl Mcu {
             panel::draw_pin_functions(self, &painter, ui, content_rect)
         } else {
             if !self.has_inner_pins() {
+                const NAME_PT: f32 = 22.0;
+                // The board's own furniture goes UNDER the name, so a long name
+                // stays readable across the chip square rather than behind it.
+                chip::draw_board_features(
+                    &painter,
+                    self,
+                    display_chip,
+                    content_rect.center(),
+                    NAME_PT,
+                );
                 painter.text(
                     content_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     &self.name,
-                    egui::FontId::proportional(22.0),
+                    egui::FontId::proportional(NAME_PT),
                     egui::Color32::WHITE,
                 );
             }

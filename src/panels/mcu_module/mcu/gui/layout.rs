@@ -23,7 +23,13 @@ pub const MIN_BODY_PINS: usize = 3;
 pub const MIN_BODY_PINS_DIP: usize = MIN_BODY_PINS * 3;
 
 /// Calculate chip dimensions and canvas size based on pin counts.
-pub fn calculate_layout(top_count: usize, left_count: usize) -> (f32, f32, f32, f32) {
+/// `top_pad` is the blank slots a BOARD keeps at each end of its top row, so
+/// the body has to be that much wider — see `geometry::BOARD_EDGE_PAD`.
+pub fn calculate_layout(
+    top_count: usize,
+    left_count: usize,
+    top_pad: usize,
+) -> (f32, f32, f32, f32) {
     // No top row → nothing but the floor decides the width, and for a chip whose
     // body has to carry the function list that floor is the wider one.
     let width_floor = if top_count == 0 {
@@ -31,7 +37,7 @@ pub fn calculate_layout(top_count: usize, left_count: usize) -> (f32, f32, f32, 
     } else {
         MIN_BODY_PINS
     };
-    let body_w = top_count.max(width_floor) as f32;
+    let body_w = (top_count + 2 * top_pad).max(width_floor) as f32;
     let body_h = left_count.max(MIN_BODY_PINS) as f32;
     let mcu_width = (body_w * (PIN_WIDTH + PIN_SPACING)) + PIN_SPACING * 2.0;
     let mcu_height = (body_h * (PIN_WIDTH + PIN_SPACING)) + PIN_SPACING * 2.0;
@@ -56,8 +62,8 @@ mod tests {
     /// body is where the pin-function list lives.
     #[test]
     fn a_dip_body_is_wide_enough_for_the_function_list() {
-        let (dip_w, _, _, _) = calculate_layout(0, 20);
-        let (min_w, _, _, _) = calculate_layout(3, 20);
+        let (dip_w, _, _, _) = calculate_layout(0, 20, 0);
+        let (min_w, _, _, _) = calculate_layout(3, 20, 0);
         assert!(
             (dip_w / min_w - 3.0).abs() < 0.15,
             "3x the old width: {dip_w} vs {min_w}"
@@ -71,11 +77,11 @@ mod tests {
     /// so nothing about the existing chips moves.
     #[test]
     fn a_quad_package_keeps_its_pin_derived_width() {
-        let (w12, _, _, _) = calculate_layout(12, 12);
-        let (w3, _, _, _) = calculate_layout(3, 12);
+        let (w12, _, _, _) = calculate_layout(12, 12, 0);
+        let (w3, _, _, _) = calculate_layout(3, 12, 0);
         assert!(w12 > w3, "12 top pins are wider than 3");
         // The floor still applies below it, exactly as before.
-        assert_eq!(calculate_layout(1, 12).0, w3);
+        assert_eq!(calculate_layout(1, 12, 0).0, w3);
     }
 }
 

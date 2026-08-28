@@ -87,8 +87,29 @@ fn offset(i: usize) -> f32 {
     PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING)
 }
 
-/// Geometry of the `i`-th pin on `side`.
-fn geom<'a>(side: PinSide, i: usize, pin: &'a Pin, chip: egui::Rect) -> PinGeom<'a> {
+/// Blank slots kept at each end of a BOARD's top/bottom row.
+///
+/// The pads there are not on the header — they are chip pins the PCB routes
+/// elsewhere — and butting them against the board edge read as though they
+/// continued the numbered header. Two empty widths each side says "these are
+/// somewhere else on the board" without a word of explanation.
+pub const BOARD_EDGE_PAD: usize = 2;
+
+/// How far in the top and bottom rows start, in pin slots.
+///
+/// A board pads; a bare chip does not. Read from the same field the green fill
+/// and the chip square read, so the three cannot disagree about what a board is.
+pub fn top_pad(mcu: &Mcu) -> usize {
+    if mcu.board_chip.is_some() {
+        BOARD_EDGE_PAD
+    } else {
+        0
+    }
+}
+
+/// Geometry of the `i`-th pin on `side`. `pad` shifts the top and bottom rows
+/// inward; it is zero for a bare chip, and ignored on the left and right edges.
+fn geom<'a>(side: PinSide, i: usize, pin: &'a Pin, chip: egui::Rect, pad: usize) -> PinGeom<'a> {
     let (rect, outward, num_pos, num_align) = match side {
         PinSide::Right => {
             let y = chip.top() + offset(i);
@@ -115,7 +136,7 @@ fn geom<'a>(side: PinSide, i: usize, pin: &'a Pin, chip: egui::Rect) -> PinGeom<
             )
         }
         PinSide::Top => {
-            let x = chip.left() + offset(i);
+            let x = chip.left() + offset(i + pad);
             (
                 egui::Rect::from_min_size(
                     egui::pos2(x, chip.top() - PIN_HEIGHT),
@@ -127,7 +148,7 @@ fn geom<'a>(side: PinSide, i: usize, pin: &'a Pin, chip: egui::Rect) -> PinGeom<
             )
         }
         PinSide::Bottom => {
-            let x = chip.left() + offset(i);
+            let x = chip.left() + offset(i + pad);
             (
                 egui::Rect::from_min_size(
                     egui::pos2(x, chip.bottom()),
@@ -190,26 +211,27 @@ fn ball_geom<'a>(cell: &'a GridCell, grid: &PinGrid, chip: egui::Rect) -> PinGeo
 /// loops, and allocating a vector for each of those would make a cheap query
 /// quadratic.
 pub fn pin_geometry(mcu: &Mcu, chip: egui::Rect) -> impl Iterator<Item = PinGeom<'_>> {
+    let pad = top_pad(mcu);
     let right = mcu
         .right_pins
         .iter()
         .enumerate()
-        .map(move |(i, p)| geom(PinSide::Right, i, p, chip));
+        .map(move |(i, p)| geom(PinSide::Right, i, p, chip, pad));
     let left = mcu
         .left_pins
         .iter()
         .enumerate()
-        .map(move |(i, p)| geom(PinSide::Left, i, p, chip));
+        .map(move |(i, p)| geom(PinSide::Left, i, p, chip, pad));
     let top = mcu
         .top_pins
         .iter()
         .enumerate()
-        .map(move |(i, p)| geom(PinSide::Top, i, p, chip));
+        .map(move |(i, p)| geom(PinSide::Top, i, p, chip, pad));
     let bottom = mcu
         .bottom_pins
         .iter()
         .enumerate()
-        .map(move |(i, p)| geom(PinSide::Bottom, i, p, chip));
+        .map(move |(i, p)| geom(PinSide::Bottom, i, p, chip, pad));
     // Balls last: they are drawn INSIDE the body, over it.
     let balls = mcu
         .grid
@@ -227,6 +249,79 @@ pub fn grid_body_size(grid: &PinGrid) -> egui::Vec2 {
 /// Placement of one pin by number. `None` if it isn't on this chip.
 pub fn pin_geom(mcu: &Mcu, chip: egui::Rect, number: usize) -> Option<PinGeom<'_>> {
     pin_geometry(mcu, chip).find(|g| g.pin.number == number)
+}
+
+#[cfg(test)]
+mod board_layout {
+    use super::*;
+    use crate::panels::mcu_module::builtins;
+
+    fn board(id: &str) -> Mcu {
+        builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu()
+    }
+
+    /// The four Pico definitions are BOARDS, and say which chip they carry.
+    ///
+    /// One field decides three things that are easy to let drift apart: the
+    /// green fill, the padded top row, and the square with the part number.
+    #[test]
+    fn the_pico_definitions_name_their_chip() {
+        for (id, part) in [
+            ("rp2040_pico", "RP2040"),
+            ("rp2040_pico_w", "RP2040"),
+            ("rp2350_pico2", "RP2350"),
+            ("rp2350_pico2_w", "RP2350"),
+        ] {
+            assert_eq!(board(id).board_chip.as_deref(), Some(part), "{id}");
+        }
+        // A bare part stays a bare part, or every chip turns green.
+        assert_eq!(board("stm32f103c8t6").board_chip, None);
+    }
+
+    /// A board's top row starts two slots in, at BOTH ends.
+    ///
+    /// `_ _ 41 42 43 44 45 _ _` — the pads there are not on the header, and
+    /// running them to the board edge read as though they continued it.
+    #[test]
+    fn a_boards_top_row_is_inset_at_both_ends() {
+        let mcu = board("rp2350_pico2_w");
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 900.0));
+        assert_eq!(top_pad(&mcu), BOARD_EDGE_PAD);
+
+        let tops: Vec<f32> = pin_geometry(&mcu, rect)
+            .filter(|g| g.side() == Some(PinSide::Top))
+            .map(|g| g.rect.left())
+            .collect();
+        assert!(!tops.is_empty(), "the W board has off-header pads");
+        let first = tops.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(
+            (first - (rect.left() + offset(BOARD_EDGE_PAD))).abs() < 0.01,
+            "first top pad sits {BOARD_EDGE_PAD} slots in, not at {first}"
+        );
+
+        // A bare chip is NOT inset — the padding is a property of boards.
+        let chip = board("stm32f103c8t6");
+        assert_eq!(top_pad(&chip), 0);
+    }
+
+    /// And the body grows by the padding, rather than squeezing the pins.
+    #[test]
+    fn the_body_carries_the_padding() {
+        use super::super::layout::calculate_layout;
+        let (bare, ..) = calculate_layout(5, 20, 0);
+        let (padded, ..) = calculate_layout(5, 20, BOARD_EDGE_PAD);
+        let slot = PIN_WIDTH + PIN_SPACING;
+        assert!(
+            (padded - bare - 2.0 * BOARD_EDGE_PAD as f32 * slot).abs() < 0.01,
+            "the board is {} wider, want {} slots",
+            padded - bare,
+            2 * BOARD_EDGE_PAD
+        );
+    }
 }
 
 #[cfg(test)]

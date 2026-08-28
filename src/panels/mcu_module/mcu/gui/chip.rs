@@ -77,16 +77,88 @@ fn dimmed(painter: &egui::Painter, dim: bool) -> egui::Painter {
 /// Opacity of a pin filtered out by the search box.
 const SEARCH_DIM: f32 = 0.3;
 
-/// Draw the chip body (gray rectangle).
-pub fn draw_chip_body(painter: &egui::Painter, chip_rect: egui::Rect) {
-    painter.rect_filled(chip_rect, 4.0, egui::Color32::from_rgb(45, 45, 55));
+/// A bare chip's body — dark grey plastic.
+pub const CHIP_FILL: egui::Color32 = egui::Color32::from_rgb(45, 45, 55);
+
+/// A BOARD's body — green solder mask. The pins along its edges are header
+/// positions, not chip pins, and the diagram should not have to say so twice.
+pub const BOARD_FILL: egui::Color32 = egui::Color32::from_rgb(18, 92, 40);
+
+/// The parts of a BOARD that are not pins: the chip, and the radio can.
+///
+/// Drawn from the SAME rect the name is centred in, and the radio's height from
+/// the pins it actually sits between — so the two move together when the body
+/// is resized rather than drifting apart at some zoom nobody tested.
+///
+/// `name_rect` is where the board name will be written; the chip square sits
+/// above it and the radio below.
+pub fn draw_board_features(
+    painter: &egui::Painter,
+    mcu: &crate::panels::mcu_module::Mcu,
+    chip_rect: egui::Rect,
+    name_center: egui::Pos2,
+    name_height: f32,
+) {
+    let Some(part) = mcu.board_chip.as_deref() else {
+        return;
+    };
+
+    // ── The chip itself ─────────────────────────────────────────────────────
+    // A square, because a package is square-ish and because the label inside it
+    // has to stay readable when the board is narrow.
+    let side = (chip_rect.width() * 0.42).clamp(48.0, 150.0);
+    let chip_sq = egui::Rect::from_center_size(
+        egui::pos2(
+            name_center.x,
+            name_center.y - name_height * 0.5 - side * 0.62,
+        ),
+        egui::vec2(side, side),
+    );
+    painter.rect_filled(chip_sq, 3.0, CHIP_FILL);
+    painter.text(
+        chip_sq.center(),
+        egui::Align2::CENTER_CENTER,
+        part,
+        egui::FontId::proportional((side * 0.22).clamp(9.0, 20.0)),
+        egui::Color32::WHITE,
+    );
+
+    // ── The radio can, on the boards that have one ──────────────────────────
+    // Keyed on the WL_ pads rather than on the name: a board carrying the radio
+    // has to describe those pads anyway, so there is nothing extra to get wrong.
+    if !mcu.iter_all_pins().any(|p| p.name.starts_with("WL_")) {
+        return;
+    }
+    // Between header pins 13 and 17 — where the module sits on the real board.
+    let edge = |n: usize| super::geometry::pin_geom(mcu, chip_rect, n).map(|g| g.rect.center().y);
+    let (Some(top), Some(bottom)) = (edge(RADIO_TOP_PIN), edge(RADIO_BOTTOM_PIN)) else {
+        return;
+    };
+    let w = chip_rect.width() * 0.60;
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(chip_rect.center().x - w * 0.5, top),
+            egui::pos2(chip_rect.center().x + w * 0.5, bottom),
+        ),
+        2.0,
+        egui::Color32::from_rgb(200, 200, 200),
+    );
+}
+
+/// The header pins the radio module sits between on a Pico W.
+const RADIO_TOP_PIN: usize = 13;
+const RADIO_BOTTOM_PIN: usize = 17;
+
+/// Draw the chip body.
+pub fn draw_chip_body(painter: &egui::Painter, chip_rect: egui::Rect, fill: egui::Color32) {
+    painter.rect_filled(chip_rect, 4.0, fill);
 }
 
 /// Draw the chip body as a rotated quad — the 45° diamond (QFP rotation).
 pub fn draw_chip_body_diamond(painter: &egui::Painter, chip_rect: egui::Rect, rot: Rot) {
     painter.add(egui::Shape::convex_polygon(
         rot.quad(chip_rect),
-        egui::Color32::from_rgb(45, 45, 55),
+        CHIP_FILL,
         egui::Stroke::NONE,
     ));
 }

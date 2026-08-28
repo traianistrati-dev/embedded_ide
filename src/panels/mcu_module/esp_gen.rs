@@ -1279,6 +1279,7 @@ pub fn definition(chip: &EspChip) -> Result<McuDefinition, String> {
         .unwrap_or(&[]);
 
     Ok(McuDefinition {
+        board_chip: None,
         id: chip.id.clone(),
         display_name: chip.name.clone(),
         family: chip.id.clone(),

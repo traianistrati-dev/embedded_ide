@@ -120,6 +120,7 @@ mod tests {
             ClockConfig::None => ClockDef::None,
         };
         McuDefinition {
+            board_chip: None,
             id: id.into(),
             display_name: m.name.clone(),
             family: family.into(),

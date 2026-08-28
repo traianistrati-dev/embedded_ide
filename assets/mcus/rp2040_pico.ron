@@ -3,6 +3,7 @@ McuDefinition(
     display_name: "Raspberry Pi Pico",
     family: "rp2040",
     package: "40-pin header",
+    board_chip: Some("RP2040"),
     max_mhz: Some(133),
     cpu: "ARM Cortex-M0+ (dual)",
     toolchain: RustEmbedded,

@@ -547,6 +547,7 @@ impl McuForm {
                 .collect()
         };
         McuDefinition {
+            board_chip: None,
             id: self.id.trim().to_string(),
             display_name: self.display_name.trim().to_string(),
             family: self.family.trim().to_string(),

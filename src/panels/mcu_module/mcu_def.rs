@@ -271,6 +271,20 @@ pub struct McuDefinition {
     pub family: String,
     #[serde(default)]
     pub package: String,
+    /// The chip on this BOARD, when the definition describes a board rather
+    /// than a bare part — `Some("RP2350")` for a Raspberry Pi Pico 2 W.
+    ///
+    /// A board is not a chip with a nicer name: its pin numbers are header
+    /// positions, some of its pads are not on the header at all, and the thing
+    /// the diagram draws is a PCB with a chip on it. Everything that follows —
+    /// the green board fill, the two blank slots that keep the off-header pads
+    /// clear of the edge, the chip square, the radio can — reads this one field
+    /// rather than testing the family, so an ESP or STM32 dev board gets the
+    /// same treatment by saying so.
+    ///
+    /// `None` for every bare part, which is nearly all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_chip: Option<String>,
     /// Datasheet maximum core frequency in MHz, captured at import from
     /// the vendor file's `<Frequency>`. A display fact only — the clock
     /// editor's ceilings live in [`ClockLimits`], which is a per-FAMILY
@@ -367,6 +381,7 @@ impl McuDefinition {
         mcu.id = self.id.clone();
         mcu.dma = self.dma.clone();
         mcu.irq_vectors = self.irq_vectors.clone();
+        mcu.board_chip = self.board_chip.clone();
         mcu.usart_ip = self.usart_ip.clone();
         mcu.sdmmc_ip = self.sdmmc_ip.clone();
         mcu.grid = self.pins.grid.as_ref().map(|g| PinGrid {

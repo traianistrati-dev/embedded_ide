@@ -3,6 +3,7 @@ McuDefinition(
     display_name: "Raspberry Pi Pico 2",
     family: "rp235x",
     package: "40-pin header",
+    board_chip: Some("RP2350"),
     max_mhz: Some(150),
     cpu: "ARM Cortex-M33 (dual)",
     toolchain: RustEmbedded,

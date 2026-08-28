@@ -228,6 +228,9 @@ pub struct Mcu {
     pub irq_vectors: Vec<String>,
     /// The chip's USART IP version — the gate on the swap/invert options, see
     /// [`crate::panels::mcu_module::stm32_pin_data::usart_has_swap_invert`].
+    /// The chip on this board — see [`McuDefinition::board_chip`]. `None` for a
+    /// bare part, which is what makes the diagram draw a chip instead of a PCB.
+    pub board_chip: Option<String>,
     pub usart_ip: Option<String>,
     /// The chip's SDMMC IP version — the gate on WHICH constructor shape the
     /// SDMMC codegen may emit, see
