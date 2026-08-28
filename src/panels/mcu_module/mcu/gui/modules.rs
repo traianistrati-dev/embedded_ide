@@ -3,6 +3,7 @@
 //! tab toolbar; config is the Module panel).
 
 use super::super::model::{Mcu, PIN_HEIGHT};
+use super::module_docs::{self as docs, ConfigOut};
 use super::rotate::Rot;
 use crate::panels::mcu_module::codegen;
 use crate::panels::mcu_module::codegen::dma_map;
@@ -142,26 +143,6 @@ pub const RP_DMA_NOTE: &str = "embassy-rp allocates DMA itself - any channel ser
 /// `new_async` takes no channel. Offering Blocking / Async-DMA here would teach
 /// a hardware model that is not true of this chip.
 pub const RP_I2C_NOTE: &str = "embassy-rp's async I2C is interrupt driven and takes no DMA channel, so there is no transport to choose";
-
-/// The USART transport, locked on an RP.
-///
-/// A real choice that is not generated YET, so it is shown and disabled rather
-/// than hidden: embassy-rp has a complete `BufferedUart`, and it is the only RP
-/// path implementing `embedded_io_async::Read` — the DMA `Uart<Async>`
-/// implements no embedded-io-async trait at all. Hiding it would say the choice
-/// does not exist, which is a different and false statement.
-fn rp_usart_transport_locked(ui: &mut egui::Ui) {
-    ui.label("Async transport");
-    let resp = ui.add_enabled_ui(false, |ui| {
-        egui::ComboBox::from_id_salt("rp_usart_transport_locked")
-            .selected_text("DMA (one transfer per read)")
-            .show_ui(ui, |_ui| {});
-    });
-    resp.response.on_hover_text(
-        "embassy-rp's Uart::new always takes two DMA channels and starts one transfer per read - there is no RingBufferedUartRx on this chip, so between two reads only the 32-byte hardware FIFO holds bytes. BufferedUart is the ring-buffered path and this backend does not emit it yet.",
-    );
-    ui.end_row();
-}
 
 /// The SPI init style, locked on an RP, for the same reason.
 ///
@@ -1351,15 +1332,17 @@ pub fn module_config_ui(
     // than derived here, because it is a fact about the CHIP and this function
     // only sees one module.
     line_extras: bool,
-    // Standing remarks about this module that are NOT controls — "duty is taken
-    // in whole percent", "assign CH2 on the canvas to add it". Collected here
-    // and drawn by the details pane instead of inside the config grid.
+    // Everything this module has to say that is NOT a control: the standing
+    // remarks ("duty is taken in whole percent"), and what each row it draws
+    // MEANS. Both are drawn by the details pane, not inside the config grid.
     //
     // Out-parameter rather than a second function, because working them out
     // means the same reading of `m.config` and the pin map the controls above
     // already did — recomputing it elsewhere is how the note and the control
-    // end up disagreeing.
-    notes: &mut Vec<String>,
+    // end up disagreeing. That is not a style preference: nine gate mechanisms,
+    // some forty `if`s and three early `return`s decide which rows exist, and a
+    // second pass would have to mirror every one of them.
+    out: &mut ConfigOut,
 ) {
     // Read what we need off `m` BEFORE `m.config` is borrowed mutably below.
     let is_custom = m.kind.is_custom();
@@ -1427,8 +1410,9 @@ pub fn module_config_ui(
     // ESP emitter reads `api_style` at all — `codegen_esp_configs` always
     // returns the esp-hal driver. Left editable it was a control that changed
     // nothing, which is worse than one that is visibly fixed.
-    let api_row = |ui: &mut egui::Ui, style: &mut ApiStyle| {
+    let api_row = |ui: &mut egui::Ui, out: &mut ConfigOut, style: &mut ApiStyle| {
         if esp {
+            out.field("Init API", docs::INIT_API_ESP);
             ui.label("Init API");
             let resp = ui.add_enabled_ui(false, |ui| {
                 egui::ComboBox::from_id_salt("api_style_esp")
@@ -1443,6 +1427,7 @@ pub fn module_config_ui(
             ui.end_row();
             return;
         }
+        out.field("Init API", docs::INIT_API);
         ui.label("Init API");
         egui::ComboBox::from_id_salt("api_style")
             .selected_text(match style {
@@ -1468,7 +1453,8 @@ pub fn module_config_ui(
     // Native RUNTIME forces every peripheral to the concrete HAL — show the Init
     // API row DISABLED + locked on Native (instead of hiding it), so it's clear
     // the choice is fixed here, not missing.
-    let api_row_locked = |ui: &mut egui::Ui| {
+    let api_row_locked = |ui: &mut egui::Ui, out: &mut ConfigOut| {
+        out.field("Init API", docs::INIT_API_NATIVE);
         ui.label("Init API");
         let resp = ui.add_enabled_ui(false, |ui| {
             egui::ComboBox::from_id_salt("api_style_locked")
@@ -1491,42 +1477,47 @@ pub fn module_config_ui(
     // `rx_ok` is false for an SPI with no MISO: there is no receive line, so
     // the two receiving choices are dropped and a stored one is narrowed on
     // sight — the same clamp codegen applies, done where the user can see it.
-    let transport_row = |ui: &mut egui::Ui, on: &mut BlockingDma, chans: &str, rx_ok: bool| {
-        if !rx_ok {
-            *on = on.without_rx();
-        }
-        ui.label("Transport");
-        egui::ComboBox::from_id_salt("blocking_dma")
-            .selected_text(on.label())
-            .show_ui(ui, |ui| {
-                for v in BlockingDma::ALL.into_iter().filter(|v| rx_ok || !v.rx()) {
-                    ui.selectable_value(on, v, v.label())
-                        .on_hover_text(match v {
-                            BlockingDma::Off => "The CPU moves every byte, both ways.".to_owned(),
-                            BlockingDma::Both => format!(
-                                "Both directions on DMA ({chans}), and both channels reserved."
-                            ),
-                            // The half-and-half cases are the interesting ones,
-                            // so each says what it buys.
-                            BlockingDma::Tx => format!(
-                                "TX on DMA, RX polled. Frees the RX channel; `init` returns a \
+    let transport_row =
+        |ui: &mut egui::Ui, out: &mut ConfigOut, on: &mut BlockingDma, chans: &str, rx_ok: bool| {
+            out.field("Transport", docs::BLOCKING_TRANSPORT);
+            if !rx_ok {
+                *on = on.without_rx();
+            }
+            ui.label("Transport");
+            egui::ComboBox::from_id_salt("blocking_dma")
+                .selected_text(on.label())
+                .show_ui(ui, |ui| {
+                    for v in BlockingDma::ALL.into_iter().filter(|v| rx_ok || !v.rx()) {
+                        ui.selectable_value(on, v, v.label())
+                            .on_hover_text(match v {
+                                BlockingDma::Off => {
+                                    "The CPU moves every byte, both ways.".to_owned()
+                                }
+                                BlockingDma::Both => format!(
+                                    "Both directions on DMA ({chans}), and both channels reserved."
+                                ),
+                                // The half-and-half cases are the interesting ones,
+                                // so each says what it buys.
+                                BlockingDma::Tx => format!(
+                                    "TX on DMA, RX polled. Frees the RX channel; `init` returns a \
                                  DMA transmitter and the HAL's ordinary `nb` receiver ({chans})."
-                            ),
-                            BlockingDma::Rx => format!(
-                                "RX on DMA, TX written by the CPU - the usual choice when \
+                                ),
+                                BlockingDma::Rx => format!(
+                                    "RX on DMA, TX written by the CPU - the usual choice when \
                                  receiving must not drop bytes but sending is short bursts. \
                                  Frees the TX channel ({chans})."
-                            ),
-                        });
-                }
-            });
-        ui.end_row();
-    };
+                                ),
+                            });
+                    }
+                });
+            ui.end_row();
+        };
 
     // With DMA on, the Init API choice has no object: the handles are the HAL's
     // own DMA types either way. Shown locked rather than hidden, same as under
     // the Native runtime.
-    let api_row_locked_dma = |ui: &mut egui::Ui| {
+    let api_row_locked_dma = |ui: &mut egui::Ui, out: &mut ConfigOut| {
+        out.field("Init API", docs::INIT_API_DMA);
         ui.label("Init API");
         let resp = ui.add_enabled_ui(false, |ui| {
             egui::ComboBox::from_id_salt("api_style_locked_dma")
@@ -1650,28 +1641,43 @@ pub fn module_config_ui(
         ui.end_row();
     };
 
-    let usart_mode_row = |ui: &mut egui::Ui, mode: &mut UsartMode| {
+    // The two transports, and the DMA half means something DIFFERENT per HAL.
+    // On embassy-stm32 it is `RingBufferedUartRx`, a circular buffer the
+    // controller keeps filling between reads. embassy-rp has no such type at
+    // all: `UartRx<Async>::read` starts one transfer per call, so between two
+    // reads the only thing holding bytes is the PL011's 32-byte FIFO. Naming
+    // the STM32 mechanism on a Pico promised a protection the chip does not
+    // give.
+    let usart_mode_row = |ui: &mut egui::Ui,
+                          out: &mut ConfigOut,
+                          mode: &mut UsartMode,
+                          family: &str| {
+        out.field("Async transport", docs::USART_ASYNC_TRANSPORT);
+        let rp = crate::panels::mcu_module::codegen::rp::is_rp(family);
+        let dma_text = if rp {
+            "DMA (one transfer per read)"
+        } else {
+            "DMA (ring buffer)"
+        };
         ui.label("Async transport");
         egui::ComboBox::from_id_salt("usart_mode")
             .selected_text(match mode {
                 UsartMode::Buffered => "Buffered (interrupt)",
-                UsartMode::Dma => "DMA (ring buffer)",
+                UsartMode::Dma => dma_text,
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(mode, UsartMode::Buffered, "Buffered (interrupt)")
-                    .on_hover_text(
-                        "embassy BufferedUart -> embedded-io-async Read + Write, one interrupt per byte into a software ring buffer. Needs no DMA channel, so it compiles out of the box.",
-                    );
-                ui.selectable_value(mode, UsartMode::Dma, "DMA (ring buffer)")
-                    .on_hover_text(
-                        "UartTx + RingBufferedUartRx -> the same embedded-io-async traits, but the \
-                         peripheral talks to DMA directly and RX keeps filling a circular buffer \
-                         between your reads, so bytes are not dropped in the gaps. Takes TWO \
-                         channels on a bidirectional UART - embassy's constructor requires both. \
-                         To spend one, set Data Direction to RX only or TX only; to keep both \
-                         directions but send from the CPU, the generated file shows \
-                         `blocking_write` on the same handle.",
-                    );
+                    .on_hover_text(if rp {
+                        "embassy-rp BufferedUart - one interrupt per byte into two software rings. Takes NO DMA channel, and it is the only RP uart type implementing embedded-io-async Read: the DMA Uart implements no embedded-io trait at all. The ring size is the RX/TX buffer field below."
+                    } else {
+                        "embassy BufferedUart -> embedded-io-async Read + Write, one interrupt per byte into a software ring buffer. Needs no DMA channel, so it compiles out of the box."
+                    });
+                ui.selectable_value(mode, UsartMode::Dma, dma_text)
+                    .on_hover_text(if rp {
+                        "embassy-rp Uart::new - the peripheral talks to DMA directly and takes TWO channels, one per direction. There is no RingBufferedUartRx on this chip, so reception does not continue between your reads: what arrives in the gap is held only by the 32-byte hardware FIFO. This type implements no embedded-io trait, only inherent async read/write."
+                    } else {
+                        "UartTx + RingBufferedUartRx -> the same embedded-io-async traits, but the peripheral talks to DMA directly and RX keeps filling a circular buffer between your reads, so bytes are not dropped in the gaps. Takes TWO channels on a bidirectional UART - embassy's constructor requires both. To spend one, set Data Direction to RX only or TX only; to keep both directions but send from the CPU, the generated file shows `blocking_write` on the same handle."
+                    });
             });
         ui.end_row();
     };
@@ -1733,8 +1739,19 @@ pub fn module_config_ui(
     // `wired` says which of CTS/RTS the module actually has a pin for, so a
     // choice that needs one it hasn't got is called out instead of silently
     // generating code that won't build.
-    let direction_row = |ui: &mut egui::Ui, cfg: &mut UsartModuleConfig| {
+    let direction_row = |ui: &mut egui::Ui, out: &mut ConfigOut, cfg: &mut UsartModuleConfig| {
         let opts = UsartDirection::options_for(cfg.mode, family);
+        // The locked form is a different fact, so it is a different
+        // sentence — chosen HERE, by the branch that knows which one it
+        // drew, and not re-derived from the family somewhere else.
+        out.field(
+            "Data direction",
+            if opts.len() == 1 {
+                docs::USART_DIRECTION_LOCKED
+            } else {
+                docs::USART_DIRECTION
+            },
+        );
         ui.label("Data direction");
         if opts.len() == 1 {
             // Locked rather than hidden: the reason is the useful part.
@@ -1760,6 +1777,14 @@ pub fn module_config_ui(
         // Line-level extras. On an older USART the register bits do not exist —
         // and neither do embassy's `Config` fields — so the row says that
         // instead of offering a switch that cannot be generated.
+        out.field(
+            "Line",
+            if line_extras {
+                docs::USART_LINE
+            } else {
+                docs::USART_LINE_ABSENT
+            },
+        );
         ui.label("Line");
         ui.vertical(|ui| {
             if line_extras {
@@ -1782,6 +1807,7 @@ pub fn module_config_ui(
         ui.end_row();
         // Readback is a half-duplex-only argument, so it appears only there.
         if cfg.direction.is_half_duplex() {
+            out.field("Read back own TX", docs::USART_HALF_DUPLEX_READBACK);
             ui.label("Read back own TX");
             ui.checkbox(&mut cfg.half_duplex_readback, "")
                 .on_hover_text(
@@ -1791,7 +1817,11 @@ pub fn module_config_ui(
         }
     };
 
-    let flow_row = |ui: &mut egui::Ui, cfg: &mut UsartModuleConfig, wired: (bool, bool)| {
+    let flow_row = |ui: &mut egui::Ui,
+                    out: &mut ConfigOut,
+                    cfg: &mut UsartModuleConfig,
+                    wired: (bool, bool)| {
+        out.field("Hardware flow control", docs::USART_FLOW);
         ui.label("Hardware flow control");
         ui.vertical(|ui| {
             egui::ComboBox::from_id_salt("usart_flow")
@@ -1881,11 +1911,17 @@ pub fn module_config_ui(
             ui.end_row();
         }
     };
-    let dma_row =
-        |ui: &mut egui::Ui, bus: dma_map::Bus, inst: u8, tx: &mut String, rx: &mut String| {
-            dma_one(ui, bus, inst, dma_map::Dir::Tx, "DMA TX", tx);
-            dma_one(ui, bus, inst, dma_map::Dir::Rx, "DMA RX", rx);
-        };
+    let dma_row = |ui: &mut egui::Ui,
+                   out: &mut ConfigOut,
+                   bus: dma_map::Bus,
+                   inst: u8,
+                   tx: &mut String,
+                   rx: &mut String| {
+        out.field("DMA TX", docs::DMA_CHANNEL);
+        out.field("DMA RX", docs::DMA_CHANNEL);
+        dma_one(ui, bus, inst, dma_map::Dir::Tx, "DMA TX", tx);
+        dma_one(ui, bus, inst, dma_map::Dir::Rx, "DMA RX", rx);
+    };
 
     egui::Grid::new("module_cfg")
         .num_columns(2)
@@ -2535,6 +2571,7 @@ pub fn module_config_ui(
                 // LPUART reuses the USART settings struct, so it reuses this
                 // whole arm — only the DMA request table differs (`uart_bus`).
                 ModuleConfig::Usart(cfg) | ModuleConfig::Lpuart(cfg) => {
+                    out.field("Baud rate", docs::USART_BAUD);
                     ui.label("Baud rate");
                     egui::ComboBox::from_id_salt("baud")
                         .selected_text(cfg.baud_rate.to_string())
@@ -2553,6 +2590,17 @@ pub fn module_config_ui(
                         cfg.mode == UsartMode::Dma && cfg.direction == UsartDirection::TxOnly;
                     if is_async && !tx_only_dma {
                         let dma = cfg.mode == UsartMode::Dma;
+                        // The label AND the sentence both turn on the transport
+                        // — the field means two different things, and the pane
+                        // has to explain the one the reader is looking at.
+                        out.field(
+                            if dma { "RX DMA buffer" } else { "RX/TX buffer" },
+                            if dma {
+                                docs::USART_BUF_DMA
+                            } else {
+                                docs::USART_BUF_BUFFERED
+                            },
+                        );
                         ui.label(if dma { "RX DMA buffer" } else { "RX/TX buffer" });
                         ui.horizontal(|ui| {
                             // A drag value, not a combo: this is a number the
@@ -2581,6 +2629,7 @@ pub fn module_config_ui(
                         });
                         ui.end_row();
                     }
+                    out.field("Data bits", docs::USART_DATA_BITS);
                     ui.label("Data bits");
                     egui::ComboBox::from_id_salt("databits")
                         .selected_text(cfg.data_bits.to_string())
@@ -2590,6 +2639,7 @@ pub fn module_config_ui(
                             }
                         });
                     ui.end_row();
+                    out.field("Parity", docs::USART_PARITY);
                     ui.label("Parity");
                     egui::ComboBox::from_id_salt("parity")
                         .selected_text(parity_label(cfg.parity))
@@ -2599,6 +2649,7 @@ pub fn module_config_ui(
                             ui.selectable_value(&mut cfg.parity, Parity::Odd, "Odd");
                         });
                     ui.end_row();
+                    out.field("Stop bits", docs::USART_STOP_BITS);
                     ui.label("Stop bits");
                     egui::ComboBox::from_id_salt("stop")
                         .selected_text(stop_label(cfg.stop_bits))
@@ -2611,14 +2662,14 @@ pub fn module_config_ui(
                     // locked on Native; async USART → hidden (always the
                     // embedded-io-async BufferedUart bridge, no choice).
                     if esp {
-                        api_row(ui, &mut pending.0);
+                        api_row(ui, out, &mut pending.0);
                         // Direction and flow control are NOT async concepts on
                         // an ESP — `UartTx::new` and `.with_cts()` are there on
                         // either runtime — so they show whatever the runtime is.
                         // They were unreachable while the ESP shared embassy's
                         // async gate.
-                        direction_row(ui, cfg);
-                        flow_row(ui, cfg, wired_flow);
+                        direction_row(ui, out, cfg);
+                        flow_row(ui, out, cfg, wired_flow);
                         if !UsartDirection::options_for(cfg.mode, family)
                             .contains(&cfg.direction)
                         {
@@ -2633,6 +2684,7 @@ pub fn module_config_ui(
                         // different driver this generator does not write yet.
                         // Said rather than left blank — the SPI beside it has
                         // the row, and the difference is not obvious.
+                        out.field("Transfers", docs::USART_TRANSFERS_ESP);
                         ui.label("Transfers");
                         ui.label(
                             egui::RichText::new("CPU (blocking)")
@@ -2646,20 +2698,16 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     } else if is_native {
-                        api_row_locked(ui);
+                        api_row_locked(ui, out);
                     } else if is_async {
                         // The API style is fixed on async (embedded-io-async
                         // either way); what IS a choice is the transport.
-                        if crate::panels::mcu_module::codegen::rp::is_rp(family) {
-                            rp_usart_transport_locked(ui);
-                        } else {
-                            usart_mode_row(ui, &mut cfg.mode);
-                        }
+                        usart_mode_row(ui, out, &mut cfg.mode, family);
                         // The transport decides which directions exist, and the
                         // pair decides which flow options do — so this order is
                         // load-bearing, not cosmetic.
-                        direction_row(ui, cfg);
-                        flow_row(ui, cfg, wired_flow);
+                        direction_row(ui, out, cfg);
+                        flow_row(ui, out, cfg, wired_flow);
                         // A direction the new transport cannot build, or a flow
                         // option the new pair cannot, would otherwise sit there
                         // as a stale choice that generates nothing.
@@ -2674,10 +2722,16 @@ pub fn module_config_ui(
                             cfg.flow = UsartFlow::None;
                         }
                         if crate::panels::mcu_module::codegen::rp::is_rp(family) {
-                            notes.push(RP_DMA_NOTE.to_owned());
+                            // Under Buffered no channel is taken at all, so the
+                            // note would describe something that is not
+                            // happening - and the DMA card agrees, because
+                            // `async_bus_lines` reserves nothing for that bus.
+                            if cfg.mode == UsartMode::Dma {
+                                out.note(RP_DMA_NOTE);
+                            }
                         } else if cfg.mode == UsartMode::Dma {
                             let inst = cfg.instance;
-                            dma_row(ui, uart_bus, inst, &mut cfg.dma_tx, &mut cfg.dma_rx);
+                            dma_row(ui, out, uart_bus, inst, &mut cfg.dma_tx, &mut cfg.dma_rx);
                         }
                     } else if let Some(chans) =
                         codegen::stm32::blocking_dma_channels(family, uart_bus, cfg.instance)
@@ -2690,15 +2744,20 @@ pub fn module_config_ui(
                             "stm32f1xx-hal builds a Serial only from the TX+RX pair",
                             wired_serial,
                         );
-                        transport_row(ui, &mut cfg.blocking_dma, &chans, true);
+                        transport_row(ui, out, &mut cfg.blocking_dma, &chans, true);
                         if cfg.blocking_dma.any() {
-                            api_row_locked_dma(ui);
+                            api_row_locked_dma(ui, out);
                         } else {
-                            api_row(ui, &mut pending.0);
+                            api_row(ui, out, &mut pending.0);
                         }
                     } else {
-                        api_row(ui, &mut pending.0);
+                        api_row(ui, out, &mut pending.0);
                     }
+                    // Every row this arm can draw is documented above, so the
+                    // pane may show the roster. The FIRST arm to say so — the
+                    // others show no Fields section until they can too, rather
+                    // than a partial list that reads as the whole surface.
+                    out.all_fields_documented();
                 }
                 ModuleConfig::Spi(cfg) => {
                     let roles = SpiRole::options(family);
@@ -2812,7 +2871,7 @@ pub fn module_config_ui(
                         });
                     ui.end_row();
                     if esp {
-                        api_row(ui, &mut pending.0);
+                        api_row(ui, out, &mut pending.0);
                         // Not a runtime choice: `with_dma` is on
                         // `impl Spi<'d, Blocking>` and hands back a
                         // `SpiDma<'d, Blocking>`, so a blocking project puts a
@@ -2827,7 +2886,7 @@ pub fn module_config_ui(
                     } else if is_async {
                         if crate::panels::mcu_module::codegen::rp::is_rp(family) {
                             rp_spi_init_locked(ui);
-                            notes.push(RP_DMA_NOTE.to_owned());
+                            out.note(RP_DMA_NOTE);
                         } else {
                             // NOT folded into the chain above: dropping this
                             // call took the Async-init combo off every STM32,
@@ -2837,6 +2896,7 @@ pub fn module_config_ui(
                                 let inst = cfg.instance;
                                 dma_row(
                                     ui,
+                                    out,
                                     dma_map::Bus::Spi,
                                     inst,
                                     &mut cfg.dma_tx,
@@ -2845,20 +2905,20 @@ pub fn module_config_ui(
                             }
                         }
                     } else if is_native {
-                        api_row_locked(ui);
+                        api_row_locked(ui, out);
                     } else if let Some(chans) = codegen::stm32::blocking_dma_channels(
                         family,
                         dma_map::Bus::Spi,
                         cfg.instance,
                     ) {
-                        transport_row(ui, &mut cfg.blocking_dma, &chans, has_miso);
+                        transport_row(ui, out, &mut cfg.blocking_dma, &chans, has_miso);
                         if cfg.blocking_dma.any() {
-                            api_row_locked_dma(ui);
+                            api_row_locked_dma(ui, out);
                         } else {
-                            api_row(ui, &mut pending.0);
+                            api_row(ui, out, &mut pending.0);
                         }
                     } else {
-                        api_row(ui, &mut pending.0);
+                        api_row(ui, out, &mut pending.0);
                     }
                 }
                 // One TIMER: the frequency it shares, then a duty slider per
@@ -3160,7 +3220,7 @@ pub fn module_config_ui(
                     // not shrink below them — which left the details pane a
                     // strip a word wide.
                     if family.starts_with("esp") {
-                        notes.push(
+                        out.note(
                             "esp-hal's LEDC takes duty in WHOLE percent - a fraction is \
                              rounded up in the generated file."
                                 .to_owned(),
@@ -3172,12 +3232,14 @@ pub fn module_config_ui(
                     // not a choice at all, which is worth saying out loud on the
                     // panel where someone would look for the picker.
                     if crate::panels::mcu_module::codegen::rp::is_rp(family) {
-                        notes.extend(rp_pwm_notes(cfg.instance, &conn_rows, pin_funcs, pin_names));
+                        for n in rp_pwm_notes(cfg.instance, &conn_rows, pin_funcs, pin_names) {
+                            out.note(n);
+                        }
                     } else {
                         let free = free_pwm_channels(cfg.instance, &wired, pin_funcs);
                         if !free.is_empty() {
                             let list = free.join(" / ");
-                            notes.push(format!(
+                            out.note(format!(
                                 "This timer has channels left. Assign TIM{} {list} on the Pins \
                                  canvas and they join this module - they share its frequency.",
                                 cfg.instance
@@ -4100,13 +4162,14 @@ pub fn module_config_ui(
                     );
                     ui.end_row();
                     if is_async && crate::panels::mcu_module::codegen::rp::is_rp(family) {
-                        notes.push(RP_I2C_NOTE.to_owned());
+                        out.note(RP_I2C_NOTE);
                     } else if is_async {
                         async_row(ui, &mut pending.1);
                         if pending.1 == AsyncBusMode::AsyncDma {
                             let inst = cfg.instance;
                             dma_row(
                                 ui,
+                                out,
                                 dma_map::Bus::I2c,
                                 inst,
                                 &mut cfg.dma_tx,
@@ -4114,7 +4177,7 @@ pub fn module_config_ui(
                             );
                         }
                     } else if is_native {
-                        api_row_locked(ui);
+                        api_row_locked(ui, out);
                     } else {
                         // Same rule as the USART above, and the only backend
                         // whose half-bus behaviour this turn verified.
@@ -4127,7 +4190,7 @@ pub fn module_config_ui(
                                 wired_i2c,
                             );
                         }
-                        api_row(ui, &mut pending.0);
+                        api_row(ui, out, &mut pending.0);
                     }
                 }
                 ModuleConfig::Can(cfg) => {
@@ -4689,6 +4752,233 @@ pub fn module_config_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drive the real `module_config_ui` headless and collect what it said.
+    ///
+    /// `egui::__run_test_ui` builds a `Context` with no fonts, so this costs
+    /// microseconds and needs no window. Everything else is a default: the test
+    /// is about which ROWS the arm draws for a given chip and runtime, and the
+    /// pin map does not decide that for a USART.
+    fn drive_usart(
+        family: &str,
+        is_async: bool,
+        is_native: bool,
+        line_extras: bool,
+        edit: impl FnOnce(&mut UsartModuleConfig),
+    ) -> ConfigOut {
+        use crate::panels::mcu_module::modules::{ModuleConfig, VirtualModule};
+
+        let mut cfg = UsartModuleConfig::new(1);
+        edit(&mut cfg);
+        let mut m = VirtualModule {
+            id: "usart_1".into(),
+            kind: ModuleKind::GenericInterfaceUsart,
+            name: "USART1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Usart(cfg),
+            connections: Vec::new(),
+        };
+        let mut out = ConfigOut::default();
+        let mut labels = HashMap::new();
+        let mut choice = None;
+        let mut pending = (ApiStyle::Portable, AsyncBusMode::Blocking);
+        egui::__run_test_ui(|ui| {
+            module_config_ui(
+                ui,
+                &mut m,
+                &HashMap::new(),
+                &HashMap::new(),
+                &std::collections::HashSet::new(),
+                &mut labels,
+                &HashMap::new(),
+                &HashMap::new(),
+                &mut choice,
+                is_async,
+                is_native,
+                family,
+                &mut pending,
+                None,
+                line_extras,
+                &mut out,
+            );
+        });
+        out
+    }
+
+    fn labels_of(out: &ConfigOut) -> Vec<&str> {
+        out.fields()
+            .expect("the USART arm marks itself documented")
+            .iter()
+            .map(|f| f.label.as_str())
+            .collect()
+    }
+
+    /// Every doc the USART arm hands out is a NAMED const from `module_docs`.
+    ///
+    /// This is the invariant the whole design rests on: the hover and the pane
+    /// read one `&'static str`, so they cannot drift. An inline literal at a row
+    /// site would still compile and still look right in the pane — and would be
+    /// the second copy this module exists to prevent. Here it fails.
+    #[test]
+    fn every_field_doc_is_a_named_const() {
+        const KNOWN: &[&str] = &[
+            docs::INIT_API,
+            docs::INIT_API_ESP,
+            docs::INIT_API_NATIVE,
+            docs::INIT_API_DMA,
+            docs::BLOCKING_TRANSPORT,
+            docs::DMA_CHANNEL,
+            docs::USART_BAUD,
+            docs::USART_DATA_BITS,
+            docs::USART_PARITY,
+            docs::USART_STOP_BITS,
+            docs::USART_BUF_BUFFERED,
+            docs::USART_BUF_DMA,
+            docs::USART_ASYNC_TRANSPORT,
+            docs::USART_TRANSFERS_ESP,
+            docs::USART_DIRECTION,
+            docs::USART_DIRECTION_LOCKED,
+            docs::USART_LINE,
+            docs::USART_LINE_ABSENT,
+            docs::USART_FLOW,
+            docs::USART_HALF_DUPLEX_READBACK,
+        ];
+        for (family, is_async, is_native) in CELLS {
+            for extras in [false, true] {
+                let out = drive_usart(family, *is_async, *is_native, extras, |_| {});
+                for f in out.fields().unwrap() {
+                    assert!(
+                        KNOWN.contains(&f.doc.as_ref()),
+                        "{family}: {:?} carries a doc that is not a module_docs const:\n{}",
+                        f.label,
+                        f.doc
+                    );
+                }
+            }
+        }
+    }
+
+    /// The chip/runtime cells this arm is expected to serve.
+    const CELLS: &[(&str, bool, bool)] = &[
+        ("stm32f1", false, false),
+        ("stm32f1", false, true),
+        ("stm32f1", true, false),
+        ("stm32g0", false, false),
+        ("stm32g0", true, false),
+        ("esp32c3", false, false),
+        ("esp32c3", true, false),
+        ("rp2040", true, false),
+    ];
+
+    /// The four wire settings exist on every chip and every runtime — they are
+    /// the UART itself, not a HAL feature — so no cell may lose them.
+    #[test]
+    fn the_wire_settings_are_documented_on_every_chip() {
+        for (family, is_async, is_native) in CELLS {
+            let out = drive_usart(family, *is_async, *is_native, false, |_| {});
+            let got = labels_of(&out);
+            for want in ["Baud rate", "Data bits", "Parity", "Stop bits"] {
+                assert!(got.contains(&want), "{family}: {want} missing from {got:?}");
+            }
+            // And nothing is documented twice, whatever the branch drew.
+            let mut sorted = got.clone();
+            sorted.sort_unstable();
+            let before = sorted.len();
+            sorted.dedup();
+            assert_eq!(before, sorted.len(), "{family}: duplicate label in {got:?}");
+        }
+    }
+
+    /// The roster follows the ROWS, so it changes with the chip — which is the
+    /// reason the collector runs inside the arm rather than beside it.
+    #[test]
+    fn the_roster_follows_what_the_chip_actually_shows() {
+        // An ESP has direction and flow on either runtime, and its Transfers
+        // row is locked because esp-hal's UART DMA is UHCI.
+        let esp = drive_usart("esp32c3", false, false, false, |_| {});
+        let l = labels_of(&esp);
+        assert!(l.contains(&"Data direction"), "{l:?}");
+        assert!(l.contains(&"Hardware flow control"), "{l:?}");
+        assert!(l.contains(&"Transfers"), "{l:?}");
+        assert!(!l.contains(&"Async transport"), "{l:?}");
+
+        // A blocking STM32G0 has none of them: no F1 DMA table, no async rows.
+        let g0 = drive_usart("stm32g0", false, false, false, |_| {});
+        let l = labels_of(&g0);
+        assert!(!l.contains(&"Data direction"), "{l:?}");
+        assert!(!l.contains(&"Transfers"), "{l:?}");
+        assert!(l.contains(&"Init API"), "{l:?}");
+
+        // The Native runtime locks the Init API, and says so in its own words.
+        let native = drive_usart("stm32f1", false, true, false, |_| {});
+        let f = native.fields().unwrap();
+        let api = f
+            .iter()
+            .find(|f| f.label == "Init API")
+            .expect("locked row");
+        assert_eq!(api.doc, docs::INIT_API_NATIVE);
+
+        // On an ESP the same row is locked for a different reason.
+        let f = esp.fields().unwrap();
+        let api = f.iter().find(|f| f.label == "Init API").expect("esp row");
+        assert_eq!(api.doc, docs::INIT_API_ESP);
+    }
+
+    /// `buf_len` is the field whose MEANING moves: the label and the sentence
+    /// both turn on the transport, and the pane must show the pair the reader
+    /// is looking at.
+    #[test]
+    fn the_buffer_row_changes_with_the_transport() {
+        let buffered = drive_usart("stm32g0", true, false, false, |c| {
+            c.mode = UsartMode::Buffered;
+        });
+        let f = buffered.fields().unwrap();
+        let b = f
+            .iter()
+            .find(|f| f.label == "RX/TX buffer")
+            .expect("buffered label");
+        assert_eq!(b.doc, docs::USART_BUF_BUFFERED);
+        assert!(f.iter().all(|f| f.label != "RX DMA buffer"));
+
+        let dma = drive_usart("stm32g0", true, false, false, |c| {
+            c.mode = UsartMode::Dma;
+        });
+        let f = dma.fields().unwrap();
+        let b = f
+            .iter()
+            .find(|f| f.label == "RX DMA buffer")
+            .expect("dma label");
+        assert_eq!(b.doc, docs::USART_BUF_DMA);
+
+        // A TX-only DMA link has no buffer at all, so the row is not drawn and
+        // the pane must not claim it exists.
+        let tx_only = drive_usart("stm32g0", true, false, false, |c| {
+            c.mode = UsartMode::Dma;
+            c.direction = UsartDirection::TxOnly;
+        });
+        let l = labels_of(&tx_only);
+        assert!(!l.contains(&"RX DMA buffer"), "{l:?}");
+        assert!(!l.contains(&"RX/TX buffer"), "{l:?}");
+    }
+
+    /// A chip whose USART has no swap/invert bits gets the sentence that says
+    /// so, not the one describing controls it does not have.
+    #[test]
+    fn the_line_row_says_when_the_bits_are_absent() {
+        let with = drive_usart("stm32g0", true, false, true, |_| {});
+        let f = with.fields().unwrap();
+        assert_eq!(
+            f.iter().find(|f| f.label == "Line").unwrap().doc,
+            docs::USART_LINE
+        );
+
+        let without = drive_usart("stm32g0", true, false, false, |_| {});
+        let f = without.fields().unwrap();
+        assert_eq!(
+            f.iter().find(|f| f.label == "Line").unwrap().doc,
+            docs::USART_LINE_ABSENT
+        );
+    }
 
     /// The picker offers what the PAD offers, and nothing else.
     ///

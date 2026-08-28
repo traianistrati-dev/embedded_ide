@@ -586,6 +586,48 @@ fn bus_speed(mcu: &Mcu, kind: &str, n: u8) -> u32 {
     }
 }
 
+/// Whether UART `i` runs on the interrupt ring buffer rather than on DMA.
+///
+/// Read from the Virtual Module through the same door [`bus_speed`] opens.
+/// `UsartMode` defaults to `Buffered` and the field is `#[serde(default)]`, so a
+/// project saved while the transport combo was LOCKED loads as `Buffered` -
+/// which is what the model always said, even while the greyed combo displayed
+/// "DMA" at the user.
+fn uart_is_buffered(
+    cfgs: &std::collections::BTreeMap<u8, crate::panels::mcu_module::modules::UsartModuleConfig>,
+    i: u8,
+) -> bool {
+    use crate::panels::mcu_module::modules::UsartMode;
+    cfgs.get(&i).is_none_or(|c| c.mode == UsartMode::Buffered)
+}
+
+/// Whether this project needs `static_cell` and `embedded-io-async` in its
+/// manifest.
+///
+/// The app gates those two crates on `has_cfg("usart")` over the generated
+/// config files, and `AsyncRpBackend` writes none at all - so a `BufferedUart`
+/// emitted into `main.rs` would reference `static_cell::StaticCell` against a
+/// Cargo.toml that never received the line, and the failure would read as a
+/// codegen bug rather than a manifest one. A Pico W hides it, because the radio
+/// path adds `static_cell` for its own reasons.
+///
+/// ONE computation, called by the app AND by the cross-compile harness. Naming
+/// the answer twice in two places is exactly how a matrix went green on a
+/// project the application could not build.
+pub fn needs_async_usart(mcu: &Mcu) -> bool {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    if !is_rp(&mcu.family) || !matches!(mcu.runtime, Runtime::Async) {
+        return false;
+    }
+    let uart = uart_pins(mcu);
+    let cfgs = crate::panels::mcu_module::modules::usart_configs(&mcu.modules);
+    instances(&uart).into_iter().any(|i| {
+        role_of(&uart, i, "tx").is_some()
+            && role_of(&uart, i, "rx").is_some()
+            && uart_is_buffered(&cfgs, i)
+    })
+}
+
 fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)], hz: u32) -> String {
     let mut o = String::new();
     o.push_str("// <<< GENERATED>>>\n");
@@ -1542,7 +1584,23 @@ mod async_dma_bindings {
                 _ => {}
             }
         }
+        pin_uart_to_dma(&mut mcu);
         mcu
+    }
+
+    /// Pin the transport, so this stays a test of the DMA ALLOCATOR.
+    ///
+    /// `UsartMode` defaults to `Buffered`, and a buffered UART takes no channel
+    /// at all - which is the whole point of that transport, and would quietly
+    /// leave these assertions measuring an allocator nobody called.
+    fn pin_uart_to_dma(mcu: &mut super::Mcu) {
+        use crate::panels::mcu_module::modules::{ModuleConfig, UsartMode};
+        mcu.reconcile_modules();
+        for m in &mut mcu.modules {
+            if let ModuleConfig::Usart(c) = &mut m.config {
+                c.mode = UsartMode::Dma;
+            }
+        }
     }
 
     /// A DMA channel handed to a driver needs its OWN handler bound.
@@ -1806,7 +1864,23 @@ mod dma_reporting {
                 _ => {}
             }
         }
+        pin_uart_to_dma(&mut mcu);
         mcu
+    }
+
+    /// Pin the transport, so this stays a test of the DMA ALLOCATOR.
+    ///
+    /// `UsartMode` defaults to `Buffered`, and a buffered UART takes no channel
+    /// at all - which is the whole point of that transport, and would quietly
+    /// leave these assertions measuring an allocator nobody called.
+    fn pin_uart_to_dma(mcu: &mut super::Mcu) {
+        use crate::panels::mcu_module::modules::{ModuleConfig, UsartMode};
+        mcu.reconcile_modules();
+        for m in &mut mcu.modules {
+            if let ModuleConfig::Usart(c) = &mut m.config {
+                c.mode = UsartMode::Dma;
+            }
+        }
     }
 
     /// The card reports the channels the code ACTUALLY takes.
@@ -2218,25 +2292,52 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String, Vec<super::dma_map::Dm
     };
 
     let uart = uart_pins(mcu);
+    let ucfgs = crate::panels::mcu_module::modules::usart_configs(&mcu.modules);
     for i in instances(&uart) {
         let (Some(tx), Some(rx)) = (role_of(&uart, i, "tx"), role_of(&uart, i, "rx")) else {
             o.push_str(&format!("    // UART{i}: TX and RX are taken together.\n"));
             continue;
         };
-        let (tdma, rdma) = (dma, dma + 1);
-        dma += 2;
-        take(tdma, &format!("UART{i} TX"), &mut uses);
-        take(rdma, &format!("UART{i} RX"), &mut uses);
         let hz = bus_speed(mcu, "uart", i);
         o.push_str(&format!(
             "    let mut ucfg{i} = embassy_rp::uart::Config::default();\n    // From the Virtual Module, not a default: a bus at the wrong speed\n    // is met as garbage on the wire, never as a message.\n    ucfg{i}.baudrate = {hz};\n"
         ));
-        o.push_str(&format!(
-            "    let uart{i} = embassy_rp::uart::Uart::new(\n        p.UART{i},\n        p.PIN_{tx},\n        p.PIN_{rx},\n        Irqs,\n        p.DMA_CH{tdma},\n        p.DMA_CH{rdma},\n        ucfg{i},\n    );\n    let _ = &uart{i};\n"
-        ));
-        irqs.push(format!(
-            "    UART{i}_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART{i}>;"
-        ));
+        // The binding NAME is the same on both transports, and so is the
+        // keep-alive: user code below GEN_END refers to `uart{i}` and must not
+        // notice which one was built.
+        if uart_is_buffered(&ucfgs, i) {
+            // No channel is taken here, so nothing is reported to the DMA card
+            // and every later peripheral keeps the number it would have had
+            // without this bus.
+            let len = ucfgs.get(&i).map_or(256, |c| c.buf_len.clamp(16, 65_536));
+            o.push_str(&format!(
+                "    // `BufferedUart` moves bytes on the UART interrupt into these two\n    // software rings - no DMA channel at all. They must be `'static`, which\n    // is what `StaticCell` buys: one runtime check instead of `static mut`.\n    static UART{i}_TX_BUF: static_cell::StaticCell<[u8; {len}]> = static_cell::StaticCell::new();\n    static UART{i}_RX_BUF: static_cell::StaticCell<[u8; {len}]> = static_cell::StaticCell::new();\n"
+            ));
+            // Argument order is embassy-rp's own and NOT embassy-stm32's: the
+            // pins go tx-then-rx, the binding sits between the pads and the
+            // buffers, and `new` returns Self - a `.unwrap()` copied from the
+            // STM32 template does not compile.
+            o.push_str(&format!(
+                "    let uart{i} = embassy_rp::uart::BufferedUart::new(\n        p.UART{i},\n        p.PIN_{tx},\n        p.PIN_{rx},\n        Irqs,\n        UART{i}_TX_BUF.init([0; {len}]),\n        UART{i}_RX_BUF.init([0; {len}]),\n        ucfg{i},\n    );\n    let _ = &uart{i};\n"
+            ));
+            // A DIFFERENT handler type on the same vector. The two disambiguate
+            // on the DMA-enable bit, so binding the wrong one is silent at
+            // compile time and dead at run time.
+            irqs.push(format!(
+                "    UART{i}_IRQ => embassy_rp::uart::BufferedInterruptHandler<embassy_rp::peripherals::UART{i}>;"
+            ));
+        } else {
+            let (tdma, rdma) = (dma, dma + 1);
+            dma += 2;
+            take(tdma, &format!("UART{i} TX"), &mut uses);
+            take(rdma, &format!("UART{i} RX"), &mut uses);
+            o.push_str(&format!(
+                "    let uart{i} = embassy_rp::uart::Uart::new(\n        p.UART{i},\n        p.PIN_{tx},\n        p.PIN_{rx},\n        Irqs,\n        p.DMA_CH{tdma},\n        p.DMA_CH{rdma},\n        ucfg{i},\n    );\n    let _ = &uart{i};\n"
+            ));
+            irqs.push(format!(
+                "    UART{i}_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART{i}>;"
+            ));
+        }
     }
 
     let spi = spi_pins(mcu);
@@ -2679,6 +2780,122 @@ impl FamilyBackend for AsyncRpBackend {
 }
 
 #[cfg(test)]
+mod buffered_uart_transport {
+    use super::{async_bus_lines, needs_async_usart};
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::modules::{ModuleConfig, UsartMode};
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    /// A Pico with UART0 on GP0/GP1 and SPI0, through the module reconciler so
+    /// the transport field actually exists.
+    fn pico(mode: UsartMode) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        mcu.runtime = Runtime::Async;
+        for p in mcu.iter_all_pins_mut() {
+            match p.name.as_str() {
+                "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                "GP18" => p.selected_function = PinFunction::SpiSck(0),
+                "GP19" => p.selected_function = PinFunction::SpiMosi(0),
+                "GP16" => p.selected_function = PinFunction::SpiMiso(0),
+                _ => {}
+            }
+        }
+        mcu.reconcile_modules();
+        for m in &mut mcu.modules {
+            if let ModuleConfig::Usart(c) = &mut m.config {
+                c.mode = mode;
+            }
+        }
+        mcu
+    }
+
+    /// The buffered transport takes NO DMA channel, and the card agrees.
+    ///
+    /// Both halves matter: the emitted code must not name a channel, and the
+    /// Configuration tab is fed from the same counter, so a `take()` left
+    /// behind would have the card listing channels nothing claims.
+    #[test]
+    fn a_buffered_uart_claims_no_channel_and_shifts_the_rest_down() {
+        let (binding, body, _, uses) = async_bus_lines(&pico(UsartMode::Buffered));
+        assert!(body.contains("BufferedUart::new("), "{body}");
+        // Qualified: "Uart::new(" is a substring of "BufferedUart::new(".
+        assert!(!body.contains("uart::Uart::new("), "{body}");
+        // Two left, both the SPI's - the UART's pair is gone.
+        assert_eq!(uses.len(), 2, "only the SPI takes channels: {uses:?}");
+        assert!(uses.iter().all(|u| u.user.starts_with("SPI")), "{uses:?}");
+        // And the SPI moved down into the channels the UART used to hold.
+        assert!(
+            body.contains("p.DMA_CH0,") && body.contains("p.DMA_CH1,"),
+            "{body}"
+        );
+        // The handler on UART0_IRQ is the BUFFERED one. Binding the DMA handler
+        // here compiles and is simply dead: the two disambiguate at run time on
+        // the DMA-enable bit.
+        assert!(binding.contains("BufferedInterruptHandler"), "{binding}");
+        assert!(
+            !binding.contains("uart::InterruptHandler"),
+            "not both on one vector: {binding}"
+        );
+    }
+
+    /// The DMA transport is untouched by any of this.
+    #[test]
+    fn the_dma_transport_still_takes_its_pair() {
+        let (binding, body, _, uses) = async_bus_lines(&pico(UsartMode::Dma));
+        assert!(body.contains("embassy_rp::uart::Uart::new("), "{body}");
+        assert!(!body.contains("BufferedUart"), "{body}");
+        assert_eq!(uses.len(), 4, "UART two and SPI two: {uses:?}");
+        assert!(binding.contains("uart::InterruptHandler"), "{binding}");
+        assert!(!binding.contains("BufferedInterruptHandler"), "{binding}");
+    }
+
+    /// The binding NAME does not move with the transport.
+    ///
+    /// It is the one thing user code below `GEN_END` refers to, and the whole
+    /// block above is rewritten on every Save.
+    #[test]
+    fn the_handle_is_called_uart0_either_way() {
+        for mode in [UsartMode::Buffered, UsartMode::Dma] {
+            let code = pico(mode).fresh_main_rs();
+            assert!(code.contains("let uart0 ="), "{mode:?}: {code}");
+            assert!(code.contains("let _ = &uart0;"), "{mode:?}: {code}");
+        }
+    }
+
+    /// The buffers come from the module's own field, not from a literal.
+    #[test]
+    fn the_ring_size_is_the_one_the_panel_shows() {
+        let mut mcu = pico(UsartMode::Buffered);
+        for m in &mut mcu.modules {
+            if let ModuleConfig::Usart(c) = &mut m.config {
+                c.buf_len = 1288;
+            }
+        }
+        let body = async_bus_lines(&mcu).1;
+        assert!(body.contains("StaticCell<[u8; 1288]>"), "{body}");
+        assert!(body.contains(".init([0; 1288])"), "{body}");
+    }
+
+    /// The manifest gate. `has_cfg("usart")` can never fire on an RP async
+    /// project - the backend writes no config files - so without this the
+    /// emitted `static_cell::StaticCell` would have no crate behind it.
+    #[test]
+    fn the_dependency_gate_follows_the_transport() {
+        assert!(needs_async_usart(&pico(UsartMode::Buffered)));
+        assert!(!needs_async_usart(&pico(UsartMode::Dma)));
+        // Blocking never emits either one.
+        let mut blocking = pico(UsartMode::Buffered);
+        blocking.runtime = Runtime::Blocking;
+        assert!(!needs_async_usart(&blocking));
+    }
+}
+
+#[cfg(test)]
 mod async_pwm_keeps_both_channels {
     use crate::panels::mcu_module::mcu::model::Runtime;
     use crate::panels::mcu_module::{builtins, pins::PinFunction};
@@ -2767,7 +2984,7 @@ mod async_pwm_keeps_both_channels {
             &toml,
             true,
             project_gen::async_flavor_for(&mcu.family, ""),
-            false,
+            super::needs_async_usart(&mcu),
             false,
             false,
             &[],
@@ -2829,6 +3046,16 @@ mod emit_async_for_manual_compile {
                     _ => {}
                 }
             }
+            // ...and that bus has to be on the transport that actually TAKES
+            // channels. `UsartMode` defaults to Buffered, which takes none - the
+            // radio would then get CH0 and this case would be checking an
+            // ordering with nothing in front of it.
+            mcu.reconcile_modules();
+            for m in &mut mcu.modules {
+                if let crate::panels::mcu_module::modules::ModuleConfig::Usart(c) = &mut m.config {
+                    c.mode = crate::panels::mcu_module::modules::UsartMode::Dma;
+                }
+            }
             let main_rs = mcu.fresh_main_rs();
             assert!(main_rs.contains("cyw43::new("), "the radio is brought up");
             assert!(
@@ -2859,7 +3086,12 @@ mod emit_async_for_manual_compile {
                 // Through the SAME chooser the app uses. Naming the flavour
                 // here is what let the app and this harness disagree.
                 project_gen::async_flavor_for(&mcu.family, ""),
-                false,
+                // This project wires GP0/GP1 as a UART too, so it needs the
+                // same answer - and the radio would MASK a wrong one, because
+                // `ensure_cyw43_deps` below adds `static_cell` for its own
+                // reasons. That is exactly why the plain Pico is the board to
+                // test a BufferedUart on.
+                super::needs_async_usart(&mcu),
                 false,
                 false,
                 &[],
@@ -2902,9 +3134,26 @@ mod emit_async_for_manual_compile {
     #[test]
     #[ignore = "writes projects to disk for a manual cross-compile"]
     fn emit_rp_async_project() {
-        for (id, dir_name) in [
-            ("rp2040_pico", "eide_rp2040_async_check"),
-            ("rp2350_pico2", "eide_rp2350_async_check"),
+        // BOTH transports, on BOTH boards. The buffered arm is the one that
+        // names `static_cell::StaticCell` in main.rs, and the plain Pico is the
+        // only board where a missing manifest line shows: on a W the radio adds
+        // that crate for its own reasons and hides the mistake.
+        for (id, dir_name, mode) in [
+            (
+                "rp2040_pico",
+                "eide_rp2040_async_check",
+                crate::panels::mcu_module::modules::UsartMode::Buffered,
+            ),
+            (
+                "rp2350_pico2",
+                "eide_rp2350_async_check",
+                crate::panels::mcu_module::modules::UsartMode::Buffered,
+            ),
+            (
+                "rp2040_pico",
+                "eide_rp2040_async_dma_check",
+                crate::panels::mcu_module::modules::UsartMode::Dma,
+            ),
         ] {
             let def = builtins::builtin_definitions()
                 .into_iter()
@@ -2942,6 +3191,16 @@ mod emit_async_for_manual_compile {
                     _ => {}
                 }
             }
+            // Through the module reconciler, the same door the canvas uses -
+            // poking `selected_function` alone leaves `mcu.modules` empty, and
+            // then the transport is whatever the fallback happens to be rather
+            // than what a user would have.
+            mcu.reconcile_modules();
+            for m in &mut mcu.modules {
+                if let crate::panels::mcu_module::modules::ModuleConfig::Usart(c) = &mut m.config {
+                    c.mode = mode;
+                }
+            }
             let main_rs = mcu.fresh_main_rs();
             // The chip names a DIFFERENT HAL crate on async; this is where that
             // choice becomes a Cargo.toml.
@@ -2964,11 +3223,19 @@ mod emit_async_for_manual_compile {
                 // Through the SAME chooser the app uses. Naming the flavour
                 // here is what let the app and this harness disagree.
                 project_gen::async_flavor_for(&mcu.family, ""),
-                false,
+                // And the same computation for `static_cell` + embedded-io-async.
+                // Hard-coded `false` here would keep the matrix green on a
+                // project whose main.rs names `StaticCell` and whose manifest
+                // does not carry it.
+                super::needs_async_usart(&mcu),
                 false,
                 false,
                 &[],
             );
+            // `static_cell` on the RP2040's M0 needs a CAS the core has not
+            // got. The app runs this for every async project; the radio
+            // harness already did, and this one did not.
+            let toml = project_gen::ensure_m0_atomics(&toml, true, &project.target, &[]);
             std::fs::write(&toml_path, toml).expect("write Cargo.toml");
             // The other half of the firmware gate: a board with no radio
             // must not carry 231 KB of it. The gate reads the GENERATED

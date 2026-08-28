@@ -6,6 +6,7 @@
 
 use super::tabs::show_peripherals_tab;
 use super::{AppIde, McuTab, ProjectFileId};
+use crate::panels::mcu_module::mcu::gui::module_docs;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
@@ -27,10 +28,11 @@ fn module_details_ui(
     id: &str,
     pin_names: &std::collections::HashMap<usize, String>,
     // What this module's config had to say that was not a control — see the
-    // `notes` out-parameter on `module_config_ui`.
-    notes: Option<&[String]>,
+    // `out` parameter on `module_config_ui`.
+    said: Option<&crate::panels::mcu_module::mcu::gui::module_docs::ConfigOut>,
     goto_pin: &mut Option<usize>,
 ) {
+    use crate::panels::mcu_module::mcu::gui::module_docs::ConfigOut;
     use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
 
     let Some(m) = mcu.modules.iter().find(|m| m.id == id) else {
@@ -62,7 +64,7 @@ fn module_details_ui(
     // ── Good to know ──
     // These came out of the config column, where each one was a grid row wide
     // enough that the column could not shrink below it.
-    if let Some(notes) = notes.filter(|n| !n.is_empty()) {
+    if let Some(notes) = said.map(ConfigOut::notes).filter(|n| !n.is_empty()) {
         ui.add_space(10.0);
         ui.label(
             egui::RichText::new("Good to know")
@@ -79,6 +81,57 @@ fn module_details_ui(
             );
             ui.add_space(3.0);
         }
+    }
+
+    // ── Fields ──
+    // Every row the config column just drew, in the order it drew them and
+    // under the label it used. Closed by default: the pane's other sections are
+    // what a reader glances at, and a fifteen-row list above them would bury
+    // both. `id_salt` on the KIND, not the module, so opening it for one USART
+    // opens it for the next — someone who wants field docs wants them for that
+    // whole kind.
+    //
+    // `fields()` is None until the arm that drew them says it documents all of
+    // them, so a kind that is half rolled out shows no section rather than a
+    // roster that reads as the module's whole surface.
+    if let Some(fields) = said.and_then(ConfigOut::fields).filter(|f| !f.is_empty()) {
+        ui.add_space(10.0);
+        egui::CollapsingHeader::new(
+            egui::RichText::new(format!("Fields \u{2014} {}", fields.len()))
+                .size(11.0)
+                .strong()
+                .color(egui::Color32::from_gray(200)),
+        )
+        .id_salt(("vmod_fields", m.kind))
+        .default_open(false)
+        .show(ui, |ui| {
+            for f in fields {
+                // Label and body on ONE wrapped line: in a 220px column a
+                // label line plus a body block costs a third more height and
+                // reads no better.
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.label(
+                        egui::RichText::new(&f.label)
+                            .size(10.5)
+                            .strong()
+                            .color(color),
+                    );
+                    // Split on whitespace rather than handing egui the whole
+                    // string: it is also what makes a run of spaces inside a
+                    // literal impossible to see, which this file has been
+                    // bitten by twice.
+                    for w in f.doc.split_whitespace() {
+                        ui.label(
+                            egui::RichText::new(w)
+                                .size(10.5)
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                    }
+                });
+                ui.add_space(4.0);
+            }
+        });
     }
 
     ui.add_space(10.0);
@@ -1044,12 +1097,16 @@ impl AppIde {
                                 // frame, so the pane never touches the editor
                                 // itself.
                                 let mut goto_pin: Option<usize> = None;
-                                // Standing remarks each open config produced,
-                                // by module id. Filled below, drawn by the
-                                // details pane — which is further right in the
-                                // same row, so it reads them the same frame.
-                                let mut notes: std::collections::HashMap<String, Vec<String>> =
-                                    std::collections::HashMap::new();
+                                // What each open config had to say beyond its
+                                // controls, by module id: the standing remarks,
+                                // and what every row it drew MEANS. Filled
+                                // below, drawn by the details pane — which is
+                                // further right in the same row, so it reads
+                                // them the same frame.
+                                let mut said: std::collections::HashMap<
+                                    String,
+                                    module_docs::ConfigOut,
+                                > = std::collections::HashMap::new();
                                 let mut arm_confirm: Option<String> = None; // show the confirm
                                 let mut cancel_confirm = false;
                                 // Pull the staged per-module styles into a LOCAL map so
@@ -1395,7 +1452,8 @@ impl AppIde {
                                                 // mutably, so the salt cannot
                                                 // borrow out of it.
                                                 let salt = m.id.clone();
-                                                let mut my_notes: Vec<String> = Vec::new();
+                                                let mut my_out =
+                                                    module_docs::ConfigOut::default();
                                                 ui.push_id(salt, |ui| {
                                                     mod_gui::module_config_ui(
                                                         ui, m, &pin_names, &pin_sigs,
@@ -1403,11 +1461,11 @@ impl AppIde {
                                                         &pin_funcs_current, &pin_funcs,
                                                         &mut pin_fn_choice, is_async, is_native,
                                                         &family, pending, chip_dma.as_ref(),
-                                                        usart_line_extras, &mut my_notes,
+                                                        usart_line_extras, &mut my_out,
                                                     );
                                                 });
-                                                if !my_notes.is_empty() {
-                                                    notes.insert(m.id.clone(), my_notes);
+                                                if !my_out.is_empty() {
+                                                    said.insert(m.id.clone(), my_out);
                                                 }
                                                 ui.add_space(4.0);
                                                 if confirm_id.as_deref() == Some(m.id.as_str()) {
@@ -1489,7 +1547,7 @@ impl AppIde {
                                                             mcu,
                                                             &id,
                                                             &pin_names,
-                                                            notes.get(&id).map(Vec::as_slice),
+                                                            said.get(&id),
                                                             &mut goto_pin,
                                                         );
                                                     });

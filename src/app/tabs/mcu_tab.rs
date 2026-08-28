@@ -120,7 +120,7 @@ fn signal_peripheral(signal: &str) -> &str {
 /// One derived category per peripheral found among the chip's `Other`
 /// signals, with how many distinct signals it has.
 ///
-/// The Peripherals tab is a fixed table of thirteen categories, each keyed on
+/// The Peripherals tab is a fixed table of categories, each keyed on
 /// a `PinFunction` variant. Everything the XML importer does not recognise
 /// becomes `PinFunction::Other`, which no category matches - so COMP, OPAMP,
 /// DAC, RTC, FMC, LTDC and DCMIPP were visible on the pins and nowhere in the
@@ -199,7 +199,7 @@ fn derived_blurb(name: &str) -> String {
 /// Hashed from the name rather than allocated in order: the set of
 /// peripherals changes with the chip, and a positional palette would repaint
 /// every row whenever a different part was loaded. Kept dark and desaturated
-/// so the thirteen hand-picked colours stay the loudest thing on screen -
+/// so the hand-picked colours stay the loudest thing on screen -
 /// these are the peripherals the IDE understands least.
 fn derived_color(name: &str) -> (u8, u8, u8) {
     let mut h: u32 = 2166136261;
@@ -422,7 +422,7 @@ fn legend(ui: &mut egui::Ui) {
 /// The ordered category table. Built per call (fn-pointer predicates), then
 /// shared by [`build_categories`] and [`pin_cost`] so the cost metric and the
 /// grouping can never drift apart.
-/// The ordered category table: thirteen hand-written rows, then one per
+/// The ordered category table: the hand-written rows, then one per
 /// peripheral derived from this chip's unrecognised signals.
 fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
     use Complexity::{Complex, Simple};
@@ -458,6 +458,17 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
             complexity: Simple,
             pred: Box::new(|f| matches!(f, PinFunction::DacOut { .. })),
         },
+        // An analog sense, which is why it sits with the ADC and DAC rather than
+        // with the digital rows: the pad reports a CAPACITANCE count, and the
+        // threshold that turns it into a press is the user's to pick.
+        // Original ESP32 only - esp-hal ships a touch driver for no other part.
+        CategoryDef {
+            name: "TOUCH".into(),
+            blurb: "a pad that senses a finger — a count, not a yes/no".into(),
+            rgb: (125, 195, 80),
+            complexity: Simple,
+            pred: Box::new(|f| matches!(f, PinFunction::TouchPad(_))),
+        },
         CategoryDef {
             name: "Timers / PWM".into(),
             blurb: "a square wave: frequency, duty, dead time".into(),
@@ -471,6 +482,48 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
                         | PinFunction::TimerBreak { .. }
                 )
             }),
+        },
+        // Directly under Timers / PWM, because the pair is the whole point: that
+        // row dims an LED, this one drives a half-bridge. Simple by the rule -
+        // one operator output is a working instance - even though a bridge
+        // usually takes A and B together.
+        // Its (205, 85, 45) deviates from the canvas, which paints MCPWM in the
+        // PWM orange deliberately (colors.rs). A canvas shows one pad at a time
+        // and can afford the shared hue; this column shows every row at once and
+        // cannot - it would be byte-identical to GPIO Output.
+        CategoryDef {
+            name: "MCPWM".into(),
+            blurb: "PWM for switching a motor bridge, not dimming an LED".into(),
+            rgb: (205, 85, 45),
+            complexity: Simple,
+            pred: Box::new(|f| {
+                matches!(f, PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. })
+            }),
+        },
+        // One edge pad is a working counter; the control pad is what makes it an
+        // encoder and the second channel is what makes it quadrature. Both are
+        // choices, so the required set is one pin and the row is Simple.
+        CategoryDef {
+            name: "PCNT".into(),
+            blurb: "counts pulses in hardware — tachometer, flow, encoder".into(),
+            rgb: (70, 190, 155),
+            complexity: Simple,
+            pred: Box::new(|f| {
+                matches!(
+                    f,
+                    PinFunction::PcntEdge { .. } | PinFunction::PcntCtrl { .. }
+                )
+            }),
+        },
+        // One pad per channel, and the direction is fixed in silicon per channel
+        // on every part after the original ESP32 - which this row has no way to
+        // show. The Virtual Modules panel is where that appears.
+        CategoryDef {
+            name: "RMT".into(),
+            blurb: "sends or reads pulse trains — IR, WS2812, 1-Wire".into(),
+            rgb: (220, 100, 115),
+            complexity: Simple,
+            pred: Box::new(|f| matches!(f, PinFunction::RmtChannel(_))),
         },
         CategoryDef {
             name: "MCO / Clock".into(),
@@ -596,6 +649,94 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
                 )
             }),
         },
+        // Data plus clock are both required, so the pads are picked as a set.
+        // Deliberately NOT "up to 16 bits": sixteen data lines exist only on the
+        // C6, and the UI offers 1/2/4/8 everywhere else.
+        CategoryDef {
+            name: "PARL".into(),
+            blurb: "parallel port out — a whole byte per clock, not a bit".into(),
+            rgb: (100, 110, 215),
+            complexity: Complex,
+            pred: Box::new(|f| {
+                matches!(
+                    f,
+                    PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid
+                )
+            }),
+        },
+        // The same peripheral by direction, so the only word that differs from
+        // the row above is out/in. Two rows because the Virtual Modules panel
+        // names the two halves separately, and the two lists must agree.
+        // The pin canvas paints all six Parl signals one colour, so these two
+        // row swatches cannot both match it. Splitting the canvas arm instead
+        // would repaint pads to fix a legend, which is the wrong way round.
+        CategoryDef {
+            name: "PARL RX".into(),
+            blurb: "parallel port in — a whole byte per clock, not a bit".into(),
+            rgb: (155, 150, 230),
+            complexity: Complex,
+            pred: Box::new(|f| {
+                matches!(
+                    f,
+                    PinFunction::ParlRxData { .. }
+                        | PinFunction::ParlRxClk
+                        | PinFunction::ParlRxValid
+                )
+            }),
+        },
+        // The display half of LCD_CAM, ESP32-S3 only. Named "LCD" to match
+        // ModuleKind::short(), so the tab and the Virtual Modules panel say the
+        // same word.
+        //
+        // KNOWN COLLISION, accepted: an imported STM32 with a segment LCD keeps
+        // `LCD_SEG0` as an unrecognised signal, and `signal_peripheral` derives
+        // the name "LCD" from it too - so the fold below merges those pads into
+        // this row and labels them "i8080 or RGB", which a segment LCD is not.
+        // No bundled chip is affected. Guarding the fold on "does this row match
+        // anything on this chip" was tried and is WRONG: an imported part whose
+        // ADC signals the importer left alone derives "ADC" with no typed
+        // AdcChannel beside it, and folding there is exactly right
+        // (`category_names_are_unique` covers that case). The two situations are
+        // mechanically identical; only the vendors' choice of a three-letter
+        // name differs.
+        CategoryDef {
+            name: "LCD".into(),
+            blurb: "parallel bus that drives a display — i8080 or RGB".into(),
+            rgb: (130, 105, 215),
+            complexity: Complex,
+            pred: Box::new(|f| {
+                matches!(
+                    f,
+                    PinFunction::LcdCamData { .. }
+                        | PinFunction::LcdCamDc
+                        | PinFunction::LcdCamWr
+                        | PinFunction::LcdCamCs
+                        | PinFunction::LcdCamPclk
+                        | PinFunction::LcdCamVsync
+                        | PinFunction::LcdCamHsync
+                        | PinFunction::LcdCamDe
+                )
+            }),
+        },
+        // The camera half of the same block, and a separate variant family in
+        // the enum - so the two preds cannot both claim a pad.
+        CategoryDef {
+            name: "CAM".into(),
+            blurb: "pixels in from a camera sensor, on a parallel bus".into(),
+            rgb: (200, 115, 215),
+            complexity: Complex,
+            pred: Box::new(|f| {
+                matches!(
+                    f,
+                    PinFunction::CamData { .. }
+                        | PinFunction::CamPclk
+                        | PinFunction::CamVsync
+                        | PinFunction::CamHsync
+                        | PinFunction::CamHenable
+                        | PinFunction::CamMclk
+                )
+            }),
+        },
         CategoryDef {
             name: "SAI".into(),
             blurb: "multi-channel audio: I2S, TDM, PDM, AC'97".into(),
@@ -641,7 +782,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
     ];
     // Then the peripherals only this chip knows about. Appended, so the
-    // hand-written thirteen keep their order and their place at the top.
+    // hand-written rows keep their order and their place at the top.
     for (name, signals) in other_peripherals(pins) {
         let prefix = name.clone();
         let derived: Box<dyn Fn(&PinFunction) -> bool> =
@@ -977,7 +1118,7 @@ mod tests {
 
     /// The Peripherals tab, for every chip that can open it.
     ///
-    /// The tab is thirteen hard-coded categories plus whatever the chip's own
+    /// The tab is a fixed set of hard-coded categories plus whatever the chip's own
     /// signals derive. What it must never do is offer a peripheral the chip
     /// has not got — the categories come from PIN FUNCTIONS, so the check is
     /// whether those agree with what the part actually carries.
@@ -1044,6 +1185,66 @@ mod tests {
                     ("CAN", &|f: &PinFunction| {
                         matches!(f, PinFunction::CanTx | PinFunction::CanRx)
                     }),
+                    // The eight that were missing entirely. The assertion is
+                    // bidirectional, so this catches a row offered without pins
+                    // AND pins with no row - the second is how these went
+                    // invisible on seven of the nine Espressif parts while the
+                    // Virtual Modules panel offered them all along.
+                    ("RMT", &|f: &PinFunction| {
+                        matches!(f, PinFunction::RmtChannel(_))
+                    }),
+                    ("PCNT", &|f: &PinFunction| {
+                        matches!(
+                            f,
+                            PinFunction::PcntEdge { .. } | PinFunction::PcntCtrl { .. }
+                        )
+                    }),
+                    ("MCPWM", &|f: &PinFunction| {
+                        matches!(f, PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. })
+                    }),
+                    ("TOUCH", &|f: &PinFunction| {
+                        matches!(f, PinFunction::TouchPad(_))
+                    }),
+                    ("PARL", &|f: &PinFunction| {
+                        matches!(
+                            f,
+                            PinFunction::ParlData { .. }
+                                | PinFunction::ParlClk
+                                | PinFunction::ParlValid
+                        )
+                    }),
+                    ("PARL RX", &|f: &PinFunction| {
+                        matches!(
+                            f,
+                            PinFunction::ParlRxData { .. }
+                                | PinFunction::ParlRxClk
+                                | PinFunction::ParlRxValid
+                        )
+                    }),
+                    ("LCD", &|f: &PinFunction| {
+                        matches!(
+                            f,
+                            PinFunction::LcdCamData { .. }
+                                | PinFunction::LcdCamDc
+                                | PinFunction::LcdCamWr
+                                | PinFunction::LcdCamCs
+                                | PinFunction::LcdCamPclk
+                                | PinFunction::LcdCamVsync
+                                | PinFunction::LcdCamHsync
+                                | PinFunction::LcdCamDe
+                        )
+                    }),
+                    ("CAM", &|f: &PinFunction| {
+                        matches!(
+                            f,
+                            PinFunction::CamData { .. }
+                                | PinFunction::CamPclk
+                                | PinFunction::CamVsync
+                                | PinFunction::CamHsync
+                                | PinFunction::CamHenable
+                                | PinFunction::CamMclk
+                        )
+                    }),
                 ] {
                     assert_eq!(
                         names.contains(&cat),
@@ -1068,6 +1269,50 @@ mod tests {
         cats.iter().find(|c| c.name == name).unwrap()
     }
 
+    /// The REVERSE of `every_bundled_chip_opens_a_truthful_peripherals_tab`.
+    ///
+    /// That test checks a category appears only where the chip has the signals.
+    /// This one checks the other direction, which is the one that was missing:
+    /// every signal a chip's pins expose must be reachable through SOME
+    /// category. A typed `PinFunction` variant with no row is simply invisible
+    /// on screen: the pin shows it on the Pins tab and in the Virtual Modules
+    /// panel, and
+    /// the Peripherals tab, which claims to list "every peripheral this chip can
+    /// use", silently omits it.
+    ///
+    /// That is how RMT, PCNT, MCPWM, PARL, PARL RX, LCD, CAM and TOUCH went
+    /// missing on seven of the nine Espressif parts. `PinFunction::Other` is
+    /// exempt because `other_peripherals` already derives a row for it.
+    #[test]
+    fn every_signal_a_chip_exposes_is_reachable_from_the_peripherals_tab() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use std::collections::BTreeSet;
+
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            let pins: Vec<&Pin> = mcu.iter_all_pins().collect();
+            let defs = category_defs(&pins);
+            let mut orphans: BTreeSet<String> = BTreeSet::new();
+            for pin in &pins {
+                for f in &pin.available_functions {
+                    if matches!(f, PinFunction::Unset | PinFunction::Other(_)) {
+                        continue;
+                    }
+                    if !defs.iter().any(|c| (c.pred)(f)) {
+                        // The variant name alone: the payload is an instance
+                        // number, and one missing row hides every instance.
+                        let s = format!("{f:?}");
+                        orphans.insert(s.split(['(', ' ', '{']).next().unwrap_or(&s).to_owned());
+                    }
+                }
+            }
+            assert!(
+                orphans.is_empty(),
+                "{}: the pins offer {orphans:?}, and no category row does",
+                d.id
+            );
+        }
+    }
     #[test]
     fn categories_cover_expected_peripherals() {
         let mcu = create_stm32f103c8tx();
@@ -1215,18 +1460,19 @@ mod tests {
     /// tab promises: single-pin functions left, multi-pin protocols right.
     #[test]
     fn every_category_has_a_column() {
-        // No pins, so only the thirteen hand-written rows: the derived ones
-        // are per-chip and have their own test.
+        // No pins, so only the hand-written rows: the derived ones are
+        // per-chip and have their own test.
         for def in category_defs(&[]) {
             let expected = match def.name.as_str() {
-                "GPIO Output" | "GPIO Input" | "ADC" | "DAC" | "Timers / PWM" | "MCO / Clock" => {
-                    Complexity::Simple
-                }
+                "GPIO Output" | "GPIO Input" | "ADC" | "DAC" | "TOUCH" | "Timers / PWM"
+                | "MCPWM" | "PCNT" | "RMT" | "MCO / Clock" => Complexity::Simple,
                 _ => Complexity::Complex,
             };
             assert_eq!(def.complexity, expected, "wrong column for {}", def.name);
         }
-        // The complex column is exactly the buses plus SWD.
+        // The complex column is the buses, SWD, and the ESP wide parallel
+        // ports - none of which `is_bus()` knows about, because they predate
+        // nothing in it: they are simply pads that have to be picked as a set.
         let complex: Vec<String> = category_defs(&[])
             .into_iter()
             .filter(|d| d.complexity == Complexity::Complex)
@@ -1244,6 +1490,10 @@ mod tests {
                 "OCTOSPI",
                 "QUADSPI",
                 "SDMMC",
+                "PARL",
+                "PARL RX",
+                "LCD",
+                "CAM",
                 "SAI",
                 "I2C",
                 "USB",
@@ -1349,7 +1599,7 @@ mod tests {
         };
         assert_eq!(col("COMP1"), Complexity::Complex, "INP + INM go together");
         assert_eq!(col("DAC1"), Complexity::Simple, "one output, one pin");
-        // …and the hand-written thirteen keep their place at the top.
+        // …and the hand-written rows keep their place at the top.
         assert_eq!(defs[0].name, "GPIO Output");
     }
 

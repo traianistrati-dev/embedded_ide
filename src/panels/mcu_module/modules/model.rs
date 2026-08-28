@@ -1877,6 +1877,16 @@ impl UsartDirection {
                 UsartDirection::RxOnly,
             ];
         }
+        // RP: the fall-through list was embassy-stm32's and offered HALF DUPLEX,
+        // which embassy-rp does not have in any form - no `hdsel`, no
+        // `new_half_duplex`, nothing in `Config`. embassy-rp does have real
+        // one-way constructors (`BufferedUartTx::new` / `UartTx::<Async>::new`),
+        // so the missing directions are a gap in THIS backend rather than in the
+        // chip - but the panel offers what the backend builds, and today that is
+        // the pair. `async_bus_lines` refuses a half-wired UART outright.
+        if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+            return &[UsartDirection::TxRx];
+        }
         Self::options(transport)
     }
 
@@ -1987,6 +1997,14 @@ impl UsartFlow {
                     _ => &[UsartFlow::None],
                 }
             };
+        }
+        // RP: embassy-rp has ONE flow form, `new_with_rtscts`, which takes both
+        // pads together - there is no RTS-only, no CTS-only and no RS485
+        // driver-enable anywhere in the crate. This backend emits neither form
+        // yet, so the panel says so by offering nothing rather than by offering
+        // three options that generate the same code.
+        if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+            return &[UsartFlow::None];
         }
         Self::options(transport, direction)
     }

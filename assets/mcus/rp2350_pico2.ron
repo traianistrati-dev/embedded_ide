@@ -15,7 +15,7 @@ McuDefinition(
         ram_origin: "0x20000000",
         ram_size: "520K",
         hal_dep: "rp235x-hal = { version = \"0.4\", features = [\"rt\", \"critical-section-impl\"] }",
-        hal_dep_async: Some("embassy-rp = { version = \"0.10\", features = [\"rp235xa\", \"critical-section-impl\"] }"),
+        hal_dep_async: Some("embassy-rp = { version = \"0.10\", features = [\"rp235xa\", \"critical-section-impl\", \"time-driver\"] }"),
         probe_chip: "RP235x",
         memory_comment: "Raspberry Pi Pico 2 (RP2350)  -  4 MiB Flash / 520 KiB RAM",
     ),

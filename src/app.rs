@@ -2933,7 +2933,16 @@ impl AppIde {
                 &new_toml,
                 is_async,
                 async_flavor,
-                is_async && has_cfg("usart"),
+                // `has_cfg` matches a config-FILE prefix, and the async RP
+                // backend writes no config files at all - so a Pico with a
+                // `BufferedUart` in main.rs would ask for `static_cell` against
+                // a manifest that never got the line. A Pico W hides it, since
+                // the radio adds that crate for its own reasons.
+                is_async && has_cfg("usart")
+                    || self
+                        .mcu
+                        .as_ref()
+                        .is_some_and(crate::panels::mcu_module::codegen::rp::needs_async_usart),
                 needs_eh_total,
                 needs_eh_async,
                 &sources,

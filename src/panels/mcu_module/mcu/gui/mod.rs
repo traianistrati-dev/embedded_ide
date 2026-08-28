@@ -12,6 +12,7 @@ pub mod geometry;
 pub mod info;
 pub mod io_arrows;
 pub mod layout;
+pub mod module_docs;
 pub mod modules;
 pub mod panel;
 pub mod rotate;
