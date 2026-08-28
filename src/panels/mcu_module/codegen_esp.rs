@@ -147,6 +147,72 @@ fn wait_fn(edge: Edge) -> &'static str {
     }
 }
 
+/// The `Event` an armed input listens for on the blocking path.
+fn listen_event(edge: Edge) -> &'static str {
+    match edge {
+        Edge::Rising => "RisingEdge",
+        Edge::Falling => "FallingEdge",
+        Edge::Both => "AnyEdge",
+    }
+}
+
+/// The static holding one armed input, so the handler can reach it.
+fn irq_static(p: &Pin) -> String {
+    esp_binding(p).to_ascii_uppercase()
+}
+
+/// The module-level items the BLOCKING path needs: one static per armed input,
+/// and ONE handler.
+///
+/// One handler, not one per pin: on this chip every GPIO shares a single
+/// interrupt (`Io::set_interrupt_handler` registers "a handler for all GPIO
+/// pins"), so the handler has to ask each pin whether it was the one — the same
+/// shape the RTIC backend uses for a shared EXTI vector. Registering a second
+/// handler would REPLACE the first, silently.
+///
+/// The statics are unavoidable: an interrupt handler takes no arguments and
+/// cannot borrow a local, so the pin has to live somewhere it can reach.
+fn irq_handler_items(armed: &[(&Pin, Edge)]) -> String {
+    if armed.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (p, _) in armed {
+        out.push_str(&format!(
+            "/// {name} — parked here so the interrupt handler can reach it.\n\
+             static {s}: Mutex<RefCell<Option<Input<'static>>>> = Mutex::new(RefCell::new(None));\n",
+            name = p.name,
+            s = irq_static(p),
+        ));
+    }
+    out.push('\n');
+    // One `push_str` per line: rustfmt joins a `\`-continued literal and keeps
+    // the SOURCE indentation, which drops every line but the first out of
+    // column — and in generated Rust that is a syntax error, not a typo.
+    out.push_str("/// Every GPIO on this chip shares ONE interrupt, so this handler asks\n");
+    out.push_str("/// each armed pin whether it was the one that fired.\n");
+    out.push_str("#[esp_hal::handler]\n");
+    out.push_str("fn gpio_irq() {\n");
+    out.push_str("    critical_section::with(|cs| {\n");
+    for (p, edge) in armed {
+        out.push_str(&format!(
+            "        if let Some(pin) = {s}.borrow_ref_mut(cs).as_mut() {{\n\
+             \x20           if pin.is_interrupt_set() {{\n\
+             \x20               // Cleared FIRST: leave it set and the handler re-enters\n\
+             \x20               // the moment it returns.\n\
+             \x20               pin.clear_interrupt();\n\
+             \x20               // {name} {label} edge: your handler code here.\n\
+             \x20           }}\n\
+             \x20       }}\n",
+            s = irq_static(p),
+            name = p.name,
+            label = edge.label().to_ascii_lowercase(),
+        ));
+    }
+    out.push_str("    });\n}\n\n");
+    out
+}
+
 /// One `#[embassy_executor::task]` per armed input, placed between the `use`
 /// block and the entry point — a task cannot live inside `fn main`.
 ///
@@ -528,9 +594,12 @@ fn make_gen_section(
     let has_pcnt = configured
         .iter()
         .any(|p| matches!(p.selected_function, PinFunction::PcntEdge { .. }));
+    let has_irq = configured
+        .iter()
+        .any(|p| p.selected_function == PinFunction::GpioInput && p.irq.is_some());
     let use_block = build_use_block(
         has_output, has_input, has_adc, has_uart, has_spi, has_i2c, has_pwm, has_rmt, has_pcnt,
-        runtime,
+        has_irq, runtime,
     );
 
     // ── fn main() body ────────────────────────────────────────────────────────
@@ -577,8 +646,16 @@ fn make_gen_section(
         }
         for p in &inputs {
             body.push_str(ALLOW);
+            // `listen` takes `&mut self`, so an input the blocking path arms has
+            // to be bound mutably. On Async it does not: the pin is MOVED into
+            // its task, which declares its own `mut`.
+            let m = if runtime == EspRuntime::Blocking && p.irq.is_some() {
+                "mut "
+            } else {
+                ""
+            };
             body.push_str(&format!(
-                "    let {var} = Input::new(peripherals.{gpio}, InputConfig::default()); // GPIO Input\n",
+                "    let {m}{var} = Input::new(peripherals.{gpio}, InputConfig::default()); // GPIO Input\n",
                 var = esp_binding(p),
                 gpio = p.name,
             ));
@@ -606,16 +683,23 @@ fn make_gen_section(
                 body.push_str(&format!("    spawner.spawn({var}_irq({var}).unwrap());\n"));
             }
         } else {
+            // ONE registration for the whole chip: `set_interrupt_handler` is on
+            // `Io`, not on the pin, and a second call would replace the first.
+            body.push_str("    let mut io = Io::new(peripherals.IO_MUX);\n");
+            body.push_str("    io.set_interrupt_handler(gpio_irq);\n");
+            body.push_str("    critical_section::with(|cs| {\n");
             for (p, edge) in &armed {
+                let var = esp_binding(p);
                 body.push_str(&format!(
-                    "    // {} is set to interrupt on a {} edge, which only the Async\n",
-                    p.name,
-                    edge.label().to_ascii_lowercase()
+                    "        {var}.listen(Event::{});\n",
+                    listen_event(*edge)
                 ));
-                body.push_str(
-                    "    // runtime generates (System tab) — it becomes a task that awaits it.\n",
-                );
+                body.push_str(&format!(
+                    "        {}.borrow_ref_mut(cs).replace({var});\n",
+                    irq_static(p)
+                ));
             }
+            body.push_str("    });\n");
         }
     }
 
@@ -898,10 +982,12 @@ fn make_gen_section(
     // Blank line before GEN_END
     body.push('\n');
 
+    // Async: one task per pin, which owns it. Blocking: one static per pin and
+    // ONE handler, because every GPIO shares a single interrupt.
     let tasks = if runtime == EspRuntime::Async {
         irq_tasks(&armed)
     } else {
-        String::new()
+        irq_handler_items(&armed)
     };
     format!(
         "{GEN_BEGIN}\n\
@@ -926,7 +1012,7 @@ fn make_default_gen_section(clock: &ClockConfig, chip: &str, runtime: EspRuntime
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n",
         use_block = build_use_block(
-            false, false, false, false, false, false, false, false, false, runtime,
+            false, false, false, false, false, false, false, false, false, false, runtime,
         ),
         entry = runtime.entry(),
         init = esp_init_line(clock, chip),
@@ -946,6 +1032,9 @@ fn build_use_block(
     has_pwm: bool,
     has_rmt: bool,
     has_pcnt: bool,
+    // Any input armed with an interrupt edge — the blocking path needs a static
+    // per pin and the `Io` that carries the one handler.
+    has_irq: bool,
     runtime: EspRuntime,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -970,6 +1059,12 @@ fn build_use_block(
         // generator emits `InputConfig::default().with_pull(..)`, and not before
         // — an import is a claim that the code below uses it.
     }
+    // An armed input listens for an `Event`, and the one handler every GPIO
+    // shares is registered on `Io`.
+    if has_irq && runtime == EspRuntime::Blocking {
+        gpio_types.insert("Event");
+        gpio_types.insert("Io");
+    }
     if !gpio_types.is_empty() {
         let types = gpio_types.iter().copied().collect::<Vec<_>>().join(", ");
         lines.push(format!("use esp_hal::gpio::{{{types}}};"));
@@ -982,6 +1077,12 @@ fn build_use_block(
     // chip-wide block, so `Ledc::new` cannot live in a per-timer config module.
     if has_pwm {
         lines.push("use esp_hal::ledc::Ledc;".into());
+    }
+    // The blocking interrupt path needs a place to park each pin (an interrupt
+    // handler takes no arguments) and the `Io` the handler is registered on.
+    if has_irq && runtime == EspRuntime::Blocking {
+        lines.push("use core::cell::RefCell;".into());
+        lines.push("use critical_section::Mutex;".into());
     }
     // The RMT is the same shape: one block for the chip, whose channels are
     // fields of what `Rmt::new` returns, so it too is built here and lent out.
@@ -2287,18 +2388,93 @@ mod tests {
         assert!(code.contains("async fn main(_spawner: Spawner)"), "{code}");
     }
 
-    /// The blocking runtime cannot build this, so it SAYS so where the spawn
-    /// would have been — the setting is not dropped on the floor.
+    /// The blocking path builds it too, with the shape esp-hal forces: a static
+    /// per pin (a handler takes no arguments and cannot borrow a local) and ONE
+    /// handler, because every GPIO on the chip shares a single interrupt.
     #[test]
-    fn the_blocking_runtime_says_why_it_generates_nothing() {
+    fn the_blocking_runtime_parks_the_pin_and_registers_one_handler() {
         let mut p = pwm_pin("GPIO0", PinFunction::GpioInput);
+        p.custom_label = "mw ot2".into();
         p.irq = Some(Edge::Falling);
         let pins = vec![p];
         let refs: Vec<&Pin> = pins.iter().collect();
         let code = esp_main(&refs, EspRuntime::Blocking);
+
         assert!(!code.contains("embassy_executor::task"), "{code}");
         assert!(
-            code.contains("GPIO0 is set to interrupt on a falling edge, which only the Async"),
+            code.contains(
+                "static GPIO0_IN_MW_OT2: Mutex<RefCell<Option<Input<'static>>>> = \
+                 Mutex::new(RefCell::new(None));"
+            ),
+            "{code}"
+        );
+        assert!(code.contains("#[esp_hal::handler]"), "{code}");
+        assert!(code.contains("fn gpio_irq() {"), "{code}");
+        // Cleared inside the handler, or it re-enters the moment it returns.
+        assert!(code.contains("pin.clear_interrupt();"), "{code}");
+        // Registered ONCE, on `Io` — a second call would replace the first.
+        assert_eq!(
+            code.matches("io.set_interrupt_handler(gpio_irq);").count(),
+            1,
+            "{code}"
+        );
+        assert!(
+            code.contains("let mut io = Io::new(peripherals.IO_MUX);"),
+            "{code}"
+        );
+        assert!(
+            code.contains("gpio0_in_mw_ot2.listen(Event::FallingEdge);"),
+            "{code}"
+        );
+        assert!(
+            code.contains("GPIO0_IN_MW_OT2.borrow_ref_mut(cs).replace(gpio0_in_mw_ot2);"),
+            "{code}"
+        );
+        // `listen` takes `&mut self`, so the binding has to be mutable — and the
+        // pin line still ends in the label `parse_main_rs` reads back.
+        assert!(
+            code.contains("let mut gpio0_in_mw_ot2 = Input::new(peripherals.GPIO0"),
+            "{code}"
+        );
+        assert!(code.contains("use critical_section::Mutex;"), "{code}");
+    }
+
+    /// Two armed pins share the ONE handler, which asks each in turn — the same
+    /// shape a shared EXTI vector takes on the RTIC backend.
+    #[test]
+    fn two_armed_pins_share_the_one_handler() {
+        let mut a = pwm_pin("GPIO0", PinFunction::GpioInput);
+        a.irq = Some(Edge::Rising);
+        let mut b = pwm_pin("GPIO1", PinFunction::GpioInput);
+        b.irq = Some(Edge::Both);
+        let pins = vec![a, b];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let code = esp_main(&refs, EspRuntime::Blocking);
+
+        assert_eq!(code.matches("#[esp_hal::handler]").count(), 1, "{code}");
+        assert_eq!(code.matches("fn gpio_irq() {").count(), 1, "{code}");
+        assert!(
+            code.contains("GPIO0_IN.borrow_ref_mut(cs).as_mut()"),
+            "{code}"
+        );
+        assert!(
+            code.contains("GPIO1_IN.borrow_ref_mut(cs).as_mut()"),
+            "{code}"
+        );
+        assert!(code.contains("gpio1_in.listen(Event::AnyEdge);"), "{code}");
+    }
+
+    /// An unarmed input on the blocking path stays exactly what it was.
+    #[test]
+    fn an_unarmed_input_arms_nothing_on_blocking() {
+        let pins = vec![pwm_pin("GPIO0", PinFunction::GpioInput)];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let code = esp_main(&refs, EspRuntime::Blocking);
+        assert!(!code.contains("esp_hal::handler"), "{code}");
+        assert!(!code.contains("Io::new"), "{code}");
+        assert!(!code.contains("critical_section::Mutex"), "{code}");
+        assert!(
+            code.contains("let gpio0_in = Input::new(peripherals.GPIO0"),
             "{code}"
         );
     }

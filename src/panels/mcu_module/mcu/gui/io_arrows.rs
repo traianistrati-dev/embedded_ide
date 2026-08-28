@@ -462,8 +462,10 @@ pub fn draw_io_arrows(
                     .on_hover_text(concat!(
                         "Raise an interrupt on this input.\n",
                         "ESP + Async: the pin becomes its own task, awaiting the edge.\n",
+                        "ESP + Blocking: it is parked in a static, and one shared handler asks it.\n",
+                        "STM32 + Async: it becomes an ExtiInput, and a task awaits the edge.\n",
                         "STM32F1 + RTIC: it becomes a #[task(binds = EXTIn)].\n",
-                        "Other runtimes generate nothing — main.rs says so in place.",
+                        "STM32F1 Blocking/Native generate nothing — main.rs says so in place.",
                     ));
                 });
             }
