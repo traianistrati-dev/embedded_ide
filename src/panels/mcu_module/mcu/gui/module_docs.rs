@@ -52,6 +52,7 @@ pub struct FieldDoc {
 pub struct ConfigOut {
     notes: Vec<String>,
     fields: Vec<FieldDoc>,
+    elsewhere: Vec<FieldDoc>,
     complete: bool,
 }
 
@@ -78,6 +79,30 @@ impl ConfigOut {
         });
     }
 
+    /// A setting this module HAS, but that this grid does not draw.
+    ///
+    /// Kept apart from [`Self::field`] and NOT gated by
+    /// [`Self::all_fields_documented`], because the two answer different
+    /// questions. `field` says "here is what the row you are looking at means";
+    /// this says "here is a setting you will not find above, and where it lives
+    /// instead". The second is true for every kind from the day it is written,
+    /// so withholding it until that kind's rows are documented would hide a
+    /// finished answer behind an unfinished one.
+    pub fn elsewhere(&mut self, label: impl Into<String>, doc: impl Into<Cow<'static, str>>) {
+        let label = label.into();
+        if self.elsewhere.iter().any(|f| f.label == label) {
+            return;
+        }
+        self.elsewhere.push(FieldDoc {
+            label,
+            doc: doc.into(),
+        });
+    }
+
+    pub fn elsewhere_fields(&self) -> &[FieldDoc] {
+        &self.elsewhere
+    }
+
     /// Say that this arm documents EVERY row it drew.
     ///
     /// Until an arm calls this, [`Self::fields`] hands back `None` and the pane
@@ -99,7 +124,7 @@ impl ConfigOut {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.notes.is_empty() && self.fields.is_empty()
+        self.notes.is_empty() && self.fields.is_empty() && self.elsewhere.is_empty()
     }
 }
 
@@ -131,6 +156,48 @@ pub const DMA_CHANNEL: &str = "The channel this direction takes. Automatic gives
                                the peripheral can use that nothing else has claimed - pin it by \
                                hand to leave a particular channel free, or to match a driver you \
                                already have.";
+
+// ── Settings every module has, that its grid does not draw ───────────────────
+
+pub const SHARED_INSTANCE: &str = "Which peripheral this module drives. Not editable: it is read \
+                                   back off the pads - a module is keyed on the function each \
+                                   wired pin carries - so moving the wiring to another instance is \
+                                   what changes it.";
+
+pub const SHARED_INSTANCE_TIMER_STM32: &str = "The TIM this module drives, read back off the pads \
+                                               rather than chosen: a channel pad names its timer, \
+                                               so re-wiring is what moves the module.";
+
+pub const SHARED_INSTANCE_TIMER_ESP: &str = "The LEDC timer this module drives. Unlike an STM32's \
+                                             TIM, its channels are not welded to pads - the GPIO \
+                                             matrix routes them - so the pad picks the channel and \
+                                             the module keeps the timer.";
+
+pub const SHARED_INSTANCE_TIMER_RP: &str = "The PWM SLICE this module drives. A slice is welded to \
+                                            its pads on the RP: pad n belongs to slice (n/2) % 8, \
+                                            and A or B by whether it is even or odd.";
+
+pub const SHARED_INSTANCE_CUSTOM: &str = "A custom module drives no peripheral, so this number \
+                                          means nothing - it exists only so every module can \
+                                          answer the same question. Custom modules are told apart \
+                                          by their id.";
+
+pub const SHARED_NAME: &str = "The label from the Name row above, and from the field inside the \
+                               module's box on the canvas. It is lowercased, every run of \
+                               non-alphanumerics becomes one underscore, and the result is \
+                               appended to the generated handle - `servo` gives `_pwm3_servo`.";
+
+pub const SHARED_NAME_RP: &str = "The label from the Name row above, and from the field inside the \
+                                  module's box on the canvas. The Pico backend does not read it \
+                                  yet, so handles keep their bare names there; every other backend \
+                                  appends it - `servo` gives `_pwm3_servo`.";
+
+pub const SHARED_DATA_MODELS: &str = "Free-text Rust this module carries for the frames it sends \
+                                      and receives. Nothing edits them today - a palette template \
+                                      can fill them, or you can by hand - and whatever is there is \
+                                      written into main.rs as a `mod` block named after the \
+                                      module's id. Additively: a block already there is left \
+                                      alone, so your edits inside it survive regeneration.";
 
 // ── USART / LPUART ───────────────────────────────────────────────────────────
 
@@ -223,6 +290,14 @@ mod tests {
         ("INIT_API_DMA", INIT_API_DMA),
         ("BLOCKING_TRANSPORT", BLOCKING_TRANSPORT),
         ("DMA_CHANNEL", DMA_CHANNEL),
+        ("SHARED_INSTANCE", SHARED_INSTANCE),
+        ("SHARED_INSTANCE_TIMER_STM32", SHARED_INSTANCE_TIMER_STM32),
+        ("SHARED_INSTANCE_TIMER_ESP", SHARED_INSTANCE_TIMER_ESP),
+        ("SHARED_INSTANCE_TIMER_RP", SHARED_INSTANCE_TIMER_RP),
+        ("SHARED_INSTANCE_CUSTOM", SHARED_INSTANCE_CUSTOM),
+        ("SHARED_NAME", SHARED_NAME),
+        ("SHARED_NAME_RP", SHARED_NAME_RP),
+        ("SHARED_DATA_MODELS", SHARED_DATA_MODELS),
         ("USART_BAUD", USART_BAUD),
         ("USART_DATA_BITS", USART_DATA_BITS),
         ("USART_PARITY", USART_PARITY),
@@ -291,6 +366,21 @@ mod tests {
         assert_eq!(f.len(), 1);
         // The FIRST wins: it is the one the reader met first.
         assert_eq!(f[0].doc, USART_BAUD);
+    }
+
+    /// "Set elsewhere" is NOT held back by the completeness gate: it is true for
+    /// every kind the day it is written, and hiding a finished answer behind an
+    /// unfinished one would be the wrong trade.
+    #[test]
+    fn the_elsewhere_group_does_not_wait_for_the_rows() {
+        let mut out = ConfigOut::default();
+        out.elsewhere("Instance", SHARED_INSTANCE);
+        assert!(out.fields().is_none(), "the rows are still ungated");
+        assert_eq!(out.elsewhere_fields().len(), 1);
+        // …and it dedupes the same way.
+        out.elsewhere("Instance", SHARED_NAME);
+        assert_eq!(out.elsewhere_fields().len(), 1);
+        assert_eq!(out.elsewhere_fields()[0].doc, SHARED_INSTANCE);
     }
 
     /// Notes and fields travel together but stay separate — the pane draws them

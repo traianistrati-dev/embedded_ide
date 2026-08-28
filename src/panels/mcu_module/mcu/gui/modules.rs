@@ -1072,6 +1072,32 @@ fn stop_label(s: StopBits) -> &'static str {
 /// package bonds only some of the pads a die carries — the truth is in the
 /// pins' own function lists, which is also where the codegen reads the channel
 /// set from (`pwm_wires`).
+/// What a module's INSTANCE number means on this chip.
+///
+/// The one shared field whose meaning really moves: an STM32 timer module is a
+/// `TIM`, an ESP one is an LEDC timer whose channels are not welded to pads at
+/// all, and a Pico one is a PWM SLICE, which is welded to them. Saying "the
+/// peripheral instance" on all three would be true and useless.
+///
+/// Chosen here — inside the function that already knows the family — and not in
+/// the pane. The pane must not learn to branch on the family: that is how the
+/// two ends of this start disagreeing.
+fn shared_instance_doc(kind: ModuleKind, family: &str) -> &'static str {
+    if kind.is_custom() {
+        return docs::SHARED_INSTANCE_CUSTOM;
+    }
+    if kind != ModuleKind::GenericInterfaceTimer {
+        return docs::SHARED_INSTANCE;
+    }
+    if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+        docs::SHARED_INSTANCE_TIMER_RP
+    } else if crate::panels::mcu_module::codegen::family::is_esp(family) {
+        docs::SHARED_INSTANCE_TIMER_ESP
+    } else {
+        docs::SHARED_INSTANCE_TIMER_STM32
+    }
+}
+
 /// `"CH3"` -> `Some(3)`; `None` for `CH3N`, `BKIN` and every non-PWM signal.
 ///
 /// The complementary pad is deliberately excluded: it is welded to its channel
@@ -1924,6 +1950,24 @@ pub fn module_config_ui(
         dma_one(ui, bus, inst, dma_map::Dir::Tx, "DMA TX", tx);
         dma_one(ui, bus, inst, dma_map::Dir::Rx, "DMA RX", rx);
     };
+
+    // ── Settings this module HAS that the grid below does not draw ──
+    //
+    // Four fields on every config, none of them gated by anything: the instance,
+    // the name, and the two data models. They are pushed once here rather than
+    // per arm because there is no arm that could get them wrong — and because
+    // the family, which decides what an INSTANCE even is, is known here and
+    // must not be re-derived in the pane.
+    out.elsewhere("Instance", shared_instance_doc(m_kind, family));
+    out.elsewhere(
+        "Name",
+        if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+            docs::SHARED_NAME_RP
+        } else {
+            docs::SHARED_NAME
+        },
+    );
+    out.elsewhere("Data models", docs::SHARED_DATA_MODELS);
 
     egui::Grid::new("module_cfg")
         .num_columns(2)
@@ -4768,16 +4812,42 @@ mod tests {
         line_extras: bool,
         edit: impl FnOnce(&mut UsartModuleConfig),
     ) -> ConfigOut {
-        use crate::panels::mcu_module::modules::{ModuleConfig, VirtualModule};
+        use crate::panels::mcu_module::modules::ModuleConfig;
 
         let mut cfg = UsartModuleConfig::new(1);
         edit(&mut cfg);
+        drive(
+            ModuleKind::GenericInterfaceUsart,
+            ModuleConfig::Usart(cfg),
+            family,
+            is_async,
+            is_native,
+            line_extras,
+        )
+    }
+
+    /// Drive one arm of the real `module_config_ui` headless.
+    ///
+    /// `egui::__run_test_ui` builds a `Context` with no fonts, so this costs
+    /// microseconds and needs no window. Everything else is a default: the test
+    /// is about which ROWS an arm draws for a given chip and runtime, and an
+    /// empty pin map is a legitimate state for every one of them.
+    fn drive(
+        kind: ModuleKind,
+        config: crate::panels::mcu_module::modules::ModuleConfig,
+        family: &str,
+        is_async: bool,
+        is_native: bool,
+        line_extras: bool,
+    ) -> ConfigOut {
+        use crate::panels::mcu_module::modules::VirtualModule;
+
         let mut m = VirtualModule {
-            id: "usart_1".into(),
-            kind: ModuleKind::GenericInterfaceUsart,
-            name: "USART1".into(),
+            id: format!("{}_1", kind.short().to_ascii_lowercase()),
+            kind,
+            name: kind.short().to_owned(),
             pos: (0.0, 0.0),
-            config: ModuleConfig::Usart(cfg),
+            config,
             connections: Vec::new(),
         };
         let mut out = ConfigOut::default();
@@ -4813,6 +4883,107 @@ mod tests {
             .iter()
             .map(|f| f.label.as_str())
             .collect()
+    }
+
+    /// EVERY kind says where its four un-drawn settings live.
+    ///
+    /// The instance, the name and the two data models are on every config and
+    /// no arm draws them, so a reader comparing the pane with what the project
+    /// saves would otherwise find four fields the IDE never mentions. This runs
+    /// the real panel for all of `ModuleKind::ALL` on four chips.
+    #[test]
+    fn every_kind_says_where_its_shared_settings_live() {
+        for kind in ModuleKind::ALL {
+            for family in ["stm32f1", "stm32g0", "esp32c3", "rp2040"] {
+                let out = drive(kind, kind.default_config(1), family, false, false, false);
+                let got: Vec<&str> = out
+                    .elsewhere_fields()
+                    .iter()
+                    .map(|f| f.label.as_str())
+                    .collect();
+                assert_eq!(
+                    got,
+                    ["Instance", "Name", "Data models"],
+                    "{kind:?} on {family}"
+                );
+                for f in out.elsewhere_fields() {
+                    assert!(!f.doc.trim().is_empty(), "{kind:?}: {} is blank", f.label);
+                }
+            }
+        }
+    }
+
+    /// The instance is the one shared field whose MEANING moves with the chip,
+    /// so it gets the chip's own sentence and not a true-but-useless one.
+    #[test]
+    fn a_timers_instance_is_named_in_the_chips_own_words() {
+        let doc = |family: &str| {
+            drive(
+                ModuleKind::GenericInterfaceTimer,
+                ModuleKind::GenericInterfaceTimer.default_config(1),
+                family,
+                false,
+                false,
+                false,
+            )
+            .elsewhere_fields()[0]
+                .doc
+                .clone()
+        };
+        assert_eq!(doc("stm32g0"), docs::SHARED_INSTANCE_TIMER_STM32);
+        assert_eq!(doc("esp32c3"), docs::SHARED_INSTANCE_TIMER_ESP);
+        assert_eq!(doc("rp2040"), docs::SHARED_INSTANCE_TIMER_RP);
+
+        // A bus module is a bus module everywhere; only the timer diverges.
+        let spi = drive(
+            ModuleKind::GenericInterfaceSpi,
+            ModuleKind::GenericInterfaceSpi.default_config(1),
+            "rp2040",
+            false,
+            false,
+            false,
+        );
+        assert_eq!(spi.elsewhere_fields()[0].doc, docs::SHARED_INSTANCE);
+
+        // A custom module drives no peripheral, and says so rather than
+        // pretending the number means something.
+        let custom = drive(
+            ModuleKind::Custom,
+            ModuleKind::Custom.default_config(1),
+            "stm32g0",
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            custom.elsewhere_fields()[0].doc,
+            docs::SHARED_INSTANCE_CUSTOM
+        );
+    }
+
+    /// The Pico backend never reads `custom_label`, so the pane must not
+    /// promise that a name reaches the generated handles there.
+    #[test]
+    fn the_name_row_admits_the_pico_ignores_it() {
+        let rp = drive(
+            ModuleKind::GenericInterfaceSpi,
+            ModuleKind::GenericInterfaceSpi.default_config(1),
+            "rp2040",
+            false,
+            false,
+            false,
+        );
+        assert_eq!(rp.elsewhere_fields()[1].doc, docs::SHARED_NAME_RP);
+
+        let stm = drive(
+            ModuleKind::GenericInterfaceSpi,
+            ModuleKind::GenericInterfaceSpi.default_config(1),
+            "stm32g0",
+            false,
+            false,
+            false,
+        );
+        assert_eq!(stm.elsewhere_fields()[1].doc, docs::SHARED_NAME);
     }
 
     /// Every doc the USART arm hands out is a NAMED const from `module_docs`.

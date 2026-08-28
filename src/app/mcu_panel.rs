@@ -12,6 +12,40 @@ use egui_phosphor::regular as ph;
 
 use crate::panels::mcu_module::modules::ModuleKind;
 
+/// One documented entry per line: a strong label, then the sentence.
+///
+/// Shared by the two groups in the details pane. The body is handed to egui one
+/// WORD at a time rather than as a string — `horizontal_wrapped` then wraps it
+/// to whatever width the column has, and a run of spaces inside a literal cannot
+/// survive `split_whitespace`. This file has been bitten by that twice.
+fn field_entries(
+    ui: &mut egui::Ui,
+    fields: &[crate::panels::mcu_module::mcu::gui::module_docs::FieldDoc],
+    label_color: egui::Color32,
+) {
+    for f in fields {
+        // Label and body on ONE wrapped line: in a 220px column a label line
+        // plus a body block costs a third more height and reads no better.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.label(
+                egui::RichText::new(&f.label)
+                    .size(10.5)
+                    .strong()
+                    .color(label_color),
+            );
+            for w in f.doc.split_whitespace() {
+                ui.label(
+                    egui::RichText::new(w)
+                        .size(10.5)
+                        .color(egui::Color32::from_gray(160)),
+                );
+            }
+        });
+        ui.add_space(4.0);
+    }
+}
+
 /// The details pane: what one Virtual Module actually holds.
 ///
 /// # What is in here, and what deliberately is not
@@ -105,32 +139,33 @@ fn module_details_ui(
         .id_salt(("vmod_fields", m.kind))
         .default_open(false)
         .show(ui, |ui| {
-            for f in fields {
-                // Label and body on ONE wrapped line: in a 220px column a
-                // label line plus a body block costs a third more height and
-                // reads no better.
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 3.0;
-                    ui.label(
-                        egui::RichText::new(&f.label)
-                            .size(10.5)
-                            .strong()
-                            .color(color),
-                    );
-                    // Split on whitespace rather than handing egui the whole
-                    // string: it is also what makes a run of spaces inside a
-                    // literal impossible to see, which this file has been
-                    // bitten by twice.
-                    for w in f.doc.split_whitespace() {
-                        ui.label(
-                            egui::RichText::new(w)
-                                .size(10.5)
-                                .color(egui::Color32::from_gray(160)),
-                        );
-                    }
-                });
-                ui.add_space(4.0);
-            }
+            field_entries(ui, fields, color);
+        });
+    }
+
+    // —— Set elsewhere ——
+    // Settings this module carries that the config column never draws: which
+    // peripheral it took, the Name row above the grid, and the two data models
+    // that have no control at all. Without this group the pane is dishonest the
+    // moment a reader compares it with what the project actually saves.
+    //
+    // NOT gated by the roster's completeness — see `ConfigOut::elsewhere`. It
+    // is true for every kind today, so it shows for every kind today.
+    let elsewhere = said.map(ConfigOut::elsewhere_fields).unwrap_or_default();
+    if !elsewhere.is_empty() {
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new(
+            egui::RichText::new(format!("Set elsewhere — {}", elsewhere.len()))
+                .size(11.0)
+                .strong()
+                .color(egui::Color32::from_gray(160)),
+        )
+        .id_salt(("vmod_elsewhere", m.kind))
+        .default_open(false)
+        .show(ui, |ui| {
+            // Grey, not the module's colour: these are not rows you can go and
+            // change up there.
+            field_entries(ui, elsewhere, egui::Color32::from_gray(175));
         });
     }
 
