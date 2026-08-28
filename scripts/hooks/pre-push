@@ -31,6 +31,12 @@ fi
 # — it would fire on uncommitted edits that are not being pushed, and skip
 # silently when you commit the codegen and push with a clean tree, which is the
 # one case that matters.
+# Paths that feed the generators. `assets/mcus/` belongs here: a chip
+# definition IS codegen input — a `.ron` with a bad pin table generates a
+# project that does not compile, and until this line said so a push carrying
+# only chip definitions skipped the matrix entirely.
+RELEVANT='^(src/panels/mcu_module/|scripts/verify-codegen|assets/mcus/)'
+
 changed=""
 saw_ref=0
 verify_sha=""
@@ -84,9 +90,48 @@ if [ "$saw_ref" = "0" ]; then
     fi
 elif [ "$changed" = "unknown" ]; then
     echo "pre-push: could not read the push range - running the matrix to be safe"
-elif ! printf '%s' "$changed" | grep -qE '^(src/panels/mcu_module/|scripts/verify-codegen)'; then
+elif ! printf '%s' "$changed" | grep -qE "$RELEVANT"; then
     echo "pre-push: no codegen changes in what is being pushed - matrix skipped"
     exit 0
+fi
+
+# Which families this push can possibly break.
+#
+# The whole set costs about twenty minutes, and a gate that costs twenty minutes
+# is a gate people turn off — this repo already has the scar (`--no-verify`, and
+# two pushes abandoned partway on 2026-08-27). So when the change is provably
+# confined to one backend, run that backend's representative case instead.
+#
+# Narrowing is only safe when EVERY relevant path maps to a family. Anything
+# shared (`family.rs` holds four backends, `project_gen.rs` builds every
+# project), anything unrecognised, and any `.ron` chip definition drops back to
+# the full quick set. The default is the expensive, correct one.
+fams=""
+narrow=1
+if [ "$changed" = "unknown" ]; then
+    narrow=0
+else
+    for f in $(printf '%s' "$changed" | grep -E "$RELEVANT" | sort -u); do
+        case "$f" in
+            src/panels/mcu_module/codegen/rp.rs)
+                fams="$fams rp" ;;
+            src/panels/mcu_module/codegen/stm32.rs|src/panels/mcu_module/codegen/rtic.rs)
+                fams="$fams f1" ;;
+            src/panels/mcu_module/codegen/embassy_async.rs|            src/panels/mcu_module/codegen/embassy_common.rs|            src/panels/mcu_module/codegen/wba.rs|            src/panels/mcu_module/codegen/watchdog_gen.rs)
+                fams="$fams embassy" ;;
+            src/panels/mcu_module/codegen/rcc_n6.rs)
+                fams="$fams n6" ;;
+            src/panels/mcu_module/codegen_esp_configs.rs)
+                fams="$fams esp" ;;
+            *)
+                narrow=0 ;;
+        esac
+    done
+fi
+hook_arg=""
+if [ "$narrow" = "1" ] && [ -n "$fams" ]; then
+    hook_arg=$(printf '%s' "$fams" | tr ' ' '
+' | grep -v '^$' | sort -u | paste -sd, -)
 fi
 
 # If a matrix run is already going, ask before spending a quarter of an hour
@@ -194,10 +239,20 @@ if [ -n "$verify_sha" ]; then
 fi
 
 echo "pre-push: cross-compiling the generated projects…"
-echo "pre-push: 20 cases, about 12 minutes on a warm tree - it prints a per-case time"
+if [ -n "$hook_arg" ]; then
+    echo "pre-push: only $hook_arg touched - one representative case each"
+    echo "pre-push: run scripts/verify-codegen.ps1 by hand for the whole matrix"
+else
+    echo "pre-push: 24 cases, about 21 minutes on a warm tree - it prints a per-case time"
+fi
 echo "pre-push: skip with 'git push --no-verify', or EIDE_SKIP_CODEGEN_CHECK=1"
 if command -v pwsh >/dev/null 2>&1; then
-    pwsh -NoProfile -File scripts/verify-codegen.ps1
+    ps_exe="pwsh"; set -- -NoProfile -File scripts/verify-codegen.ps1
 else
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-codegen.ps1
+    ps_exe="powershell"; set -- -NoProfile -ExecutionPolicy Bypass -File scripts/verify-codegen.ps1
+fi
+if [ -n "$hook_arg" ]; then
+    "$ps_exe" "$@" -Hook "$hook_arg"
+else
+    "$ps_exe" "$@"
 fi

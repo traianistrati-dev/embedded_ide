@@ -13,7 +13,7 @@
   This script is those runs, written down. It drives each emit test with the
   environment the case needs, reads the `wrote <path>` / `target: <triple>`
   lines the test prints, cross-compiles what it finds, and reports one line per
-  case. Adding a case is one row in $CASES.
+  case. Adding a case is one row in $ALL_CASES.
 
 .PARAMETER Full
   Run every case. Without it, a representative subset that still covers each
@@ -31,7 +31,15 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$Full
+    [switch]$Full,
+    # One representative case per named family (f1, esp, rp, embassy, import,
+    # n6) — what the pre-push hook runs. The full set stays a deliberate act:
+    # a gate that costs twenty minutes is a gate people turn off, and this repo
+    # already has the scar (`git push --no-verify`) to prove it.
+    #
+    # Names it does not recognise are an ERROR, not an empty run. A hook that
+    # silently verified nothing would be worse than no hook at all.
+    [string[]]$Hook = @()
 )
 
 $ErrorActionPreference = "Continue"
@@ -141,39 +149,39 @@ $CUBE_DB = if ($env:EIDE_CUBE_DB) { $env:EIDE_CUBE_DB }
 #
 # The env hash is the case: every key is a knob the emit test reads, and an
 # empty hash means "as wired by default".
-$CASES = @(
-    @{ n = "F1 blocking, full wiring";     t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off" };  q = $true }
-    @{ n = "F1 blocking, DMA tx";          t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "tx" };   q = $false }
-    @{ n = "F1 blocking, DMA rx";          t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "rx" };   q = $false }
-    @{ n = "F1 blocking, DMA both";        t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both" }; q = $true }
-    @{ n = "F1 SPI without MISO";          t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both"; EIDE_SPI_TXONLY = "1" }; q = $true }
-    # `w` is how many warnings this case is ALLOWED — see the note above $CASES.
+$ALL_CASES = @(
+    @{ n = "F1 blocking, full wiring";     t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off" };  q = $true; fam = "f1"; hk = $true }
+    @{ n = "F1 blocking, DMA tx";          t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "tx" };   q = $false; fam = "f1" }
+    @{ n = "F1 blocking, DMA rx";          t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "rx" };   q = $false; fam = "f1" }
+    @{ n = "F1 blocking, DMA both";        t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both" }; q = $true; fam = "f1" }
+    @{ n = "F1 SPI without MISO";          t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both"; EIDE_SPI_TXONLY = "1" }; q = $true; fam = "f1" }
+    # `w` is how many warnings this case is ALLOWED — see the note above $ALL_CASES.
     # A half-wired bus leaves its pad bound and unused on purpose, and that
     # warning is the compiler naming the same pad the generated comment does.
-    @{ n = "F1 USART TX only";             t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USART_HALF = "tx" }; q = $true;  w = 2 }
-    @{ n = "F1 USART RX only";             t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USART_HALF = "rx" }; q = $false; w = 2 }
-    @{ n = "F1 I2C SCL only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_I2C_HALF = "scl" };  q = $true;  w = 2 }
-    @{ n = "F1 I2C SDA only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_I2C_HALF = "sda" };  q = $false; w = 2 }
-    @{ n = "F1 CAN TX only";               t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_CAN_HALF = "tx" };   q = $true;  w = 2 }
-    @{ n = "F1 CAN RX only";               t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_CAN_HALF = "rx" };   q = $false; w = 2 }
-    @{ n = "F1 USB, both pads";            t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "both" };      q = $true }
-    @{ n = "F1 USB, D- only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "dm" };        q = $true }
-    @{ n = "F1 USB, D+ only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "dp" };        q = $false }
-    @{ n = "F1 USB D- + GPIO on its pad";  t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "dm-gpio" };   q = $true }
-    @{ n = "F1 every bus half-wired";      t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both"; EIDE_USART_HALF = "rx"; EIDE_SPI_TXONLY = "1"; EIDE_I2C_HALF = "scl" }; q = $true; w = 3 }
-    @{ n = "F1 Async (inert, = blocking)"; t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_F1_RUNTIME = "async" }; q = $true }
-    @{ n = "F1 RTIC";                      t = "emit_f1_rtic_project";   e = @{};                       q = $true }
-    @{ n = "F1 Native";                    t = "emit_f1_native_project"; e = @{};                       q = $true }
+    @{ n = "F1 USART TX only";             t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USART_HALF = "tx" }; q = $true;  w = 2; fam = "f1" }
+    @{ n = "F1 USART RX only";             t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USART_HALF = "rx" }; q = $false; w = 2; fam = "f1" }
+    @{ n = "F1 I2C SCL only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_I2C_HALF = "scl" };  q = $true;  w = 2; fam = "f1" }
+    @{ n = "F1 I2C SDA only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_I2C_HALF = "sda" };  q = $false; w = 2; fam = "f1" }
+    @{ n = "F1 CAN TX only";               t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_CAN_HALF = "tx" };   q = $true;  w = 2; fam = "f1" }
+    @{ n = "F1 CAN RX only";               t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_CAN_HALF = "rx" };   q = $false; w = 2; fam = "f1" }
+    @{ n = "F1 USB, both pads";            t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "both" };      q = $true; fam = "f1" }
+    @{ n = "F1 USB, D- only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "dm" };        q = $true; fam = "f1" }
+    @{ n = "F1 USB, D+ only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "dp" };        q = $false; fam = "f1" }
+    @{ n = "F1 USB D- + GPIO on its pad";  t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "dm-gpio" };   q = $true; fam = "f1" }
+    @{ n = "F1 every bus half-wired";      t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both"; EIDE_USART_HALF = "rx"; EIDE_SPI_TXONLY = "1"; EIDE_I2C_HALF = "scl" }; q = $true; w = 3; fam = "f1" }
+    @{ n = "F1 Async (inert, = blocking)"; t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_F1_RUNTIME = "async" }; q = $true; fam = "f1" }
+    @{ n = "F1 RTIC";                      t = "emit_f1_rtic_project";   e = @{};                       q = $true; fam = "f1" }
+    @{ n = "F1 Native";                    t = "emit_f1_native_project"; e = @{};                       q = $true; fam = "f1" }
 
     # A different HAL and a different entry point, so a different set of ways to
     # be wrong: esp-hal bindings, and the esp-rtos scheduler on the async one.
-    @{ n = "ESP32-C3 blocking";            t = "emit_esp32c3_project";       e = @{ ESP_ASYNC_RUNTIME = "blocking" }; q = $true }
-    @{ n = "ESP32-C3 async (esp-rtos)";    t = "emit_esp32c3_project";       e = @{};                       q = $true }
+    @{ n = "ESP32-C3 blocking";            t = "emit_esp32c3_project";       e = @{ ESP_ASYNC_RUNTIME = "blocking" }; q = $true; fam = "esp" }
+    @{ n = "ESP32-C3 async (esp-rtos)";    t = "emit_esp32c3_project";       e = @{};                       q = $true; fam = "esp"; hk = $true }
     # The harness wires ONE LEDC channel by default, so the two cases above only
     # ever reach the single-channel shape. Two channels is a different file: the
     # return type becomes a tuple, and the duty trait addresses it by POSITION,
     # which is not the channel number.
-    @{ n = "ESP32-C3, two PWM channels";   t = "emit_esp32c3_project";       e = @{ EIDE_ESP_PWM = "0,2" }; q = $true }
+    @{ n = "ESP32-C3, two PWM channels";   t = "emit_esp32c3_project";       e = @{ EIDE_ESP_PWM = "0,2" }; q = $true; fam = "esp" }
 
     # A third HAL family, and the first that is not STM32 or Espressif. One
     # harness, FOUR boards: Pico and Pico W on thumbv6m, Pico 2 and Pico 2 W on
@@ -187,20 +195,20 @@ $CASES = @(
     # documentation, and the compiler has already caught two of them - `.freq()`
     # and `set_duty_cycle` both live on embedded-hal traits that have to be
     # imported, and neither failure is visible by reading.
-    @{ n = "Raspberry Pi Pico x4";         t = "emit_rp_project";            e = @{};                       q = $true }
+    @{ n = "Raspberry Pi Pico x4";         t = "emit_rp_project";            e = @{};                       q = $true; fam = "rp" }
 
     # The same two boards on embassy-rp, which is a DIFFERENT HAL crate, not a
     # feature of the first one. Every bus is wired, because that is where the
     # compiler found the two things reading could not: a DMA channel needs its
     # OWN handler bound on DMA_IRQ_0, and `Spi::new` wants the binding AFTER
     # its channels while `Uart::new` wants it before.
-    @{ n = "Raspberry Pi Pico async x2";   t = "emit_rp_async_project";      e = @{};                       q = $true }
+    @{ n = "Raspberry Pi Pico async x2";   t = "emit_rp_async_project";      e = @{};                       q = $true; fam = "rp"; hk = $true }
 
     # The two W boards, whose on-board LED is not on the chip at all - it is
     # GPIO0 of the CYW43 radio, reached through a PIO-driven half-duplex SPI and
     # an async-only driver. The harness writes PLACEHOLDER firmware blobs: they
     # make `include_bytes!` resolve, which is all the codegen needs proving.
-    @{ n = "Raspberry Pi Pico W radio x2"; t = "emit_rp_radio_project";      e = @{};                       q = $true }
+    @{ n = "Raspberry Pi Pico W radio x2"; t = "emit_rp_radio_project";      e = @{};                       q = $true; fam = "rp" }
 
     # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired
@@ -221,7 +229,7 @@ $CASES = @(
     #
     # The harness still WRITES all nine: writing is free, `cargo check` is not,
     # and a harness that emits less under a flag is a harness that can rot.
-    @{ n = "embassy (9 projects)";         t = "emit_embassy_project";       e = @{};                       q = $true
+    @{ n = "embassy (9 projects)";         t = "emit_embassy_project";       e = @{};                       q = $true; fam = "embassy"; hk = $true
        only = @("eide_embassy_check_dma", "eide_embassy_check_async", "eide_embassy_check_dma_f2", "eide_wba_check_wdg") }
 
     # These two build from a REAL part in the vendor database rather than from a
@@ -229,15 +237,15 @@ $CASES = @(
     # output — channel names, interrupt names, the `bind_interrupts!` grouping.
     # `p` is what they need; without it they are skipped, not failed, because a
     # machine without the database is a normal machine.
-    @{ n = "imported chip, async DMA";     t = "emit_imported_dma_project";  e = @{}; q = $true; p = $CUBE_DB }
-    @{ n = "imported chip, comparators";   t = "emit_comp_project";          e = @{}; q = $true; p = $CUBE_DB }
+    @{ n = "imported chip, async DMA";     t = "emit_imported_dma_project";  e = @{}; q = $true; p = $CUBE_DB; fam = "import"; hk = $true }
+    @{ n = "imported chip, comparators";   t = "emit_comp_project";          e = @{}; q = $true; p = $CUBE_DB; fam = "import" }
 
     # STM32N6 — the first family whose clock block does not come from the
     # descriptor model. Cortex-M55 on a v8-M Main triple, a chip feature derived
     # through the `x`+suffix rule, and an RCC block with four-PLL types in it:
     # three separate derivations that were each wrong until this project was
     # emitted end to end.
-    @{ n = "STM32N6 clock + project";      t = "emit_n6_project";            e = @{}; q = $true; p = $CUBE_DB }
+    @{ n = "STM32N6 clock + project";      t = "emit_n6_project";            e = @{}; q = $true; p = $CUBE_DB; fam = "n6"; hk = $true }
 
     # Not a project: a VERDICT (`v`). STM32WL30 is the chip the import preflight
     # was written for — `embassy-stm32` publishes no `stm32wl3*` feature, its
@@ -247,7 +255,7 @@ $CASES = @(
     # pinned here is the verdict itself, with G071 alongside as the control.
     # This case fails the day a `stm32wl3` recipe lands and the answer has to
     # change — which is the only way anyone would remember to change it.
-    @{ n = "WL30 preflight verdict";       t = "wl30_is_the_chip_this_preflight_exists_for"; e = @{}; q = $true; p = $CUBE_DB; v = $true }
+    @{ n = "WL30 preflight verdict";       t = "wl30_is_the_chip_this_preflight_exists_for"; e = @{}; q = $true; p = $CUBE_DB; v = $true; fam = "import" }
 )
 
 # Every knob any case sets, so one case cannot leak into the next.
@@ -255,9 +263,25 @@ $KNOBS = @("EIDE_F1_DMA", "EIDE_SPI_TXONLY", "EIDE_USART_HALF", "EIDE_I2C_HALF",
            "EIDE_CAN_HALF", "EIDE_USB", "EIDE_F1_RUNTIME", "ESP_ASYNC_RUNTIME",
            "EIDE_ESP_PWM")
 
-$cases = if ($Full) { $CASES } else { $CASES | Where-Object { $_.q } }
-Write-Host ("running {0} of {1} cases{2}" -f $cases.Count, $CASES.Count,
-    $(if ($Full) { "" } else { "  (use -Full for all)" }))
+if ($Hook.Count -gt 0) {
+    $known = $ALL_CASES | ForEach-Object { $_.fam } | Sort-Object -Unique
+    $bad = $Hook | Where-Object { $known -notcontains $_ }
+    if ($bad) {
+        Write-Host ("unknown family: {0}  (known: {1})" -f ($bad -join ", "), ($known -join ", ")) -ForegroundColor Red
+        exit 2
+    }
+    # `@(...)` on every branch: a pipeline that matches exactly ONE case yields
+    # the hashtable itself, not an array, and `.Count` on a hashtable is its
+    # number of KEYS. That printed "7 of 30" for a single-case run.
+    $cases = @($ALL_CASES | Where-Object { $_.hk -and $Hook -contains $_.fam })
+} elseif ($Full) {
+    $cases = @($ALL_CASES)
+} else {
+    $cases = @($ALL_CASES | Where-Object { $_.q })
+}
+Write-Host ("running {0} of {1} cases{2}" -f $cases.Count, $ALL_CASES.Count,
+    $(if ($Hook.Count -gt 0) { "  (hook subset: " + ($Hook -join ", ") + ")" }
+      elseif ($Full) { "" } else { "  (use -Full for all)" }))
 Write-Host ""
 
 $results = @()
