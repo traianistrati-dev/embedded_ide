@@ -2968,7 +2968,10 @@ mod async_pwm_keeps_both_channels {
             .expect("built-in Pico");
         let mcu = pico_with(&[("GP2", 1, 1), ("GP3", 1, 2), ("GP6", 3, 1)]);
         let main_rs = mcu.fresh_main_rs();
-        let project = def.project.for_async(true);
+        // Through `build_cfg`, the SAME pairing the app uses. Calling
+        // `for_async` by hand here is what kept every emitted-project test
+        // green while the application shipped a manifest with no embassy in it.
+        let project = crate::panels::mcu_module::mcu_def::build_cfg(&def, Some(&mcu));
         let files = project_gen::build_project_files(&project, &def.toolchain, &main_rs);
         let user: Vec<(String, String)> = vec![
             ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
@@ -3063,7 +3066,10 @@ mod emit_async_for_manual_compile {
                 "the radio takes the channel after the UART's two:
 {main_rs}"
             );
-            let project = def.project.for_async(true);
+            // Through `build_cfg`, the SAME pairing the app uses. Calling
+            // `for_async` by hand here is what kept every emitted-project test
+            // green while the application shipped a manifest with no embassy in it.
+            let project = crate::panels::mcu_module::mcu_def::build_cfg(&def, Some(&mcu));
             let files = project_gen::build_project_files(&project, &def.toolchain, &main_rs);
             let user: Vec<(String, String)> = vec![
                 (
@@ -3204,7 +3210,10 @@ mod emit_async_for_manual_compile {
             let main_rs = mcu.fresh_main_rs();
             // The chip names a DIFFERENT HAL crate on async; this is where that
             // choice becomes a Cargo.toml.
-            let project = def.project.for_async(true);
+            // Through `build_cfg`, the SAME pairing the app uses. Calling
+            // `for_async` by hand here is what kept every emitted-project test
+            // green while the application shipped a manifest with no embassy in it.
+            let project = crate::panels::mcu_module::mcu_def::build_cfg(&def, Some(&mcu));
             let files = project_gen::build_project_files(&project, &def.toolchain, &main_rs);
             let user: Vec<(String, String)> = vec![
                 ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),

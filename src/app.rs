@@ -2400,9 +2400,27 @@ impl AppIde {
 
     /// Owned `(project params, toolchain)` for project generation — cloned so no
     /// borrow of `self` is held across the subsequent `self` mutations.
+    /// The selected chip's build config, AS IT APPLIES TO THE RUNTIME.
+    ///
+    /// `for_async` is what swaps a family's HAL crate line, and it used to be
+    /// called from nowhere but the cross-compile harnesses — so a Pico set to
+    /// Async got `main.rs` full of `embassy_rp::` against a Cargo.toml that
+    /// named `rp2040-hal` and no embassy at all (E0433 on the first Save),
+    /// while every emitted-project test stayed green because each one called
+    /// `for_async` by hand. Applied HERE rather than at the two writers, so a
+    /// third consumer cannot be added without it.
+    ///
+    /// `Mcu::is_async` is the same predicate codegen picks its backend with -
+    /// it already folds in `async_supported`, so a family that falls back to
+    /// Blocking gets the blocking manifest to match.
     fn selected_build_cfg(&self) -> Option<(ProjectDef, ToolchainKind)> {
-        self.selected_def()
-            .map(|d| (d.project.clone(), d.toolchain.clone()))
+        let mcu = self.mcu.as_ref();
+        self.selected_def().map(|d| {
+            (
+                crate::panels::mcu_module::mcu_def::build_cfg(d, mcu),
+                d.toolchain.clone(),
+            )
+        })
     }
     /// The live project files: generated `main.rs` plus the five editable config
     /// The live project files: generated `main.rs` plus the five editable config

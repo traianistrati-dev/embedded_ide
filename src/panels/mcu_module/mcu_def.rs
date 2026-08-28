@@ -855,6 +855,23 @@ mod tests {
     }
 }
 
+/// The project definition a chip builds under `mcu`'s runtime.
+///
+/// The pairing of a chip definition with the runtime that is actually selected,
+/// in ONE place. It existed only inside `AppIde::selected_build_cfg` and inside
+/// each cross-compile harness separately, which is how a Pico on Async came to
+/// generate `embassy_rp::init(...)` against a manifest naming `rp2040-hal`:
+/// every harness called [`ProjectDef::for_async`] by hand, and the application
+/// called it nowhere. A free function so a test can ask the same question the
+/// app asks, without standing up an `AppIde`.
+pub fn build_cfg(
+    def: &McuDefinition,
+    mcu: Option<&crate::panels::mcu_module::mcu::Mcu>,
+) -> ProjectDef {
+    let is_async = mcu.is_some_and(|m| m.is_async());
+    def.project.for_async(is_async).into_owned()
+}
+
 impl ProjectDef {
     /// This definition as it applies to `runtime` — the same thing, except that
     /// a family which swaps HAL crates gets the other line.
@@ -866,6 +883,82 @@ impl ProjectDef {
                 std::borrow::Cow::Owned(out)
             }
             _ => std::borrow::Cow::Borrowed(self),
+        }
+    }
+}
+
+#[cfg(test)]
+mod the_manifest_follows_the_runtime {
+    use super::build_cfg;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::project_gen;
+
+    /// A chip that swaps HAL crates on Async must get the other crate in its
+    /// Cargo.toml, on the path the APPLICATION takes.
+    ///
+    /// This is the test that was missing. `emit_rp_async_project` and friends
+    /// each called `for_async(true)` by hand before generating, so all of them
+    /// passed while a Pico saved from the app got `main.rs` full of
+    /// `embassy_rp::` and a manifest naming `rp2040-hal` - `E0433: use of
+    /// undeclared crate or module embassy_rp` on the first build.
+    #[test]
+    fn an_async_chip_gets_its_async_hal_crate() {
+        let mut checked = 0;
+        for d in builtin_definitions() {
+            let Some(async_line) = d.project.hal_dep_async.clone() else {
+                continue;
+            };
+            // The crate name is the first word of the dependency line.
+            let krate = async_line
+                .split_whitespace()
+                .next()
+                .expect("a dependency line names a crate");
+            let blocking = d.project.hal_dep.split_whitespace().next().unwrap_or("");
+            assert_ne!(krate, blocking, "{}: the two lines differ", d.id);
+
+            let mut mcu = d.build_mcu();
+            mcu.runtime = Runtime::Async;
+            assert!(mcu.is_async(), "{}: async is supported here", d.id);
+
+            let cfg = build_cfg(&d, Some(&mcu));
+            let toml =
+                project_gen::gen_config(project_gen::ConfigFile::CargoToml, &cfg, &d.toolchain);
+            assert!(
+                toml.contains(krate),
+                "{}: Async must name {krate}, got:\n{toml}",
+                d.id
+            );
+
+            // ...and Blocking keeps the other one, so this is a swap and not an
+            // addition.
+            let mut blocking_mcu = d.build_mcu();
+            blocking_mcu.runtime = Runtime::Blocking;
+            let bcfg = build_cfg(&d, Some(&blocking_mcu));
+            let btoml =
+                project_gen::gen_config(project_gen::ConfigFile::CargoToml, &bcfg, &d.toolchain);
+            assert!(
+                btoml.contains(blocking),
+                "{}: Blocking must name {blocking}, got:\n{btoml}",
+                d.id
+            );
+            checked += 1;
+        }
+        assert!(checked >= 4, "the four RP boards at least, got {checked}");
+    }
+
+    /// And the async line carries the feature embassy-time needs, or the project
+    /// links to nothing: `undefined symbol: _embassy_time_now`.
+    #[test]
+    fn the_rp_async_line_enables_the_time_driver() {
+        for d in builtin_definitions() {
+            let Some(line) = &d.project.hal_dep_async else {
+                continue;
+            };
+            if !line.starts_with("embassy-rp") {
+                continue;
+            }
+            assert!(line.contains("time-driver"), "{}: {line}", d.id);
         }
     }
 }

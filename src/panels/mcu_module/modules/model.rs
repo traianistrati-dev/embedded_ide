@@ -1998,11 +1998,14 @@ impl UsartFlow {
                 }
             };
         }
-        // RP: embassy-rp has ONE flow form, `new_with_rtscts`, which takes both
-        // pads together - there is no RTS-only, no CTS-only and no RS485
-        // driver-enable anywhere in the crate. This backend emits neither form
-        // yet, so the panel says so by offering nothing rather than by offering
-        // three options that generate the same code.
+        // RP: on the BIDIRECTIONAL port - the only shape this backend emits -
+        // embassy-rp has exactly one flow form, `new_with_rtscts`, which takes
+        // both pads together. RTS-only and CTS-only do exist, but only on the
+        // split halves (`BufferedUartRx::new_with_rts`,
+        // `BufferedUartTx::new_with_cts`), which this backend does not build
+        // either; RS485 driver-enable exists nowhere in the crate. So the row
+        // offers nothing rather than three options that all generate the same
+        // code.
         if crate::panels::mcu_module::codegen::rp::is_rp(family) {
             return &[UsartFlow::None];
         }

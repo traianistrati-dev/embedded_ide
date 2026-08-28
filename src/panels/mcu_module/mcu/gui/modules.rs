@@ -1668,7 +1668,7 @@ pub fn module_config_ui(
             .show_ui(ui, |ui| {
                 ui.selectable_value(mode, UsartMode::Buffered, "Buffered (interrupt)")
                     .on_hover_text(if rp {
-                        "embassy-rp BufferedUart - one interrupt per byte into two software rings. Takes NO DMA channel, and it is the only RP uart type implementing embedded-io-async Read: the DMA Uart implements no embedded-io trait at all. The ring size is the RX/TX buffer field below."
+                        "embassy-rp BufferedUart - one interrupt per byte into two software rings. Takes NO DMA channel, and it is the only RP uart type implementing embedded-io-async Read: the DMA Uart implements no embedded-io trait at all. Each ring is the RX/TX buffer size set above."
                     } else {
                         "embassy BufferedUart -> embedded-io-async Read + Write, one interrupt per byte into a software ring buffer. Needs no DMA channel, so it compiles out of the box."
                     });
@@ -1761,9 +1761,11 @@ pub fn module_config_ui(
                     .show_ui(ui, |_ui| {});
             })
             .response
-            .on_hover_text(
-                "embassy has no buffered TX-only / RX-only: BufferedUartTx and BufferedUartRx come only from splitting a BufferedUart, so both pins are used either way. Switch the transport to DMA for a one-way UART that frees the other pin.",
-            );
+            .on_hover_text(if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+                docs::USART_DIRECTION_LOCKED_RP
+            } else {
+                docs::USART_DIRECTION_LOCKED
+            });
         } else {
             egui::ComboBox::from_id_salt("usart_dir")
                 .selected_text(cfg.direction.label())

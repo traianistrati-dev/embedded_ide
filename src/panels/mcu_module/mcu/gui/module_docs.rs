@@ -177,6 +177,16 @@ pub const USART_DIRECTION_LOCKED: &str = "Both halves, and no choice: embassy ha
                                           `BufferedUart`, so both pads are used either way. \
                                           Switch the transport to DMA for a one-way UART.";
 
+/// The same row on an RP, where BOTH halves of the sentence above are false.
+///
+/// embassy-rp has real standalone constructors on both transports -
+/// `BufferedUartTx::new` / `BufferedUartRx::new` (uart/buffered.rs:344, :195)
+/// and `UartTx::<Async>::new` / `UartRx::<Async>::new` (uart/mod.rs:251, :403),
+/// the DMA ones taking a single channel. So the pair is not the chip's limit and
+/// switching transport unlocks nothing: `async_bus_lines` skips a UART with only
+/// one pad wired, on either transport.
+pub const USART_DIRECTION_LOCKED_RP: &str = "Both halves, and no choice yet. embassy-rp does have one-way constructors on both transports -      BufferedUartTx / BufferedUartRx and UartTx / UartRx, the DMA pair taking one channel each - but      this backend emits only the bidirectional form, so a UART with a single pad wired generates      nothing. A gap in the generator, not in the chip.";
+
 pub const USART_LINE: &str = "Pad-level fixes done inside the peripheral, so a crossed cable or an \
                               inverting transceiver needs no rework: swap RX with TX, or invert \
                               either line's idle level.";
