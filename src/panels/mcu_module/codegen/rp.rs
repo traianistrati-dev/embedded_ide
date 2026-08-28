@@ -41,7 +41,13 @@ fn hal_crate(family: &str) -> &'static str {
 /// `GP13` -> `13`. The definition names header pins after the GPIO they carry,
 /// so the number in the name IS the GPIO index; power and ground pins have no
 /// digits and are reserved anyway.
-fn gpio_index(name: &str) -> Option<u8> {
+/// The GP number a pad name carries, e.g. `GP23 (SMPS mode)` -> 23.
+///
+/// `pub(crate)` because the module panel resolves a two-pads-one-channel
+/// clash by the same rule this file's emitter does, and it has to be the same
+/// parse - a panel that ordered pads differently would name a different
+/// winner than the generated code.
+pub(crate) fn gpio_index(name: &str) -> Option<u8> {
     name.strip_prefix("GP")?
         .split_whitespace()
         .next()?
@@ -2291,25 +2297,29 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String, Vec<super::dma_map::Dm
     pwm.sort_unstable();
     let tcfg = crate::panels::mcu_module::modules::timer_configs(&mcu.modules);
     adc.sort_unstable();
-    let mut done: Vec<u8> = Vec::new();
+    // Grouped by SLICE, because a slice is one peripheral with two outputs and
+    // embassy-rp builds it once. The old loop kept a `done` list and skipped
+    // every pad after the first of a slice, so wiring GP2 (slice 1 A) and GP3
+    // (slice 1 B) generated GP2 only - the second pad configured on the canvas
+    // and absent from main.rs. `new_output_ab` exists for exactly this shape.
+    let mut by_slice: std::collections::BTreeMap<u8, Vec<(u8, u8)>> =
+        std::collections::BTreeMap::new();
     for (slice, channel, n) in &pwm {
-        if done.contains(slice) {
-            continue;
+        by_slice.entry(*slice).or_default().push((*channel, *n));
+    }
+    for (slice, chans) in &by_slice {
+        // One channel drives one pad. Two pads sixteen apart share each
+        // (slice, channel) on this chip, so a canvas can ask for both - say
+        // which one lost rather than dropping it in silence.
+        let mut pads: std::collections::BTreeMap<u8, u8> = std::collections::BTreeMap::new();
+        let mut clashes: Vec<(u8, u8)> = Vec::new();
+        for (channel, n) in chans {
+            if pads.contains_key(channel) {
+                clashes.push((*channel, *n));
+            } else {
+                pads.insert(*channel, *n);
+            }
         }
-        done.push(*slice);
-        let ctor = if *channel == 1 {
-            "new_output_a"
-        } else {
-            "new_output_b"
-        };
-        // The duty the Virtual Module carries. `Config::default()` used to go
-        // out here whatever the user had set - a setting that looks applied
-        // and is not, the same silent drop an armed input used to be.
-        let duty = tcfg
-            .get(slice)
-            .map_or(0, |c| c.duty_x100_of(*channel))
-            .min(10_000);
-        let ch = if *channel == 1 { "a" } else { "b" };
         o.push_str(&format!(
             "    let mut cfg{slice} = embassy_rp::pwm::Config::default();\n"
         ));
@@ -2323,15 +2333,46 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String, Vec<super::dma_map::Dm
             o.push_str(&format!("    cfg{slice}.divider = {div}u8.into();\n"));
             o.push_str(&format!("    cfg{slice}.top = {top};\n"));
         }
+        for (channel, _) in &pads {
+            // The duty the Virtual Module carries. `Config::default()` used to
+            // go out here whatever the user had set - a setting that looks
+            // applied and is not, the same silent drop an armed input used to
+            // be.
+            let duty = tcfg
+                .get(slice)
+                .map_or(0, |c| c.duty_x100_of(*channel))
+                .min(10_000);
+            let ch = if *channel == 1 { "a" } else { "b" };
+            o.push_str(&format!(
+                "    // Channel {}: {} % of the period.\n",
+                ch.to_ascii_uppercase(),
+                super::common::duty_percent_str(duty)
+            ));
+            o.push_str(&format!(
+                "    cfg{slice}.compare_{ch} = ((cfg{slice}.top as u32 * {duty}) / 10_000) as u16;\n"
+            ));
+        }
+        for (channel, n) in &clashes {
+            let ch = if *channel == 1 { "A" } else { "B" };
+            o.push_str(&format!(
+                "    // GP{n} also asks for slice {slice} channel {ch}, which GP{} already drives - one channel reaches one pad.\n",
+                pads[channel]
+            ));
+        }
+        let args = match (pads.get(&1), pads.get(&2)) {
+            (Some(a), Some(b)) => format!(
+                "new_output_ab(\n        p.PWM_SLICE{slice},\n        p.PIN_{a},\n        p.PIN_{b},"
+            ),
+            (Some(a), None) => {
+                format!("new_output_a(\n        p.PWM_SLICE{slice},\n        p.PIN_{a},")
+            }
+            (None, Some(b)) => {
+                format!("new_output_b(\n        p.PWM_SLICE{slice},\n        p.PIN_{b},")
+            }
+            (None, None) => continue,
+        };
         o.push_str(&format!(
-            "    // {} % of the period.\n",
-            super::common::duty_percent_str(duty)
-        ));
-        o.push_str(&format!(
-            "    cfg{slice}.compare_{ch} = ((cfg{slice}.top as u32 * {duty}) / 10_000) as u16;\n"
-        ));
-        o.push_str(&format!(
-            "    let pwm{slice} = embassy_rp::pwm::Pwm::{ctor}(\n        p.PWM_SLICE{slice},\n        p.PIN_{n},\n        cfg{slice},\n    );\n    let _ = &pwm{slice};\n"
+            "    let pwm{slice} = embassy_rp::pwm::Pwm::{args}\n        cfg{slice},\n    );\n    let _ = &pwm{slice};\n"
         ));
     }
 
@@ -2634,6 +2675,120 @@ impl FamilyBackend for AsyncRpBackend {
             async_section(mcu).trim_end_matches('\n'),
             &existing[end..]
         )
+    }
+}
+
+#[cfg(test)]
+mod async_pwm_keeps_both_channels {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    fn pico_with(pads: &[(&str, u8, u8)]) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        mcu.runtime = Runtime::Async;
+        for p in mcu.iter_all_pins_mut() {
+            if let Some((_, timer, channel)) = pads.iter().find(|(n, _, _)| *n == p.name) {
+                p.selected_function = PinFunction::TimerPwm {
+                    timer: *timer,
+                    channel: *channel,
+                };
+            }
+        }
+        mcu
+    }
+
+    /// Both halves of a slice reach main.rs.
+    ///
+    /// The emitter used to keep a `done` list of slices and `continue` past
+    /// every pad after the first, so wiring GP2 (slice 1, channel A) and GP3
+    /// (slice 1, channel B) produced code for GP2 alone - the second pad
+    /// configured on the canvas and missing from the project, with nothing
+    /// saying so.
+    #[test]
+    fn a_slice_wired_on_both_channels_emits_new_output_ab() {
+        let code = pico_with(&[("GP2", 1, 1), ("GP3", 1, 2)]).fresh_main_rs();
+        assert!(code.contains("new_output_ab("), "{code}");
+        assert!(code.contains("p.PIN_2,"), "channel A pad is there: {code}");
+        assert!(code.contains("p.PIN_3,"), "channel B pad is there: {code}");
+        assert!(code.contains("cfg1.compare_a ="), "{code}");
+        assert!(code.contains("cfg1.compare_b ="), "{code}");
+    }
+
+    /// One channel still uses the one-sided constructor - `new_output_ab` needs
+    /// both pads and would not compile with one.
+    #[test]
+    fn a_single_channel_still_uses_the_one_sided_constructor() {
+        let a = pico_with(&[("GP2", 1, 1)]).fresh_main_rs();
+        assert!(a.contains("new_output_a("), "{a}");
+        assert!(!a.contains("new_output_ab("), "{a}");
+        let b = pico_with(&[("GP3", 1, 2)]).fresh_main_rs();
+        assert!(b.contains("new_output_b("), "{b}");
+        assert!(!b.contains("new_output_ab("), "{b}");
+    }
+
+    /// %TEMP%\eide_rp2040_pwm_ab — the only proof `new_output_ab` is real.
+    ///
+    /// Its signature is the whole point of this change: `new_output_ab(slice, a,
+    /// b, config)` where `a: impl ChannelAPin<T>` and `b: impl ChannelBPin<T>`,
+    /// so passing the pads in the wrong order, or passing two pads of one
+    /// channel, does not compile. Asserting on the emitted TEXT cannot see any
+    /// of that.
+    ///
+    /// Through `async_flavor_for`, the same chooser the app uses - naming the
+    /// flavour by hand here is what once made a harness green on a project the
+    /// application could not build.
+    #[test]
+    #[ignore]
+    fn emit_rp_pwm_ab_project() {
+        use crate::panels::mcu_module::project_gen;
+        let def = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico");
+        let mcu = pico_with(&[("GP2", 1, 1), ("GP3", 1, 2), ("GP6", 3, 1)]);
+        let main_rs = mcu.fresh_main_rs();
+        let project = def.project.for_async(true);
+        let files = project_gen::build_project_files(&project, &def.toolchain, &main_rs);
+        let user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
+            ("src/pins/configs/mod.rs".into(), String::new()),
+        ];
+        let dir = std::env::temp_dir().join("eide_rp2040_pwm_ab");
+        let _ = std::fs::remove_dir_all(&dir);
+        project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write rp pwm project");
+        let toml_path = dir.join("Cargo.toml");
+        let toml = std::fs::read_to_string(&toml_path).expect("read Cargo.toml");
+        let toml = project_gen::ensure_async_deps(
+            &toml,
+            true,
+            project_gen::async_flavor_for(&mcu.family, ""),
+            false,
+            false,
+            false,
+            &[],
+        );
+        let toml = project_gen::ensure_m0_atomics(&toml, true, &project.target, &[]);
+        std::fs::write(&toml_path, toml).expect("write Cargo.toml");
+        println!("wrote {}", dir.display());
+    }
+
+    /// Two pads asking for ONE channel is a real canvas state on this chip -
+    /// GP2 and GP18 are both slice 1 channel A. One of them cannot be driven,
+    /// and the generated file says which rather than dropping it quietly.
+    #[test]
+    fn two_pads_on_one_channel_name_the_one_that_lost() {
+        let code = pico_with(&[("GP2", 1, 1), ("GP18", 1, 1)]).fresh_main_rs();
+        assert!(
+            code.contains("GP18 also asks for slice 1 channel A"),
+            "{code}"
+        );
+        assert!(code.contains("p.PIN_2,"), "{code}");
+        assert!(!code.contains("p.PIN_18,"), "{code}");
     }
 }
 

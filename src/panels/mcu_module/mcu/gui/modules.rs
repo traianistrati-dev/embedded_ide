@@ -120,10 +120,6 @@ const CUSTOM_LABEL_W: f32 = 52.0;
 /// line.
 pub const CUSTOM_FIELD_W: f32 = 160.0;
 
-/// The left column of a Custom module's `label + field` row: bold, left-aligned,
-/// fixed width. `Name:` lives in the module list (`mcu_panel`) and `Struct` in
-/// the config grid here — two different containers, so only a shared width keeps
-/// their fields aligned.
 /// Why an RP shows no DMA channel picker.
 ///
 /// On this chip the channel is not a decision anyone can get right or wrong:
@@ -133,6 +129,20 @@ pub const CUSTOM_FIELD_W: f32 = 160.0;
 /// `channels_for` returns nothing and the combo drew itself disabled with a
 /// hover telling a Raspberry Pi owner to "re-import it from the STM32Cube
 /// database". That was the most actively wrong string on the panel.
+///
+/// A remark, not a control, so it belongs in the details pane rather than in a
+/// grid row wide enough to hold the config column open. ONE source line: a
+/// `\`-continued literal comes back joined to its own indentation, and the
+/// panel would draw the run of spaces.
+pub const RP_DMA_NOTE: &str = "embassy-rp allocates DMA itself - any channel serves any peripheral, and the Configuration tab's DMA card shows which ones were taken";
+
+/// Why an RP shows no I2C transport choice.
+///
+/// Not "unimplemented": embassy-rp's `i2c.rs` contains no DMA at all, and
+/// `new_async` takes no channel. Offering Blocking / Async-DMA here would teach
+/// a hardware model that is not true of this chip.
+pub const RP_I2C_NOTE: &str = "embassy-rp's async I2C is interrupt driven and takes no DMA channel, so there is no transport to choose";
+
 /// The USART transport, locked on an RP.
 ///
 /// A real choice that is not generated YET, so it is shown and disabled rather
@@ -144,11 +154,11 @@ fn rp_usart_transport_locked(ui: &mut egui::Ui) {
     ui.label("Async transport");
     let resp = ui.add_enabled_ui(false, |ui| {
         egui::ComboBox::from_id_salt("rp_usart_transport_locked")
-            .selected_text("DMA (ring buffer)")
+            .selected_text("DMA (one transfer per read)")
             .show_ui(ui, |_ui| {});
     });
     resp.response.on_hover_text(
-        "embassy-rp's Uart is always on two DMA channels, and this backend does not emit its BufferedUart yet - so both options would generate the same code.",
+        "embassy-rp's Uart::new always takes two DMA channels and starts one transfer per read - there is no RingBufferedUartRx on this chip, so between two reads only the 32-byte hardware FIFO holds bytes. BufferedUart is the ring-buffered path and this backend does not emit it yet.",
     );
     ui.end_row();
 }
@@ -170,35 +180,10 @@ fn rp_spi_init_locked(ui: &mut egui::Ui) {
     ui.end_row();
 }
 
-fn rp_dma_note(ui: &mut egui::Ui) {
-    ui.label("");
-    ui.label(
-        egui::RichText::new(
-            "embassy-rp allocates DMA itself - any channel serves any peripheral, and the Configuration tab's DMA card shows which ones were taken",
-        )
-        .size(10.5)
-        .color(egui::Color32::from_gray(140)),
-    );
-    ui.end_row();
-}
-
-/// Why an RP shows no I2C transport choice.
-///
-/// Not "unimplemented": embassy-rp's `i2c.rs` contains no DMA at all, and
-/// `new_async` takes no channel. Offering Blocking / Async-DMA here would teach
-/// a hardware model that is not true of this chip.
-fn rp_i2c_note(ui: &mut egui::Ui) {
-    ui.label("");
-    ui.label(
-        egui::RichText::new(
-            "embassy-rp's async I2C is interrupt driven and takes no DMA channel, so there is no transport to choose",
-        )
-        .size(10.5)
-        .color(egui::Color32::from_gray(140)),
-    );
-    ui.end_row();
-}
-
+/// The left column of a Custom module's `label + field` row: bold, left-aligned,
+/// fixed width. `Name:` lives in the module list (`mcu_panel`) and `Struct` in
+/// the config grid here — two different containers, so only a shared width keeps
+/// their fields aligned.
 pub fn custom_field_label(ui: &mut egui::Ui, text: &str) {
     ui.allocate_ui_with_layout(
         egui::vec2(CUSTOM_LABEL_W, ui.spacing().interact_size.y),
@@ -1167,6 +1152,131 @@ fn esp_ledc_max_bits(freq_hz: u32) -> u8 {
 /// `unwrap` panics on the board.
 fn esp_ledc_min_bits(freq_hz: u32) -> u8 {
     crate::panels::mcu_module::codegen_esp_configs::ledc_min_duty_bits(freq_hz) as u8
+}
+
+/// What a Pico owner can actually decide about a PWM slice.
+///
+/// Not the channel. On RP2040 and RP2350 the (slice, channel) pair falls out of
+/// the GPIO NUMBER - slice `(n / 2) % 8`, channel A for an even pad and B for an
+/// odd one - and the HALs enforce it in the type system: embassy-rp emits one
+/// `impl ChannelAPin<PWM_SLICE0> for PIN_0` per pad, rp-hal one
+/// `impl ValidPwmOutputPin<Pwm0, A> for Gpio0`. All 48 impls name 48 distinct
+/// pads, and the four shipped RP definitions carry exactly one `TimerPwm` entry
+/// per pin to match. A channel dropdown here could only ever hold one value, and
+/// widening the pin data to give it a second would generate code the compiler
+/// rejects - which is the ESP's freedom (`Ledc::channel(number, pad)` routes
+/// through the GPIO matrix) read as if it were universal.
+///
+/// What IS a choice is the PAD: each (slice, channel) is reachable from two
+/// GPIOs sixteen apart, and the slice's other channel has its own two.
+fn rp_pwm_notes(
+    slice: u8,
+    conn_rows: &[(&'static str, String, usize)],
+    pin_funcs: &HashMap<usize, Vec<PinFunction>>,
+    pin_names: &HashMap<usize, String>,
+) -> Vec<String> {
+    // Every pad this chip could route to (slice, channel), in pin order. Read
+    // from the chip's own table rather than from the arithmetic: slice 7 is
+    // half-populated on an RP2040, and a W board loses four pads to the radio.
+    let pads_for = |channel: u8| -> Vec<String> {
+        let mut v: Vec<(usize, String)> = pin_funcs
+            .iter()
+            .filter(|(_, fns)| {
+                fns.iter().any(|f| {
+                    matches!(f, PinFunction::TimerPwm { timer, channel: c }
+                             if *timer == slice && *c == channel)
+                })
+            })
+            .map(|(n, _)| {
+                (
+                    *n,
+                    pin_names
+                        .get(n)
+                        .cloned()
+                        .unwrap_or_else(|| format!("pin{n}")),
+                )
+            })
+            .collect();
+        v.sort_unstable();
+        v.into_iter().map(|(_, name)| name).collect()
+    };
+    let letter = |c: u8| if c == 1 { 'A' } else { 'B' };
+
+    // Each of these is ONE source line on purpose. A `\`-continued literal is
+    // rejoined with its own indentation, and the details pane would draw the run
+    // of spaces - the same trap `RP_DMA_NOTE` above is written around.
+    let mut out = vec![
+        "On this chip the pad decides the channel - slice (GPIO / 2) mod 8, channel A for an even GPIO and B for an odd one - and both HALs make that a compile-time bound, so the channel is not selectable here."
+            .to_owned(),
+    ];
+    // Which pad each channel actually GETS. Two pads sixteen apart share every
+    // (slice, channel) here, so a canvas really can wire both - and the emitter
+    // resolves that by sorting on (slice, channel, GPIO) and keeping the first
+    // (`codegen::rp`, the `pads` map). The panel has to resolve it the same way
+    // and by the same rule, or these notes claim a pad is driving an output the
+    // generated file left out.
+    let mut driver: BTreeMap<u8, (u8, String)> = BTreeMap::new();
+    let mut lost: Vec<(u8, String, String)> = Vec::new();
+    for (sig, pin, _) in conn_rows {
+        let Some(ch) = pwm_plain_channel(sig) else {
+            continue;
+        };
+        let gp = crate::panels::mcu_module::codegen::rp::gpio_index(pin).unwrap_or(u8::MAX);
+        match driver.get(&ch) {
+            Some((held, holder)) if *held <= gp => {
+                lost.push((ch, pin.clone(), holder.clone()));
+            }
+            Some((_, holder)) => {
+                lost.push((ch, holder.clone(), pin.clone()));
+                driver.insert(ch, (gp, pin.clone()));
+            }
+            None => {
+                driver.insert(ch, (gp, pin.clone()));
+            }
+        }
+    }
+    // A pad that lost the clash is not "an alternative" - it is wired and
+    // silent, which is the one thing worth saying before the board is soldered.
+    for (ch, out_pad, holder) in &lost {
+        out.push(format!(
+            "{out_pad} is wired to slice {slice} channel {} as well, but one channel reaches one pad - {holder} drives it and {out_pad} gets no code.",
+            letter(*ch),
+        ));
+    }
+    for (ch, (_, pin)) in &driver {
+        // Only pads that are FREE are alternatives; a wired one is covered by
+        // the clash line above.
+        let others: Vec<String> = pads_for(*ch)
+            .into_iter()
+            .filter(|p| p != pin && !conn_rows.iter().any(|(_, w, _)| w == p))
+            .collect();
+        if !others.is_empty() {
+            out.push(format!(
+                "{pin} drives slice {slice} channel {} - and so can {}, if that pad suits the board better.",
+                letter(*ch),
+                others.join(" / "),
+            ));
+        }
+    }
+    // The sibling channel, named in this chip's own vocabulary. The generic note
+    // says "assign TIM3 CH2", which is STM32 wording the Pico canvas never uses.
+    for ch in [1u8, 2] {
+        if conn_rows
+            .iter()
+            .any(|(sig, _, _)| pwm_plain_channel(sig) == Some(ch))
+        {
+            continue;
+        }
+        let pads = pads_for(ch);
+        if !pads.is_empty() {
+            out.push(format!(
+                "Slice {slice} channel {} is free - wire {} on the Pins canvas and it joins this module, sharing its frequency.",
+                letter(ch),
+                pads.join(" / "),
+            ));
+        }
+    }
+    out
 }
 
 fn free_pwm_channels(
@@ -2564,7 +2674,7 @@ pub fn module_config_ui(
                             cfg.flow = UsartFlow::None;
                         }
                         if crate::panels::mcu_module::codegen::rp::is_rp(family) {
-                            rp_dma_note(ui);
+                            notes.push(RP_DMA_NOTE.to_owned());
                         } else if cfg.mode == UsartMode::Dma {
                             let inst = cfg.instance;
                             dma_row(ui, uart_bus, inst, &mut cfg.dma_tx, &mut cfg.dma_rx);
@@ -2717,7 +2827,7 @@ pub fn module_config_ui(
                     } else if is_async {
                         if crate::panels::mcu_module::codegen::rp::is_rp(family) {
                             rp_spi_init_locked(ui);
-                            rp_dma_note(ui);
+                            notes.push(RP_DMA_NOTE.to_owned());
                         } else {
                             // NOT folded into the chain above: dropping this
                             // call took the Async-init combo off every STM32,
@@ -3056,14 +3166,23 @@ pub fn module_config_ui(
                                 .to_owned(),
                         );
                     }
-                    let free = free_pwm_channels(cfg.instance, &wired, pin_funcs);
-                    if !free.is_empty() {
-                        let list = free.join(" / ");
-                        notes.push(format!(
-                            "This timer has channels left. Assign TIM{} {list} on the Pins \
-                             canvas and they join this module - they share its frequency.",
-                            cfg.instance
-                        ));
+                    // "Assign TIM3 CH2" is STM32 vocabulary, and a Pico canvas
+                    // never shows a TIM. On an RP the same facts have to be said
+                    // in slices and A/B — and the channel, unlike the ESP's, is
+                    // not a choice at all, which is worth saying out loud on the
+                    // panel where someone would look for the picker.
+                    if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+                        notes.extend(rp_pwm_notes(cfg.instance, &conn_rows, pin_funcs, pin_names));
+                    } else {
+                        let free = free_pwm_channels(cfg.instance, &wired, pin_funcs);
+                        if !free.is_empty() {
+                            let list = free.join(" / ");
+                            notes.push(format!(
+                                "This timer has channels left. Assign TIM{} {list} on the Pins \
+                                 canvas and they join this module - they share its frequency.",
+                                cfg.instance
+                            ));
+                        }
                     }
                     // Say why the output controls are absent instead of just
                     // dropping them: the reason differs per backend, and the
@@ -3981,7 +4100,7 @@ pub fn module_config_ui(
                     );
                     ui.end_row();
                     if is_async && crate::panels::mcu_module::codegen::rp::is_rp(family) {
-                        rp_i2c_note(ui);
+                        notes.push(RP_I2C_NOTE.to_owned());
                     } else if is_async {
                         async_row(ui, &mut pending.1);
                         if pending.1 == AsyncBusMode::AsyncDma {
@@ -4620,6 +4739,101 @@ mod tests {
         // channel is not something the generator can write.
         let taken: BTreeSet<u8> = [0u8, 1, 5].into_iter().collect();
         assert_eq!(pwm_channel_choices(0, 10, &funcs, &taken), vec![2, 3, 4]);
+    }
+
+    /// The Pico's PWM remarks name PADS and SLICES, never a TIM.
+    ///
+    /// The generic note tells the user to "assign TIM3 CH2 on the Pins canvas",
+    /// which is STM32 wording for a control the Pico canvas does not have. What
+    /// an RP owner can actually decide is the pad: each (slice, channel) is
+    /// reachable from two GPIOs sixteen apart.
+    #[test]
+    fn an_rp_pwm_note_talks_about_pads_not_timers() {
+        let mut funcs: HashMap<usize, Vec<PinFunction>> = HashMap::new();
+        let mut names: HashMap<usize, String> = HashMap::new();
+        // Slice 1: channel A on GP2 / GP18, channel B on GP3 / GP19 - the real
+        // RP2040 map, where slice = (n / 2) % 8 and A is the even pad.
+        for (num, gp, channel) in [(2usize, 2u8, 1u8), (18, 18, 1), (3, 3, 2), (19, 19, 2)] {
+            funcs.insert(num, vec![PinFunction::TimerPwm { timer: 1, channel }]);
+            names.insert(num, format!("GP{gp}"));
+        }
+        let conn: Vec<(&'static str, String, usize)> = vec![("CH1", "GP2".to_owned(), 2)];
+        let notes = rp_pwm_notes(1, &conn, &funcs, &names);
+
+        let all = notes.join("\n");
+        assert!(!all.contains("TIM"), "no STM32 vocabulary: {all}");
+        // The other pad on the SAME channel - a re-point that compiles.
+        assert!(all.contains("GP18"), "names the sibling pad: {all}");
+        // The slice's free half, and both pads that reach it.
+        assert!(all.contains("channel B is free"), "{all}");
+        assert!(all.contains("GP3") && all.contains("GP19"), "{all}");
+        // And it says outright that the channel is not the choice, because this
+        // is the panel where someone would look for the ESP's picker.
+        assert!(all.contains("not selectable"), "{all}");
+    }
+
+    /// The panel names the same winner the emitter does.
+    ///
+    /// GP2 and GP18 are both slice 1 channel A, and a Custom module's pin button
+    /// will hand out an already-taken function, so both can end up wired. The
+    /// generator keeps the lower GPIO and writes a comment naming the loser; the
+    /// panel used to congratulate BOTH pads on driving the channel, so the two
+    /// halves of one change described the same pad in opposite ways.
+    #[test]
+    fn two_pads_on_one_channel_agree_with_what_the_generator_emits() {
+        let mut funcs: HashMap<usize, Vec<PinFunction>> = HashMap::new();
+        let mut names: HashMap<usize, String> = HashMap::new();
+        for (num, channel) in [(2usize, 1u8), (18, 1), (3, 2), (19, 2)] {
+            funcs.insert(num, vec![PinFunction::TimerPwm { timer: 1, channel }]);
+            names.insert(num, format!("GP{num}"));
+        }
+        // Deliberately the HIGHER pad first: the winner is decided by GPIO
+        // number, exactly as `pwm.sort_unstable()` decides it in the emitter,
+        // not by the order the connections happen to sit in.
+        let conn: Vec<(&'static str, String, usize)> =
+            vec![("CH1", "GP18".to_owned(), 18), ("CH1", "GP2".to_owned(), 2)];
+        let all = rp_pwm_notes(1, &conn, &funcs, &names).join("\n");
+
+        // The winner is named as the driver. With no FREE pad left on this
+        // channel there is no "and so can ..." line, so the clash line is where
+        // it has to be said - and it is.
+        assert!(all.contains("GP2 drives it"), "{all}");
+        assert!(
+            all.contains("GP18 is wired to slice 1 channel A as well"),
+            "the pad that gets no code is named as such: {all}"
+        );
+        assert!(
+            !all.contains("GP18 drives"),
+            "and is never described as driving it: {all}"
+        );
+        // A pad that is wired-and-silent is not offered as an alternative
+        // either - that line is for FREE pads.
+        assert!(!all.contains("and so can GP18"), "{all}");
+    }
+
+    /// No note carries a run of spaces.
+    ///
+    /// A `\`-continued literal comes back joined to its own source indentation,
+    /// and the details pane draws every one of those spaces. These strings are
+    /// long enough to invite the continuation, so the rule is asserted.
+    #[test]
+    fn no_note_string_carries_a_run_of_spaces() {
+        let mut funcs: HashMap<usize, Vec<PinFunction>> = HashMap::new();
+        let mut names: HashMap<usize, String> = HashMap::new();
+        for (num, channel) in [(2usize, 1u8), (18, 1), (3, 2)] {
+            funcs.insert(num, vec![PinFunction::TimerPwm { timer: 1, channel }]);
+            names.insert(num, format!("GP{num}"));
+        }
+        let conn: Vec<(&'static str, String, usize)> = vec![("CH1", "GP2".to_owned(), 2)];
+        let mut all = rp_pwm_notes(1, &conn, &funcs, &names);
+        all.push(RP_DMA_NOTE.to_owned());
+        all.push(RP_I2C_NOTE.to_owned());
+        for n in &all {
+            assert!(
+                !n.contains("  "),
+                "double space in a details-pane note: {n:?}"
+            );
+        }
     }
 
     /// `CH3` is a channel; `CH3N` and `BKIN` are not.
