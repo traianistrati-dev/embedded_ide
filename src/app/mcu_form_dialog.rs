@@ -256,7 +256,7 @@ impl AppIde {
                         if ui
                             .button(format!("{} Import clock .ron…", ph::DOWNLOAD_SIMPLE))
                             .on_hover_text(
-                                "Load a clock tree (GraphClock or bare ClockGraph) from a .ron                                  file and attach it to this chip. It is validated before import.",
+                                "Load a clock tree (GraphClock or bare ClockGraph) from a .ron file and attach it to this chip. It is validated before import.",
                             )
                             .clicked()
                         {
@@ -314,7 +314,7 @@ impl AppIde {
                         if ui
                             .button(format!("{} Extract from datasheet (AI)…", ph::SPARKLE))
                             .on_hover_text(
-                                "Extract the clock tree from a datasheet PDF or pasted text with                                  an AI, verified against the datasheet's own default SYSCLK.",
+                                "Extract the clock tree from a datasheet PDF or pasted text with an AI, verified against the datasheet's own default SYSCLK.",
                             )
                             .clicked()
                         {
@@ -329,7 +329,7 @@ impl AppIde {
                                 egui::Button::new(format!("{} Export clock .ron…", ph::UPLOAD_SIMPLE)),
                             )
                             .on_disabled_hover_text(
-                                "Pick a clock tree (or import one) first — only graph clocks can                                  be exported.",
+                                "Pick a clock tree (or import one) first — only graph clocks can be exported.",
                             )
                             .on_hover_text("Save this chip's clock tree as a .ron template.")
                             .clicked()
@@ -771,7 +771,7 @@ fn unbound_note(missing: &[String]) -> String {
         return String::new();
     }
     format!(
-        " · {} codegen id(s) unbound ({}) — bind them in the Clock tab or those values fall back          to defaults.",
+        " · {} codegen id(s) unbound ({}) — bind them in the Clock tab or those values fall back to defaults.",
         missing.len(),
         missing.join(", ")
     )

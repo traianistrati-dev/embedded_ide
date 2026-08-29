@@ -354,7 +354,7 @@ Skipped: {}",
                         egui::Button::new(format!("{} Extract branches", ph::SPARKLE)),
                     )
                     .on_hover_text(
-                        "Pass 2: the low-speed paths, MCO and the peripheral kernel clocks,                          merged onto the tree you already have",
+                        "Pass 2: the low-speed paths, MCO and the peripheral kernel clocks, merged onto the tree you already have",
                     )
                     .on_disabled_hover_text("extract (or import) the spine first")
                     .clicked()

@@ -849,7 +849,7 @@ impl AppIde {
                 unbound_ids.dedup();
                 msg.push_str(&format!(
                     "
-{}  {} clock id(s) unbound ({}) — those values fall back to a                      default in the generated code.",
+{}  {} clock id(s) unbound ({}) — those values fall back to a default in the generated code.",
                     ph::WARNING,
                     unbound_ids.len(),
                     unbound_ids.join(", ")
@@ -864,7 +864,7 @@ impl AppIde {
                 let shown: Vec<&str> = gap_chips.iter().take(3).map(String::as_str).collect();
                 msg.push_str(&format!(
                     "
-{}  {} chip(s) imported with gaps — a project on one of these will                      not fully build: {}{}. HAL features checked against {} {}.",
+{}  {} chip(s) imported with gaps — a project on one of these will not fully build: {}{}. HAL features checked against {} {}.",
                     ph::WARNING,
                     gap_chips.len(),
                     shown.join(" | "),
@@ -1936,6 +1936,65 @@ mod chip_gaps_tests {
     /// Written against `builtin_definitions()` on purpose: a list of chip ids
     /// here would go stale the next time one is added, which is precisely the
     /// failure it exists to prevent.
+    /// The dialog's own warning texts carry no gap.
+    ///
+    /// Two of them did: the "clock id(s) unbound" and "chip(s) imported with
+    /// gaps" lines each had a run of twenty-odd spaces mid-sentence — the scar a
+    /// backslash-continued literal leaves once rustfmt joins it. They are the
+    /// messages a user reads to find out WHY a chip will not fully build, so a
+    /// gap in them lands exactly where attention is highest.
+    ///
+    /// Read from the source rather than by calling the builders, because those
+    /// need an imported-chip registry this test has no way to fake. FOUR spaces,
+    /// not two: `"    {}  {g}"` indents a list item on purpose, and a first cut
+    /// of the repair destroyed two such indentations before this existed.
+    #[test]
+    fn no_dialog_warning_text_has_a_gap_in_it() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut bad = Vec::new();
+        for rel in [
+            "src/app/dialogs.rs",
+            "src/app/mcu_form_dialog.rs",
+            "src/app/clock_import_dialog.rs",
+            "src/app/chip_search_ui.rs",
+            "src/app/chip_filter_ui.rs",
+        ] {
+            let src =
+                std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            for (i, l) in src.lines().enumerate() {
+                if l.trim_start().starts_with("//") {
+                    continue;
+                }
+                // A run of 4+ spaces with real TEXT on both sides. The
+                // character before must not be the opening quote either:
+                // `"    Not a block: ..."` indents a list item on purpose, and
+                // a first cut of this flagged exactly that - the same
+                // indentation an earlier repair had already destroyed once.
+                let b = l.as_bytes();
+                let mut run = 0usize;
+                for k in 0..b.len() {
+                    if b[k] == b' ' {
+                        run += 1;
+                        continue;
+                    }
+                    let before = k > run && {
+                        let c = b[k - run - 1];
+                        c.is_ascii_alphanumeric() || matches!(c, b'.' | b',' | b')' | b';' | b':')
+                    };
+                    if run >= 4 && before && b[k].is_ascii_alphanumeric() {
+                        bad.push(format!("{rel}:{}", i + 1));
+                        break;
+                    }
+                    run = 0;
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "joined continuations in dialog text: {bad:?}"
+        );
+    }
+
     #[test]
     fn no_bundled_chip_reports_a_gap() {
         use crate::panels::mcu_module::builtins::builtin_definitions;
