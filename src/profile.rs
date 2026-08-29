@@ -143,14 +143,27 @@ pub fn start_profile(
     });
 }
 
-fn run_bloat(project_dir: &std::path::Path, target: &str, by_crate: bool) -> ProfileState {
-    let mut args: Vec<&str> = vec!["bloat", "--release", "--target", target, "--color=never"];
+/// What to pass `cargo`, split out so it can be asserted.
+///
+/// No `--color=never`: cargo-bloat does not take it. It parses its own
+/// arguments, never forwards the flag to the inner cargo, and echoes
+/// `Warning: unused arguments left: ["--color=never"].` as the FIRST line of
+/// every run - which then sits above the real message on any failure. The
+/// colours it was meant to suppress never arrive anyway, because the child's
+/// stdio is a pipe.
+fn bloat_args<'a>(target: &'a str, by_crate: bool) -> Vec<&'a str> {
+    let mut args: Vec<&str> = vec!["bloat", "--release", "--target", target];
     if by_crate {
         args.push("--crates");
     } else {
         args.push("-n");
         args.push("40");
     }
+    args
+}
+
+fn run_bloat(project_dir: &std::path::Path, target: &str, by_crate: bool) -> ProfileState {
+    let args = bloat_args(target, by_crate);
     let out = match no_window(&mut Command::new("cargo"))
         .current_dir(project_dir)
         .args(&args)
@@ -162,6 +175,18 @@ fn run_bloat(project_dir: &std::path::Path, target: &str, by_crate: bool) -> Pro
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
+        // The toolchain BEFORE the tool: rustup's message for a missing
+        // toolchain is `custom toolchain 'esp' specified in override file
+        // '…/rust-toolchain.toml' is not installed`, and it contains the very
+        // words the cargo-bloat sniffer below looks for. Only the three Xtensa
+        // parts carry a `rust-toolchain.toml` (see `project_gen`), so on those -
+        // and only those - a machine without espup was told to install
+        // cargo-bloat, which changes nothing. rustup's own line names the file,
+        // the toolchain and the problem, so it is worth more than anything
+        // written here.
+        if stderr.contains("toolchain") && stderr.contains("is not installed") {
+            return ProfileState::Failed(stderr.trim().to_owned());
+        }
         // cargo-bloat not installed → cargo prints "no such command".
         if stderr.contains("no such command")
             || stderr.contains("not provided")
@@ -194,6 +219,49 @@ fn run_bloat(project_dir: &std::path::Path, target: &str, by_crate: bool) -> Pro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing `esp` toolchain must not be reported as a missing cargo-bloat.
+    ///
+    /// rustup's message for a toolchain named in `rust-toolchain.toml` but not
+    /// installed contains the words `is not installed` - which is exactly what
+    /// the cargo-bloat sniffer looks for. Only the three Xtensa parts carry such
+    /// a file, so on those, and only those, a machine without espup was told to
+    /// run `cargo install cargo-bloat`, which changes nothing.
+    ///
+    /// The real rustup line, verbatim from a machine with no such toolchain.
+    #[test]
+    fn a_missing_toolchain_is_not_blamed_on_cargo_bloat() {
+        let rustup = "error: custom toolchain 'esp' specified in override file \
+                      'C:\\p\\rust-toolchain.toml' is not installed";
+        assert!(
+            rustup.contains("is not installed"),
+            "the collision this guards is gone; re-check the ordering in run_bloat"
+        );
+        // The toolchain test must come FIRST and must win.
+        assert!(rustup.contains("toolchain") && rustup.contains("is not installed"));
+        // …and the cargo-bloat shapes must not look like a toolchain problem.
+        for bloat in [
+            "error: no such command: `bloat`",
+            "cargo-bloat is not provided by the `cargo` binary",
+        ] {
+            assert!(
+                !(bloat.contains("toolchain") && bloat.contains("is not installed")),
+                "`{bloat}` would be swallowed by the toolchain arm"
+            );
+        }
+    }
+
+    /// cargo-bloat takes no `--color` flag: it echoes it back as a warning that
+    /// becomes the first line of every run, above any real error.
+    #[test]
+    fn the_bloat_arguments_carry_no_flag_cargo_bloat_rejects() {
+        for by_crate in [false, true] {
+            let args = bloat_args("riscv32imc-unknown-none-elf", by_crate);
+            assert!(!args.iter().any(|a| a.starts_with("--color")), "{args:?}");
+            assert_eq!(args[0], "bloat");
+            assert!(args.contains(&"--target"), "{args:?}");
+        }
+    }
 
     #[test]
     fn parses_function_table() {
