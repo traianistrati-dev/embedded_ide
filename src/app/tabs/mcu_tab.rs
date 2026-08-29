@@ -295,6 +295,10 @@ pub fn show_peripherals_tab(
     // Filtered once, before the UI pass: the count in the search row and
     // the columns below have to agree, and re-filtering per column would
     // be two chances to disagree.
+    // Before the filter consumes it, and from the UNFILTERED set: whether
+    // the chip has a cheap pin at all is a fact about the chip, not about
+    // what the search box is showing.
+    let tiering_informative = cost_tiering_is_informative(&categories);
     let filtered = filter_categories(categories, query);
 
     // (pin_num, func) to apply after the UI pass (Unset = clear the pin).
@@ -320,7 +324,7 @@ pub fn show_peripherals_tab(
             .color(egui::Color32::from_rgb(130, 130, 145)),
         );
         ui.add_space(3.0);
-        legend(ui);
+        legend(ui, tiering_informative);
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(
@@ -388,9 +392,28 @@ fn column_title(ui: &mut egui::Ui, kind: Complexity) {
     );
 }
 
+/// Does the cost colouring tell this chip's pins apart at all?
+///
+/// `SCARCE_AT` is an ABSOLUTE threshold, and it was calibrated on an STM32,
+/// where a pad serves a handful of peripherals and 35% of them land above it.
+/// On a part with a GPIO matrix it does not sort anything: measured over the
+/// shipped definitions, every ESP and every RP board has 100% of its pins at or
+/// above the line - the ESP32-C6 runs 11 to 12, the S3 11 to 13. Fading all of
+/// them and advising "keep it free" offers a choice the chip does not have.
+///
+/// So the legend says which of the two situations the user is in, rather than
+/// implying a ranking that is not there. No relative re-tiering: on a spread of
+/// 11 to 12 any ordering would be noise dressed as advice.
+fn cost_tiering_is_informative(categories: &[CategoryView]) -> bool {
+    categories
+        .iter()
+        .flat_map(|c| c.pins.iter())
+        .any(|p| p.cost < SCARCE_AT)
+}
+
 /// One-line key for the pin-cost colouring, so the outline and the fading are
 /// readable without hovering a chip.
-fn legend(ui: &mut egui::Ui) {
+fn legend(ui: &mut egui::Ui, informative: bool) {
     let dim = egui::Color32::from_rgb(120, 120, 135);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -410,9 +433,11 @@ fn legend(ui: &mut egui::Ui) {
         );
         ui.label(egui::RichText::new("·").size(10.0).color(dim));
         ui.label(
-            egui::RichText::new(format!(
-                "faded = also serves {SCARCE_AT}+ other peripherals — keep it free"
-            ))
+            egui::RichText::new(if informative {
+                format!("faded = also serves {SCARCE_AT}+ other peripherals — keep it free")
+            } else {
+                "every pin here serves several peripherals — this chip has no cheap ones".to_owned()
+            })
             .size(10.0)
             .color(TXT_SCARCE),
         );
@@ -1115,6 +1140,37 @@ fn cost_note(cost: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The legend must not promise a choice the chip does not offer.
+    ///
+    /// `SCARCE_AT` is absolute and was calibrated on an STM32: 35% of an F103's
+    /// pins land above it, so fading them says something. Measured over the
+    /// shipped definitions, EVERY ESP part and EVERY RP board has 100% of its
+    /// pins at or above the line - the C6 runs 11 to 12, the S3 11 to 13. There
+    /// the old legend faded all of them and advised "keep it free", which is
+    /// advice about a choice that does not exist.
+    ///
+    /// Deliberately NOT re-tiered relative to the chip: on a spread of 11 to 12
+    /// any ranking would be noise dressed as advice. The tab says which of the
+    /// two situations the user is in instead.
+    #[test]
+    fn the_legend_matches_what_the_chip_can_offer() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+
+        let mut informative = Vec::new();
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            if cost_tiering_is_informative(&build_categories(&mcu)) {
+                informative.push(d.id.clone());
+            }
+        }
+        informative.sort();
+        assert_eq!(
+            informative,
+            ["rp2040_pico_w", "rp2350_pico2_w", "stm32f103c8t6"],
+            "which chips have a pin below the scarcity line changed - if a chip              joined or left, the legend it shows changed with it"
+        );
+    }
 
     /// The Peripherals tab, for every chip that can open it.
     ///
