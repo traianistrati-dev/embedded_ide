@@ -295,7 +295,7 @@ fn sample_over_dap(
         "flashingConfig": { "flashingEnabled": false },
         "coreConfigs": [{ "coreIndex": 0, "programBinary": elf.to_string_lossy() }],
     });
-    if let Some(p) = probe.filter(|s| !s.is_empty()) {
+    if let Some(p) = crate::probe::selector(probe) {
         launch["probe"] = json!(p);
     }
     send(&mut stream, &mut seq, "attach", launch)?;

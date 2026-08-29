@@ -93,7 +93,7 @@ pub fn start_reset(
 ) {
     std::thread::spawn(move || {
         let mut args: Vec<String> = vec!["reset".into(), "--chip".into(), chip];
-        if let Some(p) = probe.filter(|s| !s.is_empty()) {
+        if let Some(p) = selector(probe.as_deref()) {
             args.push("--probe".into());
             args.push(p);
         }
@@ -334,6 +334,49 @@ pub fn chip_gap(chip: &str) -> Option<String> {
 #[cfg(test)]
 mod chip_gap_tests {
     use super::*;
+
+    /// Nobody filters a probe selector by hand any more.
+    ///
+    /// There are FIVE consumers - `rtt.rs`, `debugger.rs`, `flamegraph.rs`,
+    /// `probe_flash.rs` and `start_reset` here - and they were five hand-written
+    /// copies of one idea. Fixing "both" of them was a mistake made in this very
+    /// repo: two were unified, three kept the old `!s.is_empty()` and a selector
+    /// of spaces still went out to probe-rs from the other three.
+    ///
+    /// A source scan, because what regresses is a SIXTH caller written the old
+    /// way - and that is visible here and nowhere else.
+    #[test]
+    fn no_caller_filters_a_probe_selector_by_hand() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        for rel in [
+            "src/rtt.rs",
+            "src/debugger.rs",
+            "src/flamegraph.rs",
+            "src/probe_flash.rs",
+            "src/probe.rs",
+        ] {
+            let src =
+                std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            for (i, l) in src.lines().enumerate() {
+                // The old shape, in code rather than in a doc comment.
+                let t = l.trim_start();
+                if t.starts_with("//") {
+                    continue;
+                }
+                // Assembled from pieces so this line does not match ITSELF -
+                // the scan reads the file it lives in.
+                let needle = ["filter(|s| !s.", "is_empty())"].concat();
+                if l.contains("probe") && l.contains(&needle) {
+                    offenders.push(format!("{rel}:{}", i + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these filter a selector by hand instead of calling `probe::selector`: {offenders:?}"
+        );
+    }
 
     /// One normaliser, because two callers had drifted apart.
     ///

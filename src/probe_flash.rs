@@ -101,7 +101,7 @@ pub fn start_probe_flash(
             "--target".into(),
             target,
         ];
-        if let Some(p) = probe.filter(|s| !s.is_empty()) {
+        if let Some(p) = crate::probe::selector(probe.as_deref()) {
             args.push("--probe".into());
             args.push(p);
         }
