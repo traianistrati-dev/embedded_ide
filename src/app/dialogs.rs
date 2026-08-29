@@ -2196,6 +2196,83 @@ mod chip_gaps_tests {
         }
     }
 
+    /// Every CPU frequency the Clock tab OFFERS on an Espressif part must be one
+    /// `esp_hal::clock::CpuClock` actually has a variant for.
+    ///
+    /// The tab draws a divider with a list of options; codegen turns whatever
+    /// comes out into a variant name through `esp_clocks::cpu_variant`, which
+    /// picks the CLOSEST option the chip has rather than failing. So an offered
+    /// divider that lands between two real variants does not break the build -
+    /// it silently runs the chip at a speed the tab never showed. That is worse
+    /// than a compile error, and nothing checked for it: the existing sweep
+    /// asserts the tree EXISTS, not that what it can produce is nameable.
+    #[test]
+    fn every_offered_esp_cpu_frequency_has_a_real_cpuclock_variant() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::clock::graph::eval::evaluate;
+        use crate::panels::mcu_module::clock::graph::model::{NodeKind, NodeState};
+        use crate::panels::mcu_module::clock::model::ClockConfig;
+        use crate::panels::mcu_module::codegen::family::is_esp;
+        use crate::panels::mcu_module::esp_clocks;
+
+        for d in builtin_definitions() {
+            if !is_esp(&d.family) {
+                continue;
+            }
+            let mut mcu = d.build_mcu();
+            let opts = esp_clocks::cpu_options(&mcu.family);
+            assert!(!opts.is_empty(), "{}: no CpuClock table", d.id);
+
+            let ClockConfig::Graph(gc) = &mut mcu.clock else {
+                panic!("{}: an Espressif part with no clock tree", d.id);
+            };
+            let div_options = gc
+                .graph
+                .nodes
+                .iter()
+                .find(|n| n.id == "cpu_div")
+                .map(|n| match &n.kind {
+                    NodeKind::Divider { options } => options.clone(),
+                    other => panic!("{}: cpu_div is {other:?}, not a divider", d.id),
+                })
+                .unwrap_or_else(|| panic!("{}: no cpu_div node", d.id));
+
+            for (i, by) in div_options.iter().enumerate() {
+                if let Some(n) = gc.graph.nodes.iter_mut().find(|n| n.id == "cpu_div") {
+                    n.state = NodeState::Index(i);
+                }
+                let hz = *evaluate(&gc.graph).get("cpu").unwrap_or(&0);
+                let mhz = hz / 1_000_000;
+                assert!(
+                    opts.contains(&mhz),
+                    "{}: the tab offers /{by} = {mhz} MHz, and CpuClock has only {opts:?} - \
+                     `cpu_variant` would quietly emit the nearest one instead",
+                    d.id
+                );
+            }
+
+            // And the reverse: nothing the chip CAN run is unreachable from the
+            // tab, or the user cannot ask for a speed the part supports.
+            let reachable: Vec<u32> = div_options
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    if let Some(n) = gc.graph.nodes.iter_mut().find(|n| n.id == "cpu_div") {
+                        n.state = NodeState::Index(i);
+                    }
+                    evaluate(&gc.graph).get("cpu").copied().unwrap_or(0) / 1_000_000
+                })
+                .collect();
+            for want in opts {
+                assert!(
+                    reachable.contains(want),
+                    "{}: CpuClock has {want} MHz and the tab cannot reach it (offers {reachable:?})",
+                    d.id
+                );
+            }
+        }
+    }
+
     /// The Pins tab, for every chip that can open it.
     ///
     /// The canvas draws four sides; the panel that opens on a click explains
