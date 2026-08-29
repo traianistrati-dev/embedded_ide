@@ -282,6 +282,29 @@ pub(crate) fn probe_rs_failure(console: &TerminalState) -> Option<String> {
 
 /// The orchestrator body: build, then stream probe-rs until it exits.
 #[allow(clippy::too_many_arguments)]
+/// The exact `probe-rs` argument list - built once, used twice.
+///
+/// The console echoes this line before spawning, and that echo is what a user
+/// copies to reproduce the session by hand. It used to be assembled separately
+/// from the real `Command`, two hand-kept constructions of the same thing; when
+/// those drift the command still works, it just stops being the one on screen.
+///
+/// `--probe VID:PID[:Serial]` pins the session to one probe. Absent, probe-rs
+/// auto-selects - and errors when several are attached, which is why the tabs
+/// share one selector.
+fn probe_rs_args(sub: &str, chip: &str, probe: Option<&str>, elf: &std::path::Path) -> Vec<String> {
+    let mut args = vec![sub.to_owned(), "--chip".to_owned(), chip.to_owned()];
+    // `trim`, not just `is_empty`: a selector of spaces is not a selector, and
+    // `--probe "   "` is a parse error from probe-rs rather than the "let it
+    // choose" the empty case means.
+    if let Some(sel) = probe.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--probe".to_owned());
+        args.push(sel.to_owned());
+    }
+    args.push(elf.display().to_string());
+    args
+}
+
 fn run_session(
     mode: RttMode,
     project_dir: &std::path::Path,
@@ -308,30 +331,17 @@ fn run_session(
         RttMode::Run => "run",
         RttMode::Attach => "attach",
     };
-    // `--probe VID:PID[:Serial]` pins the session to one probe; absent, probe-rs
-    // auto-selects (and errors when several are attached).
-    let probe_arg = probe
-        .filter(|s| !s.is_empty())
-        .map(|s| format!(" --probe {s}"))
-        .unwrap_or_default();
-    state.lock().unwrap().push_plain(
-        LineKind::Input,
-        format!(
-            "> probe-rs {sub} --chip {chip}{probe_arg} {}",
-            elf.display()
-        ),
-    );
+    let args = probe_rs_args(sub, chip, probe, &elf);
+    state
+        .lock()
+        .unwrap()
+        .push_plain(LineKind::Input, format!("> probe-rs {}", args.join(" ")));
     ctx.request_repaint();
 
     let mut cmd = Command::new("probe-rs");
-    let builder = no_window(&mut cmd)
+    let mut probe = no_window(&mut cmd)
         .current_dir(project_dir)
-        .args([sub, "--chip", chip]);
-    if let Some(sel) = probe.filter(|s| !s.is_empty()) {
-        builder.args(["--probe", sel]);
-    }
-    let mut probe = builder
-        .arg(&elf)
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -406,5 +416,78 @@ fn run_session(
             ))
         }
         _ => Err("probe-rs could not be reaped".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::probe_rs_args;
+    use std::path::Path;
+
+    /// The line the console prints IS the command that runs. It used to be
+    /// assembled twice, and the printed one is what a user copies to reproduce
+    /// the session by hand.
+    #[test]
+    fn the_echoed_line_is_the_command() {
+        let elf = Path::new("target/x/release/app");
+        let args = probe_rs_args("run", "esp32c6", None, elf);
+        assert_eq!(args, ["run", "--chip", "esp32c6", "target/x/release/app"]);
+        assert_eq!(
+            format!("probe-rs {}", args.join(" ")),
+            "probe-rs run --chip esp32c6 target/x/release/app"
+        );
+    }
+
+    /// `--probe` appears only when a selector was picked - probe-rs auto-selects
+    /// otherwise, and passing an empty string would be a parse error rather than
+    /// the intended "let it choose".
+    #[test]
+    fn the_probe_selector_is_added_only_when_there_is_one() {
+        let elf = Path::new("app.elf");
+        for empty in [None, Some(""), Some("   ")] {
+            let args = probe_rs_args("attach", "esp32", empty, elf);
+            assert!(
+                !args.iter().any(|a| a == "--probe"),
+                "{empty:?} produced {args:?}"
+            );
+        }
+        let args = probe_rs_args("attach", "esp32", Some("303a:1001"), elf);
+        assert_eq!(
+            args,
+            [
+                "attach",
+                "--chip",
+                "esp32",
+                "--probe",
+                "303a:1001",
+                "app.elf"
+            ]
+        );
+    }
+
+    /// The ELF is LAST: probe-rs takes it positionally, so a flag appended after
+    /// it would be read as a second path.
+    #[test]
+    fn the_elf_stays_last() {
+        let args = probe_rs_args("run", "esp32s3", Some("1"), Path::new("a.elf"));
+        assert_eq!(args.last().unwrap(), "a.elf");
+    }
+
+    /// Every bundled chip produces a well-formed line, so no definition can
+    /// carry a chip name that would come out empty or split.
+    #[test]
+    fn every_bundled_chip_produces_one_chip_argument() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        for d in builtin_definitions() {
+            let args = probe_rs_args("run", &d.project.probe_chip, None, Path::new("a.elf"));
+            let i = args.iter().position(|a| a == "--chip").expect("--chip");
+            let name = &args[i + 1];
+            assert!(!name.trim().is_empty(), "{}: empty chip name", d.id);
+            assert!(
+                !name.contains(' '),
+                "{}: `{name}` would split into two arguments",
+                d.id
+            );
+        }
     }
 }
