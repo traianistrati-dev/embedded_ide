@@ -18,6 +18,19 @@ use eframe::egui;
 pub struct StructureView {
     /// User zoom multiplier over the auto-fit base (1.0 = pure auto-fit).
     pub zoom: f32,
+    /// The scale the LAST frame actually drew at, so the toolbar can say so.
+    ///
+    /// The auto-fit takes `min(width, height)` ratio, and this layout only ever
+    /// grows SIDEWAYS: one config module per column, no wrapping. Measured, a
+    /// project with 32 of them is 3971 wide and 427 tall, so the whole diagram
+    /// fits at roughly a fifth of full size and every label with it. An ESP part
+    /// reaches that easily - uart0..2, spi2..3, i2c0..1, eight LEDC channels,
+    /// RMT, PCNT, MCPWM, PARL, LCD, CAM.
+    ///
+    /// Without this the user sees an unreadable diagram and no reason for it.
+    /// One frame late on purpose: the scale is not known until the canvas has
+    /// been measured, which happens after the toolbar is drawn.
+    pub last_scale: f32,
     /// Draw the cross-module call edges (Phase 3) over the diagram.
     pub show_calls: bool,
     /// How many call-hops BELOW the focused module to draw: `Some(1)` = only
@@ -82,6 +95,7 @@ impl Default for StructureView {
     fn default() -> Self {
         Self {
             zoom: 1.0,
+            last_scale: 1.0,
             show_calls: true,
             call_depth: Some(1),
             path_style: PathStyle::Mixed,
@@ -91,6 +105,12 @@ impl Default for StructureView {
         }
     }
 }
+
+/// Below this the node labels stop being readable, so the toolbar says what
+/// scale the diagram is at rather than leaving it looking broken. Measured
+/// against the 11px node text: a fifth of full size is where names turn to
+/// smudges.
+const LEGIBLE_SCALE: f32 = 0.45;
 
 /// Padding kept around the diagram when it auto-fits the panel.
 const FIT_PAD: f32 = 20.0;
@@ -221,6 +241,24 @@ pub fn show(
                 egui::RichText::new(calls_status)
                     .size(10.5)
                     .color(egui::Color32::from_rgb(200, 160, 70)),
+            );
+        }
+        // Say the scale when the fit has shrunk the labels past reading. The
+        // diagram only grows sideways, so a project with many `pins/configs`
+        // modules - which is every well-populated ESP one - fits at a fifth of
+        // full size, and an unreadable diagram with no explanation reads as a
+        // broken one. One frame behind; see `StructureView::last_scale`.
+        if view.last_scale < LEGIBLE_SCALE {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{:.0}% - fit to panel; scroll to zoom",
+                    view.last_scale * 100.0
+                ))
+                .size(10.5)
+                .color(egui::Color32::from_rgb(150, 150, 165)),
+            )
+            .on_hover_text(
+                "The whole diagram is being shown at once. It grows sideways with the number of modules, so a project with many peripheral configs fits only by shrinking.",
             );
         }
     });
@@ -362,6 +400,7 @@ pub fn show(
         .min((avail.y - 2.0 * FIT_PAD) / lay.height)
         .clamp(0.05, 2.5);
     let scale = (base * view.zoom).clamp(0.05, 5.0);
+    view.last_scale = scale;
     let content = egui::vec2(lay.width, lay.height) * scale;
     show_canvas(
         ui,

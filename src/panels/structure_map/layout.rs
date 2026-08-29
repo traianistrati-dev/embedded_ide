@@ -528,6 +528,76 @@ pub fn seg_hits_rect(p1: (f32, f32), p2: (f32, f32), x: f32, y: f32, w: f32, h: 
 #[cfg(test)]
 mod tests {
     use super::super::parse::build_graph;
+
+    /// The diagram grows SIDEWAYS only, which is why the tab reports its scale.
+    ///
+    /// `pack` puts every sibling on one layer and never wraps, so width is
+    /// linear in the module count while height is flat. Measured here rather
+    /// than asserted: 1 config module is 123 wide, 32 are 3971, and the height
+    /// never moves off 427. A panel around 900px wide therefore fits 32 modules
+    /// only by shrinking everything to roughly a fifth.
+    ///
+    /// An ESP project reaches that count easily - uart0..2, spi2..3, i2c0..1,
+    /// eight LEDC channels, RMT, PCNT, MCPWM, PARL, LCD, CAM. Nothing here is
+    /// wrong: a layered graph with thirty leaves under one parent IS that wide.
+    /// What was missing is the tab saying so, which `LEGIBLE_SCALE` now does.
+    #[test]
+    fn the_layout_grows_sideways_not_downwards() {
+        use super::super::parse::build_graph;
+        let measure = |n: usize| {
+            let mods: Vec<(String, String)> = (0..n)
+                .map(|i| {
+                    (
+                        format!("pins/configs/uart{i}.rs"),
+                        "pub fn init() {}
+"
+                        .to_owned(),
+                    )
+                })
+                .chain(std::iter::once((
+                    "pins/mod.rs".to_owned(),
+                    "pub mod configs;
+"
+                    .to_owned(),
+                )))
+                .chain(std::iter::once((
+                    "pins/configs/mod.rs".to_owned(),
+                    (0..n)
+                        .map(|i| {
+                            format!(
+                                "pub mod uart{i};
+"
+                            )
+                        })
+                        .collect(),
+                )))
+                .collect();
+            let g = build_graph(
+                "pub mod pins;
+fn main() {}
+",
+                &mods,
+            );
+            let lay = super::layout(&g);
+            (lay.width, lay.height)
+        };
+
+        let (w4, h4) = measure(4);
+        let (w32, h32) = measure(32);
+        assert!(
+            w32 > w4 * 5.0,
+            "width barely moved ({w4} -> {w32}); did `pack` learn to wrap?"
+        );
+        assert!(
+            (h32 - h4).abs() < 1.0,
+            "height changed ({h4} -> {h32}) - if layers now wrap, the scale note              and its threshold want revisiting"
+        );
+        // And the consequence the note exists for: in a typical panel this is
+        // well under the legibility threshold.
+        let fit = (900.0f32 - 32.0) / w32;
+        assert!(fit < 0.45, "32 modules fit at {fit:.2}, which is readable");
+    }
+
     use super::*;
 
     /// Hub layout: main sits BETWEEN its subtrees — the component holding
