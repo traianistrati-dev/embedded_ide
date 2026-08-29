@@ -4756,10 +4756,10 @@ impl CanMode {
         match self {
             Self::Normal => "An ordinary node: sends, receives, and acknowledges.",
             Self::SelfTest => {
-                "Sends without waiting for an acknowledgement, so one board alone                  on the bus does not fault. For bench work."
+                "Sends without waiting for an acknowledgement, so one board alone on the bus does not fault. For bench work."
             }
             Self::ListenOnly => {
-                "Never drives the wire, not even to acknowledge - the bus cannot                  tell this node is there. For sniffing traffic."
+                "Never drives the wire, not even to acknowledge - the bus cannot tell this node is there. For sniffing traffic."
             }
         }
     }

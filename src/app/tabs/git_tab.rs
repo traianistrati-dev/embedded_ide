@@ -819,7 +819,7 @@ pub fn show_git_tab(
                                 .small(),
                             )
                             .on_hover_text(
-                                "Make the tracked files match this commit. The branch does                                  not move — it becomes one uncommitted change (asks first).",
+                                "Make the tracked files match this commit. The branch does not move — it becomes one uncommitted change (asks first).",
                             )
                             .clicked()
                         {

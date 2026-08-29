@@ -487,7 +487,7 @@ impl McuForm {
         }
         if let Some(g) = &self.grid {
             w.push(format!(
-                "{} ball(s) on a {}x{} grid. The form edits edge pins only, so the                  grid is carried through unchanged — edit it in the .ron.",
+                "{} ball(s) on a {}x{} grid. The form edits edge pins only, so the grid is carried through unchanged — edit it in the .ron.",
                 g.cells.len(),
                 g.rows,
                 g.cols

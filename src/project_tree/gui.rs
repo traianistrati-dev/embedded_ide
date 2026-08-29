@@ -2405,7 +2405,7 @@ fn user_file_row(
             if ui
                 .button(menu_label(ph::COLUMNS, "Open beside editor", ICON_VIEW))
                 .on_hover_text(
-                    "Show this file READ-ONLY in the Reference tab, so you can consult it                      while editing another one",
+                    "Show this file READ-ONLY in the Reference tab, so you can consult it while editing another one",
                 )
                 .clicked()
             {

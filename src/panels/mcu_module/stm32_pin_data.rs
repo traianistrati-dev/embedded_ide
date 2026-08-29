@@ -189,7 +189,7 @@ pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<Convert
     let mut base_warnings = Vec::new();
     if merged_positions > 0 {
         base_warnings.push(format!(
-            "{merged_positions} package pin(s) carry two GPIOs bonded together              (common on G0/C0 in small packages). Each is one pin here, offering              both GPIOs' functions; the generated code names whichever one the              function you pick belongs to."
+            "{merged_positions} package pin(s) carry two GPIOs bonded together (common on G0/C0 in small packages). Each is one pin here, offering both GPIOs' functions; the generated code names whichever one the function you pick belongs to."
         ));
     }
     if skipped_positions > 0 {
@@ -230,7 +230,7 @@ pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<Convert
         ),
         Some(_) => {}
         None => base_warnings.push(
-            "No GPIO IP file was read, so no alternate-function indices were recorded.              Import from a full STM32_open_pin_data checkout (mcu/ next to mcu/IP/) to              capture them."
+            "No GPIO IP file was read, so no alternate-function indices were recorded. Import from a full STM32_open_pin_data checkout (mcu/ next to mcu/IP/) to capture them."
                 .into(),
         ),
     }
