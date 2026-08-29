@@ -1075,9 +1075,19 @@ pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
         // The ESP path is its own: esp-hal's `with_dma` takes ONE channel per
         // bus, not a TX/RX pair, so the plan is keyed by instance rather than
         // by direction.
-        Runtime::Async if is_esp(&mcu.family) => codegen_esp::dma_plan(
+        // FAMILY, not runtime. `with_dma` is on esp-hal's BLOCKING drivers, so a
+        // Blocking ESP project takes channels exactly like an Async one -
+        // `codegen_esp::dma_plan` says so itself with a bare `let _ = runtime;`.
+        // Gating this arm on Async left the Configuration tab's DMA card empty
+        // on the runtime where ESP DMA is most ordinary, while the generated
+        // code was quietly holding the channels.
+        _ if is_esp(&mcu.family) => codegen_esp::dma_plan(
             mcu.dma.as_ref(),
-            EspRuntime::Async,
+            if matches!(mcu.runtime, Runtime::Async) {
+                EspRuntime::Async
+            } else {
+                EspRuntime::Blocking
+            },
             &modules::spi_configs(&mcu.modules),
             &codegen_esp::i2s_instances_wired(&pins_of(mcu)),
             codegen_esp::parl_io_wired(&pins_of(mcu)).is_some(),

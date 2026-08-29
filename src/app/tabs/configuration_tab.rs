@@ -874,6 +874,71 @@ fn comp_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The DMA card follows the FAMILY on Espressif, not the runtime.
+    ///
+    /// `with_dma` lives on esp-hal's BLOCKING drivers, so a Blocking ESP project
+    /// takes channels exactly like an Async one - `codegen_esp::dma_plan` says
+    /// so itself, with a bare `let _ = runtime;`. `dma_uses` gated its ESP arm
+    /// on `Runtime::Async`, so on Blocking it fell to `_ => Vec::new()`: the
+    /// Configuration tab's DMA card was empty on the runtime where ESP DMA is
+    /// most ordinary, while the generated code held the channels.
+    #[test]
+    fn an_esp_reports_its_dma_channels_on_both_runtimes() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::mcu::model::Runtime;
+        use crate::panels::mcu_module::modules::ModuleConfig;
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+        // A chip with a pooled GDMA and an SPI to put on it.
+        let d = builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "esp32c6")
+            .expect("built-in C6");
+
+        let wire = |rt: Runtime| {
+            let mut mcu = d.build_mcu();
+            mcu.runtime = rt;
+            // Wire one SPI so there is something to give a channel to.
+            let mut want = vec![
+                PinFunction::SpiSck(2),
+                PinFunction::SpiMosi(2),
+                PinFunction::SpiMiso(2),
+            ];
+            for p in mcu.iter_all_pins_mut() {
+                if let Some(i) = want.iter().position(|w| p.available_functions.contains(w)) {
+                    p.selected_function = want.remove(i);
+                }
+                if want.is_empty() {
+                    break;
+                }
+            }
+            assert!(want.is_empty(), "could not wire an SPI on the C6");
+            mcu.reconcile_modules();
+            for m in &mut mcu.modules {
+                if let ModuleConfig::Spi(c) = &mut m.config {
+                    c.async_mode =
+                        crate::panels::mcu_module::modules::model::AsyncBusMode::AsyncDma;
+                }
+            }
+            crate::panels::mcu_module::codegen::family::dma_uses(&mcu)
+        };
+
+        let async_uses = wire(Runtime::Async);
+        let blocking_uses = wire(Runtime::Blocking);
+        assert!(
+            !async_uses.is_empty(),
+            "the Async case was already working; if this fails the fixture is wrong"
+        );
+        assert_eq!(
+            blocking_uses.len(),
+            async_uses.len(),
+            "Blocking took {} channel(s) and reported {} - the card lies about \
+             the runtime where ESP DMA is most ordinary",
+            async_uses.len(),
+            blocking_uses.len()
+        );
+    }
     use crate::panels::mcu_module::builtins::builtin_definitions;
     use crate::panels::mcu_module::codegen::family;
 
