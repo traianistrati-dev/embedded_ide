@@ -1686,6 +1686,60 @@ mod tests {
     /// names differ would be a coin flip dressed as a test - the first pair I
     /// picked, COMP1 and FMC, happens to collide. What is worth pinning is
     /// that the palette is actually spread rather than constant.
+    /// No two hand-written rows share a colour, and none sits closer to another
+    /// than the closest DELIBERATE pair.
+    ///
+    /// The swatch is how a row is recognised at a glance, and the table has
+    /// grown from thirteen to twenty-seven. Eight of those colours arrived at
+    /// once, picked against a palette listing rather than against each other -
+    /// which is exactly how two rows end up indistinguishable with nothing
+    /// failing.
+    ///
+    /// The floor is 20 in RGB space because HSPI and XSPI sit at 21 ON PURPOSE:
+    /// they are one family of external-memory controller and read as one. A new
+    /// row closer than that to anything is almost certainly an accident; if it
+    /// is not, the pair belongs in the exemption below with a reason.
+    #[test]
+    fn every_category_colour_is_its_own() {
+        let defs = category_defs(&[]);
+        let mut seen: std::collections::BTreeMap<(u8, u8, u8), Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for d in &defs {
+            seen.entry(d.rgb).or_default().push(&d.name);
+        }
+        for (rgb, names) in &seen {
+            assert_eq!(names.len(), 1, "{names:?} all draw {rgb:?}");
+        }
+
+        // One family, deliberately close.
+        const ALLOWED_NEAR: [(&str, &str); 3] = [
+            ("HSPI", "XSPI"),
+            ("OCTOSPI", "XSPI"),
+            ("OCTOSPI", "QUADSPI"),
+        ];
+        let dist = |a: (u8, u8, u8), b: (u8, u8, u8)| -> f64 {
+            let f = |x: u8, y: u8| (f64::from(x) - f64::from(y)).powi(2);
+            (f(a.0, b.0) + f(a.1, b.1) + f(a.2, b.2)).sqrt()
+        };
+        for (i, a) in defs.iter().enumerate() {
+            for b in &defs[i + 1..] {
+                let near = ALLOWED_NEAR
+                    .iter()
+                    .any(|(x, y)| (a.name == *x && b.name == *y) || (a.name == *y && b.name == *x));
+                if near {
+                    continue;
+                }
+                let d = dist(a.rgb, b.rgb);
+                assert!(
+                    d >= 20.0,
+                    "{} and {} are {d:.0} apart in RGB - one swatch, two rows",
+                    a.name,
+                    b.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn derived_colours_are_stable_per_name() {
         assert_eq!(derived_color("COMP1"), derived_color("COMP1"));
