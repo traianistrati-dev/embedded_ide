@@ -115,10 +115,17 @@ pub fn strict_main_exemption(code: String, strict: bool) -> String {
     if !strict {
         return code;
     }
+    // Every entry attribute the backends emit. `#[esp_rtos::main]` was missing,
+    // so an ESP project on the ASYNC runtime got no exemption at all and its
+    // generated init - the `take().unwrap()`s and `as` casts this exists for -
+    // was linted in full, inside a GENERATED block the user cannot edit.
+    // Blocking was fine, which is why it went unseen: the two ESP runtimes use
+    // different attributes.
     for entry in [
         "#[entry]",
         "#[embassy_executor::main]",
         "#[esp_hal::main]",
+        "#[esp_rtos::main]",
         "#[main]",
     ] {
         let mut offset = 0;
@@ -749,6 +756,66 @@ mod tests {
     }
 
     use super::*;
+
+    /// Under strict lints, EVERY chip on EVERY runtime gets its generated entry
+    /// exempted.
+    ///
+    /// The list of entry attributes is hand-written and the match is exact, so a
+    /// backend that emits a new one silently loses the exemption - which is what
+    /// happened to ESP Async: it emits `#[esp_rtos::main]` while Blocking emits
+    /// `#[esp_hal::main]`, only the latter was listed, and the generated init was
+    /// then linted in full inside a block the user cannot edit.
+    ///
+    /// Derived from the real `fresh_main_rs` of each definition rather than from
+    /// a second copy of the attribute list, so it follows the backends.
+    #[test]
+    fn strict_lints_exempt_the_generated_entry_on_every_chip_and_runtime() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::mcu::model::Runtime;
+
+        for d in builtin_definitions() {
+            for rt in [Runtime::Blocking, Runtime::Async, Runtime::Native] {
+                let mut mcu = d.build_mcu();
+                mcu.runtime = rt;
+                let code = mcu.fresh_main_rs();
+                // Only where the backend actually emits an entry attribute -
+                // a runtime a family cannot build emits nothing to exempt.
+                let has_entry = [
+                    "#[entry]",
+                    "#[embassy_executor::main]",
+                    "#[esp_hal::main]",
+                    "#[esp_rtos::main]",
+                    "#[main]",
+                ]
+                .iter()
+                .any(|e| code.lines().any(|l| l.trim() == *e));
+                if !has_entry {
+                    continue;
+                }
+                let exempt = strict_main_exemption(code.clone(), true);
+                assert!(
+                    exempt.contains("#[allow(clippy::"),
+                    "{} / {rt:?}: entry present but no exemption applied - its \
+                     attribute is missing from the list",
+                    d.id
+                );
+                assert_ne!(exempt, code, "{} / {rt:?}: nothing was inserted", d.id);
+            }
+        }
+    }
+
+    /// And the ESP async attribute specifically, named so a rename is loud.
+    #[test]
+    fn the_esp_async_entry_is_exempted() {
+        let code = "#[esp_rtos::main]\nasync fn main(_spawner: Spawner) {\n}\n".to_owned();
+        let out = strict_main_exemption(code.clone(), true);
+        assert!(out.starts_with("#[allow(clippy::"), "{out}");
+        assert_eq!(
+            strict_main_exemption(code, false),
+            "#[esp_rtos::main]\nasync fn main(_spawner: Spawner) {\n}\n",
+            "and still a no-op when strict is off"
+        );
+    }
 
     #[test]
     fn strict_main_exemption_wraps_entry_only_when_strict() {
