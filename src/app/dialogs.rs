@@ -2196,6 +2196,72 @@ mod chip_gaps_tests {
         }
     }
 
+    /// No generated file carries a run of spaces mid-sentence.
+    ///
+    /// That is the scar a backslash-continued string literal leaves once
+    /// rustfmt joins it back onto one physical line: the source indentation
+    /// becomes real spaces inside the text, invisible in review and obvious in
+    /// the user's editor. It has shipped four times.
+    ///
+    /// Between two WORDS only. Aligned TOML keys (`lto           = "fat"`) are
+    /// deliberate and everywhere, and a first cut of this flagged all of them.
+    ///
+    /// COVERAGE, stated because it is narrow: the DEFAULT project for each
+    /// bundled chip - the runtime each definition ships with, and no peripheral
+    /// wired. Emitters reached only by a configured bus on the Async runtime are
+    /// NOT exercised here, and at least one such line exists today
+    /// (`embassy_async.rs`, the async USART DMA binding). Widening this to every
+    /// runtime x wiring is what `scripts/verify-codegen.ps1` is for.
+    #[test]
+    fn no_generated_file_carries_a_joined_continuation() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::project_gen::{ConfigFile, gen_config};
+
+        let mut hits: Vec<String> = Vec::new();
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            let mut files: Vec<(String, String)> = vec![("main.rs".into(), mcu.fresh_main_rs())];
+            for (label, f) in [
+                ("Cargo.toml", ConfigFile::CargoToml),
+                (".cargo/config.toml", ConfigFile::CargoConfig),
+                ("memory.x", ConfigFile::MemoryX),
+                ("build.rs", ConfigFile::BuildRs),
+                (".gitignore", ConfigFile::GitIgnore),
+            ] {
+                files.push((label.to_owned(), gen_config(f, &d.project, &d.toolchain)));
+            }
+            files.extend(mcu.config_files());
+
+            for (name, body) in files {
+                for (i, l) in body.lines().enumerate() {
+                    let b = l.as_bytes();
+                    let mut run = 0usize;
+                    for k in 0..b.len() {
+                        if b[k] == b' ' {
+                            run += 1;
+                            continue;
+                        }
+                        let before = k > run && b[k - run - 1].is_ascii_alphanumeric();
+                        if run >= 4 && before && b[k].is_ascii_alphabetic() {
+                            hits.push(format!("{}/{name}:{} | {l}", d.id, i + 1));
+                            break;
+                        }
+                        run = 0;
+                    }
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "joined continuations:
+{}",
+            hits.join(
+                "
+"
+            )
+        );
+    }
+
     /// Every CPU frequency the Clock tab OFFERS on an Espressif part must be one
     /// `esp_hal::clock::CpuClock` actually has a variant for.
     ///
