@@ -1118,6 +1118,47 @@ mod held_port_tests {
         assert!(!conflicts("", ""));
     }
 
+    /// The note names whichever holder actually has it.
+    ///
+    /// The first pass wired ONE holder, the ESP Monitor, and called the case
+    /// covered. There are two: `espflash` takes the port for `flash` and for
+    /// `board-info`, and it runs BEFORE the Monitor - so the window where the
+    /// Serial tab failed with a bare "Access is denied" was the flash itself,
+    /// which is exactly when a user reaches for the console.
+    #[test]
+    fn either_holder_is_named_by_name() {
+        for (who, port) in [("espflash", "COM7"), ("The ESP Monitor", "COM7")] {
+            let n = held_port_note(port, who);
+            assert!(n.starts_with(who), "{n}");
+            assert!(n.contains(port), "{n}");
+            assert!(n.contains("one owner"), "{n}");
+        }
+    }
+
+    /// `Building` holds no port - that phase is a cargo build. Treating it as a
+    /// holder would refuse Connect for the minutes a build takes, on a port
+    /// nothing has opened.
+    #[test]
+    fn the_build_phase_is_not_a_port_holder() {
+        use crate::espflash::EspFlashState;
+        for s in [EspFlashState::Flashing, EspFlashState::ReadingInfo] {
+            assert!(s.is_busy(), "{s:?} must count as busy");
+        }
+        assert!(
+            EspFlashState::Building.is_busy(),
+            "Building is busy for the UI…"
+        );
+        // …but the panel excludes it from the HOLDER test on purpose. Encode
+        // that here so the exclusion is not quietly dropped.
+        let holds_port =
+            |s: &EspFlashState| matches!(s, EspFlashState::Flashing | EspFlashState::ReadingInfo);
+        assert!(!holds_port(&EspFlashState::Building));
+        assert!(holds_port(&EspFlashState::Flashing));
+        assert!(holds_port(&EspFlashState::ReadingInfo));
+        assert!(!holds_port(&EspFlashState::Idle));
+        assert!(!holds_port(&EspFlashState::Success));
+    }
+
     #[test]
     fn the_note_names_the_holder_the_port_and_the_fix() {
         let n = held_port_note("COM7", "The ESP Monitor");

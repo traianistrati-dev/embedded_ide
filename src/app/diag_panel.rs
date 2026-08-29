@@ -38,6 +38,10 @@ pub(super) fn show_diag_panel(
     openocd_target_cfg: &mut String,
     espflash_state: &Arc<Mutex<EspFlashState>>,
     espflash_port: &mut String,
+    // The port the running `espflash` actually took (its own override, or the
+    // one it auto-detected). Needed by the Serial tab: a serial port has one
+    // owner, and espflash is the SECOND in-IDE holder after the Monitor.
+    espflash_used_port: &Arc<Mutex<String>>,
     tools_state: &Arc<Mutex<required_tools::ToolsState>>,
     serial: &mut SerialMonitor,
     terminal: &mut TerminalConsole,
@@ -743,13 +747,25 @@ pub(super) fn show_diag_panel(
             );
         }
         BuildPanelTab::Serial => {
-            let monitor_port = esp_monitor.active_port();
-            show_serial_tab(
-                ui,
-                serial,
-                ctx,
-                Some((monitor_port.as_str(), "The ESP Monitor")),
+            // Two in-IDE holders, checked in the order they can appear: a
+            // flash runs first and the Monitor starts after it. `Building` is
+            // excluded because that phase is a cargo build and holds no port.
+            let flashing = matches!(
+                *espflash_state.lock().unwrap(),
+                EspFlashState::Flashing | EspFlashState::ReadingInfo
             );
+            let esp_port = if flashing {
+                espflash_used_port.lock().unwrap().clone()
+            } else {
+                String::new()
+            };
+            let monitor_port = esp_monitor.active_port();
+            let held: Option<(&str, &str)> = if !esp_port.is_empty() {
+                Some((esp_port.as_str(), "espflash"))
+            } else {
+                Some((monitor_port.as_str(), "The ESP Monitor"))
+            };
+            show_serial_tab(ui, serial, ctx, held);
         }
         BuildPanelTab::Terminal => {
             show_terminal_tab(ui, terminal, ctx);

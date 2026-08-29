@@ -283,6 +283,7 @@ impl AppIde {
                     &mut self.openocd_target_cfg,
                     &self.espflash_state,
                     &mut self.espflash_port,
+                    &self.espflash_used_port,
                     &self.tools_state,
                     &mut self.serial,
                     &mut self.terminal,
