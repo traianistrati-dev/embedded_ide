@@ -222,6 +222,9 @@ impl Committing {
 }
 
 impl Drop for Committing {
+    /// Covered by `a_committing_recorder_logs_even_when_the_action_bails_out`:
+    /// three flash paths return early on a dozen error paths each, and this is
+    /// the only thing that makes the entry appear anyway.
     fn drop(&mut self) {
         if let Some(rec) = self.rec.take() {
             if let Ok(mut log) = self.log.lock() {
@@ -286,6 +289,61 @@ mod tests {
         assert_eq!(a.phases[1].cmd.as_deref(), Some("cargo check"));
         assert_eq!(a.phases[1].exit, Some(0));
         assert_eq!(a.phases[2].dur, Duration::ZERO);
+    }
+
+    /// The property every flash path leans on: the entry appears even when the
+    /// operation FAILED.
+    ///
+    /// `espflash.rs`, `openocd.rs` and `dfu.rs` all build a `Committing` and
+    /// then return early on any of a dozen error paths - a missing tool, a
+    /// failed build, an unplugged board. Its whole reason to exist is that none
+    /// of those has to remember to log, and nothing covered it.
+    #[test]
+    fn a_committing_recorder_logs_even_when_the_action_bails_out() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(ActivityLog::default()));
+
+        // The shape of a real flash: one phase done, then an early return.
+        (|| {
+            let mut act = Committing::new("Flash (ESP / espflash)", log.clone());
+            act.rec()
+                .add("cargo build --release", Duration::from_millis(120));
+            // espflash is missing / the board is unplugged - bail.
+        })();
+
+        let entries = &log.lock().unwrap().actions;
+        assert_eq!(entries.len(), 1, "the failed action still logged");
+        assert_eq!(entries[0].kind, "Flash (ESP / espflash)");
+        assert_eq!(
+            entries[0].phases.len(),
+            1,
+            "and kept the phase it got through"
+        );
+    }
+
+    /// An exit code of a FAILED command is recorded, not dropped - the tab's
+    /// whole use on a flash that did not work.
+    #[test]
+    fn a_failing_command_keeps_its_exit_code() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(ActivityLog::default()));
+        {
+            let mut act = Committing::new("Flash (ESP / espflash)", log.clone());
+            act.rec().cmd_phase(
+                "espflash flash",
+                "espflash flash --chip esp32c6".to_owned(),
+                Duration::from_millis(900),
+                Some(2),
+            );
+        }
+        let entries = &log.lock().unwrap().actions;
+        let p = &entries[0].phases[0];
+        assert_eq!(p.exit, Some(2), "a non-zero exit is the interesting one");
+        assert!(
+            p.cmd
+                .as_deref()
+                .is_some_and(|c| c.contains("--chip esp32c6")),
+            "the command names the chip, so two boards are told apart: {:?}",
+            p.cmd
+        );
     }
 
     #[test]
