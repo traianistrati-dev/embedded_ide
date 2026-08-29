@@ -1039,7 +1039,15 @@ pub fn rtic_unavailable_reason(family: &str) -> Option<String> {
         return None;
     }
     Some(if family.starts_with("esp") {
-        format!("RTIC 2 has Cortex-M backends only, and `{family}` is RISC-V.")
+        // The architecture is NOT named per chip on purpose. This used to end
+        // "and `{family}` is RISC-V", which is false for the esp32, esp32s2 and
+        // esp32s3 - a third of the family is Xtensa, and each of those was told
+        // the wrong thing about its own core. Naming both is true of every part
+        // and cannot drift when a tenth chip lands; the reason RTIC is
+        // unavailable never depended on which of the two it is.
+        format!(
+            "RTIC 2 ships Cortex-M backends only, so no Espressif part can use it - neither the RISC-V chips nor the Xtensa ones (`{family}`)."
+        )
     } else {
         format!(
             "Not written for `{family}` yet: the generated interrupt tasks use \
@@ -1199,6 +1207,50 @@ mod blocking_note_tests {
 
     /// A greyed card must be able to say why — and the two reasons are NOT the
     /// same kind of thing, which is the point of having separate texts.
+    /// No chip is told the wrong thing about its own core.
+    ///
+    /// The RTIC explanation used to end "and `{family}` is RISC-V" for every
+    /// Espressif part — false for the esp32, esp32s2 and esp32s3, which are
+    /// Xtensa. A third of the family read a statement about its own silicon
+    /// that was simply wrong, in the one message meant to explain something.
+    ///
+    /// Checked against each definition's real TARGET, not a list, so it follows
+    /// the chips rather than someone's memory of them.
+    #[test]
+    fn no_chip_is_told_the_wrong_architecture() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+
+        for d in builtin_definitions() {
+            let Some(why) = super::rtic_unavailable_reason(&d.family) else {
+                continue; // RTIC is available here; nothing to explain.
+            };
+            let xtensa = d.project.target.starts_with("xtensa");
+            let riscv = d.project.target.starts_with("riscv");
+
+            if xtensa {
+                assert!(
+                    !why.contains("is RISC-V"),
+                    "{} is Xtensa and was told: {why}",
+                    d.id
+                );
+            }
+            if riscv {
+                assert!(
+                    !why.contains("is Xtensa"),
+                    "{} is RISC-V and was told: {why}",
+                    d.id
+                );
+            }
+            // And the run-of-spaces scar, which a continued literal leaves the
+            // moment rustfmt joins it — this message has already had one.
+            assert!(
+                !why.contains("  "),
+                "{}: a joined continuation left a gap: {why}",
+                d.id
+            );
+        }
+    }
+
     #[test]
     fn every_unavailable_runtime_can_explain_itself() {
         use super::{native_unavailable_reason, rtic_unavailable_reason};
