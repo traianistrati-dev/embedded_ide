@@ -49,7 +49,12 @@ param(
     #
     # Defaults to $env:EIDE_MATRIX_DIR when that is set, so the pre-push hook and
     # a hand-run matrix agree without either of them naming a path.
-    [string]$WorkDir = $env:EIDE_MATRIX_DIR
+    [string]$WorkDir = $env:EIDE_MATRIX_DIR,
+    # Wipe the work directory before starting. A deliberate COLD run: every
+    # dependency recompiles, which is minutes, so it is a switch and not the
+    # default. Stale directories are pruned automatically after a full green
+    # run without it - see the prune below.
+    [switch]$Clean
 )
 
 $ErrorActionPreference = "Continue"
@@ -153,6 +158,8 @@ $env:EIDE_MATRIX_RUN = "1"
 # CALLER's process, so a TMP/TEMP left pointing at the work volume follows the
 # user into every later command in that shell - including ones that have nothing
 # to do with this repository.
+$script:touched = @{}
+$script:workRoot = $null
 $script:origTmp = $env:TMP
 $script:origTemp = $env:TEMP
 trap { $env:TMP = $script:origTmp; $env:TEMP = $script:origTemp; break }
@@ -167,6 +174,12 @@ if ($WorkDir) {
     # string "False" and every case failed in the linker. The same collision
     # that made `$cases`/`$CASES` print the wrong count.
     $workRoot = (Resolve-Path $WorkDir).Path
+    $script:workRoot = $workRoot
+    if ($Clean) {
+        Write-Host "  -Clean: emptying it first, so this run is cold" -ForegroundColor Yellow
+        Get-ChildItem $workRoot -Directory -Filter "eide*" -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
     $env:TMP = $workRoot
     $env:TEMP = $workRoot
     $vol = $workRoot.Substring(0, 2)
@@ -249,7 +262,16 @@ $ALL_CASES = @(
     # compiler found the two things reading could not: a DMA channel needs its
     # OWN handler bound on DMA_IRQ_0, and `Spi::new` wants the binding AFTER
     # its channels while `Uart::new` wants it before.
-    @{ n = "Raspberry Pi Pico async x2";   t = "emit_rp_async_project";      e = @{};                       q = $true; fam = "rp"; hk = $true }
+    #
+    # THREE projects, not two: both boards on the buffered uart, plus a third
+    # that forces the DMA transport. Those two build different types, bind a
+    # different interrupt handler on the same vector, and renumber every later
+    # peripheral - one of them alone proves nothing about the other.
+    #
+    # The count in the name is load-bearing. It read `x2` for a while after the
+    # third project arrived, and a name that understates its own coverage is how
+    # a gap hides in plain sight - the same way `23 of 23` hid six unrun cases.
+    @{ n = "Raspberry Pi Pico async x3";   t = "emit_rp_async_project";      e = @{};                       q = $true; fam = "rp"; hk = $true }
 
 
     # The two W boards, whose on-board LED is not on the chip at all - it is
@@ -386,6 +408,10 @@ foreach ($c in $cases) {
         }
     }
     $projects = @($projects | Where-Object { $_.Dir -and (Test-Path $_.Dir) })
+    # What this run touched. Anything ELSE under the work root is left over from
+    # a case that has since been renamed or removed, and is pure waste: 39
+    # directories had accumulated where a run uses 26.
+    foreach ($pr in $projects) { $script:touched[(Split-Path $pr.Dir -Leaf)] = $true }
     if (-not $projects) {
         $results += [pscustomobject]@{ Case = $c.n; Status = "NO OUTPUT"; Detail = "harness printed no usable 'wrote' line" }
         continue
@@ -475,6 +501,36 @@ if ($timed) {
 }
 Write-Host ("all {0} cases pass{1}" -f $ran,
     $(if ($skipped) { " ($($skipped.Count) skipped)" } else { "" })) -ForegroundColor Green
+
+# Drop what no longer belongs, and ONLY then.
+#
+# Not "delete everything at the end": the `target/` inside each project is what
+# keeps a run at ~24 minutes instead of recompiling every dependency, so wiping
+# them would make the matrix something people avoid running. What IS waste is a
+# directory no current case writes - left by a case since renamed or removed.
+#
+# Three guards, each for a different way this could delete something wanted:
+#   - a FAILED run may not have reached the cases that write the rest;
+#   - a SKIPPED case (no vendor database) writes nothing but is not gone;
+#   - a -Hook subset touches a handful of directories on purpose.
+# Any of them, and the prune is the wrong answer, so it does not run.
+if ($script:workRoot -and $Hook.Count -eq 0 -and -not $skipped) {
+    $stale = @(Get-ChildItem $script:workRoot -Directory -Filter "eide_*" -ErrorAction SilentlyContinue |
+        Where-Object { -not $script:touched.ContainsKey($_.Name) })
+    if ($stale) {
+        $freed = 0
+        foreach ($d in $stale) {
+            $freed += (Get-ChildItem $d.FullName -Recurse -File -ErrorAction SilentlyContinue |
+                Measure-Object Length -Sum).Sum
+            Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host ("pruned {0} stale project dir(s), {1:N1} GB - none of them written by this run" -f
+            $stale.Count, ($freed / 1GB)) -ForegroundColor DarkGray
+    }
+    $left = (Get-ChildItem $script:workRoot -Recurse -File -ErrorAction SilentlyContinue |
+        Measure-Object Length -Sum).Sum
+    Write-Host ("{0} holds {1:N1} GB of warm build caches" -f $script:workRoot, ($left / 1GB)) -ForegroundColor DarkGray
+}
 $env:TMP = $script:origTmp
 $env:TEMP = $script:origTemp
 exit 0
