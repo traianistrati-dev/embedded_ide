@@ -224,7 +224,11 @@ if [ -n "$verify_sha" ]; then
     wt_err=$(git worktree add --detach "$worktree" "$verify_sha" 2>&1) && wt_ok=1 || wt_ok=0
     if [ "$wt_ok" = "1" ]; then
         echo "pre-push: checking ${verify_sha%${verify_sha#???????}} in its own worktree"
-        CARGO_TARGET_DIR="${TMP:-${TEMP:-/tmp}}/eide-hook-target"
+        # Follows EIDE_MATRIX_DIR when it is set, so this cache lands on the
+        # same volume the matrix writes to. It grew to 11.8 GB on its own,
+        # and leaving it on a full C: while the projects moved elsewhere
+        # would just relocate half the problem.
+        CARGO_TARGET_DIR="${EIDE_MATRIX_DIR:-${TMP:-${TEMP:-/tmp}}}/eide-hook-target"
         export CARGO_TARGET_DIR
         cd "$worktree"
     else

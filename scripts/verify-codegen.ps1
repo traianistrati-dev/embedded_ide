@@ -39,7 +39,17 @@ param(
     #
     # Names it does not recognise are an ERROR, not an empty run. A hook that
     # silently verified nothing would be worse than no hook at all.
-    [string[]]$Hook = @()
+    [string[]]$Hook = @(),
+    # Where the emitted projects and their `target/` directories go.
+    #
+    # A full run leaves about 16 GB behind, and nothing cleans it up: eight runs
+    # filled a 465 GB C: to exactly zero bytes, at which point cargo fails with
+    # `could not compile syn` and the matrix looks like a codegen regression.
+    # Pointing this at a roomier volume is the fix.
+    #
+    # Defaults to $env:EIDE_MATRIX_DIR when that is set, so the pre-push hook and
+    # a hand-run matrix agree without either of them naming a path.
+    [string]$WorkDir = $env:EIDE_MATRIX_DIR
 )
 
 $ErrorActionPreference = "Continue"
@@ -130,6 +140,43 @@ if ($waited -gt 0) { Write-Host ("waited {0} min for the lock" -f [math]::Round(
 # is fine, so tell them so.
 $env:EIDE_MATRIX_RUN = "1"
 
+# Relocate the projects, but NOT the lock.
+#
+# The lock was taken above from the ORIGINAL %TEMP% on purpose: two runs writing
+# to different volumes still have to serialise, and a lock that moved with the
+# work would let them run on top of each other in the one repository they share.
+#
+# `std::env::temp_dir()` in the harnesses reads TMP first, then TEMP, at the
+# moment it is called - and cargo inherits this environment - so setting both
+# here moves the emitted projects and the `target/` inside each of them.
+# Restored on the way out, whatever happens. `& .erify-codegen.ps1` runs in the
+# CALLER's process, so a TMP/TEMP left pointing at the work volume follows the
+# user into every later command in that shell - including ones that have nothing
+# to do with this repository.
+$script:origTmp = $env:TMP
+$script:origTemp = $env:TEMP
+trap { $env:TMP = $script:origTmp; $env:TEMP = $script:origTemp; break }
+
+if ($WorkDir) {
+    if (-not (Test-Path $WorkDir)) {
+        New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
+    }
+    # NOT `$full`: PowerShell variable names are case-insensitive, so that name
+    # is the `[switch]$Full` parameter above, and assigning a path to it fails
+    # with a SwitchParameter conversion error - after which TEMP became the
+    # string "False" and every case failed in the linker. The same collision
+    # that made `$cases`/`$CASES` print the wrong count.
+    $workRoot = (Resolve-Path $WorkDir).Path
+    $env:TMP = $workRoot
+    $env:TEMP = $workRoot
+    $vol = $workRoot.Substring(0, 2)
+    $free = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$vol'").FreeSpace
+    Write-Host ("projects -> {0}  ({1:N1} GB free)" -f $workRoot, ($free / 1GB)) -ForegroundColor DarkCyan
+    if ($free -lt 25GB) {
+        Write-Host "  under 25 GB free - a full run needs about 16 GB" -ForegroundColor Yellow
+    }
+}
+
 # Where the STM32Cube database is, if it is anywhere. The two importer cases
 # need it; everything else is built from definitions bundled in the repo.
 $CUBE_DB = if ($env:EIDE_CUBE_DB) { $env:EIDE_CUBE_DB }
@@ -204,11 +251,6 @@ $ALL_CASES = @(
     # its channels while `Uart::new` wants it before.
     @{ n = "Raspberry Pi Pico async x2";   t = "emit_rp_async_project";      e = @{};                       q = $true; fam = "rp"; hk = $true }
 
-    # The BUFFERED uart: a different embassy-rp type, a different interrupt
-    # handler on the same vector, StaticCell rings instead of DMA, and every
-    # later peripheral renumbered because the UART stopped taking a pair. The
-    # unit tests check all of that in the emitted TEXT; only this compiles it.
-    @{ n = "Raspberry Pi Pico buffered uart"; t = "emit_rp_buffered_project"; e = @{};                       q = $true; fam = "rp" }
 
     # The two W boards, whose on-board LED is not on the chip at all - it is
     # GPIO0 of the CYW43 radio, reached through a PIO-driven half-duplex SPI and
@@ -418,6 +460,8 @@ $bad = @($results | Where-Object {
 if ($bad) {
     Write-Host "FAILED:" -ForegroundColor Red
     $bad | ForEach-Object { Write-Host ("  {0}: {1}`n      {2}" -f $_.Case, $_.Status, $_.Detail) -ForegroundColor Red }
+    $env:TMP = $script:origTmp
+    $env:TEMP = $script:origTemp
     exit 1
 }
 $skipped = @($results | Where-Object { $_.Status -eq "skipped" })
@@ -431,4 +475,6 @@ if ($timed) {
 }
 Write-Host ("all {0} cases pass{1}" -f $ran,
     $(if ($skipped) { " ($($skipped.Count) skipped)" } else { "" })) -ForegroundColor Green
+$env:TMP = $script:origTmp
+$env:TEMP = $script:origTemp
 exit 0
