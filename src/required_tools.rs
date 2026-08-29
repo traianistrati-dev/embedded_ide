@@ -1617,6 +1617,99 @@ fn do_install_blocking(idx: usize, state: &Arc<Mutex<ToolsState>>, ctx: &egui::C
 mod tests {
     use super::*;
 
+    /// Every bundled chip is offered exactly the target-gated tools it needs.
+    ///
+    /// `only_for_target` is a PREFIX match, and the two RISC-V targets differ by
+    /// one letter in the middle - `riscv32imc` against `riscv32imac`. If either
+    /// were a prefix of the other, a C3 would be told to install the C6's target
+    /// (or worse, silently not told to install its own). They are not, and this
+    /// is where that stays true.
+    ///
+    /// The Xtensa parts are the other half: espup and the `esp` toolchain are
+    /// Blocking, so getting their gate wrong either blocks an STM32 user on a
+    /// tool they will never use, or lets an ESP32-S3 build fail with
+    /// `'esp32s3' is not a recognized processor` and no tool listed as missing.
+    #[test]
+    fn each_chip_is_offered_the_target_tools_it_needs_and_no_others() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+
+        let state = make_tools_state();
+        let mut s = state.lock().unwrap();
+        // Pretend everything is absent, so the filter - not the probe - decides.
+        for t in &mut s.tools {
+            t.status = ToolStatus::Missing;
+        }
+
+        for d in builtin_definitions() {
+            let target = d.project.target.as_str();
+            let names: Vec<&str> = s
+                .problems_for(Some(&d.toolchain), Some(target))
+                .into_iter()
+                .map(|(n, _, _)| n)
+                .collect();
+
+            let xtensa = target.starts_with("xtensa");
+            for t in ["espup", "esp toolchain"] {
+                assert_eq!(
+                    names.contains(&t),
+                    xtensa,
+                    "{} ({target}): `{t}` offered={}, wanted={xtensa}",
+                    d.id,
+                    names.contains(&t)
+                );
+            }
+
+            // Each RISC-V target entry appears for its OWN chips only. The
+            // assertion is written from the chip's target, so it cannot drift
+            // with the catalogue.
+            for t in [
+                "riscv32imc-unknown-none-elf",
+                "riscv32imac-unknown-none-elf",
+            ] {
+                assert_eq!(
+                    names.contains(&t),
+                    target == t,
+                    "{} ({target}): `{t}` offered={}",
+                    d.id,
+                    names.contains(&t)
+                );
+            }
+        }
+    }
+
+    /// With no project open, a toolchain-specific tool must not fire the
+    /// BLOCKING banner - "espup is missing" on a machine that only builds STM32
+    /// is a false alarm, and the banner is the one thing that must not cry wolf.
+    #[test]
+    fn no_project_open_does_not_block_on_a_toolchain_specific_tool() {
+        let state = make_tools_state();
+        let mut s = state.lock().unwrap();
+        for t in &mut s.tools {
+            t.status = ToolStatus::Missing;
+        }
+        // The Tools LIST still shows them (you may be browsing the catalogue)…
+        let listed: Vec<&str> = s
+            .problems_for(None, None)
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        assert!(
+            !listed.contains(&"espup"),
+            "toolchain-specific, no chip open"
+        );
+
+        // …and an STM32 project is not blocked by an Espressif tool either.
+        use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+        let arm = s.problems_for(
+            Some(&ToolchainKind::RustEmbedded),
+            Some("thumbv7em-none-eabihf"),
+        );
+        let arm: Vec<&str> = arm.into_iter().map(|(n, _, _)| n).collect();
+        for t in ["espup", "esp toolchain", "riscv32imc-unknown-none-elf"] {
+            assert!(!arm.contains(&t), "an ARM project was offered `{t}`");
+        }
+    }
+
     /// The failure mode this per-platform table invites: picking the command
     /// with `per_os` but forgetting to switch the ARGS with it, leaving a bare
     /// `winget` / `brew` that installs nothing and reports success.
