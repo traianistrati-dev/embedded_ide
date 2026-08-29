@@ -47,8 +47,13 @@ param(
     # `could not compile syn` and the matrix looks like a codegen regression.
     # Pointing this at a roomier volume is the fix.
     #
-    # Defaults to $env:EIDE_MATRIX_DIR when that is set, so the pre-push hook and
-    # a hand-run matrix agree without either of them naming a path.
+    # Three places, in order: this switch, $env:EIDE_MATRIX_DIR, and a
+    # `scripts/matrix-dir.txt` holding one path.
+    #
+    # The file exists so the choice can be made ONCE per clone without setting a
+    # persistent Windows environment variable - that writes to HKCU\Environment,
+    # follows the user into every program they run, and is a heavier thing to
+    # leave behind than a gitignored text file in the repository it serves.
     [string]$WorkDir = $env:EIDE_MATRIX_DIR,
     # Wipe the work directory before starting. A deliberate COLD run: every
     # dependency recompiles, which is minutes, so it is a switch and not the
@@ -158,6 +163,14 @@ $env:EIDE_MATRIX_RUN = "1"
 # CALLER's process, so a TMP/TEMP left pointing at the work volume follows the
 # user into every later command in that shell - including ones that have nothing
 # to do with this repository.
+# The per-clone default, when neither the switch nor the variable named one.
+if (-not $WorkDir) {
+    $dirFile = Join-Path $PSScriptRoot "matrix-dir.txt"
+    if (Test-Path $dirFile) {
+        $WorkDir = (Get-Content $dirFile -Raw -ErrorAction SilentlyContinue).Trim()
+    }
+}
+
 $script:touched = @{}
 $script:workRoot = $null
 $script:origTmp = $env:TMP

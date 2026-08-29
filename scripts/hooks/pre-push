@@ -228,7 +228,14 @@ if [ -n "$verify_sha" ]; then
         # same volume the matrix writes to. It grew to 11.8 GB on its own,
         # and leaving it on a full C: while the projects moved elsewhere
         # would just relocate half the problem.
-        CARGO_TARGET_DIR="${EIDE_MATRIX_DIR:-${TMP:-${TEMP:-/tmp}}}/eide-hook-target"
+        # Same three places the matrix script reads, same order, so the cache
+        # and the projects cannot end up on different volumes.
+        matrix_dir="$EIDE_MATRIX_DIR"
+        if [ -z "$matrix_dir" ] && [ -f "$repo_root/scripts/matrix-dir.txt" ]; then
+            matrix_dir=$(tr -d '
+' < "$repo_root/scripts/matrix-dir.txt")
+        fi
+        CARGO_TARGET_DIR="${matrix_dir:-${TMP:-${TEMP:-/tmp}}}/eide-hook-target"
         export CARGO_TARGET_DIR
         cd "$worktree"
     else

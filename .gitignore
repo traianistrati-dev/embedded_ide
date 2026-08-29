@@ -3,3 +3,7 @@ Cargo.lock
 .DS_Store
 .idea/
 .vscode/
+
+# Per-clone choice of where the codegen matrix writes its projects.
+# A path, not a setting: see scripts/verify-codegen.ps1 -WorkDir.
+scripts/matrix-dir.txt
