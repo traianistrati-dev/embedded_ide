@@ -74,6 +74,11 @@ pub fn start_probe_flash(
     // that won't halt — and without this the only way out was killing the IDE.
     child_slot: Arc<Mutex<Option<u32>>>,
     ctx: Context,
+    // The Activity tab's log. The other three flash paths - espflash,
+    // OpenOCD and DFU - have always recorded themselves; this one did not,
+    // so the one operation an STM32 or RP user cares most about was the
+    // one the timing breakdown had nothing to say about.
+    activity: Arc<Mutex<crate::activity::ActivityLog>>,
 ) {
     if state.lock().unwrap().is_busy() {
         return;
@@ -83,6 +88,11 @@ pub fn start_probe_flash(
     ctx.request_repaint();
 
     thread::spawn(move || {
+        // Commits on drop, so the entry appears even when the spawn fails
+        // outright (no probe-rs installed) - the same reason the other three
+        // paths use it.
+        let mut act = crate::activity::Committing::new("Flash (probe-rs)", activity);
+        let t_flash = std::time::Instant::now();
         let mut args: Vec<String> = vec![
             "flash".into(),
             "--release".into(),
@@ -150,7 +160,16 @@ pub fn start_probe_flash(
             let _ = h.join();
         }
 
-        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        let status = child.wait();
+        let ok = status.as_ref().map(|s| s.success()).unwrap_or(false);
+        // The CODE, not just success: "exit 1" and "exit 101" send the
+        // reader to different places, and the tab exists for the failures.
+        act.rec().cmd_phase(
+            "cargo flash",
+            format!("cargo {}", args.join(" ")),
+            t_flash.elapsed(),
+            status.as_ref().ok().and_then(|s| s.code()),
+        );
         // Whatever happened, nobody may kill this pid any more — the OS reuses
         // them, and a stale one aimed at a stranger is the worst kind of bug.
         let stopped = child_slot.lock().unwrap().take().is_none();

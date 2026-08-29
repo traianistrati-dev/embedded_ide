@@ -298,6 +298,44 @@ mod tests {
     /// then return early on any of a dozen error paths - a missing tool, a
     /// failed build, an unplugged board. Its whole reason to exist is that none
     /// of those has to remember to log, and nothing covered it.
+    /// Every flash path records itself, and each under its own name.
+    ///
+    /// Three of the four always did; `probe_flash.rs` did not, and did not even
+    /// take the log handle - so an STM32 or RP user flashing over probe-rs got
+    /// no Activity entry for the one operation they most want timed. A source
+    /// scan rather than a behavioural test because each path spawns a real
+    /// tool: what regresses is someone adding a fifth path, or dropping the
+    /// recorder from one, and both are visible here.
+    #[test]
+    fn every_flash_path_opens_a_committing_recorder() {
+        let paths = [
+            ("src/espflash.rs", "Flash (ESP / espflash)"),
+            ("src/openocd.rs", "Flash (SWD / OpenOCD)"),
+            ("src/dfu.rs", "Flash (DFU)"),
+            ("src/probe_flash.rs", "Flash (probe-rs)"),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut names = Vec::new();
+        for (rel, kind) in paths {
+            let src =
+                std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            assert!(
+                src.contains("Committing::new"),
+                "{rel} flashes a board and records nothing"
+            );
+            assert!(
+                src.contains(kind),
+                "{rel} does not name itself {kind:?} - two paths under one name \
+                 are indistinguishable in the tab"
+            );
+            names.push(kind);
+        }
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "two flash paths share a name");
+    }
+
     #[test]
     fn a_committing_recorder_logs_even_when_the_action_bails_out() {
         let log = std::sync::Arc::new(std::sync::Mutex::new(ActivityLog::default()));

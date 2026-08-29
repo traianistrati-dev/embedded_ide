@@ -183,6 +183,7 @@ impl AppIde {
                 Arc::clone(&self.dfu_log),
                 Arc::clone(&self.probe_flash_child),
                 self.egui_ctx.clone(),
+                std::sync::Arc::clone(&self.activity),
             );
         }
     }
