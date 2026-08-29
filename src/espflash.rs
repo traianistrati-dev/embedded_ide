@@ -154,10 +154,20 @@ pub fn start_flash(
             }
         };
 
-        // Stream cargo stderr line by line
+        // Stream cargo stderr line by line, and KEEP the one line that means
+        // the build never started. The headline below used to blame the user's
+        // code for any non-zero exit, and rustup's "custom toolchain 'esp' ...
+        // is not installed" is not a compilation error. Only the three Xtensa
+        // parts carry a `rust-toolchain.toml`, so that is where a machine
+        // without espup lands - and it lands on advice to go hunting through
+        // code that is fine.
+        let mut toolchain_error: Option<String> = None;
         if let Some(stderr) = child.stderr.take() {
             for line in BufReader::new(stderr).lines() {
                 if let Ok(line) = line {
+                    if line.contains("toolchain") && line.contains("is not installed") {
+                        toolchain_error = Some(line.trim().to_owned());
+                    }
                     push_log(&log, &ctx, &line);
                 }
             }
@@ -176,12 +186,20 @@ pub fn start_flash(
                 set(
                     &state,
                     &ctx,
-                    EspFlashState::Error(
-                        "cargo build --release failed.\n\
-                         Fix compilation errors before flashing.\n\
-                         See the log for details."
-                            .into(),
-                    ),
+                    EspFlashState::Error(match &toolchain_error {
+                        // rustup's own line names the file, the toolchain and
+                        // the problem, so it is worth more than anything
+                        // written here.
+                        Some(msg) => format!(
+                            "{msg}
+
+Install it with `espup install` - the Tools tab lists espup."
+                        ),
+                        None => "cargo build --release failed.
+Fix compilation errors before flashing.
+See the log for details."
+                            .to_owned(),
+                    }),
                 );
                 return;
             }
@@ -489,4 +507,44 @@ fn push_log(log: &Arc<Mutex<Vec<String>>>, ctx: &eframe::egui::Context, line: &s
 fn set(state: &Arc<Mutex<EspFlashState>>, ctx: &eframe::egui::Context, next: EspFlashState) {
     *state.lock().unwrap() = next;
     ctx.request_repaint();
+}
+
+#[cfg(test)]
+mod build_failure_tests {
+    /// The line that means the build never started, told apart from one that
+    /// means the user's code is wrong.
+    ///
+    /// This mirrors the check in `start_flash`: a non-zero `cargo build` exit
+    /// used to produce "Fix compilation errors before flashing" unconditionally,
+    /// and on an esp32 / esp32s2 / esp32s3 without espup the real cause is
+    /// rustup refusing a toolchain that is not there. There are no compilation
+    /// errors to fix, and the user is sent through their own code looking for
+    /// one. `profile.rs` had the same shape, from the other side: it read the
+    /// same words as "cargo-bloat is missing".
+    fn is_toolchain_error(line: &str) -> bool {
+        line.contains("toolchain") && line.contains("is not installed")
+    }
+
+    #[test]
+    fn a_missing_toolchain_is_not_a_compilation_error() {
+        // Verbatim from a machine whose rust-toolchain.toml names an absent one.
+        let rustup = "error: custom toolchain 'esp' specified in override file \
+                      'C:\\p\\rust-toolchain.toml' is not installed";
+        assert!(is_toolchain_error(rustup), "{rustup}");
+    }
+
+    /// And a real build failure still gets the old, correct headline.
+    #[test]
+    fn a_real_compile_error_is_still_a_compile_error() {
+        for line in [
+            "error[E0425]: cannot find value `foo` in this scope",
+            "error: could not compile `esp32c6-project` (bin \"esp32c6-project\")",
+            "error: linker `xtensa-esp32s3-elf-gcc` not found",
+        ] {
+            assert!(
+                !is_toolchain_error(line),
+                "`{line}` would be reported as a missing toolchain"
+            );
+        }
+    }
 }

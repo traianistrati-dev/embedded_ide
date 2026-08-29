@@ -745,6 +745,23 @@ fn run_cargo(
     }
 
     if !saw_build_finished {
+        // The TOOLCHAIN before the tool. rustup's "custom toolchain 'esp'
+        // specified in override file '…' is not installed" contains the very
+        // words the clippy sniffer below looks for, and only the three Xtensa
+        // parts carry such a file - so a machine without espup was told to run
+        // `rustup component add clippy`, which fails for the same reason. The
+        // line rustup wrote names the file, the toolchain and the problem.
+        if let Some(msg) = stderr_text
+            .lines()
+            .find(|l| l.contains("toolchain") && l.contains("is not installed"))
+        {
+            return BuildState::Failed(format!(
+                "{}
+
+Install it with `espup install` - the Tools tab lists espup.",
+                msg.trim()
+            ));
+        }
         // clippy not installed → cargo prints "no such command" / "not provided".
         if subcommand == "clippy"
             && (stderr_text.contains("no such command")
