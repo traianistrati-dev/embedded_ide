@@ -915,6 +915,9 @@ pub fn run_op(
     add_paths: Option<Vec<String>>,
     project_dir: PathBuf,
     snapshot: Vec<(String, String)>,
+    // Generated files this project must NOT have on disk any more - see
+    // `unsaved_changes`. Owned, because the worker outlives the caller.
+    absent: Vec<String>,
     // `(library dir name, project root)` to also commit this change into the
     // project repository — set only when committing a library that the project
     // tracks as well. `None` for an ordinary commit.
@@ -1192,7 +1195,8 @@ pub fn run_op(
             })
             .unwrap_or_default();
 
-        let unsaved = unsaved_changes(&project_dir, &snapshot);
+        let absent_refs: Vec<&str> = absent.iter().map(String::as_str).collect();
+        let unsaved = unsaved_changes(&project_dir, &snapshot, &absent_refs);
         {
             let mut st = state.lock().unwrap();
             st.remote_url = remote_url;
@@ -2040,7 +2044,15 @@ pub fn fetch_baseline(
 /// Project-relative paths whose in-memory `snapshot` content differs from the
 /// file on disk (or the file is missing) — i.e. edits a commit would MISS.
 /// `pub(crate)` so the exit prompt can ask the same question.
-pub(crate) fn unsaved_changes(project_dir: &Path, snapshot: &[(String, String)]) -> Vec<String> {
+pub(crate) fn unsaved_changes(
+    project_dir: &Path,
+    snapshot: &[(String, String)],
+    // Files this project must NOT have on disk. `write_project` deletes each of
+    // them on the next Save, but a snapshot keyed on CONTENT cannot say "this
+    // should be gone", so a stale one left the tree looking clean. See
+    // `generated_files_that_must_be_absent`.
+    absent: &[&str],
+) -> Vec<String> {
     // Compare EOL-AGNOSTICALLY. The in-memory snapshot is LF-normalized, but a
     // project checked out on Windows (`core.autocrlf=true`) has CRLF files on
     // disk, and `write_if_changed` deliberately keeps that CRLF. A raw `disk !=
@@ -2057,6 +2069,12 @@ pub(crate) fn unsaved_changes(project_dir: &Path, snapshot: &[(String, String)])
                 .unwrap_or(true)
         })
         .map(|(rel, _)| rel.clone())
+        .chain(
+            absent
+                .iter()
+                .filter(|rel| project_dir.join(rel).exists())
+                .map(|rel| (*rel).to_owned()),
+        )
         .collect()
 }
 
@@ -2753,6 +2771,48 @@ index abc..def 100644
         assert!(validate_remote_url("https://host/a repo.git").is_err());
     }
 
+    /// A generated file the project no longer wants counts as unsaved.
+    ///
+    /// `write_project` DELETES `memory.x`, `build.rs` and `rust-toolchain.toml`
+    /// when their content is empty, but the snapshot is keyed on CONTENT and so
+    /// could only ever say "this differs", never "this should be gone". Between
+    /// a chip change and the next Save the tree therefore read as clean.
+    ///
+    /// The case that makes it matter is an Espressif one: switch a saved project
+    /// from an esp32s3 to an esp32c6 and the Xtensa `rust-toolchain.toml` is
+    /// stale at once. Commit before saving and the repo pins a RISC-V project to
+    /// the `esp` toolchain - which still BUILDS, so nothing ever complains and
+    /// the repository quietly says something untrue about itself.
+    #[test]
+    fn a_generated_file_left_behind_is_reported_unsaved() {
+        let dir = std::env::temp_dir().join(format!("eide_absent_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let snap = vec![("src/main.rs".to_owned(), "fn main() {}\n".to_owned())];
+
+        // Nothing stale: clean.
+        assert!(unsaved_changes(&dir, &snap, &["rust-toolchain.toml"]).is_empty());
+
+        // The Xtensa pin still on disk after a move to a RISC-V part.
+        std::fs::write(
+            dir.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"esp\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            unsaved_changes(&dir, &snap, &["rust-toolchain.toml"]),
+            ["rust-toolchain.toml"],
+            "a stale toolchain pin left the tree looking clean"
+        );
+
+        // And a file that is legitimately present is not reported by this path:
+        // it is in the snapshot, matching, so neither half flags it.
+        assert!(unsaved_changes(&dir, &snap, &[]).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn unsaved_changes_flags_differing_and_missing() {
         let dir = std::env::temp_dir().join(format!("eide_git_test_{}", std::process::id()));
@@ -2766,7 +2826,7 @@ index abc..def 100644
             ("Cargo.toml".to_owned(), "new".to_owned()),   // differs
             ("src/missing.rs".to_owned(), "anything".to_owned()), // not on disk
         ];
-        let unsaved = unsaved_changes(&dir, &snapshot);
+        let unsaved = unsaved_changes(&dir, &snapshot, &[]);
         assert_eq!(
             unsaved,
             vec!["Cargo.toml".to_owned(), "src/missing.rs".to_owned()]
@@ -2792,7 +2852,7 @@ index abc..def 100644
             // A REAL edit (line 2 changed) → still flagged despite the EOL diff.
             ("Cargo.toml".to_owned(), "a\nb\n".to_owned()),
         ];
-        let unsaved = unsaved_changes(&dir, &snapshot);
+        let unsaved = unsaved_changes(&dir, &snapshot, &[]);
         assert_eq!(
             unsaved,
             vec!["Cargo.toml".to_owned()],

@@ -550,6 +550,17 @@ impl AppIde {
             add_paths,
             dir,
             crate::git::snapshot_for_target(self.git_disk_snapshot(), &self.git.target),
+            // Only meaningful at the project root: a library repo has no
+            // generated config files of its own to go stale.
+            match self.git.target {
+                crate::git::RepoTarget::Project => {
+                    generated_files_that_must_be_absent(&self.current_project_files())
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect()
+                }
+                _ => Vec::new(),
+            },
             // Mirror only when committing a LIBRARY and the option is on; the
             // project root is where the second commit runs.
             match (&self.git.target, self.git.mirror_to_project) {
@@ -960,6 +971,33 @@ fn generated_files_snapshot(
     snap
 }
 
+/// The conditional files this project must NOT have on disk.
+///
+/// The mirror of the empty-content skip above, and the half that was missing.
+/// `write_project` DELETES each of these when its content is empty, but a
+/// snapshot keyed on content cannot express "this should be gone", so the state
+/// between a chip change and the next Save read as clean.
+///
+/// The case that makes it matter is an Espressif one: switch a saved project
+/// from an esp32s3 to an esp32c6 and the Xtensa `rust-toolchain.toml` is stale
+/// the moment the chip changes. Committing before saving pins a RISC-V project
+/// to the `esp` toolchain — which still builds, so nothing complains, and the
+/// repo quietly says something untrue about itself. `memory.x` and `build.rs`
+/// have the same shape when moving between an STM32 and an ESP.
+fn generated_files_that_must_be_absent(
+    files: &crate::panels::mcu_module::project_gen::ProjectFiles,
+) -> Vec<&'static str> {
+    [
+        ("memory.x", &files.memory_x),
+        ("build.rs", &files.build_rs),
+        ("rust-toolchain.toml", &files.rust_toolchain),
+    ]
+    .into_iter()
+    .filter(|(_, c)| c.is_empty())
+    .map(|(rel, _)| rel)
+    .collect()
+}
+
 impl AppIde {
     /// The in-memory project content, keyed by project-relative path — the
     /// exact file set `write_project` persists. The git worker compares it
@@ -990,7 +1028,11 @@ impl AppIde {
     pub(super) fn unsaved_files(&self) -> Vec<String> {
         let snapshot = self.git_disk_snapshot();
         match &self.project_dir {
-            Some(dir) => crate::git::unsaved_changes(dir, &snapshot),
+            Some(dir) => crate::git::unsaved_changes(
+                dir,
+                &snapshot,
+                &generated_files_that_must_be_absent(&self.current_project_files()),
+            ),
             None => {
                 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
                 let has_content = !self.project_tree.user_src_files.is_empty()
