@@ -1938,9 +1938,9 @@ fn cargo_toml_esp(c: &ProjectDef) -> String {
 fn cargo_config_esp(c: &ProjectDef) -> String {
     format!(
         "[target.{target}]\n\
-         # --ignore-app-descriptor: esp-hal bare-metal binaries do not carry an\n\
-         # ESP-IDF app descriptor; espflash 4.x requires this flag to skip the\n\
-         # descriptor check. Add --monitor to open the serial console after flash.\n\
+         # main.rs carries `esp_app_desc!()`, so espflash\'s descriptor check\n\
+         # passes and no flag is needed. Add --ignore-app-descriptor below if\n\
+         # you remove it. --monitor opens the serial console after flashing.\n\
          #runner = \"espflash flash --monitor --ignore-app-descriptor\"\n\
          runner = \"espflash flash --monitor --chip {chip}\"\n\
          # esp-hal 0.23 places linkall.x + memory.x in its OUT_DIR via its\n\

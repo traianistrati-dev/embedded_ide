@@ -223,9 +223,14 @@ See the log for details."
             .join(format!("{chip}-project"));
 
         // Full espflash command (shown in log for easy copy-paste / debugging):
-        //   --ignore-app-descriptor  : esp-hal bare-metal ELFs have no ESP-IDF
-        //                              app descriptor; espflash 4.x rejects them
-        //                              without this flag.
+        //   --ignore-app-descriptor  : belt and braces. It was needed when the
+        //                              generator emitted no descriptor at all;
+        //                              every generated main.rs now carries
+        //                              `esp_bootloader_esp_idf::esp_app_desc!()`
+        //                              (checked by `the_generated_main_carries_an_app_descriptor`),
+        //                              so espflash's check would pass anyway.
+        //                              Kept because it also covers a user who
+        //                              deletes that line from their own main.rs.
         //   --after hard-reset       : explicitly reset the chip via the RTS line
         //                              after flashing so boards with a DTR/RTS
         //                              auto-reset circuit reboot automatically.
@@ -511,6 +516,42 @@ fn set(state: &Arc<Mutex<EspFlashState>>, ctx: &eframe::egui::Context, next: Esp
 
 #[cfg(test)]
 mod build_failure_tests {
+
+    /// Every generated `main.rs` carries the ESP-IDF app descriptor.
+    ///
+    /// This is what makes `--ignore-app-descriptor` unnecessary. Both comments
+    /// justifying that flag used to say the opposite - "esp-hal bare-metal ELFs
+    /// have no ESP-IDF app descriptor" - and one of them is COPIED INTO the
+    /// user's `.cargo/config.toml`, so the false claim shipped with every
+    /// project. Measured here instead: nine chips, both runtimes.
+    ///
+    /// The flag is kept anyway, and the comment now says why: it also covers a
+    /// user who deletes the line from their own main.rs.
+    #[test]
+    fn the_generated_main_carries_an_app_descriptor() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::codegen::family::is_esp;
+        use crate::panels::mcu_module::mcu::model::Runtime;
+
+        let mut checked = 0;
+        for d in builtin_definitions() {
+            if !is_esp(&d.family) {
+                continue;
+            }
+            for rt in [Runtime::Blocking, Runtime::Async] {
+                let mut mcu = d.build_mcu();
+                mcu.runtime = rt;
+                assert!(
+                    mcu.fresh_main_rs().contains("esp_app_desc!"),
+                    "{} / {rt:?}: no app descriptor, so espflash needs the flag                      and the comments explaining it are right again",
+                    d.id
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 18, "nine Espressif parts, two runtimes each");
+    }
+
     /// The line that means the build never started, told apart from one that
     /// means the user's code is wrong.
     ///
