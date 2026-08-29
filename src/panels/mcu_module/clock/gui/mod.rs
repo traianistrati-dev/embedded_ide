@@ -249,7 +249,7 @@ pub fn draw_graph_clock(
                         .selected(view.edit),
                 )
                 .on_hover_text(
-                    "Build the tree: drag nodes, add / delete them, wire them up. A hand-drawn                      figure is edited in place - only its wires stay where its author routed them.",
+                    "Build the tree: drag nodes, add / delete them, wire them up. A hand-drawn figure is edited in place - only its wires stay where its author routed them.",
                 )
                 .clicked()
             {
@@ -273,13 +273,13 @@ pub fn draw_graph_clock(
                             .button(spread.label())
                             .on_hover_text(match spread {
                                 super::graph::auto_layout::Spread::Min => {
-                                    "Densest - rows merge freely, so the whole tree fits on                                      screen sooner"
+                                    "Densest - rows merge freely, so the whole tree fits on screen sooner"
                                 }
                                 super::graph::auto_layout::Spread::Mid => {
                                     "A middle ground between size and alignment"
                                 }
                                 super::graph::auto_layout::Spread::Max => {
-                                    "Loosest - one row per row the vendor drew, best aligned,                                      largest canvas"
+                                    "Loosest - one row per row the vendor drew, best aligned, largest canvas"
                                 }
                             })
                             .clicked()
@@ -2069,7 +2069,7 @@ fn clock_manual_checkbox(ui: &mut egui::Ui, family: &str, manual: &mut bool) -> 
     }
     ui.checkbox(manual, "Write the clock by hand")
         .on_hover_text(
-            "Fence the clock block off in main.rs and keep your edits across regeneration.              Turning it back off lets the Clock tab drive it again - and discards what you wrote.",
+            "Fence the clock block off in main.rs and keep your edits across regeneration. Turning it back off lets the Clock tab drive it again - and discards what you wrote.",
         )
         .changed()
 }
