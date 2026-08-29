@@ -204,6 +204,12 @@ $ALL_CASES = @(
     # its channels while `Uart::new` wants it before.
     @{ n = "Raspberry Pi Pico async x2";   t = "emit_rp_async_project";      e = @{};                       q = $true; fam = "rp"; hk = $true }
 
+    # The BUFFERED uart: a different embassy-rp type, a different interrupt
+    # handler on the same vector, StaticCell rings instead of DMA, and every
+    # later peripheral renumbered because the UART stopped taking a pair. The
+    # unit tests check all of that in the emitted TEXT; only this compiles it.
+    @{ n = "Raspberry Pi Pico buffered uart"; t = "emit_rp_buffered_project"; e = @{};                       q = $true; fam = "rp" }
+
     # The two W boards, whose on-board LED is not on the chip at all - it is
     # GPIO0 of the CYW43 radio, reached through a PIO-driven half-duplex SPI and
     # an async-only driver. The harness writes PLACEHOLDER firmware blobs: they
