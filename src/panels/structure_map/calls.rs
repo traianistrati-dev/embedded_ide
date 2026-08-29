@@ -22,7 +22,10 @@ use crate::lsp::ReferenceLoc;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Safety cap on symbols queried per pass (each is a whole-crate search).
-const MAX_SYMBOLS: usize = 400;
+///
+/// Public because the status line names it: a cap the user cannot see is a cap
+/// that turns a partial answer into a confident one.
+pub const MAX_SYMBOLS: usize = 400;
 
 /// One `caller → callee` edge between symbol rows of two different modules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -39,6 +42,16 @@ pub struct CallPass {
     pub hash: u64,
     /// Symbols still to query: `(node, row)`.
     pub queue: VecDeque<(usize, usize)>,
+    /// The rust-analyzer generation the in-flight request was sent under.
+    ///
+    /// `LspState::reset` bumps the generation AND clears `calls_refs_pending` /
+    /// `calls_refs_results`, so a restart mid-request means the reply can never
+    /// arrive. `in_flight` is cleared only by that reply, and `running()` is
+    /// true while it is set, so nothing further is ever sent: the pass wedges on
+    /// "analyzing calls N/total..." until a content change happens to rebuild
+    /// it. Comparing this against the live generation is what lets the request
+    /// be re-queued instead.
+    pub sent_at_generation: u64,
     /// The one in-flight request: `(local key, node, row)`.
     pub in_flight: Option<(usize, usize, usize)>,
     pub edges: Vec<CallEdge>,
@@ -52,6 +65,13 @@ pub struct CallPass {
     seen: HashSet<CallEdge>,
     pub done: usize,
     pub total: usize,
+    /// Symbols the cap left unqueried, or 0.
+    ///
+    /// [`Self::total`] counts what was QUEUED, so a truncated pass finishes at
+    /// "400/400" and then reports its edge count - reading as a complete answer
+    /// while every symbol past the cap was never searched and its call edges
+    /// were never drawn. The count is kept so the status line can say so.
+    pub skipped: usize,
     /// `true` while paused because a file's text isn't synced to RA yet.
     pub waiting_sync: bool,
     /// Last state line written to the debug log — dedup so the per-frame tick
@@ -62,6 +82,7 @@ pub struct CallPass {
 impl CallPass {
     /// Queue every top-level symbol of every module (capped at [`MAX_SYMBOLS`]).
     pub fn new(graph: &ModuleGraph, hash: u64) -> Self {
+        let available: usize = graph.nodes.iter().map(|n| n.symbols.len()).sum();
         let queue: VecDeque<(usize, usize)> = graph
             .nodes
             .iter()
@@ -70,16 +91,19 @@ impl CallPass {
             .take(MAX_SYMBOLS)
             .collect();
         let total = queue.len();
+        let skipped = available.saturating_sub(total);
         Self {
             hash,
             queue,
             in_flight: None,
+            sent_at_generation: 0,
             edges: Vec::new(),
             ref_counts: HashMap::new(),
             pair_counts: HashMap::new(),
             seen: HashSet::new(),
             done: 0,
             total,
+            skipped,
             waiting_sync: false,
             last_log: String::new(),
         }
@@ -90,6 +114,23 @@ impl CallPass {
         if self.last_log != line {
             crate::lsp::debug_log(&line);
             self.last_log = line;
+        }
+    }
+
+    /// Drop an in-flight request whose reply can no longer come, putting its
+    /// symbol back at the FRONT of the queue so nothing is lost.
+    ///
+    /// Returns true when it did. Called with the live generation each frame.
+    pub fn abandon_if_restarted(&mut self, generation: u64) -> bool {
+        if self.sent_at_generation == generation {
+            return false;
+        }
+        match self.in_flight.take() {
+            Some((_, node, row)) => {
+                self.queue.push_front((node, row));
+                true
+            }
+            None => false,
         }
     }
 
@@ -255,6 +296,92 @@ fn main() {
         assert_eq!(pass.edges.len(), 2);
         pass.add_references(&g, a, 1, &[loc("x/src/a.rs", 0)]);
         assert_eq!(pass.edges.len(), 2, "intra-module reference adds no edge");
+    }
+
+    /// The cap is counted, not just applied.
+    ///
+    /// `total` is what got QUEUED, so a truncated pass runs to "400/400" and
+    /// then reports its edge count - which reads as the whole answer while every
+    /// symbol past the cap was never searched. `skipped` is what lets the status
+    /// line say otherwise.
+    /// A restart mid-request must not wedge the pass.
+    ///
+    /// `LspState::reset` bumps the generation AND clears the call-graph reply
+    /// channel, so the outstanding request can never be answered. `in_flight`
+    /// is cleared only by that reply and `running()` is true while it is set,
+    /// so before this the pass sat on "analyzing calls N/total..." for good -
+    /// Save did not help (same content, same hash, same pass) and neither did
+    /// reopening the tab. Only an unrelated edit rebuilt it.
+    #[test]
+    fn a_restart_mid_request_requeues_instead_of_wedging() {
+        let g = build_graph("fn main() {}\nfn helper() {}\n", &[]);
+        let mut pass = CallPass::new(&g, 0);
+        let queued = pass.queue.len();
+
+        // Send one, the way the driver does.
+        let sym = pass.queue.pop_front().expect("a symbol");
+        pass.in_flight = Some((7, sym.0, sym.1));
+        pass.sent_at_generation = 3;
+        assert!(pass.running());
+
+        // Same generation: nothing to abandon, the reply is still coming.
+        assert!(!pass.abandon_if_restarted(3));
+        assert!(pass.in_flight.is_some());
+
+        // The analyzer restarted. The reply is gone, so take the symbol back.
+        assert!(pass.abandon_if_restarted(4));
+        assert!(pass.in_flight.is_none(), "the dead request was dropped");
+        assert_eq!(
+            pass.queue.len(),
+            queued,
+            "and its symbol is back in the queue, not lost"
+        );
+        assert_eq!(
+            pass.queue.front().copied(),
+            Some(sym),
+            "at the front, so it is retried first"
+        );
+        assert!(
+            pass.running(),
+            "so the pass carries on rather than stalling"
+        );
+    }
+
+    /// Nothing in flight and a restart: nothing to do, and no phantom re-queue.
+    #[test]
+    fn a_restart_with_nothing_in_flight_changes_nothing() {
+        let g = build_graph("fn main() {}\n", &[]);
+        let mut pass = CallPass::new(&g, 0);
+        let before = pass.queue.len();
+        assert!(!pass.abandon_if_restarted(99));
+        assert_eq!(pass.queue.len(), before);
+    }
+
+    #[test]
+    fn the_symbol_cap_reports_what_it_dropped() {
+        // One module carrying more symbols than the cap allows.
+        let over = MAX_SYMBOLS + 37;
+        let body: String = (0..over).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        let g = build_graph(&body, &[]);
+        let pass = CallPass::new(&g, 0);
+
+        assert_eq!(pass.total, MAX_SYMBOLS, "the cap still applies");
+        assert_eq!(pass.skipped, 37, "and says how many it left out");
+        assert_eq!(
+            pass.total + pass.skipped,
+            over,
+            "the two must account for every symbol, or the message lies"
+        );
+    }
+
+    /// A project under the cap reports nothing dropped, so the note never
+    /// appears where it would only be noise.
+    #[test]
+    fn a_project_under_the_cap_skips_nothing() {
+        let g = build_graph("fn main() {}\nfn helper() {}\n", &[]);
+        let pass = CallPass::new(&g, 0);
+        assert_eq!(pass.skipped, 0);
+        assert_eq!(pass.total, 2);
     }
 
     #[test]

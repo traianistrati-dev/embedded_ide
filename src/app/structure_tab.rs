@@ -239,6 +239,14 @@ impl AppIde {
 
         let mut lsp = self.lsp_state.lock().unwrap();
 
+        // 0) A rust-analyzer restart clears the reply channel, so a request
+        //    that was in flight can never be answered. Re-queue it rather than
+        //    waiting for a reply that is not coming - without this the pass sat
+        //    on "analyzing calls N/total..." until an unrelated edit rebuilt it.
+        if pass.abandon_if_restarted(lsp.generation) {
+            pass.log_once("CALLS_ABANDONED analyzer restarted mid-request".to_owned());
+        }
+
         // 1) Receive the completed lookup (stale keys from a superseded pass
         //    are simply dropped by the key match).
         for (key, locs) in lsp.take_calls_reference_results() {
@@ -306,6 +314,7 @@ impl AppIde {
                         key,
                     );
                     pass.in_flight = Some((key, node_i, row));
+                    pass.sent_at_generation = lsp.generation;
                     pass.waiting_sync = false;
                     fired = true;
                     break;
@@ -316,17 +325,36 @@ impl AppIde {
             }
         }
 
-        // 3) Toolbar status — always says WHY nothing is moving.
+        // 3) Toolbar status — always says WHY nothing is moving, and never
+        //    claims a completeness it does not have: a pass that hit the symbol
+        //    cap says so in every state, because "512 call edges" on a
+        //    truncated search reads as the whole answer.
+        let capped = if pass.skipped == 0 {
+            String::new()
+        } else {
+            format!(
+                "  ·  {} symbol(s) past the {} cap not searched — some edges are missing",
+                pass.skipped,
+                crate::panels::structure_map::calls::MAX_SYMBOLS
+            )
+        };
         let status = if pass.running() {
             if let Some(b) = blocked {
                 b.to_owned()
             } else if pass.waiting_sync {
                 "unsaved changes — Save the project to update the call graph".to_owned()
             } else {
-                format!("analyzing calls {}/{}…", pass.done, pass.total)
+                format!("analyzing calls {}/{}…{capped}", pass.done, pass.total)
             }
         } else if !pass.edges.is_empty() {
-            format!("{} call edges", pass.edges.len())
+            format!("{} call edges{capped}", pass.edges.len())
+        } else if pass.skipped > 0 {
+            // Nothing found AND the search was cut short: saying only "none
+            // found" here would blame the code for the cap's omission.
+            format!(
+                "no cross-module calls found in the first {}{capped}",
+                pass.total
+            )
         } else {
             // Distinguish "finished, none found" from "not running" — an
             // empty diagram with silent status made failures undiagnosable.
