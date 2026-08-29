@@ -1671,6 +1671,61 @@ mod git_snapshot_tests {
     /// The defect this guards: the pin lived in memory and never in the
     /// snapshot, so the Git tab called an Xtensa project clean while its
     /// toolchain file was missing from disk.
+
+    /// Which committed files the editor cannot open, kept to exactly two.
+    ///
+    /// The Git tab lists every changed file and lets the user click a line to
+    /// jump there. `resolve_diag_file` answers `None` for a path with no editor
+    /// view, and that click used to be swallowed in silence - which reads as a
+    /// dead button rather than a deliberate refusal.
+    ///
+    /// Two files legitimately have no view, and both are committed on purpose:
+    /// `mcu.config` on every chip, and `rust-toolchain.toml` on the three Xtensa
+    /// ESP32s. A THIRD appearing here means a generated file lost its editor
+    /// entry, which is a real regression - the user would see it change in git
+    /// and have no way to look at it.
+    #[test]
+    fn only_the_two_ide_owned_files_have_no_editor_view() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::mcu_config::FILE_NAME as MCU_CONFIG;
+
+        for d in builtin_definitions() {
+            // Only the paths matter here, so a ProjectFiles with the right
+            // EMPTINESS is enough - the snapshot drops empty entries, which is
+            // exactly the rule under test.
+            let pin = crate::panels::mcu_module::project_gen::rust_toolchain_for(&d.project.target);
+            let files =
+                generated_files_snapshot(crate::panels::mcu_module::project_gen::ProjectFiles {
+                    main_rs: "x".into(),
+                    cargo_toml: "x".into(),
+                    cargo_config: "x".into(),
+                    gitignore: "x".into(),
+                    memory_x: String::new(),
+                    build_rs: String::new(),
+                    rust_toolchain: pin.clone(),
+                });
+            let mut blind: Vec<String> = files
+                .into_iter()
+                .map(|(p, _)| p)
+                .chain(std::iter::once(MCU_CONFIG.to_owned()))
+                .filter(|p| crate::app::resolve_diag_file(p, &[]).is_none())
+                .collect();
+            blind.sort();
+            blind.dedup();
+
+            let mut want = vec![MCU_CONFIG.to_owned()];
+            if !pin.is_empty() {
+                want.push("rust-toolchain.toml".to_owned());
+            }
+            want.sort();
+            assert_eq!(
+                blind, want,
+                "{}: the set of unopenable committed files changed",
+                d.id
+            );
+        }
+    }
+
     #[test]
     fn the_xtensa_toolchain_pin_is_tracked() {
         let snap = generated_files_snapshot(xtensa_files());

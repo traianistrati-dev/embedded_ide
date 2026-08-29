@@ -314,6 +314,11 @@ pub fn resolve_diag_file(path: &str, user_files: &[(String, String)]) -> Option<
         "memory.x" => Some(ProjectFileId::MemoryX),
         ".cargo/config.toml" => Some(ProjectFileId::CargoConfig),
         ".gitignore" => Some(ProjectFileId::GitIgnore),
+        // NOT here on purpose: `mcu.config` is the Configurator's own state and
+        // `rust-toolchain.toml` is derived from the target, so neither has an
+        // editor view. Both are committed, so both DO show up in the Git tab -
+        // which is why the caller says so rather than swallowing the click.
+        // `only_the_two_ide_owned_files_have_no_editor_view` pins that set.
         _ => user_files
             .iter()
             .position(|(name, _)| path == name)

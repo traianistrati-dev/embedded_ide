@@ -644,6 +644,24 @@ impl AppIde {
             {
                 self.selected_file = id;
                 self.pending_scroll_to_line = Some((id, line));
+            } else {
+                // Some files the Git tab lists have no editor view at all:
+                // `mcu.config` is the Configurator's own state on every chip,
+                // and `rust-toolchain.toml` is derived from the target on the
+                // Xtensa ESP32s. Both are committed on purpose, so they show up
+                // in the diff - and the click used to be swallowed with nothing
+                // said, which reads as the IDE having missed it.
+                let why = if key == "rust-toolchain.toml" {
+                    " - it is derived from the chip's target, so there is nothing to edit"
+                } else if key == crate::panels::mcu_module::mcu_config::FILE_NAME {
+                    " - it is the MCU Configurator's own state; change it through the tabs"
+                } else {
+                    ""
+                };
+                self.git.state.lock().unwrap().lines.push((
+                    crate::git::GitLine::Notice,
+                    format!("[skip] {path} has no editor view{why}"),
+                ));
             }
         }
         // A hunk's revert button was clicked in the Git diff view (Phase B):
