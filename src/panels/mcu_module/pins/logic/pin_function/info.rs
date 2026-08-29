@@ -116,7 +116,7 @@ impl PinFunction {
 
             PinFunction::TimerPwmN { timer, channel } => FunctionInfo {
                 description: format!(
-                    "Complementary PWM output on TIM{timer} channel CH{channel}N. Carries the                      inverse of CH{channel}, with a dead time between the two edges so the two                      sides of a half-bridge are never driven on at once."
+                    "Complementary PWM output on TIM{timer} channel CH{channel}N. Carries the inverse of CH{channel}, with a dead time between the two edges so the two sides of a half-bridge are never driven on at once."
                 ),
                 specs: vec![
                     (
@@ -516,22 +516,22 @@ impl PinFunction {
                 };
                 FunctionInfo {
                     description: format!(
-                        "PARL_IO: {role}. A parallel port that moves a whole nibble, byte or                          word per clock instead of one bit — for LED matrices, fast ADCs and                          camera-style sensors."
+                        "PARL_IO: {role}. A parallel port that moves a whole nibble, byte or word per clock instead of one bit — for LED matrices, fast ADCs and camera-style sensors."
                     ),
                     specs: vec![
                         (
                             "Width".into(),
-                            "1, 2, 4 or 8 lines, and 16 on the parts whose PARL_IO is the                              first generation. Set it in the module; the extra data pads are                              assigned here on the canvas."
+                            "1, 2, 4 or 8 lines, and 16 on the parts whose PARL_IO is the first generation. Set it in the module; the extra data pads are assigned here on the canvas."
                                 .into(),
                         ),
                         (
                             "One direction".into(),
-                            "The port transmits or receives, not both. Which one decides                              whether these pads are outputs or inputs."
+                            "The port transmits or receives, not both. Which one decides whether these pads are outputs or inputs."
                                 .into(),
                         ),
                         (
                             "DMA".into(),
-                            "There is no non-DMA form: the port exists to move blocks, and                              its constructor takes a channel. The Configuration tab shows                              which one it took."
+                            "There is no non-DMA form: the port exists to move blocks, and its constructor takes a channel. The Configuration tab shows which one it took."
                                 .into(),
                         ),
                     ],
@@ -541,23 +541,23 @@ impl PinFunction {
                 let b = matches!(self, PinFunction::McpwmB { .. });
                 FunctionInfo {
                     description: format!(
-                        "MCPWM{unit} operator {operator}, output {}. Espressif's MOTOR-control                          PWM — a different peripheral from the LEDC that drives the plain PWM                          pins. An operator's two outputs are a complementary PAIR meant to                          switch the two sides of a half-bridge.",
+                        "MCPWM{unit} operator {operator}, output {}. Espressif's MOTOR-control PWM — a different peripheral from the LEDC that drives the plain PWM pins. An operator's two outputs are a complementary PAIR meant to switch the two sides of a half-bridge.",
                         if b { "B" } else { "A" }
                     ),
                     specs: vec![
                         (
                             "Why not LEDC".into(),
-                            "The LEDC dims LEDs: one output per channel, no pairing and no                              dead time. This one exists to drive a bridge, where turning both                              sides on at once destroys it."
+                            "The LEDC dims LEDs: one output per channel, no pairing and no dead time. This one exists to drive a bridge, where turning both sides on at once destroys it."
                                 .into(),
                         ),
                         (
                             "The pair".into(),
-                            "A and B come from one operator and share its timer, so they                              share a frequency by construction. Wiring only A is fine - a                              single-ended output is a normal use."
+                            "A and B come from one operator and share its timer, so they share a frequency by construction. Wiring only A is fine - a single-ended output is a normal use."
                                 .into(),
                         ),
                         (
                             "Frequency".into(),
-                            "Set once for the whole MCPWM unit in the module: all three of                              its operators run off the same timer here."
+                            "Set once for the whole MCPWM unit in the module: all three of its operators run off the same timer here."
                                 .into(),
                         ),
                     ],
@@ -567,7 +567,7 @@ impl PinFunction {
                 let ctrl = matches!(self, PinFunction::PcntCtrl { .. });
                 FunctionInfo {
                     description: format!(
-                        "PCNT unit {n} — {}. A hardware pulse counter: it follows edges on                          its own, with a glitch filter and high/low limits that raise an                          interrupt, so nothing has to be polled. What reads a flow meter, a                          tachometer or a rotary encoder.",
+                        "PCNT unit {n} — {}. A hardware pulse counter: it follows edges on its own, with a glitch filter and high/low limits that raise an interrupt, so nothing has to be polled. What reads a flow meter, a tachometer or a rotary encoder.",
                         if ctrl {
                             "the CONTROL input, which modifies the counting"
                         } else {
@@ -578,24 +578,24 @@ impl PinFunction {
                         if ctrl {
                             (
                                 "What it does".into(),
-                                "Its LEVEL decides what an edge means: keep counting the same                                  way, reverse, or ignore it. Wire an encoder's B phase here                                  and its A phase to the edge input, and the unit follows                                  direction by itself."
+                                "Its LEVEL decides what an edge means: keep counting the same way, reverse, or ignore it. Wire an encoder's B phase here and its A phase to the edge input, and the unit follows direction by itself."
                                     .into(),
                             )
                         } else {
                             (
                                 "What it does".into(),
-                                "Every rising or falling edge here moves the counter — up,                                  down or not at all, as the module says. Nothing needs to                                  read the pin."
+                                "Every rising or falling edge here moves the counter — up, down or not at all, as the module says. Nothing needs to read the pin."
                                     .into(),
                             )
                         },
                         (
                             "Limits".into(),
-                            "The counter is 16-bit and signed. Reaching either limit resets                              it and raises an event, which is how a count larger than 16                              bits gets accumulated."
+                            "The counter is 16-bit and signed. Reaching either limit resets it and raises an event, which is how a count larger than 16 bits gets accumulated."
                                 .into(),
                         ),
                         (
                             "Filter".into(),
-                            "Pulses shorter than the filter are ignored — the difference                              between counting a contact bounce once and counting it eight                              times."
+                            "Pulses shorter than the filter are ignored — the difference between counting a contact bounce once and counting it eight times."
                                 .into(),
                         ),
                     ],
@@ -603,22 +603,22 @@ impl PinFunction {
             }
             PinFunction::RmtChannel(n) => FunctionInfo {
                 description: format!(
-                    "RMT channel {n}. A pulse-train engine, not a bus: you hand it a list of                      (level, duration) pairs and the hardware clocks every edge out — or                      samples them in — without the CPU timing anything. This is what drives                      an IR remote, a WS2812 strip or a 1-Wire line."
+                    "RMT channel {n}. A pulse-train engine, not a bus: you hand it a list of (level, duration) pairs and the hardware clocks every edge out — or samples them in — without the CPU timing anything. This is what drives an IR remote, a WS2812 strip or a 1-Wire line."
                 ),
                 specs: vec![
                     (
                         "Direction".into(),
-                        "Fixed in silicon on most parts: the low channels transmit and the                          high ones receive. The original ESP32 and the S2 let every channel                          do either."
+                        "Fixed in silicon on most parts: the low channels transmit and the high ones receive. The original ESP32 and the S2 let every channel do either."
                             .into(),
                     ),
                     (
                         "Resolution".into(),
-                        "One tick is the RMT source clock divided by the channel's divider.                          The module states the divider; the generated file works the tick                          time out for you."
+                        "One tick is the RMT source clock divided by the channel's divider. The module states the divider; the generated file works the tick time out for you."
                             .into(),
                     ),
                     (
                         "Carrier".into(),
-                        "The channel can modulate its output onto a carrier — 38 kHz is the                          usual one for IR — so the LED driver needs no oscillator of its own."
+                        "The channel can modulate its output onto a carrier — 38 kHz is the usual one for IR — so the LED driver needs no oscillator of its own."
                             .into(),
                     ),
                 ],
@@ -939,4 +939,62 @@ fn can_specs() -> Vec<(String, String)> {
             "Requires external CAN transceiver (e.g. TJA1050)".into(),
         ),
     ]
+}
+
+#[cfg(test)]
+mod gap_tests {
+    /// No pin-info text carries a run of spaces mid-sentence.
+    ///
+    /// FOUR spaces, not two. A pair is used deliberately as a visual separator
+    /// in spec values ("12-bit  ->  0 - 4095 counts", "ADC1  IN0"), and a first
+    /// cut of this flagged 684 of them. What a joined continuation leaves is a
+    /// run of SOURCE INDENTATION - twenty-odd columns, never two.
+    ///
+    /// The scar a backslash-continued literal leaves once rustfmt joins it back
+    /// onto one physical line: the source indentation becomes real spaces INSIDE
+    /// the sentence. Invisible in review, obvious in the panel.
+    ///
+    /// Eighteen shipped in this file at once - every PARL_IO, MCPWM, PCNT and
+    /// RMT description, i.e. the Espressif peripherals whose pads a user clicks
+    /// to find out what they are. The generated-code guard in `dialogs.rs` does
+    /// not cover UI strings, so this is the other half.
+    ///
+    /// Driven from the SHIPPED chips rather than a list of variants, so a new
+    /// peripheral's text is covered the day its pads appear.
+    #[test]
+    fn no_pin_info_text_has_a_gap_in_it() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+
+        let mut bad: Vec<String> = Vec::new();
+        let mut seen = 0usize;
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            for pin in mcu.iter_all_pins() {
+                for f in &pin.available_functions {
+                    let info = f.info();
+                    seen += 1;
+                    if info.description.contains("    ") {
+                        bad.push(format!("{}/{:?}: {}", d.id, f, info.description));
+                    }
+                    for (k, v) in &info.specs {
+                        if v.contains("    ") {
+                            bad.push(format!("{}/{:?} [{k}]: {v}", d.id, f));
+                        }
+                    }
+                }
+            }
+        }
+        bad.sort();
+        bad.dedup();
+        assert!(
+            seen > 1000,
+            "only {seen} texts checked - the scan found nothing"
+        );
+        assert!(
+            bad.is_empty(),
+            "{} gap(s) in pin info text:\n{}",
+            bad.len(),
+            bad.iter().take(5).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
 }
