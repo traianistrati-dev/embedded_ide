@@ -875,6 +875,54 @@ fn comp_card(
 mod tests {
     use super::*;
 
+    /// A watchdog on its own keeps the `pins/configs/` path alive.
+    ///
+    /// `sync_config_files` drops the WHOLE subtree - and `pub mod configs;` with
+    /// it - when the file list is empty, which would lose a project whose only
+    /// generated config is a watchdog. It does not happen: the watchdog's files
+    /// are extended into the backend's own list before that check ever sees it
+    /// (`codegen::family` does it in four places).
+    ///
+    /// Measured rather than argued: with nothing wired, asking for a watchdog
+    /// takes the list from empty to exactly one file on every chip that has a
+    /// watchdog backend at all.
+    #[test]
+    fn a_watchdog_alone_still_produces_a_config_file() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::codegen::family::is_esp;
+
+        for d in builtin_definitions() {
+            let esp = is_esp(&d.family);
+            if !esp && d.family != "stm32f1" {
+                continue; // no watchdog backend to speak of
+            }
+            let mut mcu = d.build_mcu();
+            assert!(
+                mcu.config_files().is_empty(),
+                "{}: something is wired before the test wires anything",
+                d.id
+            );
+
+            if esp {
+                mcu.watchdog.rwdt = Some(wdg::EspWdtConfig {
+                    timeout_us: 2_000_000,
+                });
+            } else {
+                mcu.watchdog.iwdg = Some(wdg::IwdgConfig {
+                    timeout_us: 2_000_000,
+                });
+            }
+
+            let names: Vec<String> = mcu.config_files().into_iter().map(|(n, _)| n).collect();
+            assert_eq!(
+                names,
+                [if esp { "rwdt.rs" } else { "iwdg.rs" }],
+                "{}: the watchdog did not reach the config file list, so                  `sync_config_files` would drop the whole configs/ subtree",
+                d.id
+            );
+        }
+    }
+
     /// The DMA card follows the FAMILY on Espressif, not the runtime.
     ///
     /// `with_dma` lives on esp-hal's BLOCKING drivers, so a Blocking ESP project
