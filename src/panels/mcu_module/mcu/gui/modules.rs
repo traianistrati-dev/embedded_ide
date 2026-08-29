@@ -4339,7 +4339,7 @@ pub fn module_config_ui(
                                 .color(egui::Color32::GRAY),
                         )
                         .on_hover_text(
-                            "The USB Serial/JTAG peripheral enumerates with Espressif's own VID:PID and a fixed descriptor set. Nothing here can change it                              - a board that needs its own identity uses a USB stack over the OTG controller instead, which this chip may not have.",
+                            "The USB Serial/JTAG peripheral enumerates with Espressif's own VID:PID and a fixed descriptor set. Nothing here can change it - a board that needs its own identity uses a USB stack over the OTG controller instead, which this chip may not have.",
                         );
                         ui.end_row();
                         ui.label("Port");
