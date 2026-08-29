@@ -2622,8 +2622,9 @@ pub fn module_config_ui(
                     egui::ComboBox::from_id_salt("baud")
                         .selected_text(cfg.baud_rate.to_string())
                         .show_ui(ui, |ui| {
-                            for b in [9600u32, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
-                            {
+                            // The Serial tab's list, not a second copy of it:
+                            // opening that tab seeds its baud from here.
+                            for b in crate::serial::BAUDS {
                                 ui.selectable_value(&mut cfg.baud_rate, b, b.to_string());
                             }
                         });

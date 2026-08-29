@@ -14,7 +14,7 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 
 /// Common baud rates offered in the dropdown.
-const BAUDS: [u32; 8] = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+use crate::serial::BAUDS;
 
 /// Height of the send-area resize handle / minimum send-area height.
 const HANDLE_H: f32 = 6.0;

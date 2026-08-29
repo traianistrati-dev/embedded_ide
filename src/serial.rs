@@ -34,6 +34,23 @@ pub enum Dir {
 /// INSIDE a frame at common baud rates, comfortably shorter than the turnaround
 /// between a command and its reply.
 pub const DEFAULT_BLOCK_GAP_MS: u64 = 20;
+/// The rates both baud pickers offer - the Serial tab's and the USART Virtual
+/// Module's.
+///
+/// ONE list, because the two are joined: opening the Serial tab seeds its baud
+/// from the first USART module, so a rate one of them offers and the other does
+/// not is a rate the user can be handed and then cannot re-select. They were two
+/// hand-kept copies in two files with nothing comparing them.
+///
+/// 74880 is the odd one and is here for the Espressif parts. `esp32` and
+/// `esp32c2` carry a 26 MHz crystal - their own metadata says so, and it is the
+/// DEFAULT for both - while the ROM sizes its UART divisor for 40 MHz, so the
+/// boot log arrives at 115200 x 26 / 40, which is exactly 74880. Without it that
+/// log is unreadable here at any setting, because neither picker takes a typed
+/// value.
+pub const BAUDS: [u32; 9] = [
+    9600, 19200, 38400, 57600, 74880, 115200, 230400, 460800, 921600,
+];
 
 /// One contiguous burst of bytes in one direction.
 ///
@@ -1512,5 +1529,79 @@ mod tests {
         );
         // Trailing partial chunk is ignored ("ON" + leftover 'X').
         assert_eq!(seq_counts(b"ONX", 2), vec![(b"ON".to_vec(), 1)]);
+    }
+}
+
+#[cfg(test)]
+mod baud_list_tests {
+    use super::BAUDS;
+
+    /// The default a fresh console starts at has to be selectable, or the very
+    /// first thing the combo shows is a value it cannot get back to.
+    #[test]
+    fn the_default_baud_is_in_the_list() {
+        assert!(BAUDS.contains(&115_200), "{BAUDS:?}");
+    }
+
+    /// A USART Virtual Module's default too - that is the value the Serial tab
+    /// is SEEDED with the first time it opens, so the two must agree.
+    #[test]
+    fn the_seed_from_a_usart_module_is_selectable() {
+        let seeded = crate::panels::mcu_module::modules::model::UsartModuleConfig::new(1).baud_rate;
+        assert!(
+            BAUDS.contains(&seeded),
+            "a module seeds {seeded} baud and the picker cannot show it: {BAUDS:?}"
+        );
+    }
+
+    /// Sorted and unique: the combo renders in order, and a repeat would draw
+    /// the same row twice.
+    #[test]
+    fn the_list_is_sorted_and_has_no_repeats() {
+        assert!(BAUDS.windows(2).all(|w| w[0] < w[1]), "{BAUDS:?}");
+    }
+
+    /// The Espressif boot-log rate on a 26 MHz part, which is the reason this
+    /// list is not just the eight round numbers. 115200 x 26 / 40 = 74880
+    /// exactly, so the arithmetic is checkable even though the ROM's divisor
+    /// choice is not visible from here.
+    #[test]
+    fn the_26mhz_boot_log_rate_is_offered() {
+        assert_eq!(115_200 * 26 / 40, 74_880);
+        assert!(
+            BAUDS.contains(&74_880),
+            "an esp32 or esp32c2 boot log is unreadable at every other rate"
+        );
+    }
+
+    /// And the parts that need it really do carry a 26 MHz crystal - read from
+    /// the shipped definitions, not asserted from memory.
+    #[test]
+    fn the_parts_that_need_it_run_a_26mhz_crystal() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        use crate::panels::mcu_module::clock::graph::model::NodeKind;
+        use crate::panels::mcu_module::clock::model::ClockConfig;
+
+        let mut found = Vec::new();
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            let ClockConfig::Graph(gc) = &mcu.clock else {
+                continue;
+            };
+            // The crystal is a RANGE, and 26 MHz is where the C2's starts -
+            // which is also the value its state defaults to.
+            let has26 = gc.graph.nodes.iter().any(|n| {
+                n.id == "xtal"
+                    && matches!(&n.kind, NodeKind::Source { min_hz, .. } if *min_hz == 26_000_000)
+            });
+            if has26 {
+                found.push(d.id.clone());
+            }
+        }
+        assert!(
+            found.iter().any(|id| id == "esp32c2"),
+            "no bundled part offers a 26 MHz crystal, so the rate above needs a \
+             different justification: {found:?}"
+        );
     }
 }
