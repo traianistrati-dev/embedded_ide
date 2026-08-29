@@ -929,7 +929,7 @@ fn run_session(
     let cfg = Arc::new(SessionCfg {
         project_dir: project_dir.to_path_buf(),
         chip: chip.to_string(),
-        probe: probe.filter(|s| !s.is_empty()),
+        probe: crate::probe::selector(probe.as_deref()),
         elf,
         breakpoints,
     });

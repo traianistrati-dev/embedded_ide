@@ -31,6 +31,19 @@ impl ProbeInfo {
     }
 }
 
+/// A probe selector as probe-rs should see it, or `None` for "let it choose".
+///
+/// One place, because two callers had drifted: the RTT tab passes it as
+/// `--probe <sel>` and the debugger as the DAP `launch` object's `probe` field,
+/// and both were filtering with a bare `is_empty()`. A selector of SPACES then
+/// survived and went out as `--probe "   "` / `"probe": "   "`, which probe-rs
+/// rejects - where the empty case is meant to mean auto-select.
+pub fn selector(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 /// Run `probe-rs list` and parse the connected probes. `Ok(vec![])` when none
 /// are attached; `Err` only when the binary itself cannot be run.
 pub fn list_probes() -> Result<Vec<ProbeInfo>, String> {
@@ -321,6 +334,31 @@ pub fn chip_gap(chip: &str) -> Option<String> {
 #[cfg(test)]
 mod chip_gap_tests {
     use super::*;
+
+    /// One normaliser, because two callers had drifted apart.
+    ///
+    /// The RTT tab spends it as `--probe <sel>`, the debugger as the DAP
+    /// `launch` object's `probe` field. Both filtered with a bare `is_empty()`,
+    /// so a selector of spaces survived and went out as `--probe "   "` -
+    /// rejected by probe-rs, where the absent case means auto-select.
+    #[test]
+    fn a_blank_selector_means_auto_select() {
+        for blank in [None, Some(""), Some(" "), Some("   \t ")] {
+            assert_eq!(selector(blank), None, "{blank:?}");
+        }
+    }
+
+    /// A real selector survives, and is trimmed rather than passed with the
+    /// whitespace a copy-paste brings along.
+    #[test]
+    fn a_real_selector_is_kept_and_trimmed() {
+        assert_eq!(selector(Some("303a:1001")).as_deref(), Some("303a:1001"));
+        assert_eq!(
+            selector(Some("  0483:3748:0671FF56  ")).as_deref(),
+            Some("0483:3748:0671FF56"),
+            "a pasted selector carries spaces the user cannot see"
+        );
+    }
 
     const SAMPLE: &str = "\
 Available chips:

@@ -294,10 +294,7 @@ pub(crate) fn probe_rs_failure(console: &TerminalState) -> Option<String> {
 /// share one selector.
 fn probe_rs_args(sub: &str, chip: &str, probe: Option<&str>, elf: &std::path::Path) -> Vec<String> {
     let mut args = vec![sub.to_owned(), "--chip".to_owned(), chip.to_owned()];
-    // `trim`, not just `is_empty`: a selector of spaces is not a selector, and
-    // `--probe "   "` is a parse error from probe-rs rather than the "let it
-    // choose" the empty case means.
-    if let Some(sel) = probe.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(sel) = crate::probe::selector(probe) {
         args.push("--probe".to_owned());
         args.push(sel.to_owned());
     }
