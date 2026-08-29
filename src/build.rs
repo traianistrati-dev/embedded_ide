@@ -586,20 +586,30 @@ fn run_cargo(
     // `rustup target add` is idempotent — exits 0 immediately when already
     // installed, so the overhead on subsequent builds is negligible.
     let t = std::time::Instant::now();
-    let ensured = ensure_target(target);
-    rec.cmd_phase(
-        "rustup target add",
-        format!("rustup target add {target}"),
-        t.elapsed(),
-        ensured.as_ref().ok().map(|_| 0),
-    );
-    if let Err(e) = ensured {
-        activity.lock().unwrap().push(rec.finish());
-        return BuildState::Failed(format!(
-            "Could not install target `{target}` via rustup: {e}\n\n\
-             Make sure `rustup` is in PATH or install the target manually:\n\
-             rustup target add {target}"
-        ));
+    if !target_comes_from_rustup(target) {
+        // Recorded, not skipped silently: the Activity tab would otherwise show
+        // one fewer phase on three chips than on the other eleven, and the
+        // reader would wonder which step went missing.
+        rec.add(
+            "rustup target add (not applicable - Xtensa ships with the esp toolchain)",
+            t.elapsed(),
+        );
+    } else {
+        let ensured = ensure_target(target);
+        rec.cmd_phase(
+            "rustup target add",
+            format!("rustup target add {target}"),
+            t.elapsed(),
+            ensured.as_ref().ok().map(|_| 0),
+        );
+        if let Err(e) = ensured {
+            activity.lock().unwrap().push(rec.finish());
+            return BuildState::Failed(format!(
+                "Could not install target `{target}` via rustup: {e}\n\n\
+                 Make sure `rustup` is in PATH or install the target manually:\n\
+                 rustup target add {target}"
+            ));
+        }
     }
 
     // ── Step 2: cargo check / clippy ─────────────────────────────────────────
@@ -767,6 +777,29 @@ fn run_cargo(
 
 /// Run `rustup target add <target>`, returning an error only if rustup itself
 /// couldn't be launched (target already installed → exit 0, not an error).
+/// Whether `rustup target add` is how this target arrives at all.
+///
+/// It is not, for Xtensa. No rustup channel has a prebuilt `xtensa-*` artifact:
+/// the target ships INSIDE Espressif's `esp` toolchain, which `espup` installs
+/// and the generated project's `rust-toolchain.toml` selects. Asking rustup for
+/// it fails with
+///
+/// ```text
+/// error: toolchain 'stable-x86_64-pc-windows-msvc' has no prebuilt artifacts
+///        available for target 'xtensa-esp32s3-none-elf'
+/// ```
+///
+/// and exit 1 - which aborted the whole run, so Cargo Check, Build and Clippy
+/// were all dead on the esp32, esp32s2 and esp32s3, with an error telling the
+/// user to run by hand the very command that cannot work.
+///
+/// A missing `esp` toolchain is still diagnosed, and in the right place: the
+/// Tools tab lists `espup` and `esp toolchain` as Blocking for exactly these
+/// targets (see `required_tools`).
+pub(crate) fn target_comes_from_rustup(target: &str) -> bool {
+    !target.starts_with("xtensa")
+}
+
 fn ensure_target(target: &str) -> std::io::Result<()> {
     let status = no_window(&mut Command::new("rustup"))
         .args(["target", "add", target])
@@ -1126,6 +1159,70 @@ mod tests {
             "children": []
         });
         assert!(extract_rename(&msg).is_none());
+    }
+}
+
+#[cfg(test)]
+mod target_install_tests {
+    use super::target_comes_from_rustup;
+
+    /// The three chips whose build this used to kill outright.
+    ///
+    /// `rustup target add xtensa-esp32s3-none-elf` exits 1 on every machine -
+    /// no channel has a prebuilt artifact for it - and `run_cargo` returned
+    /// `BuildState::Failed` on that, so Cargo Check, Build and Clippy were all
+    /// dead on the esp32, esp32s2 and esp32s3. The message even told the user to
+    /// run the failing command by hand.
+    #[test]
+    fn xtensa_targets_are_never_asked_of_rustup() {
+        for t in [
+            "xtensa-esp32-none-elf",
+            "xtensa-esp32s2-none-elf",
+            "xtensa-esp32s3-none-elf",
+        ] {
+            assert!(!target_comes_from_rustup(t), "{t} would abort the build");
+        }
+    }
+
+    /// Everything else still goes through rustup, which is how those targets
+    /// really do arrive - and skipping it would break a fresh machine silently.
+    #[test]
+    fn every_other_target_still_comes_from_rustup() {
+        for t in [
+            "riscv32imc-unknown-none-elf",
+            "riscv32imac-unknown-none-elf",
+            "thumbv7em-none-eabihf",
+            "thumbv6m-none-eabi",
+            "thumbv8m.main-none-eabihf",
+        ] {
+            assert!(target_comes_from_rustup(t), "{t} needs rustup");
+        }
+    }
+
+    /// Against the shipped definitions, so the rule follows the chips rather
+    /// than a list someone has to remember to extend.
+    #[test]
+    fn every_bundled_chip_is_classified_by_its_own_target() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        let mut skipped = Vec::new();
+        for d in builtin_definitions() {
+            let t = &d.project.target;
+            assert_eq!(
+                target_comes_from_rustup(t),
+                !t.starts_with("xtensa"),
+                "{}: {t}",
+                d.id
+            );
+            if !target_comes_from_rustup(t) {
+                skipped.push(d.id.clone());
+            }
+        }
+        skipped.sort();
+        assert_eq!(
+            skipped,
+            ["esp32", "esp32s2", "esp32s3"],
+            "exactly the Xtensa parts skip the rustup step"
+        );
     }
 }
 
