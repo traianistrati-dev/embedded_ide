@@ -453,6 +453,9 @@ fn main() -> eframe::Result<()> {
     // (build, LSP, watcher) must see the same answer. A second IDE window gets
     // its own slot instead of fighting over one directory (see `workspace`).
     workspace::init();
+    // Reclaim the slots of windows long gone. Off-thread, and only ever
+    // touching directories no live process holds.
+    workspace::sweep_stale_slots();
 
     // Resolve the MSVC toolchain env off-thread so the first build doesn't pay
     // for the one-off `vcvars64.bat` capture (see `msvc`).

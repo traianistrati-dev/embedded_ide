@@ -243,10 +243,34 @@ fn irq_for(family: &str, channel: &str) -> Option<String> {
 ///
 /// A chip that is neither still answers `None`, and the caller keeps its
 /// `TODO`. Guessing would produce code that compiles and moves the wrong bytes.
+/// Why [`DmaAllocator::take_named_or`] would not hand over a named channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedRefusal {
+    /// Another peripheral in this project already has it - two Virtual Modules
+    /// pinned to the same channel. The user can see this one and undo it.
+    AlreadyTaken,
+    /// No interrupt name is known for it, so `bind_interrupts!` would not
+    /// compile. A fact about the chip, not a mistake.
+    UnknownIrq,
+}
+
 #[derive(Debug, Default)]
 pub struct DmaAllocator {
     family: String,
     used: BTreeSet<String>,
+    /// Channels already HANDED OUT, as opposed to merely out of circulation.
+    ///
+    /// `used` answers "may the allocator pick this?", and a hand-pinned channel
+    /// enters it BEFORE anything is allocated so nothing else takes it. That
+    /// makes `used` useless for the second question - "has this already been
+    /// GIVEN to a peripheral?" - because a pinned channel is in it before its
+    /// own owner asks for it.
+    ///
+    /// Without the distinction, two modules pinned to one channel were both
+    /// handed it: `channels_for` offers every channel without excluding the
+    /// ones other modules already name, so pinning `DMA1_CH4` on USART1 TX and
+    /// again on SPI1 TX emitted it twice.
+    claimed: BTreeSet<String>,
     /// What the vendor database says about THIS chip. `None` for a built-in
     /// chip or one imported before the data was captured.
     chip: Option<crate::panels::mcu_module::mcu_def::DmaDef>,
@@ -257,6 +281,7 @@ impl DmaAllocator {
         Self {
             family: family.to_owned(),
             used: BTreeSet::new(),
+            claimed: BTreeSet::new(),
             chip: None,
         }
     }
@@ -270,6 +295,7 @@ impl DmaAllocator {
         Self {
             family: family.to_owned(),
             used: BTreeSet::new(),
+            claimed: BTreeSet::new(),
             chip: dma.cloned(),
         }
     }
@@ -286,6 +312,7 @@ impl DmaAllocator {
             .take_from_chip(bus, instance, dir)
             .or_else(|| self.take_from_family(bus, instance, dir))?;
         self.used.insert(pick.peri.clone());
+        self.claimed.insert(pick.peri.clone());
         Some(pick)
     }
 
@@ -298,18 +325,41 @@ impl DmaAllocator {
     /// `mcu.config` is the user's business. What CANNOT be honoured is a
     /// channel whose interrupt is unknown, because the binding would not
     /// compile.
+    /// A channel already handed to another peripheral is refused, and the
+    /// caller falls back to its `TODO` - the same outcome as any other channel
+    /// it cannot resolve. Silently emitting it twice was worse than failing:
+    /// embassy moves a `Peri`, so the SECOND use is the one that does not
+    /// compile, and the error names a line the user never edited.
     pub fn take_named(&mut self, peri: &str) -> Option<DmaPick> {
+        self.take_named_or(peri).ok()
+    }
+
+    /// As [`Self::take_named`], but saying WHY it refused.
+    ///
+    /// The two reasons want different words in the generated `TODO`: one is a
+    /// mistake the user can see and undo, the other is a fact about the chip.
+    pub fn take_named_or(&mut self, peri: &str) -> Result<DmaPick, NamedRefusal> {
+        if self.claimed.contains(peri) {
+            return Err(NamedRefusal::AlreadyTaken);
+        }
         let irq = self
             .chip
             .as_ref()
             .and_then(|c| c.channels.iter().find(|c| c.peri == peri))
             .map(|c| c.irq.clone())
-            .or_else(|| irq_for(&self.family, peri))?;
+            .or_else(|| irq_for(&self.family, peri))
+            .ok_or(NamedRefusal::UnknownIrq)?;
         self.used.insert(peri.to_owned());
-        Some(DmaPick {
+        self.claimed.insert(peri.to_owned());
+        Ok(DmaPick {
             peri: peri.to_owned(),
             irq,
         })
+    }
+
+    /// Whether this channel has already been handed to a peripheral.
+    pub fn is_claimed(&self, peri: &str) -> bool {
+        self.claimed.contains(peri)
     }
 
     /// Put a channel out of circulation without emitting anything for it.
@@ -564,6 +614,66 @@ mod tests {
     /// A channel pinned by hand in a Virtual Module: honoured, and taken out
     /// of circulation BEFORE anything is allocated, so whichever peripheral
     /// happens to be emitted first cannot claim it.
+    /// Two Virtual Modules pinned to ONE channel.
+    ///
+    /// `reserve` puts a hand-pinned channel out of circulation before anything
+    /// is allocated, so `used` says "taken" about a channel whose own owner has
+    /// not asked for it yet. That made `used` unable to answer the second
+    /// question - has this been HANDED OUT - and both peripherals got it. The
+    /// generated code then moved the same `Peri` twice, and the error landed on
+    /// the second peripheral's line, which the user never edited.
+    #[test]
+    fn one_channel_is_never_handed_to_two_peripherals() {
+        let def = DmaDef {
+            mux: true,
+            channels: vec![
+                chan("DMA1_CH1", "DMA1_CHANNEL1"),
+                chan("DMA1_CH2", "DMA1_CHANNEL2"),
+            ],
+            requests: Vec::new(),
+        };
+        let mut a = DmaAllocator::for_chip("stm32g4", Some(&def));
+        // Both modules name CH1, so it is reserved once and asked for twice.
+        a.reserve("DMA1_CH1");
+        a.reserve("DMA1_CH1");
+
+        assert_eq!(
+            a.take_named("DMA1_CH1").expect("the first owner").peri,
+            "DMA1_CH1"
+        );
+        assert_eq!(
+            a.take_named_or("DMA1_CH1"),
+            Err(NamedRefusal::AlreadyTaken),
+            "the second owner must be refused, not handed the same channel"
+        );
+
+        // And the refusal is specific: an unknown channel is a different fact.
+        assert_eq!(
+            a.take_named_or("DMA9_CH9"),
+            Err(NamedRefusal::UnknownIrq),
+            "no interrupt is known for it, which is not the user's mistake"
+        );
+    }
+
+    /// Automatic allocation claims too, so a pinned channel cannot be taken by
+    /// a peripheral that was allocated one earlier.
+    #[test]
+    fn an_automatically_allocated_channel_is_claimed_as_well() {
+        let def = DmaDef {
+            mux: true,
+            channels: vec![chan("DMA1_CH1", "DMA1_CHANNEL1")],
+            requests: Vec::new(),
+        };
+        let mut a = DmaAllocator::for_chip("stm32g4", Some(&def));
+        assert_eq!(a.take(Bus::Usart, 1, Dir::Tx).unwrap().peri, "DMA1_CH1");
+        assert!(a.is_claimed("DMA1_CH1"));
+        assert_eq!(
+            a.take_named_or("DMA1_CH1"),
+            Err(NamedRefusal::AlreadyTaken),
+            "pinning a channel the allocator already gave away must fail"
+        );
+    }
+
     #[test]
     fn a_reserved_channel_is_kept_for_whoever_pinned_it() {
         let def = DmaDef {

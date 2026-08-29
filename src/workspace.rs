@@ -61,6 +61,88 @@ pub fn init() {
     let _ = WORKSPACE.set((dir, 0));
 }
 
+/// How long an unclaimed slot may sit before its build cache is thrown away.
+///
+/// Not zero, and not "every slot but ours". A free slot is REUSABLE - the next
+/// window takes it and inherits a warm `target/` - so deleting one the moment
+/// nobody holds it would make a second window cold every single time. Two weeks
+/// is long past "I closed that window an hour ago" and well short of forever.
+const STALE_SLOT_DAYS: u64 = 14;
+
+/// Delete workspace slots nobody has used in a fortnight.
+///
+/// Slots are reused, so their COUNT is bounded by the most windows ever open at
+/// once - but a slot used once keeps its `target/` for good. Six of them had
+/// accumulated on the author's machine holding 8.3 GB, on a disk that had
+/// reached zero bytes free; nothing in the IDE had ever removed one.
+///
+/// Runs on its own thread: the scan is cheap but the delete is gigabytes, and
+/// startup must not wait for a disk.
+///
+/// Safety comes from the same lock that claims a slot. A directory is only
+/// removed when its lock can be taken - which means no live process holds it -
+/// AND it is older than [`STALE_SLOT_DAYS`]. Our own slot is skipped outright:
+/// we hold its lock, so it could never pass the first test anyway, and relying
+/// on that would be a subtle way to depend on lock semantics from two places.
+pub fn sweep_stale_slots() {
+    let Some((ours, _)) = WORKSPACE.get().cloned() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let base = std::env::temp_dir();
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return;
+        };
+        let cutoff = std::time::Duration::from_secs(STALE_SLOT_DAYS * 24 * 60 * 60);
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if sweepable(&dir, &ours, cutoff) {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    });
+}
+
+/// May `dir` be deleted? Every guard the sweep has, in one place.
+///
+/// Split out of the loop so it can be TESTED. A sweep whose decision lives
+/// inside a spawned thread over the real temp directory is a sweep nobody can
+/// check, and this one deletes gigabytes.
+fn sweepable(dir: &Path, ours: &Path, cutoff: std::time::Duration) -> bool {
+    if dir == ours || !dir.is_dir() {
+        return false;
+    }
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !name.starts_with("embedded_ide_0_check") {
+        return false;
+    }
+    // Age from the directory itself: a `target/` written yesterday updates it,
+    // so "old" really does mean "nothing has been built here".
+    let stale = std::fs::metadata(dir)
+        .and_then(|m| m.modified())
+        .and_then(|t| t.elapsed().map_err(std::io::Error::other))
+        .is_ok_and(|age| age > cutoff);
+    if !stale {
+        return false;
+    }
+    // The pid-fallback directories carry no lock file, so the age gate is all
+    // they get - which is right: nothing ever reuses one, and a fortnight-old
+    // pid is not running.
+    let lock_path = dir.join(".instance.lock");
+    if lock_path.exists() {
+        match try_lock(&lock_path) {
+            // Held by a live window that simply has not built lately.
+            None => return false,
+            // Dropped at once: holding it would reserve a slot we are about to
+            // delete.
+            Some(f) => drop(f),
+        }
+    }
+    true
+}
+
 /// Directory name for `slot`. Slot 1 is the historical path — unsuffixed, so an
 /// existing install keeps its build cache.
 fn slot_name(slot: u32) -> String {
@@ -328,8 +410,6 @@ mod tests {
         let other = base.join("Other");
         std::fs::create_dir_all(&other).unwrap();
         assert_ne!(direct, project_lock_path(&other));
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// End to end: the second claim on a folder is refused, and releasing the
@@ -368,5 +448,111 @@ mod tests {
         };
         assert_eq!(name(1), "");
         assert_eq!(name(3), "_3");
+    }
+}
+
+#[cfg(test)]
+mod stale_slot_sweep {
+    use super::{sweepable, try_lock};
+    use std::time::Duration;
+
+    /// Everything is old (cutoff 0) / nothing is (cutoff a century).
+    const OLD: Duration = Duration::from_secs(0);
+    const NEVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+
+    /// A scratch directory that removes itself when the test ends.
+    ///
+    /// Not a bare path plus a `remove_dir_all` at the bottom of each test: two
+    /// of the five forgot it, and left directories in the very temp folder this
+    /// module exists to stop filling up.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
+        let d = std::env::temp_dir().join(format!("eide_sweep_test_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch");
+        Scratch(d)
+    }
+
+    /// A slot nobody holds, old enough, goes.
+    #[test]
+    fn an_abandoned_slot_is_swept() {
+        let base = scratch("abandoned");
+        let slot = base.join("embedded_ide_0_check_9");
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join(".instance.lock"), b"").unwrap();
+        assert!(sweepable(&slot, &base, OLD));
+    }
+
+    /// A LIVE window keeps its slot, however long since it last built.
+    ///
+    /// This is the guard that matters: the lock is the only thing standing
+    /// between the sweep and another window's workspace.
+    #[test]
+    fn a_held_slot_is_never_swept() {
+        let base = scratch("held");
+        let slot = base.join("embedded_ide_0_check_9");
+        std::fs::create_dir_all(&slot).unwrap();
+        let held = try_lock(&slot.join(".instance.lock")).expect("take the lock");
+        assert!(!sweepable(&slot, &base, OLD), "a locked slot is in use");
+        drop(held);
+        // ...and once released, the same directory is fair game.
+        assert!(sweepable(&slot, &base, OLD));
+    }
+
+    /// A slot used recently keeps its warm `target/`.
+    ///
+    /// Slots are REUSED - deleting a free one immediately would hand the next
+    /// window a cold build every time.
+    #[test]
+    fn a_recent_slot_is_kept() {
+        let base = scratch("recent");
+        let slot = base.join("embedded_ide_0_check_2");
+        std::fs::create_dir_all(&slot).unwrap();
+        assert!(
+            !sweepable(&slot, &base, NEVER),
+            "just created, so not stale"
+        );
+    }
+
+    /// Our own slot, and anything that is not a slot at all, are untouchable.
+    #[test]
+    fn our_own_slot_and_strangers_are_untouchable() {
+        let base = scratch("ours");
+        let ours = base.join("embedded_ide_0_check");
+        std::fs::create_dir_all(&ours).unwrap();
+        assert!(!sweepable(&ours, &ours, OLD), "never our own workspace");
+
+        let stranger = base.join("someone_elses_cache");
+        std::fs::create_dir_all(&stranger).unwrap();
+        assert!(!sweepable(&stranger, &base, OLD), "name gate");
+
+        let file = base.join("embedded_ide_0_check_not_a_dir");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(!sweepable(&file, &base, OLD), "files are not slots");
+    }
+
+    /// A pid-fallback directory has no lock file; the age gate alone decides.
+    #[test]
+    fn a_pid_fallback_dir_is_swept_on_age_alone() {
+        let base = scratch("pid");
+        let slot = base.join("embedded_ide_0_check_p999999");
+        std::fs::create_dir_all(&slot).unwrap();
+        assert!(!slot.join(".instance.lock").exists());
+        assert!(sweepable(&slot, &base, OLD));
+        assert!(!sweepable(&slot, &base, NEVER), "and age still gates it");
     }
 }

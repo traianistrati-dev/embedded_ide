@@ -761,7 +761,42 @@ fn pwm_config_file(mcu: &Mcu, slice: u8, chans: &[(u8, u8)]) -> String {
         "/// Enable the slice and route each wired channel to its pad.\npub fn init(\n    slice: &mut Handle,\n{}) {{\n",
         params.join("")
     ));
-    o.push_str("    slice.set_ph_correct();\n    slice.enable();\n");
+    o.push_str("    slice.set_ph_correct();\n");
+    // The frequency from the Virtual Module. It used to be dropped here: the
+    // blocking emitter set only `ph_correct` and `enable`, so the slice ran at
+    // the HAL's default divider whatever the module said, while the async
+    // emitter honoured the very same field. Two runtimes, one setting, two
+    // answers.
+    //
+    // Programmed against the clock the Clock tab actually builds, not embassy's
+    // default - this backend calls `init_clocks_and_plls` with `PLL_SYS_CFG`.
+    //
+    // `set_ph_correct` above halves the output: phase-correct counts up AND
+    // back down, so one period is 2*(top+1) ticks. The pair is derived for the
+    // counter, then the comment says what the pad really sees.
+    let want = cfg.map_or(0, |c| c.freq_hz);
+    if want > 0 {
+        let sys = blocking_sys_hz(mcu);
+        // HALF the clock, because `set_ph_correct` above counts up AND back
+        // down: one period is 2*(top+1) ticks, not (top+1). Deriving `top` from
+        // the whole clock would put the pad at half the frequency asked for -
+        // which is what a first cut of this did, arithmetically right and
+        // wrong on the wire. The async emitter leaves embassy's
+        // `phase_correct: false`, so it needs no such halving; the two runtimes
+        // now land on the same output frequency by different routes.
+        let (div, top) = pwm_div_top_at(sys / 2, want);
+        let got = pwm_actual_hz_at(sys / 2, div, top);
+        o.push_str(&format!(
+            "    // {want} Hz asked for; phase-correct, so the counter runs at\n"
+        ));
+        o.push_str(&format!(
+            "    // 2 x {want} Hz and the pad sees {got} Hz.\n"
+        ));
+        o.push_str(&format!("    slice.set_div_int({div});\n"));
+        o.push_str("    slice.set_div_frac(0);\n");
+        o.push_str(&format!("    slice.set_top({top});\n"));
+    }
+    o.push_str("    slice.enable();\n");
     for (channel, n) in chans {
         let ch = if *channel == 1 {
             "channel_a"
@@ -1686,6 +1721,97 @@ mod blocking_pwm_is_generated {
         let code = mcu.fresh_main_rs();
         assert!(code.contains("pins::configs::pwm3::init("), "{code}");
     }
+
+    /// The frequency set in the Virtual Module has to reach the BLOCKING file.
+    ///
+    /// It did not: the blocking emitter wrote `set_ph_correct()` and
+    /// `enable()` and nothing else, so a slice asked for 20 kHz ran at the
+    /// HAL's default divider - while the async emitter, reading the very same
+    /// `freq_hz`, programmed it. One setting, two runtimes, two answers, and
+    /// nothing on screen to say so.
+    #[test]
+    fn a_blocking_slice_is_programmed_to_the_frequency_it_was_given() {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        mcu.runtime = Runtime::Blocking;
+        for p in mcu.iter_all_pins_mut() {
+            if p.name == "GP6" {
+                p.selected_function = PinFunction::TimerPwm {
+                    timer: 3,
+                    channel: 1,
+                };
+            }
+        }
+        mcu.reconcile_modules();
+        let want = 20_000;
+        let mut found = false;
+        for m in &mut mcu.modules {
+            if let crate::panels::mcu_module::modules::ModuleConfig::Timer(c) = &mut m.config {
+                c.freq_hz = want;
+                found = true;
+            }
+        }
+        assert!(found, "no Timer module was reconciled for the wired pad");
+
+        let files = mcu.config_files();
+        let pwm = &files
+            .iter()
+            .find(|(n, _)| n == "pwm3.rs")
+            .expect("pwm3.rs")
+            .1;
+        // Not "does it mention a divider" - what does the PAD actually see.
+        // Phase-correct counts up and back down, so one period is 2*(top+1)
+        // ticks; deriving `top` from the whole clock is arithmetically fine and
+        // puts the output at HALF the request, which is the mistake this
+        // guards against.
+        assert!(
+            pwm.contains("set_ph_correct()"),
+            "the halving below assumes phase-correct is still on:\n{pwm}"
+        );
+        let num = |key: &str| -> u32 {
+            let at = pwm
+                .find(key)
+                .unwrap_or_else(|| panic!("no {key} in:\n{pwm}"));
+            pwm[at + key.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .expect("a number")
+        };
+        let (div, top) = (num("set_div_int("), num("set_top("));
+        let out = 125_000_000 / (2 * div * (top + 1));
+        assert_eq!(
+            out, want,
+            "asked for {want} Hz, the pad gets {out} Hz (div {div}, top {top})"
+        );
+    }
+
+    /// Against the clock the project really builds, not embassy's default.
+    ///
+    /// The blocking backend hands `init_clocks_and_plls` the Clock tab's
+    /// `PLL_SYS_CFG`, so a project running at something other than 125 MHz
+    /// would get a divider computed for a clock it does not have.
+    #[test]
+    fn the_blocking_divider_follows_the_clock_tab_not_embassys_default() {
+        // 125 MHz and 150 MHz are the two the async path assumes; asking the
+        // arithmetic for a third shows it is the input, not a constant.
+        let (d125, t125) = super::pwm_div_top_at(125_000_000, 20_000);
+        let (d100, t100) = super::pwm_div_top_at(100_000_000, 20_000);
+        assert_ne!(
+            (d125, t125),
+            (d100, t100),
+            "the same request on a different clock must not give the same pair"
+        );
+        for (sys, div, top) in [(125_000_000, d125, t125), (100_000_000, d100, t100)] {
+            let got = super::pwm_actual_hz_at(sys, div, top);
+            let err = (got as i64 - 20_000).abs();
+            assert!(err * 1000 <= 20_000, "{sys} Hz sys came out {got} Hz");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2172,11 +2298,34 @@ pub struct AsyncRpBackend;
 /// Printing the ASKED-FOR frequency beside a divider that cannot reach it is
 /// how a generated comment starts lying quietly.
 fn pwm_actual_hz(family: &str, div: u32, top: u16) -> u32 {
-    let sys: u32 = if family == "rp235x" {
+    pwm_actual_hz_at(async_sys_hz(family), div, top)
+}
+
+/// What `embassy_rp::init(Default::default())` leaves the system clock at.
+///
+/// Only the ASYNC backend may assume this. The blocking one builds its clocks
+/// from the Clock tab, so it has to ask that instead - see [`blocking_sys_hz`].
+fn async_sys_hz(family: &str) -> u32 {
+    if family == "rp235x" {
         150_000_000
     } else {
         125_000_000
-    };
+    }
+}
+
+/// The system clock the BLOCKING backend actually programs, from the Clock tab.
+///
+/// `init_clocks_and_plls` is handed `PLL_SYS_CFG`, whose VCO and two post
+/// dividers are emitted a few lines above the PWM config - so the frequency is
+/// known here exactly, and assuming embassy's default would be wrong for every
+/// project that touched the Clock tab.
+fn blocking_sys_hz(mcu: &Mcu) -> u32 {
+    let cfg = pll_from(mcu, "pll_sys", xtal_hz(mcu));
+    let mhz = cfg.vco_mhz / cfg.pd1.max(1) / cfg.pd2.max(1);
+    mhz.saturating_mul(1_000_000).max(1)
+}
+
+fn pwm_actual_hz_at(sys: u32, div: u32, top: u16) -> u32 {
     sys / (div * (top as u32 + 1))
 }
 
@@ -2188,12 +2337,11 @@ fn pwm_actual_hz(family: &str, div: u32, top: u16) -> u32 {
 /// clamped and the caller says what was actually programmed rather than
 /// pretending the asked-for number was met.
 fn pwm_div_top(family: &str, freq_hz: u32) -> (u32, u16) {
-    // What `embassy_rp::init(Default::default())` leaves the system clock at.
-    let sys: u32 = if family == "rp235x" {
-        150_000_000
-    } else {
-        125_000_000
-    };
+    pwm_div_top_at(async_sys_hz(family), freq_hz)
+}
+
+/// The same arithmetic against a system clock the caller knows.
+fn pwm_div_top_at(sys: u32, freq_hz: u32) -> (u32, u16) {
     let freq = freq_hz.max(1);
     let mut div: u32 = 1;
     while div < 255 && sys / (div * freq) > 65_536 {
