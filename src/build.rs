@@ -237,13 +237,6 @@ pub fn attach_parent_console() {
     }
 }
 
-/// Apply `CREATE_NO_WINDOW` (Windows) to a command so spawning it does NOT flash
-/// a console window. On a GUI/`windows_subsystem = "windows"` build every child
-/// console process (cargo, rustup, rust-analyzer, …) otherwise pops a console
-/// window that steals focus for a frame and vanishes — with flycheck firing on
-/// every save that reads as the whole app "flickering" and the taskbar spawning
-/// ghost instances. No-op on non-Windows. Returns the same `&mut Command` so it
-/// chains inline: `no_window(Command::new("cargo")).args(...)`.
 /// Where `espup` put Espressif's Xtensa GCC, if it is installed.
 ///
 /// Only the LINKER lives here; the Rust side of an Xtensa build needs nothing
@@ -258,34 +251,44 @@ pub fn attach_parent_console() {
 /// `export-esp` script that adds this directory, but the IDE inherits whatever
 /// PATH it was launched with, and a desktop shortcut has never run that script.
 ///
-/// Probed once. `None` on a machine without the Xtensa toolchain, which is every
-/// machine that only ever builds ARM or RISC-V.
+/// Only SUCCESS is cached. The absent case is re-probed on every call, and that
+/// is the whole point: the Tools tab can install `espup` itself, and the `esp`
+/// toolchain arrives from `espup install` while the IDE is running. Caching the
+/// `None` would freeze the answer taken before any of that happened, so every
+/// Xtensa build for the rest of the session would fail with
+/// `error: linker 'xtensa-esp32s3-elf-gcc' not found` - an error that names a
+/// linker and gives no hint that the fix is to restart the IDE. Re-probing costs
+/// one `read_dir` of one directory, and only while the toolchain is missing.
 fn xtensa_bin_dir() -> Option<&'static std::path::Path> {
     use std::sync::OnceLock;
-    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let rustup = std::env::var_os("RUSTUP_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("USERPROFILE")
-                    .or_else(|| std::env::var_os("HOME"))
-                    .map(|h| std::path::PathBuf::from(h).join(".rustup"))
-            })?;
-        let dir = rustup
-            .join("toolchains")
-            .join("esp")
-            .join("xtensa-esp-elf")
-            .join("bin");
-        // The directory existing is not enough — an interrupted install leaves
-        // one behind. Look for a linker the way rustc will.
-        let has_linker = std::fs::read_dir(&dir).ok()?.flatten().any(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("xtensa-esp32") && n.contains("-elf-gcc"))
-        });
-        has_linker.then_some(dir)
-    })
-    .as_deref()
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    if let Some(d) = DIR.get() {
+        return Some(d.as_path());
+    }
+    let rustup = std::env::var_os("RUSTUP_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|h| std::path::PathBuf::from(h).join(".rustup"))
+        })?;
+    let dir = rustup
+        .join("toolchains")
+        .join("esp")
+        .join("xtensa-esp-elf")
+        .join("bin");
+    // The directory existing is not enough — an interrupted install leaves one
+    // behind. Look for a linker the way rustc will.
+    let has_linker = std::fs::read_dir(&dir).ok()?.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with("xtensa-esp32") && n.contains("-elf-gcc"))
+    });
+    if !has_linker {
+        return None;
+    }
+    let _ = DIR.set(dir);
+    DIR.get().map(std::path::PathBuf::as_path)
 }
 
 /// Put the Xtensa linker within reach of `cmd`, without disturbing anything.
@@ -314,6 +317,13 @@ fn add_xtensa_to_path(cmd: &mut Command) {
     }
 }
 
+/// Apply `CREATE_NO_WINDOW` (Windows) to a command so spawning it does NOT flash
+/// a console window. On a GUI/`windows_subsystem = "windows"` build every child
+/// console process (cargo, rustup, rust-analyzer, …) otherwise pops a console
+/// window that steals focus for a frame and vanishes — with flycheck firing on
+/// every save that reads as the whole app "flickering" and the taskbar spawning
+/// ghost instances. No-op on non-Windows. Returns the same `&mut Command` so it
+/// chains inline: `no_window(Command::new("cargo")).args(...)`.
 pub fn no_window(cmd: &mut Command) -> &mut Command {
     no_window_raw(cmd);
     // The Xtensa linker, for ESP32/S2/S3. Harmless everywhere else: the whole
@@ -1229,6 +1239,46 @@ mod target_install_tests {
 #[cfg(test)]
 mod xtensa_path_tests {
     use super::*;
+
+    /// The absent case must NOT be remembered.
+    ///
+    /// The Tools tab installs `espup` itself, and the `esp` toolchain arrives
+    /// from `espup install` while the IDE is running. Caching the `None` froze
+    /// the answer taken before any of that, so every Xtensa build for the rest
+    /// of the session failed with `error: linker 'xtensa-esp32s3-elf-gcc' not
+    /// found` - which names a linker and gives no hint that the fix is a
+    /// restart. The flow the IDE itself encourages ended in a dead end.
+    ///
+    /// Asserted through the OBSERVABLE effect, since the cache is a private
+    /// static: on a machine without the toolchain the call must stay cheap and
+    /// keep answering `None` rather than latching, and on one WITH it the answer
+    /// must be stable.
+    #[test]
+    fn the_missing_toolchain_is_not_cached_as_a_verdict() {
+        let first = super::xtensa_bin_dir();
+        let second = super::xtensa_bin_dir();
+        assert_eq!(first, second, "the answer must be stable within one state");
+
+        match first {
+            // Installed here: the path is cached, so the second call is the
+            // same borrow and no re-probe happened.
+            Some(p) => assert!(
+                p.join("..").exists(),
+                "a cached directory that no longer resolves"
+            ),
+            // Absent: the point is that nothing was latched. `add_xtensa_to_path`
+            // must therefore still be a no-op, and remain able to change its
+            // mind later in the same process.
+            None => {
+                let mut cmd = std::process::Command::new("cargo");
+                add_xtensa_to_path(&mut cmd);
+                assert!(
+                    !cmd.get_envs().any(|(k, _)| k == "PATH"),
+                    "PATH was rewritten from a toolchain that is not there"
+                );
+            }
+        }
+    }
 
     /// The injection must be a no-op on a machine with no Xtensa toolchain —
     /// which is every machine that only builds ARM or RISC-V.
