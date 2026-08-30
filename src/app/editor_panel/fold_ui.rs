@@ -251,3 +251,62 @@ impl AppIde {
         }
     }
 }
+
+impl AppIde {
+    /// Two safety checks, run once per frame AFTER the editor and the fold
+    /// gutter — by which point every path that can change the fold set for this
+    /// frame has already run.
+    ///
+    /// **A fold toggle clears the editor's undo history.** `TextEdit` snapshots
+    /// the text it is shown into its own undo stack, and while folded that text
+    /// is a projection with whole lines missing. One later Ctrl+Z would write
+    /// that snapshot back over the file with `replace_with` — every folded
+    /// block's body deleted at once. The widget is read-only while folded so
+    /// nothing new is captured, but the history is keyed to the file for the
+    /// whole app run, so anything already in it is dropped on the transition.
+    ///
+    /// **A file changed from outside drops its folds.** The set is keyed by LINE
+    /// NUMBER and nothing else invalidates it: a codegen regeneration, a Clippy
+    /// fix or a git restore moves the lines, and a stale head can then land on a
+    /// different block's opening brace — folding something the user never asked
+    /// to hide. (A change made by TYPING cannot reach here: it unfolds the file
+    /// before the editor renders.)
+    pub(super) fn guard_folds(
+        &mut self,
+        rel: &str,
+        text: &str,
+        editor_widget_id: egui::Id,
+        ctx: &egui::Context,
+    ) {
+        use std::hash::{Hash, Hasher};
+        let folds_sig = |me: &Self| -> u64 {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            if let Some(set) = me.folds.get(rel) {
+                for line in set {
+                    line.hash(&mut h);
+                }
+            }
+            h.finish()
+        };
+        let text_sig = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut h);
+            h.finish()
+        };
+
+        if let Some((prev_folds, prev_text)) = self.fold_guard.get(rel).copied() {
+            if prev_text != text_sig && self.folds.contains_key(rel) {
+                self.folds.remove(rel);
+            }
+            if prev_folds != folds_sig(self) {
+                // `TextEditState` shares its undoer through an `Arc`, so clearing
+                // the loaded copy is enough — no `store` needed.
+                if let Some(mut state) = egui::TextEdit::load_state(ctx, editor_widget_id) {
+                    state.clear_undoer();
+                }
+            }
+        }
+        self.fold_guard
+            .insert(rel.to_owned(), (folds_sig(self), text_sig));
+    }
+}

@@ -1192,6 +1192,13 @@ pub struct AppIde {
     espflash_used_port: Arc<Mutex<String>>,
     /// On-target debug session (DAP client over probe-rs dap-server).
     debugger: crate::debugger::Debugger,
+    /// Per file: `(hash of the fold set, hash of the buffer)` as of the last
+    /// frame — see the guard at the top of the editor panel. Two jobs: notice a
+    /// fold toggle so the editor's undo history can be cleared, and notice the
+    /// file changing from OUTSIDE the editor (codegen regen, a Clippy fix, a
+    /// git restore) so folds keyed to line numbers do not end up pointing at
+    /// somebody else's block.
+    fold_guard: std::collections::HashMap<String, (u64, u64)>,
     /// Collapsed blocks per file: rel path → the 0-based line carrying the `{`
     /// of each folded block. View state only — never persisted, and cleared for
     /// a file the moment anything is typed into it (see
@@ -1930,6 +1937,7 @@ impl AppIde {
             espflash_used_port: Arc::new(Mutex::new(String::new())),
             debugger: crate::debugger::Debugger::default(),
             folds: std::collections::HashMap::new(),
+            fold_guard: std::collections::HashMap::new(),
             fold_anchor: None,
             probe_list: Vec::new(),
             selected_probe: None,

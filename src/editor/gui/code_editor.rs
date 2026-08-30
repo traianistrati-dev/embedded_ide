@@ -91,6 +91,21 @@ fn fade(color: egui::Color32) -> egui::Color32 {
 /// inside it (tokens never straddle a boundary in practice).
 #[derive(Default, Clone, Copy)]
 pub struct Marks<'a> {
+    /// `true` while the editor shows a FOLDED projection of the buffer: the
+    /// text on screen is missing whole lines, so the widget is made
+    /// non-interactive.
+    ///
+    /// This is not cosmetic. egui only runs its event handling — caret
+    /// placement, selection, editing, and the undo snapshots — when the widget
+    /// is interactive AND focused. Left interactive, the projection is captured
+    /// into the widget's own undo history, and one later Ctrl+Z writes it back
+    /// over the file: every folded block's body deleted at once. A caret placed
+    /// in it is an index into a SHORTER string, which nothing clamps or
+    /// translates, so the next keystroke lands somewhere else entirely.
+    ///
+    /// Read-only closes both, and everything downstream keeps reading a caret
+    /// that is still in buffer coordinates.
+    pub read_only: bool,
     /// De-emphasised (faded toward gray): never-referenced fn/struct/enum/const
     /// from the usages analysis, unused locals, unused generic parameters.
     pub dead: &'a [(usize, usize)],
@@ -517,6 +532,7 @@ fn show_rust_editor(
                             };
                         let output = egui::TextEdit::multiline(text)
                             .id_source(id)
+                            .interactive(!marks.read_only)
                             .lock_focus(true)
                             .desired_rows(rows)
                             .desired_width(f32::INFINITY)

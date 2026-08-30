@@ -803,6 +803,7 @@ impl AppIde {
                     &mut self.completer,
                     suppress_keyword_completer,
                     crate::editor::gui::code_editor::Marks {
+                        read_only: folded,
                         dead: &fold_map.map_ranges(&dead_ranges),
                         underline: &fold_map.map_ranges(&underline_ranges),
                     },
@@ -1032,6 +1033,9 @@ impl AppIde {
                     &rel,
                     font_size,
                 );
+                // Last, so it sees every fold change this frame — including the
+                // one the gutter just made.
+                self.guard_folds(&rel, &display_code, editor_resp.response.id, ui.ctx());
             }
 
             // ── Ctrl+Enter code actions (RA assists / quick-fixes) ────────
