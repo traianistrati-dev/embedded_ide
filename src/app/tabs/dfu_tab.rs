@@ -72,6 +72,13 @@ pub fn show_dfu_tab(
     // Tools confirmed missing — buttons needing one are greyed out with a
     // "install it in Tools" hint (see `super::tool_missing`).
     missing_tools: &[&'static str],
+    // Who inside the IDE holds the serial DEVICE, if anyone, as (port, holder).
+    //
+    // Distinct from `probe_holder` above, which is about a probe-rs session
+    // owning the PROBE. This one is the espflash/Monitor pair owning the port -
+    // and it is why `probe-rs list` can come back empty on a board that is
+    // plugged in and working. See `tabs::no_probe_message`.
+    holder: Option<(&str, &str)>,
 ) {
     let state = dfu_state.lock().unwrap().clone();
     let ocd_state = openocd_state.lock().unwrap().clone();
@@ -291,6 +298,7 @@ pub fn show_dfu_tab(
                     SCAN_W,
                     combo_w,
                     false, // no Auto here — see `allow_auto`
+                    holder,
                     |ui| {
                         // While it runs, the same button STOPS it. A flash that
                         // hangs (an ambiguous probe, a target that won't halt)

@@ -652,6 +652,22 @@ pub(super) fn show_diag_panel(
     ui.separator();
 
     // ── Tab content ───────────────────────────────────────────────────────────
+    // Who inside the IDE holds the device, answered ONCE for every tab that
+    // needs it. This used to live inside the Serial branch alone, so the Flash
+    // tab's Scan reported an empty bench while the IDE itself was the reason -
+    // see `esp_monitor::port_holder`.
+    let flashing = matches!(
+        *espflash_state.lock().unwrap(),
+        EspFlashState::Flashing | EspFlashState::ReadingInfo
+    );
+    let esp_port = if flashing {
+        espflash_used_port.lock().unwrap().clone()
+    } else {
+        String::new()
+    };
+    let monitor_port = esp_monitor.active_port();
+    let holder = crate::esp_monitor::port_holder(&esp_port, &monitor_port);
+
     match tab {
         BuildPanelTab::Cargo => {
             let clippy_running = clippy_state.lock().unwrap().is_building();
@@ -715,6 +731,7 @@ pub(super) fn show_diag_panel(
                 esp_monitor_auto_set,
                 serial.is_connected().then(|| serial.port.as_str()),
                 missing_tools,
+                holder,
             );
         }
         BuildPanelTab::Rtt => {
@@ -730,6 +747,7 @@ pub(super) fn show_diag_panel(
                 probe_scan_err,
                 toolchain,
                 missing_tools,
+                holder,
             );
         }
         BuildPanelTab::Debug => {
@@ -752,28 +770,11 @@ pub(super) fn show_diag_panel(
                 probe_scan_err,
                 toolchain,
                 missing_tools,
+                holder,
             );
         }
         BuildPanelTab::Serial => {
-            // Two in-IDE holders, checked in the order they can appear: a
-            // flash runs first and the Monitor starts after it. `Building` is
-            // excluded because that phase is a cargo build and holds no port.
-            let flashing = matches!(
-                *espflash_state.lock().unwrap(),
-                EspFlashState::Flashing | EspFlashState::ReadingInfo
-            );
-            let esp_port = if flashing {
-                espflash_used_port.lock().unwrap().clone()
-            } else {
-                String::new()
-            };
-            let monitor_port = esp_monitor.active_port();
-            let held: Option<(&str, &str)> = if !esp_port.is_empty() {
-                Some((esp_port.as_str(), "espflash"))
-            } else {
-                Some((monitor_port.as_str(), "The ESP Monitor"))
-            };
-            show_serial_tab(ui, serial, ctx, held);
+            show_serial_tab(ui, serial, ctx, holder);
         }
         BuildPanelTab::Terminal => {
             show_terminal_tab(ui, terminal, ctx);
@@ -832,6 +833,7 @@ pub(super) fn show_diag_panel(
                 probe_scan_err,
                 toolchain,
                 missing_tools,
+                holder,
             );
         }
         BuildPanelTab::RequiredTools => {

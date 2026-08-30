@@ -89,6 +89,10 @@ pub fn show_debug_tab(
     // Tools confirmed missing — buttons needing one are greyed out with a
     // "install it in Tools" hint (see `super::tool_missing`).
     missing_tools: &[&'static str],
+    // Who inside the IDE holds the device, if anyone. Threaded from the panel
+    // so every tab that lists probes gives the SAME answer for why the list
+    // is empty - see `tabs::no_probe_message`.
+    holder: Option<(&str, &str)>,
 ) {
     let phase = dbg.phase();
     let busy = dbg.is_busy();
@@ -253,6 +257,7 @@ pub fn show_debug_tab(
             probe_scan,
             probe_scan_err,
             toolchain,
+            holder,
         );
 
         ui.separator();

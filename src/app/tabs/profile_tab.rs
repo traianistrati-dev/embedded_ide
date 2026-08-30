@@ -34,6 +34,10 @@ pub fn show_profile_tab(
     // Tools confirmed missing — buttons needing one are greyed out with a
     // "install it in Tools" hint (see `super::tool_missing`).
     missing_tools: &[&'static str],
+    // Who inside the IDE holds the device, if anyone. Threaded from the panel
+    // so every tab that lists probes gives the SAME answer for why the list
+    // is empty - see `tabs::no_probe_message`.
+    holder: Option<(&str, &str)>,
 ) {
     // ── Mode switch ─────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -70,6 +74,7 @@ pub fn show_profile_tab(
             probe_scan_err,
             toolchain,
             super::tool_missing(missing_tools, "probe-rs"),
+            holder,
         ),
     }
 }
@@ -281,6 +286,8 @@ fn runtime_view(
     toolchain: &crate::panels::mcu_module::mcu_catalog::ToolchainKind,
     // `probe-rs` proven absent → the on-target sampler can't run at all.
     no_probe_rs: bool,
+    // Who inside the IDE holds the device - see `tabs::no_probe_message`.
+    holder: Option<(&str, &str)>,
 ) {
     // Halt-sampling drives probe-rs, so a chip it has no target for cannot be
     // sampled. Asked of the installed binary — see `probe::chip_gap`.
@@ -301,6 +308,7 @@ fn runtime_view(
             probe_scan,
             probe_scan_err,
             toolchain,
+            holder,
         );
         ui.separator();
         if ui

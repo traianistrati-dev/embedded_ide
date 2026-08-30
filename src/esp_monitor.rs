@@ -432,3 +432,50 @@ mod tests {
         }
     }
 }
+
+/// Who inside this IDE is holding a serial port right now, as (port, holder).
+///
+/// A serial port has exactly ONE owner, and on an Espressif project the IDE is
+/// routinely that owner without the user having asked: a flash takes the port,
+/// and the Monitor starts itself on the same port the moment the flash ends.
+/// Every tab that opens or enumerates the device needs the same answer, so it
+/// is computed here rather than at each call site - the Serial tab had this
+/// logic inline and the Flash tab had none, which is why Scan could report an
+/// empty bench while the IDE itself was the reason.
+///
+/// Order matters: a flash runs FIRST and the Monitor follows it, so espflash
+/// wins when both look busy.
+pub fn port_holder<'a>(
+    espflash_port: &'a str,
+    monitor_port: &'a str,
+) -> Option<(&'a str, &'static str)> {
+    if !espflash_port.is_empty() {
+        Some((espflash_port, "espflash"))
+    } else if !monitor_port.is_empty() {
+        Some((monitor_port, "The ESP Monitor"))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod port_holder_tests {
+    use super::port_holder;
+
+    /// Nobody busy is None - not `Some(("", ...))`.
+    ///
+    /// The Serial tab's inline version returned the Monitor with an EMPTY port
+    /// in this case and relied on every caller re-checking for empty. One that
+    /// forgot would name a holder for a port nobody holds.
+    #[test]
+    fn an_idle_ide_holds_nothing() {
+        assert_eq!(port_holder("", ""), None);
+    }
+
+    /// The flash runs first, so it wins while both look busy.
+    #[test]
+    fn espflash_outranks_the_monitor() {
+        assert_eq!(port_holder("COM7", "COM7"), Some(("COM7", "espflash")));
+        assert_eq!(port_holder("", "COM7"), Some(("COM7", "The ESP Monitor")));
+    }
+}
