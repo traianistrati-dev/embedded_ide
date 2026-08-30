@@ -402,6 +402,18 @@ impl AppIde {
             self.reference_ctrl_space = ref_ctrl_space;
             // Ctrl+/ → toggle line comments on the selection (consumed before
             // the editor so `/` is never typed into the text).
+            // Ctrl+Shift+/ → wrap the selected lines in ONE `/* … */`.
+            // Consumed BEFORE the plain Ctrl+/ below: `consume_key` is lenient
+            // about Shift (same trap as Ctrl+Shift+Up vs Ctrl+Up), so checking
+            // the Shift variant second would let the line-comment shortcut
+            // swallow this key-down first.
+            let mut ctrl_shift_slash_pressed = editor_kbd_active
+                && ui.input_mut(|i| {
+                    i.consume_key(
+                        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                        egui::Key::Slash,
+                    )
+                });
             let mut ctrl_slash_pressed = editor_kbd_active
                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
             // Ctrl+Shift+Q → collapse every function body, or expand everything
@@ -723,7 +735,8 @@ impl AppIde {
                 // checked directly. Each one rewrites the buffer using caret
                 // indices taken from the galley, which while folded belongs to
                 // the projection: without this they would edit the wrong lines.
-                let line_op = ctrl_slash_pressed
+                let line_op = ctrl_shift_slash_pressed
+                    || ctrl_slash_pressed
                     || ctrl_up_pressed
                     || ctrl_down_pressed
                     || cut_line_pressed
@@ -1069,6 +1082,7 @@ impl AppIde {
                     Some(A::DeleteLine) => cut_line_pressed = true,
                     Some(A::DuplicateLine) => ctrl_d_pressed = true,
                     Some(A::Comment) => ctrl_slash_pressed = true,
+                    Some(A::BlockComment) => ctrl_shift_slash_pressed = true,
                     Some(A::MoveUp) => ctrl_up_pressed = true,
                     Some(A::MoveDown) => ctrl_down_pressed = true,
                     Some(A::NextFile) => cycle_next_pressed = true,
@@ -1267,7 +1281,13 @@ impl AppIde {
                 editor_resp.state.cursor.char_range().and_then(|r| {
                     let lo = r.primary.index.min(r.secondary.index);
                     let hi = r.primary.index.max(r.secondary.index);
-                    if ctrl_slash_pressed {
+                    if ctrl_shift_slash_pressed {
+                        // Only where `/* … */` is actually a comment. A TOML or
+                        // .gitignore line comment is `#` and has no block form,
+                        // so wrapping there would just corrupt the file.
+                        (display_syntax.comment() == "//")
+                            .then(|| comment::toggle_block_comment(&display_code, lo, hi))
+                    } else if ctrl_slash_pressed {
                         Some(comment::toggle_line_comments(
                             &display_code,
                             lo,

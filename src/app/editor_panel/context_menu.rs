@@ -14,6 +14,8 @@ pub(super) enum EditorAction {
     DeleteLine,
     DuplicateLine,
     Comment,
+    /// Wrap the selected lines in one `/* … */` (Ctrl+Shift+/).
+    BlockComment,
     MoveUp,
     MoveDown,
     Format,
@@ -83,6 +85,15 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
         "Ctrl+/",
         EditorAction::Comment,
     );
+    if is_rs {
+        item(
+            ui,
+            ph::BRACKETS_CURLY,
+            "Block comment selection",
+            "Ctrl+Shift+/",
+            EditorAction::BlockComment,
+        );
+    }
     item(
         ui,
         ph::ARROW_UP,
