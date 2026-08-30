@@ -821,19 +821,46 @@ pub fn show_dfu_tab(
         });
         ui.separator();
     }
-    if matches!(esp_state, EspFlashState::Success) {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(ph::CHECK_CIRCLE)
-                    .size(13.0)
-                    .color(egui::Color32::from_rgb(80, 200, 100)),
-            );
-            ui.label(
-                egui::RichText::new("ESP32 programmed successfully!")
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(80, 200, 100))
-                    .strong(),
-            );
+    // The two verdicts of one action, on one row: the flash worked, and then
+    // the monitor did or did not manage to attach. They are read together -
+    // "programmed successfully" alone is misleading when the console that was
+    // supposed to follow it never opened.
+    //
+    // Either can appear without the other: a monitor started by hand can fail
+    // with no flash before it, so the row is not tied to Success.
+    let monitor_error = match &*esp_monitor.phase.lock().unwrap() {
+        crate::esp_monitor::MonitorPhase::Error(e) => Some(e.clone()),
+        _ => None,
+    };
+    let flashed = matches!(esp_state, EspFlashState::Success);
+    if flashed || monitor_error.is_some() {
+        ui.horizontal_wrapped(|ui| {
+            if flashed {
+                ui.label(
+                    egui::RichText::new(ph::CHECK_CIRCLE)
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(80, 200, 100)),
+                );
+                ui.label(
+                    egui::RichText::new("ESP32 programmed successfully!")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(80, 200, 100))
+                        .strong(),
+                );
+            }
+            if let Some(e) = &monitor_error {
+                ui.label(
+                    egui::RichText::new(ph::X_CIRCLE)
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(230, 90, 80)),
+                );
+                ui.label(
+                    egui::RichText::new(e.as_str())
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(230, 90, 80)),
+                )
+                .on_hover_text(e.as_str());
+            }
         });
         ui.separator();
     }
@@ -1194,16 +1221,16 @@ fn esp_monitor_controls(
                         format!("{} {port}", ph::BROADCAST),
                         egui::Color32::from_rgb(80, 200, 100),
                     ),
-                    MonitorPhase::Error(e) => (
-                        format!("{} {}", ph::X_CIRCLE, e.lines().next().unwrap_or("error")),
-                        egui::Color32::from_rgb(230, 90, 80),
-                    ),
+                    // Drawn on the VERDICT row below, next to the flash's own
+                    // result - not here. It is a sentence long, and inline it
+                    // pushed this row wide enough to crowd the buttons it sits
+                    // among. The live statuses above stay: they are the
+                    // monitor's current state, which belongs beside its
+                    // controls.
+                    MonitorPhase::Error(_) => (String::new(), egui::Color32::GRAY),
                 };
                 if !text.is_empty() {
-                    let label = ui.label(egui::RichText::new(text).size(10.5).color(color));
-                    if let MonitorPhase::Error(e) = &phase {
-                        label.on_hover_text(e);
-                    }
+                    ui.label(egui::RichText::new(text).size(10.5).color(color));
                 }
             }
         }
