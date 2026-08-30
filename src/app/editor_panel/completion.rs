@@ -329,7 +329,15 @@ impl AppIde {
                     // phantom type errors on a detached file.
                     let usable = {
                         let lsp = self.lsp_state.lock().unwrap();
-                        lsp.indexed && matches!(lsp.status, lsp::LspStatus::Ready)
+                        // Already-open document: `did_change` below opens
+                        // nothing, so the detached-file risk that `indexed`
+                        // guards against cannot apply. Needed as an alternative
+                        // because `indexed` depends on a load-progress token
+                        // rust-analyzer does not always send — gating on it
+                        // alone parked every F12 behind a condition that never
+                        // became true.
+                        matches!(lsp.status, lsp::LspStatus::Ready)
+                            && (lsp.indexed || lsp.is_file_open(&rel))
                     };
                     if usable {
                         let sent = {

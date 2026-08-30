@@ -1912,10 +1912,15 @@ fn handle_incoming(
                 }
             }
 
-            // The indexing pass proper finishing = crate graph + sysroot are
-            // loaded. Matched case-insensitively: RA's token is
-            // "rustAnalyzer/Indexing".
-            if kind == "end" && token.to_ascii_lowercase().contains("index") {
+            // A finished load phase = crate graph + sysroot are in place.
+            //
+            // Matching only a token that NAMES indexing was too strict: the
+            // token is whatever RA chose, and this server sends numeric ones —
+            // so the flag never flipped, every gate on it fell back to its
+            // timeout, and a deferred Go-to-definition waited for a condition
+            // that could not arrive. `is_indexing` (a rust-prefixed or numeric
+            // load token) ending is the signal that actually exists here.
+            if kind == "end" && (is_indexing || token.to_ascii_lowercase().contains("index")) {
                 s.indexed = true;
                 ctx.request_repaint();
             }

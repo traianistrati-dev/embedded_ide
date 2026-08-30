@@ -2268,14 +2268,24 @@ impl AppIde {
             return;
         }
 
-        let (status, indexed) = {
+        // "Can it answer this?" is `Ready` plus one of two things:
+        //
+        // * the index is built (`indexed`), so opening the document is safe; or
+        // * the document is ALREADY open, in which case the `did_change` on the
+        //   way in opens nothing and the detached-file risk does not exist.
+        //
+        // The second half matters: `indexed` depends on rust-analyzer sending a
+        // load-progress token, which not every server does — gating on it alone
+        // left the request parked and the status bar spinning until the deadline.
+        let (status, usable) = {
             let lsp = self.lsp_state.lock().unwrap();
-            (lsp.status.clone(), lsp.indexed)
+            let usable = lsp.indexed || lsp.is_file_open(&p.rel);
+            (lsp.status.clone(), usable)
         };
 
         match status {
             // Usable at last: re-issue exactly what was asked for.
-            crate::lsp::LspStatus::Ready if indexed => {
+            crate::lsp::LspStatus::Ready if usable => {
                 let p = self.pending_goto.take().expect("checked above");
                 let sent = {
                     let mut lsp = self.lsp_state.lock().unwrap();
@@ -2336,7 +2346,33 @@ impl AppIde {
                 self.restart_lsp();
                 self.egui_ctx.request_repaint();
             }
-            // Starting / Indexing / Ready-but-not-indexed: just wait.
+            // Ready, but neither signal says it is safe to open the document
+            // yet. Wait — but not for ever: a user file is only opened by a
+            // Save or a completion, so without this the request could sit here
+            // until the deadline while the analyzer was perfectly able to
+            // answer. Past the grace period, send it and let `did_change` open
+            // the file.
+            crate::lsp::LspStatus::Ready => {
+                // Short on purpose: with the analyzer up, F12 must feel like a
+                // jump, not a wait. This only gives `indexed` a moment to
+                // arrive if it is coming at all; past it the request goes out
+                // and `did_change` opens the file.
+                const GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+                if p.since.elapsed() > GRACE {
+                    let p = self.pending_goto.take().expect("checked above");
+                    let sent = {
+                        let mut lsp = self.lsp_state.lock().unwrap();
+                        if p.implementation {
+                            lsp.request_implementation(&p.rel, p.line, p.col)
+                        } else {
+                            lsp.request_definition(&p.rel, p.line, p.col)
+                        }
+                    };
+                    self.definition_in_flight = sent;
+                    self.egui_ctx.request_repaint();
+                }
+            }
+            // Starting / Indexing: just wait.
             _ => {}
         }
     }
