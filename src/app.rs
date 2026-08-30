@@ -4233,8 +4233,11 @@ impl eframe::App for AppIde {
                 self.pending_scroll_to_line = Some((id, line));
                 // Must be `diag_highlight_color`: a translucent wash painted
                 // OVER the text. A solid colour hides the very line it points at.
-                self.highlighted_error_line =
-                    Some((id, line, diag_highlight_color(crate::lsp::DiagSeverity::Error)));
+                self.highlighted_error_line = Some((
+                    id,
+                    line,
+                    diag_highlight_color(crate::lsp::DiagSeverity::Error),
+                ));
             }
         }
         // "Extract to library crate…" on a tree folder → open the dialog.

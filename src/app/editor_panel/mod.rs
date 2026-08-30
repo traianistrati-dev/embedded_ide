@@ -409,10 +409,16 @@ impl AppIde {
             // swallow this key-down first.
             let mut ctrl_shift_slash_pressed = editor_kbd_active
                 && ui.input_mut(|i| {
-                    i.consume_key(
-                        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
-                        egui::Key::Slash,
-                    )
+                    let cs = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+                    // BOTH keys, because Shift+`/` is `?` on most layouts and
+                    // egui reports the SHIFTED character: `Key::Slash` alone
+                    // matched nothing, which is why the shortcut did nothing at
+                    // all. Which of the two arrives depends on the keyboard, so
+                    // either counts. Not `||` on one line — both must be
+                    // consumed, or the unconsumed one is typed into the buffer.
+                    let q = i.consume_key(cs, egui::Key::Questionmark);
+                    let sl = i.consume_key(cs, egui::Key::Slash);
+                    q || sl
                 });
             let mut ctrl_slash_pressed = editor_kbd_active
                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
