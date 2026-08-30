@@ -200,16 +200,50 @@ impl AppIde {
     }
 
     /// 1-based line of the FIRST error in `rel` (project-root-relative), or
-    /// `None` when the file has none. Errors only — a warning is not what the
-    /// node's red border is pointing at, and jumping to one would be a lie.
-    fn first_error_line(&self, rel: &str) -> Option<usize> {
-        let lsp = self.lsp_state.lock().unwrap();
-        lsp.diagnostics
-            .get(rel)?
-            .iter()
-            .filter(|d| d.severity.is_error())
-            .map(|d| d.line as usize)
-            .min()
+    /// `None` when the file has none. Errors only - a warning is not what the
+    /// red marker is pointing at, and jumping to one would be a lie.
+    ///
+    /// Rust-analyzer WINS whenever it has anything to say; cargo is only a
+    /// fallback. Deliberately not the earliest line of the two: the cargo
+    /// `BuildResult` is a snapshot from the last check, so after fixing line 10
+    /// and introducing line 200 an earliest-of-both rule would land on the
+    /// clean line 10 and wash it as an error. Rust-analyzer's map is live, and
+    /// is also what paints the squiggle you see on arrival - preferring it
+    /// keeps the jump and the marker agreeing.
+    ///
+    /// Cargo still matters as a fallback: the project tree badges a row on
+    /// `build_result.has_errors_in(rel) || lsp.error_count_for(rel) > 0`, so an
+    /// LSP-only lookup left a cargo-flagged row jumping nowhere. Both sources
+    /// number lines from 1 (`LspDiagnostic.line` is converted from LSP's 0-based
+    /// on the way in; rustc's JSON is already 1-based).
+    ///
+    /// The two locks are taken and released one at a time - never held together
+    /// - so this cannot deadlock against code that locks them the other way.
+    pub(super) fn first_error_line(&self, rel: &str) -> Option<usize> {
+        let from_lsp = {
+            let lsp = self.lsp_state.lock().unwrap();
+            lsp.diagnostics.get(rel).and_then(|ds| {
+                ds.iter()
+                    .filter(|d| d.severity.is_error())
+                    .map(|d| d.line as usize)
+                    .min()
+            })
+        };
+        if from_lsp.is_some() {
+            return from_lsp;
+        }
+        let build = self.build_state.lock().unwrap();
+        build.result().and_then(|r| {
+            r.for_file(rel)
+                .iter()
+                .filter(|d| d.is_error())
+                // A rustc diagnostic can carry a file with no primary span
+                // (a link error, say). It still badges the row; it just has
+                // nowhere to jump to, and the caller degrades to a plain
+                // selection rather than inventing a line.
+                .filter_map(|d| d.line.map(|l| l as usize))
+                .min()
+        })
     }
 
     /// One step of the call-graph pass: receive the in-flight reply, then fire

@@ -837,6 +837,9 @@ pub fn show_project_tree(
     // whole.
     clip_copy: &mut Option<clipboard::CopyRequest>,
     clip_paste: &mut Option<clipboard::PasteRequest>,
+    // Set when a file row carrying the RED error badge is clicked; the app
+    // scrolls the editor to that file's first error instead of its top.
+    goto_error: &mut Option<ProjectFileId>,
 ) {
     // Diagnostic status of the user files (cargo + rust-analyzer), so
     // `user_file_row` can flag them: `true` = has ERRORS (red icon), `false` =
@@ -966,6 +969,7 @@ pub fn show_project_tree(
                     ProjectFileId::CargoConfig,
                     selected,
                     open_reference,
+                    goto_error,
                     project_dir,
                     build_result,
                     lsp_state,
@@ -989,6 +993,7 @@ pub fn show_project_tree(
                     ProjectFileId::MainRs,
                     selected,
                     open_reference,
+                    goto_error,
                     project_dir,
                     build_result,
                     lsp_state,
@@ -1043,6 +1048,7 @@ pub fn show_project_tree(
                     open_reference,
                     clip_copy,
                     clip_paste,
+                    goto_error,
                     renaming_folder,
                     workspace_dir,
                     project_dir,
@@ -1144,6 +1150,7 @@ pub fn show_project_tree(
                 ProjectFileId::GitIgnore,
                 selected,
                 open_reference,
+                goto_error,
                 project_dir,
                 build_result,
                 lsp_state,
@@ -1156,6 +1163,7 @@ pub fn show_project_tree(
                     ProjectFileId::BuildRs,
                     selected,
                     open_reference,
+                    goto_error,
                     project_dir,
                     build_result,
                     lsp_state,
@@ -1168,6 +1176,7 @@ pub fn show_project_tree(
                 ProjectFileId::CargoToml,
                 selected,
                 open_reference,
+                goto_error,
                 project_dir,
                 build_result,
                 lsp_state,
@@ -1180,6 +1189,7 @@ pub fn show_project_tree(
                     ProjectFileId::MemoryX,
                     selected,
                     open_reference,
+                    goto_error,
                     project_dir,
                     build_result,
                     lsp_state,
@@ -1395,6 +1405,7 @@ pub fn show_project_tree(
                         open_reference,
                         clip_copy,
                         clip_paste,
+                        goto_error,
                         renaming_folder,
                         workspace_dir,
                         project_dir,
@@ -1570,6 +1581,7 @@ pub fn show_project_tree(
                             open_reference,
                             clip_copy,
                             clip_paste,
+                            goto_error,
                             renaming_folder,
                             workspace_dir,
                             project_dir,
@@ -1801,6 +1813,7 @@ fn render_tree_node(
     open_reference: &mut Option<String>,
     clip_copy: &mut Option<clipboard::CopyRequest>,
     clip_paste: &mut Option<clipboard::PasteRequest>,
+    goto_error: &mut Option<ProjectFileId>,
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     project_dir: Option<&std::path::Path>,
@@ -1849,6 +1862,7 @@ fn render_tree_node(
                     to_duplicate,
                     open_reference,
                     clip_copy,
+                    goto_error,
                     can_duplicate,
                     &full_path,
                     project_dir,
@@ -1993,6 +2007,7 @@ fn render_tree_node(
                             open_reference,
                             clip_copy,
                             clip_paste,
+                            goto_error,
                             renaming_folder,
                             workspace_dir,
                             project_dir,
@@ -2185,6 +2200,7 @@ fn render_tree_node(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn file_row(
     ui: &mut egui::Ui,
     indent: f32,
@@ -2192,6 +2208,9 @@ fn file_row(
     id: ProjectFileId,
     selected: &mut ProjectFileId,
     open_reference: &mut Option<String>,
+    // Set when a row carrying the RED error badge is clicked: the app then
+    // scrolls the editor to that file's first error instead of its top.
+    goto_error: &mut Option<ProjectFileId>,
     // The saved project folder, for the Show-in-Explorer / Copy-path entries.
     project_dir: Option<&std::path::Path>,
     build_result: Option<&build::BuildResult>,
@@ -2220,8 +2239,19 @@ fn file_row(
             .selectable(false)
             .sense(egui::Sense::click()),
         );
+        // Computed BEFORE the click is handled (the badge below reuses it):
+        // clicking a row that is MARKED with the error badge means "take me to
+        // that error", so the click needs to know whether the badge is there.
+        let cargo_path = id.cargo_path();
+        let err = cargo_path.is_some_and(|p| {
+            build_result.is_some_and(|r| r.has_errors_in(p))
+                || lsp_state.is_some_and(|l| l.error_count_for(p) > 0)
+        });
         if resp.clicked() {
             *selected = id;
+            if err {
+                *goto_error = Some(id);
+            }
         }
         // The fixed files have no Rename/Delete (codegen owns them), but they
         // are just as worth consulting side-by-side — or opening in a file
@@ -2245,9 +2275,7 @@ fn file_row(
                 reveal_menu_items(ui, project_dir, rel);
             });
         }
-        if let Some(cargo_path) = id.cargo_path() {
-            let err = build_result.is_some_and(|r| r.has_errors_in(cargo_path))
-                || lsp_state.is_some_and(|l| l.error_count_for(cargo_path) > 0);
+        if let Some(cargo_path) = cargo_path {
             if err {
                 ui.label(
                     egui::RichText::new(ph::X_CIRCLE)
@@ -2274,6 +2302,7 @@ fn file_row(
     row_hover_feedback(ui, row.response.rect, row.response.contains_pointer());
 }
 
+#[allow(clippy::too_many_arguments)]
 fn user_file_row(
     ui: &mut egui::Ui,
     indent: f32,
@@ -2290,6 +2319,9 @@ fn user_file_row(
     to_duplicate: &mut Option<usize>,
     open_reference: &mut Option<String>,
     clip_copy: &mut Option<clipboard::CopyRequest>,
+    // Set when a row carrying the RED error badge is clicked: the app then
+    // scrolls the editor to that file's first error instead of its top.
+    goto_error: &mut Option<ProjectFileId>,
     can_duplicate: bool,
     // Project-root-relative path of this file + the saved project folder, for
     // the Show-in-Explorer / Copy-path entries.
@@ -2379,6 +2411,12 @@ fn user_file_row(
         }
         if resp.clicked() {
             *selected = id;
+            // `Some(true)` is exactly the condition that paints the red badge
+            // (warnings are `Some(false)` and stay a plain selection) — the
+            // jump follows the marker the user actually clicked on.
+            if diag == Some(true) {
+                *goto_error = Some(id);
+            }
         }
         resp.context_menu(|ui| {
             if ui

@@ -4214,6 +4214,29 @@ impl eframe::App for AppIde {
         if let Some(req) = signals.clip_paste {
             self.apply_clip_paste(&ui.ctx().clone(), req, &mut save_project_needed);
         }
+        // A tree row with the RED error badge was clicked -> land on the error,
+        // not at the top of the file. Same three-step idiom the Structure tab's
+        // node click uses (select, queue the scroll, wash the line): the scroll
+        // is applied by `apply_pending_scroll` on the NEXT frame, once the
+        // editor is actually displaying the file this frame only just selected.
+        //
+        // The badge is what the user clicked, so a file with no locatable line
+        // still selects normally rather than reporting a failure - a cargo
+        // diagnostic without a line span is the realistic case.
+        if let Some(id) = signals.goto_error {
+            // No `selected_file = id` here: the row's click handler already wrote
+            // it through the `&mut` the tree holds. Re-assigning would only hide
+            // that fact from the next reader.
+            if let Some(rel) = id.rel_path(&self.project_tree.user_src_files)
+                && let Some(line) = self.first_error_line(&rel)
+            {
+                self.pending_scroll_to_line = Some((id, line));
+                // Must be `diag_highlight_color`: a translucent wash painted
+                // OVER the text. A solid colour hides the very line it points at.
+                self.highlighted_error_line =
+                    Some((id, line, diag_highlight_color(crate::lsp::DiagSeverity::Error)));
+            }
+        }
         // "Extract to library crate…" on a tree folder → open the dialog.
         if let Some(folder) = signals.extract_folder {
             self.extract_crate = Some(extract_crate_dialog::ExtractCrateDialog::extract(folder));

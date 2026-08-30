@@ -47,6 +47,9 @@ pub(super) struct ProjectPanelSignals {
     pub clip_copy: Option<crate::project_tree::clipboard::CopyRequest>,
     /// Where to paste a staged payload.
     pub clip_paste: Option<crate::project_tree::clipboard::PasteRequest>,
+    /// A file row carrying the RED error badge was clicked - jump the editor to
+    /// that file's FIRST error rather than leaving it at the top.
+    pub goto_error: Option<crate::app::ProjectFileId>,
 }
 
 impl AppIde {
@@ -166,6 +169,7 @@ impl AppIde {
         let mut open_reference: Option<String> = None;
         let mut clip_copy: Option<crate::project_tree::clipboard::CopyRequest> = None;
         let mut clip_paste: Option<crate::project_tree::clipboard::PasteRequest> = None;
+        let mut goto_error: Option<crate::app::ProjectFileId> = None;
 
         // Collapsed: the panel is not built at all, so the editor and the MCU
         // zone take the width back. This function still RUNS, because it is
@@ -408,6 +412,7 @@ impl AppIde {
                                 &mut open_reference,
                                 &mut clip_copy,
                                 &mut clip_paste,
+                                &mut goto_error,
                             );
                         }
                         _ => {
@@ -442,6 +447,7 @@ impl AppIde {
             open_reference,
             clip_copy,
             clip_paste,
+            goto_error,
         }
     }
 }
