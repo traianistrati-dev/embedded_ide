@@ -97,6 +97,10 @@ pub fn start_flash(
     monitor_follows: bool,
     state: Arc<Mutex<EspFlashState>>,
     log: Arc<Mutex<Vec<String>>>,
+    // The child running right now - the build, then espflash - so the Stop
+    // button can kill it. espflash is the half that hangs: a board that never
+    // enters download mode leaves it retrying against a silent port.
+    child: crate::flash_stop::FlashHandle,
     ctx: eframe::egui::Context,
     activity: Arc<Mutex<crate::activity::ActivityLog>>,
 ) {
@@ -105,6 +109,7 @@ pub fn start_flash(
     }
     *state.lock().unwrap() = EspFlashState::Building;
     log.lock().unwrap().clear();
+    crate::flash_stop::arm(&child);
     ctx.request_repaint();
 
     thread::spawn(move || {
@@ -142,7 +147,7 @@ pub fn start_flash(
             cargo_cmd.creation_flags(0x0800_0000);
         }
 
-        let mut child = match cargo_cmd.spawn() {
+        let mut cargo = match cargo_cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
                 set(
@@ -154,6 +159,17 @@ pub fn start_flash(
             }
         };
 
+        if !crate::flash_stop::publish(&child, cargo.id()) {
+            crate::lsp::kill_process_tree(cargo.id());
+            let _ = cargo.wait();
+            set(
+                &state,
+                &ctx,
+                EspFlashState::Error(crate::flash_stop::STOPPED.into()),
+            );
+            return;
+        }
+
         // Stream cargo stderr line by line, and KEEP the one line that means
         // the build never started. The headline below used to blame the user's
         // code for any non-zero exit, and rustup's "custom toolchain 'esp' ...
@@ -162,7 +178,7 @@ pub fn start_flash(
         // without espup lands - and it lands on advice to go hunting through
         // code that is fine.
         let mut toolchain_error: Option<String> = None;
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = cargo.stderr.take() {
             for line in BufReader::new(stderr).lines() {
                 if let Ok(line) = line {
                     if line.contains("toolchain") && line.contains("is not installed") {
@@ -173,7 +189,18 @@ pub fn start_flash(
             }
         }
 
-        match child.wait() {
+        let build_status = cargo.wait();
+        // A build the user stopped is not a build that failed: the only errors
+        // it left behind are the ones killing it produced.
+        if crate::flash_stop::finished(&child) {
+            set(
+                &state,
+                &ctx,
+                EspFlashState::Error(crate::flash_stop::STOPPED.into()),
+            );
+            return;
+        }
+        match build_status {
             Err(e) => {
                 set(
                     &state,
@@ -291,7 +318,7 @@ See the log for details."
             esp_cmd.creation_flags(0x0800_0000);
         }
 
-        let mut child = match esp_cmd.spawn() {
+        let mut esp = match esp_cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
                 set(
@@ -311,7 +338,20 @@ See the log for details."
         let stdout_log = Arc::clone(&log);
         let stdout_ctx = ctx.clone();
         let stdout_port = Arc::clone(&used_port);
-        let stdout_handle = child.stdout.take().map(|stdout| {
+        // Before the first line is read: a board that will not answer keeps
+        // espflash retrying, which is exactly when Stop has to work.
+        if !crate::flash_stop::publish(&child, esp.id()) {
+            crate::lsp::kill_process_tree(esp.id());
+            let _ = esp.wait();
+            set(
+                &state,
+                &ctx,
+                EspFlashState::Error(crate::flash_stop::STOPPED.into()),
+            );
+            return;
+        }
+
+        let stdout_handle = esp.stdout.take().map(|stdout| {
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     if let Ok(line) = line {
@@ -326,7 +366,7 @@ See the log for details."
         });
 
         // Stream espflash stderr in this thread
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = esp.stderr.take() {
             for line in BufReader::new(stderr).lines() {
                 if let Ok(line) = line {
                     // espflash logs through `env_logger`, i.e. to STDERR — this
@@ -343,7 +383,9 @@ See the log for details."
             let _ = h.join();
         }
 
-        let esp_status = child.wait();
+        let esp_status = esp.wait();
+        // Nobody may kill this pid any more: the OS reuses them.
+        let stopped = crate::flash_stop::finished(&child);
         act.rec().cmd_phase(
             "espflash flash",
             format!("espflash flash --chip {chip}"),
@@ -356,6 +398,13 @@ See the log for details."
                 &state,
                 &ctx,
                 EspFlashState::Error(format!("Cannot run espflash: {e}")),
+            ),
+            // The user asked for this one - not a failure with a cause to
+            // hunt for.
+            Ok(s) if !s.success() && stopped => set(
+                &state,
+                &ctx,
+                EspFlashState::Error(crate::flash_stop::STOPPED.into()),
             ),
             Ok(s) if !s.success() => set(
                 &state,
@@ -408,6 +457,10 @@ See the log for details."
 pub fn read_board_info(
     state: Arc<Mutex<EspFlashState>>,
     log: Arc<Mutex<Vec<String>>>,
+    // The same handle the flash uses: board-info runs espflash against the same
+    // port and, while it runs, blocks the same buttons - so the same Stop has
+    // to reach it. A chip that does not answer is precisely its failure mode.
+    child: crate::flash_stop::FlashHandle,
     ctx: eframe::egui::Context,
     port: String,
 ) {
@@ -416,6 +469,7 @@ pub fn read_board_info(
     }
     *state.lock().unwrap() = EspFlashState::ReadingInfo;
     log.lock().unwrap().clear();
+    crate::flash_stop::arm(&child);
     ctx.request_repaint();
 
     thread::spawn(move || {
@@ -434,7 +488,7 @@ pub fn read_board_info(
             cmd.creation_flags(0x0800_0000);
         }
 
-        let mut child = match cmd.spawn() {
+        let mut info = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
                 set(
@@ -449,10 +503,21 @@ pub fn read_board_info(
             }
         };
 
+        if !crate::flash_stop::publish(&child, info.id()) {
+            crate::lsp::kill_process_tree(info.id());
+            let _ = info.wait();
+            set(
+                &state,
+                &ctx,
+                EspFlashState::Error(crate::flash_stop::STOPPED.into()),
+            );
+            return;
+        }
+
         // Drain stdout in a helper thread
         let stdout_log = Arc::clone(&log);
         let stdout_ctx = ctx.clone();
-        let stdout_handle = child.stdout.take().map(|stdout| {
+        let stdout_handle = info.stdout.take().map(|stdout| {
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().flatten() {
                     stdout_log.lock().unwrap().push(line);
@@ -462,7 +527,7 @@ pub fn read_board_info(
         });
 
         // Drain stderr in this thread
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = info.stderr.take() {
             for line in BufReader::new(stderr).lines().flatten() {
                 push_log(&log, &ctx, &line);
             }
@@ -472,11 +537,18 @@ pub fn read_board_info(
             let _ = h.join();
         }
 
-        match child.wait() {
+        let info_status = info.wait();
+        let stopped = crate::flash_stop::finished(&child);
+        match info_status {
             Ok(s) if s.success() => {
                 push_log(&log, &ctx, "[OK] Chip info read OK.");
                 set(&state, &ctx, EspFlashState::Idle);
             }
+            _ if stopped => set(
+                &state,
+                &ctx,
+                EspFlashState::Error(crate::flash_stop::STOPPED.into()),
+            ),
             _ => {
                 set(
                     &state,

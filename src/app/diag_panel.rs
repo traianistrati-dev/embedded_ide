@@ -106,6 +106,12 @@ pub(super) fn show_diag_panel(
     // `can_flash` = a buildable chip config exists (gates the Flash button).
     flash_scan: &mut bool,
     flash_go: &mut bool,
+    // Set when the same button - reading "Stop Flash" while one runs - aborts
+    // it; the caller stops whichever path the toolchain uses.
+    flash_stop: &mut bool,
+    // The running SWD / ESP child, so the Flash tab can stop `Read chip info`
+    // too (same tool, same port, same blocked buttons).
+    esp_flash_child: &crate::flash_stop::FlashHandle,
     can_flash: bool,
     // Cargo-tab Build button (moved off the top toolbar): set on click; the
     // caller runs `start_build`. Gated like Flash, on the same chip config.
@@ -680,6 +686,8 @@ pub(super) fn show_diag_panel(
                 toolchain,
                 flash_scan,
                 flash_go,
+                flash_stop,
+                esp_flash_child,
                 can_flash,
                 size_state,
                 size_flash_go,

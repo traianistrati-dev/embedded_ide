@@ -24,6 +24,7 @@ pub mod esp_monitor;
 pub mod espflash;
 pub mod failure_hint;
 pub mod flamegraph;
+pub mod flash_stop;
 pub mod git;
 pub mod lsp;
 pub mod msvc;

@@ -42,20 +42,10 @@ impl ProbeFlashState {
     }
 }
 
-/// Stop a running flash: kill the process TREE and mark the slot taken, so the
-/// waiting thread reports it as stopped rather than as a failure to diagnose.
-///
-/// The tree, not the process: `cargo flash` is cargo, which spawns the build and
-/// then the flashing work — killing only the parent leaves a child holding the
-/// probe, and the next Flash fails to open it.
-pub fn stop_probe_flash(child_slot: &Arc<Mutex<Option<u32>>>, log: &Arc<Mutex<Vec<String>>>) {
-    let Some(pid) = child_slot.lock().unwrap().take() else {
-        return; // already finished, or never started
-    };
-    log.lock()
-        .unwrap()
-        .push("> stopping flash (killing cargo flash)…".to_owned());
-    crate::lsp::kill_process_tree(pid);
+/// Stop a running flash. See [`crate::flash_stop`] — the same mechanism serves
+/// the OpenOCD and espflash paths.
+pub fn stop_probe_flash(child: &crate::flash_stop::FlashHandle, log: &Arc<Mutex<Vec<String>>>) {
+    crate::flash_stop::request_stop(child, log, "cargo flash");
 }
 
 /// Spawn `cargo flash --release --chip <chip> --target <target> [--probe <sel>]`
@@ -72,7 +62,7 @@ pub fn start_probe_flash(
     // The running child, so the UI can stop it. `cargo flash` can sit for
     // minutes with nothing to show — waiting on an ambiguous probe, on a target
     // that won't halt — and without this the only way out was killing the IDE.
-    child_slot: Arc<Mutex<Option<u32>>>,
+    child: crate::flash_stop::FlashHandle,
     ctx: Context,
     // The Activity tab's log. The other three flash paths - espflash,
     // OpenOCD and DFU - have always recorded themselves; this one did not,
@@ -85,6 +75,7 @@ pub fn start_probe_flash(
     }
     *state.lock().unwrap() = ProbeFlashState::Flashing;
     log.lock().unwrap().clear();
+    crate::flash_stop::arm(&child);
     ctx.request_repaint();
 
     thread::spawn(move || {
@@ -122,7 +113,7 @@ pub fn start_probe_flash(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = match command.spawn() {
+        let mut cargo = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
                 *state.lock().unwrap() = ProbeFlashState::Error(format!(
@@ -137,12 +128,20 @@ pub fn start_probe_flash(
         // Publish the pid before reading a single line: a flash that hangs does
         // so at the very first step (opening the probe), which is exactly when
         // Stop has to work.
-        *child_slot.lock().unwrap() = Some(child.id());
+        if !crate::flash_stop::publish(&child, cargo.id()) {
+            // Stopped while this one was being spawned — nothing else can reach
+            // it, so kill it here.
+            crate::lsp::kill_process_tree(cargo.id());
+            let _ = cargo.wait();
+            *state.lock().unwrap() = ProbeFlashState::Error(crate::flash_stop::STOPPED.into());
+            ctx.request_repaint();
+            return;
+        }
 
         // Stream stdout on a helper thread so we never block on a full stderr pipe.
         let out_log = Arc::clone(&log);
         let out_ctx = ctx.clone();
-        let out_h = child.stdout.take().map(|o| {
+        let out_h = cargo.stdout.take().map(|o| {
             thread::spawn(move || {
                 for line in BufReader::new(o).lines().map_while(Result::ok) {
                     out_log.lock().unwrap().push(line);
@@ -150,7 +149,7 @@ pub fn start_probe_flash(
                 }
             })
         });
-        if let Some(err) = child.stderr.take() {
+        if let Some(err) = cargo.stderr.take() {
             for line in BufReader::new(err).lines().map_while(Result::ok) {
                 log.lock().unwrap().push(line);
                 ctx.request_repaint();
@@ -160,7 +159,7 @@ pub fn start_probe_flash(
             let _ = h.join();
         }
 
-        let status = child.wait();
+        let status = cargo.wait();
         let ok = status.as_ref().map(|s| s.success()).unwrap_or(false);
         // The CODE, not just success: "exit 1" and "exit 101" send the
         // reader to different places, and the tab exists for the failures.
@@ -172,13 +171,13 @@ pub fn start_probe_flash(
         );
         // Whatever happened, nobody may kill this pid any more — the OS reuses
         // them, and a stale one aimed at a stranger is the worst kind of bug.
-        let stopped = child_slot.lock().unwrap().take().is_none();
+        let stopped = crate::flash_stop::finished(&child);
         *state.lock().unwrap() = if ok {
             ProbeFlashState::Success
         } else if stopped {
-            // The slot was already emptied by `stop_probe_flash`: this is the
-            // user's own doing, not a failure to explain.
-            ProbeFlashState::Error("flash stopped".into())
+            // `stop_probe_flash` got here first: this is the user's own doing,
+            // not a failure to explain.
+            ProbeFlashState::Error(crate::flash_stop::STOPPED.into())
         } else {
             // A probe that won't open (or a probe-rs crash) has an explanation
             // worth more than "see the log above" — the log is where the raw

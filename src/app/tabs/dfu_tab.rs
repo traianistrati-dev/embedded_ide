@@ -27,6 +27,13 @@ pub fn show_dfu_tab(
     // gates the Flash button (a buildable chip config exists).
     scan_out: &mut bool,
     flash_out: &mut bool,
+    // Set when that same button - which reads "Stop Flash" while a flash runs -
+    // is clicked to abort it. One flag for both paths: the toolchain decides
+    // which one can be running, exactly as it does for `flash_out`.
+    flash_stop: &mut bool,
+    // The running SWD / ESP child, so `Read chip info` can be stopped too: it
+    // runs espflash against the same port and blocks the same buttons.
+    esp_flash_child: &crate::flash_stop::FlashHandle,
     can_flash: bool,
     // Flash/RAM usage: the row is rendered under the Programmer row and is
     // refreshed automatically after every flash. `size_out` = the manual Size
@@ -210,7 +217,17 @@ pub fn show_dfu_tab(
             // Toolchain-specific Flash button.
             match toolchain {
                 ToolchainKind::RustEmbedded => {
-                    if flash_button(
+                    // While it runs, the same button STOPS it - see
+                    // `stop_flash_button`.
+                    if ocd_state.is_busy() {
+                        if stop_flash_button(
+                            ui,
+                            "Kill the running SWD flash - the `cargo build` or openocd itself,\n\
+                             with its children, so the ST-Link is released.",
+                        ) {
+                            *flash_stop = true;
+                        }
+                    } else if flash_button(
                         ui,
                         "Flash SWD",
                         format!("{} Flash SWD", ph::LIGHTNING),
@@ -223,7 +240,15 @@ pub fn show_dfu_tab(
                     }
                 }
                 ToolchainKind::EspRust => {
-                    if flash_button(
+                    if esp_state.is_busy() {
+                        if stop_flash_button(
+                            ui,
+                            "Kill the running espflash - the `cargo build`, the flash itself\n\
+                             or a chip-info read - so the serial port is released.",
+                        ) {
+                            *flash_stop = true;
+                        }
+                    } else if flash_button(
                         ui,
                         "Flash ESP32",
                         format!("{} Flash ESP32", ph::LIGHTNING),
@@ -271,24 +296,11 @@ pub fn show_dfu_tab(
                         // hangs (an ambiguous probe, a target that won't halt)
                         // otherwise leaves killing the IDE as the only way out.
                         if pf_state.is_busy() {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new(format!(
-                                            "{} Stop Flash",
-                                            ph::STOP_CIRCLE
-                                        ))
-                                        .size(10.5)
-                                        .color(egui::Color32::from_rgb(235, 120, 110)),
-                                    )
-                                    .min_size(egui::vec2(FLASH_W, ROW_H)),
-                                )
-                                .on_hover_text(
-                                    "Kill the running `cargo flash` (and its children, so the \
-                                     probe is released).",
-                                )
-                                .clicked()
-                            {
+                            if stop_flash_button(
+                                ui,
+                                "Kill the running `cargo flash` (and its children, so the \
+                                 probe is released).",
+                            ) {
                                 *probe_flash_stop = true;
                             }
                         } else if flash_button(
@@ -401,14 +413,32 @@ pub fn show_dfu_tab(
             // log first (left), then the device console (right), with Size/Info
             // pushed to the far edge. `Tool: espflash` and the Build -> Flash
             // phases live on the probe row above.
-            esp_board_info_button(ui, &esp_state, espflash_state, dfu_log, dfu_sel_programmer);
+            esp_board_info_button(
+                ui,
+                &esp_state,
+                espflash_state,
+                dfu_log,
+                esp_flash_child,
+                dfu_sel_programmer,
+            );
+            // Disabled while a flash runs: it resets the very phase states the
+            // Flash button reads to know it is showing "Stop Flash", so a Clear
+            // mid-run would put Flash back and leave the run unstoppable.
             if ui
-                .button(
-                    egui::RichText::new(ph::BROOM)
-                        .size(11.0)
-                        .color(egui::Color32::GRAY),
+                .add_enabled(
+                    !any_busy,
+                    egui::Button::new(
+                        egui::RichText::new(ph::BROOM)
+                            .size(11.0)
+                            .color(egui::Color32::GRAY),
+                    ),
                 )
-                .on_hover_text("Clear the flash log (left pane) and reset the phase icons")
+                .on_hover_text(if any_busy {
+                    "Wait for the flash to finish (or stop it) - clearing now would \
+                     hide the Stop button"
+                } else {
+                    "Clear the flash log (left pane) and reset the phase icons"
+                })
                 .clicked()
             {
                 dfu_log.lock().unwrap().clear();
@@ -613,11 +643,20 @@ pub fn show_dfu_tab(
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add(egui::Button::new(
-                    egui::RichText::new(format!("{} Clear", ph::X))
-                        .size(10.0)
-                        .color(egui::Color32::GRAY),
-                ))
+                .add_enabled(
+                    !any_busy,
+                    egui::Button::new(
+                        egui::RichText::new(format!("{} Clear", ph::X))
+                            .size(10.0)
+                            .color(egui::Color32::GRAY),
+                    ),
+                )
+                .on_hover_text(if any_busy {
+                    "Wait for the flash to finish (or stop it) - clearing now would \
+                     hide the Stop button"
+                } else {
+                    "Clear the flash log and reset the phase icons"
+                })
                 .clicked()
             {
                 dfu_log.lock().unwrap().clear();
@@ -950,11 +989,28 @@ fn esp_phase_widgets(ui: &mut egui::Ui, esp_state: &EspFlashState, build_done: b
 }
 
 /// `espflash board-info` — connect and identify the chip, writing nothing.
+/// The Flash button's second state: while a flash runs, that same button stops
+/// it. Red, and always ENABLED - a flash that hangs is precisely when this has
+/// to be reachable, and a disabled button would be both faded and inert.
+fn stop_flash_button(ui: &mut egui::Ui, hover: &str) -> bool {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(format!("{} Stop Flash", ph::STOP_CIRCLE))
+                .size(10.5)
+                .color(egui::Color32::from_rgb(235, 120, 110)),
+        )
+        .min_size(egui::vec2(FLASH_W, ROW_H)),
+    )
+    .on_hover_text(hover)
+    .clicked()
+}
+
 fn esp_board_info_button(
     ui: &mut egui::Ui,
     esp_state: &EspFlashState,
     espflash_state: &Arc<Mutex<EspFlashState>>,
     dfu_log: &Arc<Mutex<Vec<String>>>,
+    esp_flash_child: &crate::flash_stop::FlashHandle,
     dfu_sel_programmer: &str,
 ) {
     let busy = esp_state.is_busy();
@@ -985,6 +1041,7 @@ fn esp_board_info_button(
         espflash::read_board_info(
             Arc::clone(espflash_state),
             Arc::clone(dfu_log),
+            Arc::clone(esp_flash_child),
             ui.ctx().clone(),
             dfu_sel_programmer.to_owned(),
         );

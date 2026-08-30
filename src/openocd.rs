@@ -111,6 +111,7 @@ pub fn adapter_select_cmd(kind: &str, vid_pid: &str) -> String {
 ///
 /// `state` is updated at every phase so the UI can show progress.
 /// `log` receives each output line as it arrives (shared with the DFU tab's log area).
+#[allow(clippy::too_many_arguments)]
 pub fn start_flash(
     project_dir: PathBuf,
     target: String,
@@ -122,6 +123,10 @@ pub fn start_flash(
     target_cfg: String,
     state: Arc<Mutex<OpenOcdState>>,
     log: Arc<Mutex<Vec<String>>>,
+    // The child running right now - the build, then openocd - so the UI's Stop
+    // button can kill it. Both halves can hang: a build waiting on a locked
+    // target dir, and openocd on an adapter that never answers.
+    child: crate::flash_stop::FlashHandle,
     ctx: eframe::egui::Context,
     activity: Arc<Mutex<crate::activity::ActivityLog>>,
 ) {
@@ -130,6 +135,7 @@ pub fn start_flash(
     }
     *state.lock().unwrap() = OpenOcdState::Building;
     log.lock().unwrap().clear();
+    crate::flash_stop::arm(&child);
     ctx.request_repaint();
 
     thread::spawn(move || {
@@ -144,7 +150,17 @@ pub fn start_flash(
             &format!("> cargo build --release --target {target} …"),
         );
 
-        if !run_cargo_build(&project_dir, &target, &log, &ctx) {
+        if !run_cargo_build(&project_dir, &target, &log, &ctx, &child) {
+            // A build the user stopped is not a build that failed - and the
+            // only errors it left behind are the ones killing it produced.
+            if crate::flash_stop::stop_requested(&child) {
+                set(
+                    &state,
+                    &ctx,
+                    OpenOcdState::Error(crate::flash_stop::STOPPED.into()),
+                );
+                return;
+            }
             // If the failure is a stale device.x cache, auto-clean and retry once.
             let is_device_x = log
                 .lock()
@@ -165,7 +181,15 @@ pub fn start_flash(
                     &ctx,
                     &format!("> cargo build --release --target {target} … (retry)"),
                 );
-                if !run_cargo_build(&project_dir, &target, &log, &ctx) {
+                if !run_cargo_build(&project_dir, &target, &log, &ctx, &child) {
+                    if crate::flash_stop::stop_requested(&child) {
+                        set(
+                            &state,
+                            &ctx,
+                            OpenOcdState::Error(crate::flash_stop::STOPPED.into()),
+                        );
+                        return;
+                    }
                     set(
                         &state,
                         &ctx,
@@ -195,6 +219,16 @@ pub fn start_flash(
 
         push_log(&log, &ctx, "[OK] Build OK");
         act.rec().add("cargo build --release", t_build.elapsed());
+        // Stopped during the build: the whole point of Stop is that openocd
+        // never gets to touch the target.
+        if crate::flash_stop::stop_requested(&child) {
+            set(
+                &state,
+                &ctx,
+                OpenOcdState::Error(crate::flash_stop::STOPPED.into()),
+            );
+            return;
+        }
         let t_flash = std::time::Instant::now();
 
         // ── Phase 2: openocd flash ─────────────────────────────────────────────
@@ -252,7 +286,7 @@ pub fn start_flash(
             ocd_cmd.creation_flags(0x0800_0000);
         }
 
-        let mut child = match ocd_cmd.spawn() {
+        let mut ocd = match ocd_cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
                 set(
@@ -273,7 +307,20 @@ pub fn start_flash(
         // Stream openocd stdout in a helper thread so we don't block on stderr
         let stdout_log = Arc::clone(&log);
         let stdout_ctx = ctx.clone();
-        let stdout_handle = child.stdout.take().map(|stdout| {
+        // Before the first line is read: openocd hangs on an adapter that
+        // never answers, and that is exactly when Stop has to work.
+        if !crate::flash_stop::publish(&child, ocd.id()) {
+            crate::lsp::kill_process_tree(ocd.id());
+            let _ = ocd.wait();
+            set(
+                &state,
+                &ctx,
+                OpenOcdState::Error(crate::flash_stop::STOPPED.into()),
+            );
+            return;
+        }
+
+        let stdout_handle = ocd.stdout.take().map(|stdout| {
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     if let Ok(line) = line {
@@ -285,7 +332,7 @@ pub fn start_flash(
         });
 
         // Stream openocd stderr in this thread (OpenOCD uses stderr for progress)
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = ocd.stderr.take() {
             for line in BufReader::new(stderr).lines() {
                 if let Ok(line) = line {
                     push_log(&log, &ctx, &line);
@@ -297,7 +344,9 @@ pub fn start_flash(
             let _ = h.join();
         }
 
-        let ocd_status = child.wait();
+        let ocd_status = ocd.wait();
+        // Nobody may kill this pid any more: the OS reuses them.
+        let stopped = crate::flash_stop::finished(&child);
         act.rec().cmd_phase(
             "openocd program+verify+reset",
             format!(
@@ -312,6 +361,12 @@ pub fn start_flash(
                 &state,
                 &ctx,
                 OpenOcdState::Error(format!("Cannot run openocd: {e}")),
+            ),
+            // The user's own doing - not a failure with a cause to hunt for.
+            Ok(s) if !s.success() && stopped => set(
+                &state,
+                &ctx,
+                OpenOcdState::Error(crate::flash_stop::STOPPED.into()),
             ),
             Ok(s) if !s.success() => set(
                 &state,
@@ -354,6 +409,8 @@ fn run_cargo_build(
     target: &str,
     log: &Arc<Mutex<Vec<String>>>,
     ctx: &eframe::egui::Context,
+    // Publishes the build's own child, so Stop reaches THIS phase too.
+    child: &crate::flash_stop::FlashHandle,
 ) -> bool {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(project_dir)
@@ -375,7 +432,7 @@ fn run_cargo_build(
         cmd.creation_flags(0x0800_0000);
     }
 
-    let mut child = match cmd.spawn() {
+    let mut cargo = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             push_log(log, ctx, &format!("Cannot run cargo: {e}"));
@@ -383,13 +440,21 @@ fn run_cargo_build(
         }
     };
 
-    if let Some(stderr) = child.stderr.take() {
+    if !crate::flash_stop::publish(child, cargo.id()) {
+        crate::lsp::kill_process_tree(cargo.id());
+        let _ = cargo.wait();
+        return false;
+    }
+
+    if let Some(stderr) = cargo.stderr.take() {
         for line in BufReader::new(stderr).lines().flatten() {
             push_log(log, ctx, &line);
         }
     }
 
-    matches!(child.wait(), Ok(s) if s.success())
+    let ok = matches!(cargo.wait(), Ok(s) if s.success());
+    crate::flash_stop::finished(child);
+    ok
 }
 
 /// Runs `cargo clean` in `project_dir` (blocking, output suppressed).

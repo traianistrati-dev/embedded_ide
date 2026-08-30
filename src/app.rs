@@ -1156,8 +1156,14 @@ pub struct AppIde {
     /// Status of a `cargo flash` (probe-rs) run — the Flash tab's probe-rs path,
     /// which shares `selected_probe` with the Debug / RTT / Runtime tabs.
     probe_flash_state: Arc<Mutex<crate::probe_flash::ProbeFlashState>>,
-    /// Pid of the running `cargo flash`, so the Flash button can stop it.
-    probe_flash_child: Arc<Mutex<Option<u32>>>,
+    /// The running `cargo flash`, so the Flash button can stop it.
+    probe_flash_child: crate::flash_stop::FlashHandle,
+    /// The running SWD flash (`cargo build`, then openocd) — one handle covers
+    /// both children, see `crate::flash_stop`.
+    swd_flash_child: crate::flash_stop::FlashHandle,
+    /// The running ESP flash (`cargo build`, then espflash) — and `espflash
+    /// board-info`, which holds the same port and blocks the same buttons.
+    esp_flash_child: crate::flash_stop::FlashHandle,
     /// Target config file passed to OpenOCD (e.g. "target/stm32f1x.cfg")
     openocd_target_cfg: String,
     /// Shared state for ESP32 espflash operations
@@ -1908,7 +1914,9 @@ impl AppIde {
             dfu_flash_addr: "0x08000000".to_string(),
             openocd_state,
             probe_flash_state,
-            probe_flash_child: Arc::new(Mutex::new(None)),
+            probe_flash_child: crate::flash_stop::handle(),
+            swd_flash_child: crate::flash_stop::handle(),
+            esp_flash_child: crate::flash_stop::handle(),
             openocd_target_cfg: "target/stm32f1x.cfg".to_string(),
             espflash_state,
             espflash_port: String::new(),

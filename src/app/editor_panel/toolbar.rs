@@ -150,6 +150,7 @@ impl AppIde {
                 self.openocd_target_cfg.clone(),
                 Arc::clone(&self.openocd_state),
                 Arc::clone(&self.dfu_log),
+                Arc::clone(&self.swd_flash_child),
                 self.egui_ctx.clone(),
                 std::sync::Arc::clone(&self.activity),
             );
@@ -193,6 +194,18 @@ impl AppIde {
         crate::probe_flash::stop_probe_flash(&self.probe_flash_child, &self.dfu_log);
     }
 
+    /// Stop a running SWD flash — whichever of its two children is up: the
+    /// `cargo build`, or openocd itself.
+    pub(crate) fn stop_swd_flash(&mut self) {
+        crate::flash_stop::request_stop(&self.swd_flash_child, &self.dfu_log, "openocd");
+    }
+
+    /// Stop a running ESP flash (or `espflash board-info`, which holds the same
+    /// port) — again whichever child is up, the build or espflash.
+    pub(crate) fn stop_esp_flash(&mut self) {
+        crate::flash_stop::request_stop(&self.esp_flash_child, &self.dfu_log, "espflash");
+    }
+
     /// Build `--release` and flash an ESP32 via espflash, over the selected
     /// programmer's serial port. No-op without a buildable chip config.
     pub(crate) fn flash_esp(&mut self) {
@@ -231,6 +244,7 @@ impl AppIde {
                 monitor_follows,
                 Arc::clone(&self.espflash_state),
                 Arc::clone(&self.dfu_log),
+                Arc::clone(&self.esp_flash_child),
                 self.egui_ctx.clone(),
                 std::sync::Arc::clone(&self.activity),
             );

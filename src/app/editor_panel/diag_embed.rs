@@ -145,6 +145,7 @@ impl AppIde {
         // Flash-tab Programmer-row buttons (moved off the top toolbar).
         let mut flash_scan = false;
         let mut flash_go = false;
+        let mut flash_stop = false;
         let mut probe_flash_go = false;
         let mut probe_flash_stop = false;
         // Snapshot of the tools proven missing by the startup self-check — the
@@ -318,6 +319,8 @@ impl AppIde {
                     &git_libraries,
                     &mut flash_scan,
                     &mut flash_go,
+                    &mut flash_stop,
+                    &self.esp_flash_child,
                     can_flash,
                     &mut build_go,
                     &self.size_state,
@@ -616,6 +619,16 @@ impl AppIde {
                     self.flash_esp()
                 }
                 _ => self.flash_swd(),
+            }
+        }
+        // Same button, second state - and the same toolchain decides which of
+        // the two paths is the one running.
+        if flash_stop {
+            match self.selected_toolchain() {
+                Some(crate::panels::mcu_module::mcu_catalog::ToolchainKind::EspRust) => {
+                    self.stop_esp_flash()
+                }
+                _ => self.stop_swd_flash(),
             }
         }
         // Flash tab's probe-rs path (shared probe). `probe_scan` is consumed above.
