@@ -296,7 +296,9 @@ pub fn text_delta(before: &str, after: &str) -> Option<(usize, usize, String)> {
     // The two tails must not run back past the shared head, or an insertion of
     // text that repeats its surroundings would report a negative-length range.
     let mut tail = 0;
-    while tail < b.len() - head && tail < a.len() - head && b[b.len() - 1 - tail] == a[a.len() - 1 - tail]
+    while tail < b.len() - head
+        && tail < a.len() - head
+        && b[b.len() - 1 - tail] == a[a.len() - 1 - tail]
     {
         tail += 1;
     }
@@ -362,7 +364,13 @@ pub fn edit_pending(ui: &egui::Ui) -> bool {
                 i.modifiers.command
                     && matches!(
                         key,
-                        Key::D | Key::X | Key::F | Key::V | Key::Slash | Key::ArrowUp | Key::ArrowDown
+                        Key::D
+                            | Key::X
+                            | Key::F
+                            | Key::V
+                            | Key::Slash
+                            | Key::ArrowUp
+                            | Key::ArrowDown
                     )
             }
             _ => false,
@@ -657,10 +665,13 @@ mod tests {
 after
 ";
         let m = folded_of(src, &[0]);
-        assert_eq!(m.display(), "fn a() {
+        assert_eq!(
+            m.display(),
+            "fn a() {
 }
 after
-");
+"
+        );
         let edited = "fn a() {
 }
 Xafter
@@ -671,12 +682,15 @@ Xafter
         let mut out: String = chars[..bs].iter().collect();
         out.push_str(&ins);
         out.extend(&chars[be..]);
-        assert_eq!(out, "fn a() {
+        assert_eq!(
+            out,
+            "fn a() {
     x;
     y;
 }
 Xafter
-");
+"
+        );
     }
 
     #[test]

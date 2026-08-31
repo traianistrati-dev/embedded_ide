@@ -11,6 +11,7 @@
 //! GPIO bindings round-trip through [`super::parse_main_rs`], so the Pins canvas
 //! restores on reopen.
 
+use super::common::retarget_pristine_tail;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, pin_binding};
 use crate::panels::mcu_module::pins::logic::pin::{GpioMode, Pin};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -173,7 +174,10 @@ pub fn splice_section(existing: &str, new_section: &str, mcu_name: &str, mcu_id:
     let header = invariant_header(mcu_name, mcu_id);
     if let (Some(_begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
-        let after = existing[end..].trim_start_matches('\n');
+        // The mirror of the async splice: a project switched BACK to
+        // Blocking must not keep an "every iteration must `.await`" warning in
+        // a program that has no executor.
+        let after = retarget_pristine_tail(existing[end..].trim_start_matches('\n'), false);
         format!("{header}{new_section}\n{after}")
     } else {
         format!("{header}{new_section}\n{USER_TAIL}")

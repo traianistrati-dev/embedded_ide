@@ -86,6 +86,58 @@ pub fn keep_manual_clock(existing: &str, section: String, manual: bool) -> Strin
 
 pub const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n    }\n}\n";
 
+/// The same tail for an ASYNC (embassy-executor) runtime, opening with the one
+/// warning that costs a beginner a whole afternoon.
+///
+/// Every async backend here — STM32 embassy, embassy-rp, and ESP on esp-rtos —
+/// runs embassy-executor, whose scheduler is COOPERATIVE: a task only yields at
+/// an `.await`. A `loop` with no await in it therefore never gives the executor
+/// control back, and every other spawned task (the EXTI edge watchers, the
+/// buffered-UART pump, the radio driver) simply never runs again. The symptom is
+/// a program that looks like it hung for no reason, and nothing in the compiler
+/// output points at it.
+///
+/// `concat!` rather than a `\`-continued literal on purpose: rustfmt joins those
+/// and leaves a run of spaces inside the string (see the notes on
+/// `rustfmt-joins-continued-strings`), which would land in the user's file.
+pub const ASYNC_USER_TAIL: &str = concat!(
+    "    loop {\n",
+    "        /* !!! IMPORTANT !!!\n",
+    "           Every iteration must `.await` — Embassy tasks are cooperative, and a\n",
+    "           non-awaiting loop blocks all other tasks from ever running.\n",
+    "        */\n",
+    "\n",
+    "        // Your main loop code here.\n",
+    "    }\n",
+    "}\n",
+);
+
+/// Swap a still-PRISTINE user tail for the one this runtime wants, when a
+/// project is re-generated after a Blocking/Async runtime switch.
+///
+/// The tail below `GEN_END` belongs to the user and every splice preserves it
+/// verbatim — which is why a runtime switch would otherwise never show the async
+/// warning (the file already exists, so `fresh_main_rs` never runs again), and
+/// why switching back would leave a warning about awaiting in a program that has
+/// no executor. Both are fixed by exchanging the tail ONLY while it is still
+/// character-for-character the seed we wrote: the moment the user types a single
+/// line in there it is theirs, and it is left alone.
+///
+/// Leading newlines are preserved so the blank line between `GEN_END` and `loop`
+/// does not drift on either side of the swap.
+pub fn retarget_pristine_tail(after: &str, want_async: bool) -> String {
+    let (from, to) = if want_async {
+        (USER_TAIL, ASYNC_USER_TAIL)
+    } else {
+        (ASYNC_USER_TAIL, USER_TAIL)
+    };
+    if after.trim() != from.trim() {
+        return after.to_owned();
+    }
+    let lead: String = after.chars().take_while(|&c| c == '\n').collect();
+    format!("{lead}{to}")
+}
+
 // ── Strict-lints exemption for generated code ─────────────────────────────────
 //
 // When the MCU System "Strict lints" toggle is on, the project Cargo.toml gets a
@@ -1022,5 +1074,78 @@ mod tests {
         );
         assert_eq!(find_pin_binding_line(&src, "PC13"), None);
         assert_eq!(find_pin_mention_line(&src, "PC13"), None);
+    }
+}
+
+#[cfg(test)]
+mod async_tail_tests {
+    use super::{ASYNC_USER_TAIL, USER_TAIL, retarget_pristine_tail};
+
+    /// The warning has to say the two things that make it actionable: WHAT to do
+    /// (`.await` every iteration) and WHY (a cooperative scheduler starves the
+    /// other tasks). A version that only says "must await" sends the reader
+    /// looking for a compiler rule that does not exist.
+    #[test]
+    fn the_async_tail_carries_the_cooperative_warning() {
+        assert!(ASYNC_USER_TAIL.contains("!!! IMPORTANT !!!"));
+        assert!(ASYNC_USER_TAIL.contains("Every iteration must `.await`"));
+        assert!(ASYNC_USER_TAIL.contains("cooperative"));
+        assert!(ASYNC_USER_TAIL.contains("blocks all other tasks"));
+        // It opens the loop, before the line the user writes on.
+        let loop_at = ASYNC_USER_TAIL.find("loop {").expect("a loop");
+        let warn_at = ASYNC_USER_TAIL.find("IMPORTANT").expect("the warning");
+        let seed_at = ASYNC_USER_TAIL.find("Your main loop").expect("the seed");
+        assert!(loop_at < warn_at && warn_at < seed_at, "{ASYNC_USER_TAIL}");
+        // And it is a block comment, closed — an unterminated `/*` would eat
+        // the rest of main.
+        assert_eq!(ASYNC_USER_TAIL.matches("/*").count(), 1);
+        assert_eq!(ASYNC_USER_TAIL.matches("*/").count(), 1);
+    }
+
+    /// Both tails must still close `fn main` — they are the only thing that does.
+    #[test]
+    fn both_tails_close_the_entry_fn() {
+        for tail in [USER_TAIL, ASYNC_USER_TAIL] {
+            assert!(tail.trim_end().ends_with("}\n}"), "{tail}");
+            assert_eq!(tail.matches("loop {").count(), 1, "{tail}");
+        }
+    }
+
+    #[test]
+    fn a_pristine_tail_is_exchanged_both_ways() {
+        assert_eq!(retarget_pristine_tail(USER_TAIL, true), ASYNC_USER_TAIL);
+        assert_eq!(retarget_pristine_tail(ASYNC_USER_TAIL, false), USER_TAIL);
+    }
+
+    #[test]
+    fn a_tail_already_right_for_the_runtime_is_left_alone() {
+        assert_eq!(retarget_pristine_tail(USER_TAIL, false), USER_TAIL);
+        assert_eq!(
+            retarget_pristine_tail(ASYNC_USER_TAIL, true),
+            ASYNC_USER_TAIL
+        );
+    }
+
+    /// The whole point of the guard: the moment there is user code in there, the
+    /// tail is theirs. Switching runtime must not rewrite it.
+    #[test]
+    fn a_tail_the_user_touched_is_never_rewritten() {
+        let mine = "    loop {\n        led.toggle();\n    }\n}\n";
+        assert_eq!(retarget_pristine_tail(mine, true), mine);
+        assert_eq!(retarget_pristine_tail(mine, false), mine);
+        // Even one extra line beside the seed counts as touched.
+        let plus = "    loop {\n        // Your main loop code here.\n        x();\n    }\n}\n";
+        assert_eq!(retarget_pristine_tail(plus, true), plus);
+    }
+
+    /// The blank line between `GEN_END` and `loop` must not drift on a switch —
+    /// the RP splice passes the tail through untrimmed.
+    #[test]
+    fn leading_blank_lines_survive_the_exchange() {
+        let with_lead = format!("\n\n{USER_TAIL}");
+        assert_eq!(
+            retarget_pristine_tail(&with_lead, true),
+            format!("\n\n{ASYNC_USER_TAIL}")
+        );
     }
 }

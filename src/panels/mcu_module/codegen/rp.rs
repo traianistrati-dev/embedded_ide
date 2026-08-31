@@ -15,7 +15,10 @@
 //! **There are two cores.** That is why the generated `Cargo.toml` does not
 //! enable `cortex-m/critical-section-single-core` — see `cargo_toml_rp`.
 
-use super::common::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, var_suffix};
+use super::common::{
+    ASYNC_USER_TAIL, GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, retarget_pristine_tail,
+    var_suffix,
+};
 use super::family::FamilyBackend;
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::pins::PinFunction;
@@ -948,7 +951,7 @@ impl FamilyBackend for RpBackend {
             "{}{}{}",
             &existing[..begin],
             section(mcu).trim_end_matches('\n'),
-            &existing[end..]
+            retarget_pristine_tail(&existing[end..], false)
         )
     }
 }
@@ -2905,10 +2908,9 @@ impl FamilyBackend for AsyncRpBackend {
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
         format!(
-            "{}{}{}",
+            "{}{}\n{ASYNC_USER_TAIL}",
             async_header(mcu),
             async_section(mcu),
-            "\n    loop {\n        // Your main loop code here.\n    }\n}\n"
         )
     }
 
@@ -2922,7 +2924,7 @@ impl FamilyBackend for AsyncRpBackend {
             "{}{}{}",
             &existing[..begin],
             async_section(mcu).trim_end_matches('\n'),
-            &existing[end..]
+            retarget_pristine_tail(&existing[end..], true)
         )
     }
 }
@@ -3405,5 +3407,39 @@ mod emit_async_for_manual_compile {
             println!("wrote {}", dir.display());
             println!("target: {}", def.project.target);
         }
+    }
+}
+
+#[cfg(test)]
+mod async_tail_rp {
+    use super::super::common::ASYNC_USER_TAIL;
+    use crate::panels::mcu_module::builtins;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+
+    fn pico(runtime: Runtime) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        mcu.runtime = runtime;
+        mcu
+    }
+
+    /// embassy-rp runs the same cooperative executor, so a Pico on Async gets
+    /// the same warning as an STM32 on Async.
+    #[test]
+    fn an_async_pico_opens_its_loop_with_the_warning() {
+        let code = pico(Runtime::Async).fresh_main_rs();
+        assert!(code.contains("Every iteration must `.await`"), "{code}");
+        assert!(code.ends_with(ASYNC_USER_TAIL), "{code}");
+    }
+
+    /// A Blocking Pico has no executor to starve — no warning.
+    #[test]
+    fn a_blocking_pico_has_no_warning() {
+        let code = pico(Runtime::Blocking).fresh_main_rs();
+        assert!(!code.contains("IMPORTANT"), "{code}");
+        assert!(code.contains("// Your main loop code here."), "{code}");
     }
 }

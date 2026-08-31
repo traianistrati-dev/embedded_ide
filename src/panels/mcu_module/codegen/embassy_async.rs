@@ -15,11 +15,12 @@
 //!
 //! [`Runtime::Async`]: crate::panels::mcu_module::mcu::Runtime
 
+use super::common::{ASYNC_USER_TAIL, retarget_pristine_tail};
 use super::common::{duty_percent_str, pin_binding, sanitize_label};
 use super::dma_map;
 use super::embassy_common::{NO_PINS_PLACEHOLDER, gpio_bindings_exti};
 use super::nvic;
-use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
+use super::{GEN_BEGIN, GEN_END, mcu_id_marker_line};
 use crate::panels::mcu_module::comparator;
 use crate::panels::mcu_module::modules::{
     AsyncBusMode, DacModuleConfig, HspiModuleConfig, I2cModuleConfig, I2sModuleConfig,
@@ -120,13 +121,16 @@ pub fn splice_section(existing: &str, new_section: &str, mcu_name: &str, mcu_id:
     let header = invariant_header(mcu_name, mcu_id);
     if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
-        let after = existing[end..].trim_start_matches('\n');
+        // A Blocking project switched to Async keeps its tail — including,
+        // while it is still untouched, the seed that has no `.await` warning
+        // in it. Exchange that one; anything the user wrote is left alone.
+        let after = retarget_pristine_tail(existing[end..].trim_start_matches('\n'), true);
         // Preserve only the user code AFTER the markers; the header above them is
         // regenerated so a runtime switch updates the imports + entry.
         let _ = begin; // header replaces everything before the markers
         format!("{header}{new_section}\n{after}")
     } else {
-        format!("{header}{new_section}\n{USER_TAIL}")
+        format!("{header}{new_section}\n{ASYNC_USER_TAIL}")
     }
 }
 
@@ -8064,5 +8068,50 @@ mod async_duty_handle_tests {
         );
         // A complementary channel means BOTH its pads, and the doc says so.
         assert!(f.contains("/// CH1 and CH1N."), "{f}");
+    }
+}
+
+#[cfg(test)]
+mod async_tail_on_switch {
+    use super::super::common::{ASYNC_USER_TAIL, USER_TAIL};
+    use super::{GEN_BEGIN, GEN_END, splice_section};
+
+    fn file_with(tail: &str) -> String {
+        format!("// header\n{GEN_BEGIN}\n    let p = init();\n{GEN_END}\n\n{tail}")
+    }
+
+    /// A project switched Blocking -> Async is spliced, never freshly generated,
+    /// so this is the only place the warning can reach an existing file.
+    #[test]
+    fn switching_to_async_gains_the_await_warning() {
+        let out = splice_section(&file_with(USER_TAIL), "SECTION", "STM32G431", "g431");
+        assert!(out.contains("Every iteration must `.await`"), "{out}");
+        assert!(out.contains("!!! IMPORTANT !!!"), "{out}");
+        assert_eq!(
+            out.matches("// Your main loop code here.").count(),
+            1,
+            "the tail was exchanged, not duplicated:\n{out}"
+        );
+    }
+
+    /// …but only while the tail is still ours. A loop the user wrote in is not
+    /// something a runtime switch gets to rewrite.
+    #[test]
+    fn a_loop_the_user_wrote_is_not_touched_by_the_switch() {
+        let mine = "    loop {\n        led.toggle();\n    }\n}\n";
+        let out = splice_section(&file_with(mine), "SECTION", "STM32G431", "g431");
+        assert!(out.contains("led.toggle();"), "{out}");
+        assert!(
+            !out.contains("IMPORTANT"),
+            "no warning over user code:\n{out}"
+        );
+    }
+
+    /// A file with no markers is rebuilt from scratch — it must get the async
+    /// tail, not the blocking one.
+    #[test]
+    fn a_rebuilt_file_gets_the_async_tail() {
+        let out = splice_section("not our file", "SECTION", "STM32G431", "g431");
+        assert!(out.ends_with(ASYNC_USER_TAIL), "{out}");
     }
 }

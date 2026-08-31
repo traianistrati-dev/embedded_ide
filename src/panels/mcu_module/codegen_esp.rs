@@ -55,6 +55,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n    }\n}\n";
 
+/// Async on ESP is esp-rtos driving embassy-executor, so it gets exactly the
+/// same cooperative-scheduler warning as every other async backend.
+fn user_tail(runtime: EspRuntime) -> &'static str {
+    if matches!(runtime, EspRuntime::Async) {
+        crate::panels::mcu_module::codegen::common::ASYNC_USER_TAIL
+    } else {
+        USER_TAIL
+    }
+}
+
 // ── Runtime (entry point) ────────────────────────────────────────────────────
 
 /// Which entry point the generated `main` opens — the only structural difference
@@ -330,8 +340,9 @@ pub fn fresh_esp32c3_main_rs(
         dma,
     );
     format!(
-        "{}{section}\n{USER_TAIL}",
-        invariant_header(mcu_name, id, runtime)
+        "{}{section}\n{tail}",
+        invariant_header(mcu_name, id, runtime),
+        tail = user_tail(runtime),
     )
 }
 
@@ -402,7 +413,13 @@ pub fn update_esp32c3_main_rs(
         let end = end_start + GEN_END.len();
         // Strip ALL leading newlines after GEN_END, then re-add exactly one
         // blank line so splice is idempotent (same as the STM32 path in codegen.rs).
-        let after = existing[end..].trim_start_matches('\n');
+        // A runtime switch keeps the user's tail; swap it only while it is
+        // still the untouched seed, so Async gains the `.await` warning and
+        // Blocking loses it again.
+        let after = crate::panels::mcu_module::codegen::common::retarget_pristine_tail(
+            existing[end..].trim_start_matches('\n'),
+            matches!(runtime, EspRuntime::Async),
+        );
         // The region above the markers is the USER's (their own `use` items, their
         // panic handler) so it is kept as-is — except the one provenance line,
         // which is ours to keep truthful.
@@ -411,8 +428,9 @@ pub fn update_esp32c3_main_rs(
     } else {
         // No markers — rebuild from scratch.
         format!(
-            "{}{new_section}\n{USER_TAIL}",
-            invariant_header(mcu_name, id, runtime)
+            "{}{new_section}\n{tail}",
+            invariant_header(mcu_name, id, runtime),
+            tail = user_tail(runtime),
         )
     }
 }
@@ -3394,5 +3412,48 @@ mod tests {
             .uses()
             .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod async_tail_esp {
+    use crate::panels::mcu_module::mcu::Runtime;
+
+    /// Async on ESP is esp-rtos driving embassy-executor — same cooperative
+    /// scheduler, same warning.
+    #[test]
+    fn an_async_esp_opens_its_loop_with_the_warning() {
+        let mut mcu = crate::panels::mcu_module::mock_esp32c3::create_esp32c3();
+
+        let blocking = mcu.fresh_main_rs();
+        assert!(!blocking.contains("IMPORTANT"), "{blocking}");
+
+        mcu.runtime = Runtime::Async;
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("Every iteration must `.await`"), "{code}");
+        assert!(code.contains("cooperative"), "{code}");
+    }
+
+    /// The switch path, both ways, on a tail nobody has touched: the warning
+    /// appears going to Async and is gone again coming back.
+    #[test]
+    fn the_runtime_switch_moves_the_warning_in_and_out() {
+        let mut mcu = crate::panels::mcu_module::mock_esp32c3::create_esp32c3();
+        let blocking = mcu.fresh_main_rs();
+
+        mcu.runtime = Runtime::Async;
+        let to_async = mcu.update_main_rs(&blocking);
+        assert!(to_async.contains("!!! IMPORTANT !!!"), "{to_async}");
+        // The seed line, not `loop {` — the panic handler is a `loop {}` too.
+        assert_eq!(
+            to_async.matches("// Your main loop code here.").count(),
+            1,
+            "the tail was exchanged, not duplicated:\n{to_async}"
+        );
+
+        mcu.runtime = Runtime::Blocking;
+        let back = mcu.update_main_rs(&to_async);
+        assert!(!back.contains("IMPORTANT"), "warning gone again:\n{back}");
+        assert_eq!(back, blocking, "blocking -> async -> blocking is identity");
     }
 }

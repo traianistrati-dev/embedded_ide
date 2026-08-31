@@ -10,6 +10,7 @@ use super::super::modules::{
 use super::super::pins::logic::pin::{GpioMode, Pin};
 use super::super::pins::logic::pin_function::PinFunction;
 use super::common::duty_percent_str;
+use super::common::retarget_pristine_tail;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, pin_binding, sanitize_label};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,7 +42,7 @@ pub fn splice_section(existing: &str, new_section: &str, mcu_name: &str, mcu_id:
         // Strip ALL leading newlines after GEN_END, then re-add exactly one
         // blank line.  This makes splice idempotent: running it N times always
         // produces the same result instead of accumulating newlines.
-        let after = existing[end..].trim_start_matches('\n');
+        let after = retarget_pristine_tail(existing[end..].trim_start_matches('\n'), false);
 
         // Detect old format (had fn custom_config / fn loop_code after GEN_END).
         // Rebuild from scratch so the user tail is the new flat loop{} style.

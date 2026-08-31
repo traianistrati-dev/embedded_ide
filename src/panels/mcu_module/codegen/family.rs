@@ -742,7 +742,7 @@ impl FamilyBackend for AsyncEmbassyBackend {
             "{header}{section}\n{tail}",
             header = embassy_async::invariant_header(&mcu.name, &mcu.id),
             section = async_section(mcu),
-            tail = USER_TAIL,
+            tail = super::common::ASYNC_USER_TAIL,
         )
     }
 
