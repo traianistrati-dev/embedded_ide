@@ -231,8 +231,8 @@ impl AppIde {
     /// per frame, before rendering the editor (so `usages_dead_ranges` below
     /// reflects this frame's poll).
     pub(super) fn tick_usages(&mut self, rel_path: &str, text: &str) {
-        if self.usages.rel_path != rel_path {
-            self.usages = UsagesState {
+        if self.ed.usages.rel_path != rel_path {
+            self.ed.usages = UsagesState {
                 rel_path: rel_path.to_owned(),
                 ..Default::default()
             };
@@ -243,30 +243,31 @@ impl AppIde {
         // instead of waiting out the debounce below (memoized on the text, so
         // it is one scan per keystroke, not one per frame). `.rs` only — a
         // library's Cargo.toml also arrives here as a `UserFile`.
-        if self.usages.generics_for_text != text {
-            self.usages.generic_marks = if rel_path.ends_with(".rs") {
+        if self.ed.usages.generics_for_text != text {
+            self.ed.usages.generic_marks = if rel_path.ends_with(".rs") {
                 super::generics::analyze(text)
             } else {
                 Default::default()
             };
-            self.usages.generics_for_text = text.to_owned();
+            self.ed.usages.generics_for_text = text.to_owned();
         }
 
-        if self.usages.last_seen_text != text {
-            self.usages.last_seen_text = text.to_owned();
-            self.usages.last_change_at = Some(Instant::now());
+        if self.ed.usages.last_seen_text != text {
+            self.ed.usages.last_seen_text = text.to_owned();
+            self.ed.usages.last_change_at = Some(Instant::now());
         }
 
         let settled = self
+            .ed
             .usages
             .last_change_at
             .is_none_or(|t| t.elapsed() > DEBOUNCE);
-        let stale = self.usages.computed_for_text != text;
-        let already_pending = self.usages.pending_text.as_deref() == Some(text);
+        let stale = self.ed.usages.computed_for_text != text;
+        let already_pending = self.ed.usages.pending_text.as_deref() == Some(text);
         if stale && settled && !already_pending {
             let ready = matches!(self.lsp_state.lock().unwrap().status, LspStatus::Ready);
             if ready {
-                self.usages.pending_text = Some(text.to_owned());
+                self.ed.usages.pending_text = Some(text.to_owned());
                 self.lsp_state
                     .lock()
                     .unwrap()
@@ -276,7 +277,7 @@ impl AppIde {
     }
 
     /// Drain completed `documentSymbol` / `references` LSP responses into
-    /// `self.usages`. A fresh symbol list immediately fires one `references`
+    /// `self.ed.usages`. A fresh symbol list immediately fires one `references`
     /// request per item (concurrent — keyed by its index in the new list).
     fn poll_usages(&mut self) {
         let symbols = {
@@ -284,17 +285,17 @@ impl AppIde {
             lsp.take_document_symbols_result()
         };
         if let Some((file, syms)) = symbols {
-            if file == self.usages.rel_path {
-                let text = self.usages.pending_text.take().unwrap_or_default();
+            if file == self.ed.usages.rel_path {
+                let text = self.ed.usages.pending_text.take().unwrap_or_default();
                 // Carry the previous run's resolved references over by (name,
                 // kind) so the fade/pill stays continuous while the serialized
                 // refresh below re-verifies each item one by one.
                 let cache: std::collections::HashMap<(String, u8), Vec<UsageRef>> =
-                    std::mem::take(&mut self.usages.items)
+                    std::mem::take(&mut self.ed.usages.items)
                         .into_iter()
                         .filter_map(|it| Some(((it.name, it.kind), it.references?)))
                         .collect();
-                self.usages.items = syms
+                self.ed.usages.items = syms
                     .into_iter()
                     // Entry points / externally-invoked items (`fn main`, an
                     // `#[interrupt]` handler, …) are never called from the
@@ -315,17 +316,17 @@ impl AppIde {
                         in_trait_impl: s.in_trait_impl,
                     })
                     .collect();
-                self.usages.computed_for_text = text;
-                self.usages.open_popup = None;
+                self.ed.usages.computed_for_text = text;
+                self.ed.usages.open_popup = None;
                 // Refresh every item's references — SERIALIZED (one in-flight
                 // request; the next goes out when the reply lands), never the
                 // old fire-all-at-once flood. A fresh run supersedes any
                 // still-queued indices from the previous one.
-                self.usages.refs_run += 1;
-                self.usages.refs_queue = (0..self.usages.items.len()).collect();
-                self.usages.refs_inflight = false;
+                self.ed.usages.refs_run += 1;
+                self.ed.usages.refs_queue = (0..self.ed.usages.items.len()).collect();
+                self.ed.usages.refs_inflight = false;
                 let mut lsp = self.lsp_state.lock().unwrap();
-                pump_references(&mut self.usages, &mut lsp);
+                pump_references(&mut self.ed.usages, &mut lsp);
             }
             // A response for a file we've since navigated away from — drop it;
             // `take_document_symbols_result` already removed it from `lsp_state`.
@@ -340,10 +341,10 @@ impl AppIde {
                 // Any reply frees the in-flight slot; only replies from the
                 // CURRENT run are applied (a superseded run's key would land on
                 // the wrong item).
-                self.usages.refs_inflight = false;
-                if key / REFS_RUN_STRIDE == self.usages.refs_run as usize {
+                self.ed.usages.refs_inflight = false;
+                if key / REFS_RUN_STRIDE == self.ed.usages.refs_run as usize {
                     let idx = key % REFS_RUN_STRIDE;
-                    if let Some(item) = self.usages.items.get_mut(idx) {
+                    if let Some(item) = self.ed.usages.items.get_mut(idx) {
                         item.references = Some(
                             locs.into_iter()
                                 .map(|r| UsageRef {
@@ -356,7 +357,7 @@ impl AppIde {
                 }
             }
             let mut lsp = self.lsp_state.lock().unwrap();
-            pump_references(&mut self.usages, &mut lsp);
+            pump_references(&mut self.ed.usages, &mut lsp);
         }
     }
 
@@ -388,14 +389,14 @@ impl AppIde {
         // Generic parameters first — computed from this exact text in
         // `tick_usages`, so no freshness guard is needed (or wanted: it is the
         // one part of the fade that stays live while you type).
-        if self.usages.generics_for_text == display_code {
+        if self.ed.usages.generics_for_text == display_code {
             // Only the fully-unused ones. The `impl`-only parameters are
             // underlined instead — fading them would be plain wrong.
-            ranges.extend_from_slice(&self.usages.generic_marks.unused);
+            ranges.extend_from_slice(&self.ed.usages.generic_marks.unused);
         }
 
-        if self.usages.rel_path == rel_path && self.usages.computed_for_text == display_code {
-            ranges.extend(self.usages.items.iter().filter_map(|item| {
+        if self.ed.usages.rel_path == rel_path && self.ed.usages.computed_for_text == display_code {
+            ranges.extend(self.ed.usages.items.iter().filter_map(|item| {
                 let refs = item.references.as_ref()?;
                 if !refs.is_empty() {
                     return None;
@@ -441,8 +442,8 @@ impl AppIde {
     /// scan is for different text. Same data the fade uses — handed to the
     /// pulsing overlay so the two can never disagree about what is unused.
     pub(super) fn generic_pulse_ranges(&self, display_code: &str) -> &[(usize, usize)] {
-        if self.usages.generics_for_text == display_code {
-            &self.usages.generic_marks.unused
+        if self.ed.usages.generics_for_text == display_code {
+            &self.ed.usages.generic_marks.unused
         } else {
             &[]
         }
@@ -451,8 +452,8 @@ impl AppIde {
     /// Ranges to underline: generic parameters the item itself doesn't use but
     /// an `impl` of it does. Empty when the cached scan is for different text.
     pub(super) fn generic_underline_ranges(&self, display_code: &str) -> &[(usize, usize)] {
-        if self.usages.generics_for_text == display_code {
-            &self.usages.generic_marks.underline
+        if self.ed.usages.generics_for_text == display_code {
+            &self.ed.usages.generic_marks.underline
         } else {
             &[]
         }
@@ -472,14 +473,14 @@ impl AppIde {
         display_code: &str,
         rel_path: &str,
     ) {
-        if self.usages.rel_path != rel_path || self.usages.computed_for_text != display_code {
+        if self.ed.usages.rel_path != rel_path || self.ed.usages.computed_for_text != display_code {
             return;
         }
 
         const PILL_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(40, 58, 76, 220);
         const PILL_FG: egui::Color32 = egui::Color32::from_rgb(150, 195, 235);
 
-        // Pass 1 (read-only borrow of `self.usages.items`): paint every pill and
+        // Pass 1 (read-only borrow of `self.ed.usages.items`): paint every pill and
         // remember its rect + click state. Nothing here mutates `self` — the
         // popup (which navigates on click) is handled in pass 2, after this
         // borrow ends.
@@ -489,7 +490,7 @@ impl AppIde {
             let total_chars = display_code.chars().count();
             let painter = ui.painter().with_clip_rect(clip);
             let gp = galley_pos;
-            for (i, item) in self.usages.items.iter().enumerate() {
+            for (i, item) in self.ed.usages.items.iter().enumerate() {
                 let Some(refs) = &item.references else {
                     continue; // still resolving
                 };
@@ -551,7 +552,7 @@ impl AppIde {
         }
 
         if let Some(i) = clicked {
-            self.usages.open_popup = if self.usages.open_popup == Some(i) {
+            self.ed.usages.open_popup = if self.ed.usages.open_popup == Some(i) {
                 None
             } else {
                 Some(i)
@@ -559,11 +560,11 @@ impl AppIde {
         }
 
         // Pass 2: the floating popup (needs `&mut self` to navigate on click),
-        // now that pass 1's borrow of `self.usages.items` has ended.
-        if let Some(idx) = self.usages.open_popup {
+        // now that pass 1's borrow of `self.ed.usages.items` has ended.
+        if let Some(idx) = self.ed.usages.open_popup {
             match pill_rects.get(&idx) {
                 Some(&anchor) => self.show_usage_popup(ui, anchor, idx),
-                None => self.usages.open_popup = None, // pill scrolled off-screen
+                None => self.ed.usages.open_popup = None, // pill scrolled off-screen
             }
         }
     }
@@ -571,8 +572,8 @@ impl AppIde {
     /// The floating "References to `name`" popup anchored below a pill; each
     /// row navigates to that call site (opens the file, scrolls, highlights).
     fn show_usage_popup(&mut self, ui: &egui::Ui, anchor: egui::Rect, idx: usize) {
-        let Some(item) = self.usages.items.get(idx) else {
-            self.usages.open_popup = None;
+        let Some(item) = self.ed.usages.items.get(idx) else {
+            self.ed.usages.open_popup = None;
             return;
         };
         let name = item.name.clone();
@@ -629,13 +630,25 @@ impl AppIde {
             if let Some(id) =
                 crate::app::project_file_for_def(&path, &self.project_tree.user_src_files)
             {
-                self.selected_file = id;
-                self.pending_scroll_to_line = Some((id, line as usize + 1));
-                self.highlighted_def_line = Some((id, line as usize + 1));
+                // Navigate the view the pill was clicked in. Jumping the MAIN
+                // editor for a reference clicked in the second one would move
+                // the file being read FROM out from under the reader.
+                if self.ed_slot == crate::app::EditorSlot::Reference {
+                    if let Some(p) = crate::editor::gui::text_pos::selected_file_rel_path(
+                        &id,
+                        &self.project_tree.user_src_files,
+                    ) {
+                        self.reference_file = Some(p);
+                    }
+                } else {
+                    self.selected_file = id;
+                }
+                self.ed.pending_scroll_to_line = Some((id, line as usize + 1));
+                self.ed.highlighted_def_line = Some((id, line as usize + 1));
             }
         }
         if close {
-            self.usages.open_popup = None;
+            self.ed.usages.open_popup = None;
         }
     }
 }

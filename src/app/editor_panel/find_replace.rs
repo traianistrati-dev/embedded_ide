@@ -185,20 +185,20 @@ impl AppIde {
         display_code: &mut String,
         displayed_file: ProjectFileId,
     ) {
-        if !self.find.open {
-            self.find.had_focus = false;
+        if !self.ed.find.open {
+            self.ed.find.had_focus = false;
             return;
         }
         // Esc closes the bar.
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            self.find.open = false;
-            self.find.had_focus = false;
+            self.ed.find.open = false;
+            self.ed.find.had_focus = false;
             return;
         }
         // Re-observed from this frame's widgets below.
-        self.find.had_focus = false;
+        self.ed.find.had_focus = false;
 
-        let mode = self.find.mode;
+        let mode = self.ed.find.mode;
         let mut do_next = false;
         let mut do_prev = false;
         let mut do_search = false;
@@ -225,15 +225,15 @@ impl AppIde {
                         .color(egui::Color32::from_rgb(160, 170, 190)),
                 );
                 let q = ui.add(
-                    egui::TextEdit::singleline(&mut self.find.query)
+                    egui::TextEdit::singleline(&mut self.ed.find.query)
                         .desired_width(230.0)
                         .hint_text("find"),
                 );
-                if self.find.focus_query {
+                if self.ed.find.focus_query {
                     q.request_focus();
-                    self.find.focus_query = false;
+                    self.ed.find.focus_query = false;
                 }
-                self.find.had_focus |= q.has_focus();
+                self.ed.find.had_focus |= q.has_focus();
                 query_changed = q.changed();
                 let enter = q.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
@@ -256,16 +256,16 @@ impl AppIde {
                         FindMode::FindProject => do_search = true,
                         FindMode::ReplaceFile | FindMode::ReplaceProject => do_replace_all = true,
                     }
-                    self.find.focus_query = true; // keep focus for repeated Enter
+                    self.ed.find.focus_query = true; // keep focus for repeated Enter
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(ph::X).on_hover_text("Close (Esc)").clicked() {
                         close = true;
                     }
-                    if !self.find.status.is_empty() {
+                    if !self.ed.find.status.is_empty() {
                         ui.label(
-                            egui::RichText::new(&self.find.status)
+                            egui::RichText::new(&self.ed.find.status)
                                 .size(11.0)
                                 .color(egui::Color32::from_rgb(150, 160, 175)),
                         );
@@ -282,15 +282,15 @@ impl AppIde {
                             .color(egui::Color32::from_rgb(160, 170, 190)),
                     );
                     let r = ui.add(
-                        egui::TextEdit::singleline(&mut self.find.replace)
+                        egui::TextEdit::singleline(&mut self.ed.find.replace)
                             .desired_width(230.0)
                             .hint_text("replace with"),
                     );
-                    if self.find.focus_replace {
+                    if self.ed.find.focus_replace {
                         r.request_focus();
-                        self.find.focus_replace = false;
+                        self.ed.find.focus_replace = false;
                     }
-                    self.find.had_focus |= r.has_focus();
+                    self.ed.find.had_focus |= r.has_focus();
                     let renter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui.button("Replace All").clicked() || renter {
                         do_replace_all = true;
@@ -302,7 +302,7 @@ impl AppIde {
             // Shown ONLY after a rename that rust-analyzer could not complete.
             // The action is textual, so it stays behind an explicit click with
             // the affected lines listed right below it — never automatic.
-            if let Some(new_name) = self.find.leftover_target().map(str::to_owned) {
+            if let Some(new_name) = self.ed.find.leftover_target().map(str::to_owned) {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(
@@ -333,13 +333,13 @@ impl AppIde {
             }
 
             // ── Results list (project modes) ──
-            if mode.is_project() && !self.find.results.is_empty() {
+            if mode.is_project() && !self.ed.find.results.is_empty() {
                 ui.add_space(4.0);
                 egui::ScrollArea::vertical()
                     .max_height(190.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        for (idx, m) in self.find.results.iter().enumerate() {
+                        for (idx, m) in self.ed.find.results.iter().enumerate() {
                             let text = format!("{}:{}  {}", m.path, m.line, m.preview);
                             if ui
                                 .add(
@@ -361,16 +361,16 @@ impl AppIde {
         ui.add_space(4.0);
 
         if close {
-            self.find.open = false;
+            self.ed.find.open = false;
             return;
         }
 
         // ── Apply actions (outside the closures to avoid borrow tangles) ──
         if let Some(idx) = clicked_result {
-            if let Some(m) = self.find.results.get(idx) {
+            if let Some(m) = self.ed.find.results.get(idx) {
                 let (file, line) = (m.file, m.line);
                 self.selected_file = file;
-                self.pending_scroll_to_line = Some((file, line));
+                self.ed.pending_scroll_to_line = Some((file, line));
             }
         }
 
@@ -391,38 +391,39 @@ impl AppIde {
                 }
             }
             FindMode::ReplaceFile => {
-                if do_replace_all && !self.find.query.is_empty() {
-                    let count = display_code.matches(self.find.query.as_str()).count();
-                    *display_code =
-                        display_code.replace(self.find.query.as_str(), self.find.replace.as_str());
-                    self.find.status = format!("Replaced {count}");
+                if do_replace_all && !self.ed.find.query.is_empty() {
+                    let count = display_code.matches(self.ed.find.query.as_str()).count();
+                    *display_code = display_code
+                        .replace(self.ed.find.query.as_str(), self.ed.find.replace.as_str());
+                    self.ed.find.status = format!("Replaced {count}");
                 }
             }
             FindMode::FindFile => {
-                let starts = match_starts(display_code, &self.find.query);
+                let starts = match_starts(display_code, &self.ed.find.query);
                 if starts.is_empty() {
-                    self.find.status = if self.find.query.is_empty() {
+                    self.ed.find.status = if self.ed.find.query.is_empty() {
                         String::new()
                     } else {
                         "No results".to_string()
                     };
                 } else {
                     if do_next {
-                        self.find.current = (self.find.current + 1) % starts.len();
+                        self.ed.find.current = (self.ed.find.current + 1) % starts.len();
                     } else if do_prev {
-                        self.find.current = (self.find.current + starts.len() - 1) % starts.len();
+                        self.ed.find.current =
+                            (self.ed.find.current + starts.len() - 1) % starts.len();
                     } else if query_changed {
-                        self.find.current = 0;
+                        self.ed.find.current = 0;
                     }
-                    self.find.current = self.find.current.min(starts.len() - 1);
+                    self.ed.find.current = self.ed.find.current.min(starts.len() - 1);
                     if do_next || do_prev || query_changed {
-                        let start = starts[self.find.current];
-                        let end = start + self.find.query.chars().count();
-                        self.find.pending_select = Some((start, end));
-                        self.pending_scroll_to_line =
+                        let start = starts[self.ed.find.current];
+                        let end = start + self.ed.find.query.chars().count();
+                        self.ed.find.pending_select = Some((start, end));
+                        self.ed.pending_scroll_to_line =
                             Some((displayed_file, line_of(display_code, start)));
                     }
-                    self.find.status = format!("{}/{}", self.find.current + 1, starts.len());
+                    self.ed.find.status = format!("{}/{}", self.ed.find.current + 1, starts.len());
                 }
             }
         }
@@ -440,16 +441,19 @@ impl AppIde {
         clip: egui::Rect,
         ui: &egui::Ui,
     ) {
-        if !self.find.open || self.find.query.is_empty() {
+        if !self.ed.find.open || self.ed.find.query.is_empty() {
             return;
         }
-        let starts = match_starts(display_code, &self.find.query);
+        let starts = match_starts(display_code, &self.ed.find.query);
         if starts.is_empty() {
             return;
         }
-        let wl = self.find.query.chars().count();
-        let file_find = matches!(self.find.mode, FindMode::FindFile | FindMode::ReplaceFile);
-        let cur_idx = self.find.current.min(starts.len() - 1);
+        let wl = self.ed.find.query.chars().count();
+        let file_find = matches!(
+            self.ed.find.mode,
+            FindMode::FindFile | FindMode::ReplaceFile
+        );
+        let cur_idx = self.ed.find.current.min(starts.len() - 1);
         let base = egui::Color32::from_rgba_unmultiplied(52, 232, 235, 45);
         let current = egui::Color32::from_rgba_unmultiplied(255, 200, 60, 96);
 
@@ -510,7 +514,9 @@ impl AppIde {
             }
         }
         if !results.is_empty() {
-            self.find.show_rename_leftovers(old_name, new_name, results);
+            self.ed
+                .find
+                .show_rename_leftovers(old_name, new_name, results);
         }
     }
 
@@ -562,14 +568,14 @@ impl AppIde {
     /// [`Self::run_project_replace`] does it: the editor writes its buffer back
     /// at end of frame and would otherwise revert the edit in the open file.
     fn apply_leftover_rename(&mut self, displayed_file: ProjectFileId, display_code: &mut String) {
-        let Some(new_name) = self.find.leftover_new_name.clone() else {
+        let Some(new_name) = self.ed.find.leftover_new_name.clone() else {
             return;
         };
-        let old_name = self.find.query.clone();
+        let old_name = self.ed.find.query.clone();
 
         // Group the approved lines per file before editing anything.
         let mut per_file: Vec<(ProjectFileId, Vec<usize>)> = Vec::new();
-        for m in &self.find.results {
+        for m in &self.ed.find.results {
             match per_file.iter_mut().find(|(id, _)| *id == m.file) {
                 Some((_, lines)) => lines.push(m.line),
                 None => per_file.push((m.file, vec![m.line])),
@@ -593,10 +599,10 @@ impl AppIde {
             *display_code = self.searchable_content(displayed_file);
         }
 
-        self.find.results.clear();
-        self.find.leftover_new_name = None;
-        self.find.query = new_name;
-        self.find.status = format!("Renamed {total} leftover(s) in {files} file(s)");
+        self.ed.find.results.clear();
+        self.ed.find.leftover_new_name = None;
+        self.ed.find.query = new_name;
+        self.ed.find.status = format!("Renamed {total} leftover(s) in {files} file(s)");
     }
 
     /// In-memory content of a searchable file by id.
@@ -634,13 +640,13 @@ impl AppIde {
         }
     }
 
-    /// Populate `self.find.results` with every line in the project containing the
+    /// Populate `self.ed.find.results` with every line in the project containing the
     /// query (one hit per line; capped to keep the list responsive).
     fn run_project_search(&mut self) {
-        self.find.results.clear();
-        let query = self.find.query.clone();
+        self.ed.find.results.clear();
+        let query = self.ed.find.query.clone();
         if query.is_empty() {
-            self.find.status.clear();
+            self.ed.find.status.clear();
             return;
         }
         const CAP: usize = 1000;
@@ -648,13 +654,13 @@ impl AppIde {
         for (id, path, content) in self.searchable_files() {
             for (n, line) in content.lines().enumerate() {
                 if line.contains(&query) {
-                    self.find.results.push(ProjectMatch {
+                    self.ed.find.results.push(ProjectMatch {
                         file: id,
                         path: path.clone(),
                         line: n + 1,
                         preview: line.trim().chars().take(140).collect(),
                     });
-                    if self.find.results.len() >= CAP {
+                    if self.ed.find.results.len() >= CAP {
                         capped = true;
                         break;
                     }
@@ -664,8 +670,8 @@ impl AppIde {
                 break;
             }
         }
-        let n = self.find.results.len();
-        self.find.status = match n {
+        let n = self.ed.find.results.len();
+        self.ed.find.status = match n {
             0 => "No results".to_string(),
             _ if capped => format!("{n}+ matches"),
             _ => format!("{n} matches"),
@@ -676,8 +682,8 @@ impl AppIde {
     /// `display_code` to the (possibly edited) current file so the editor's
     /// write-back doesn't revert it.
     fn run_project_replace(&mut self, displayed_file: ProjectFileId, display_code: &mut String) {
-        let query = self.find.query.clone();
-        let replacement = self.find.replace.clone();
+        let query = self.ed.find.query.clone();
+        let replacement = self.ed.find.replace.clone();
         if query.is_empty() {
             return;
         }
@@ -695,8 +701,8 @@ impl AppIde {
             }
         }
         *display_code = self.searchable_content(displayed_file);
-        self.find.results.clear();
-        self.find.status = format!("Replaced {total} in {files} file(s)");
+        self.ed.find.results.clear();
+        self.ed.find.status = format!("Replaced {total} in {files} file(s)");
     }
 }
 

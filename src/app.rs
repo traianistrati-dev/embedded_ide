@@ -10,7 +10,7 @@ use crate::panels::mcu_module::{project_gen, project_gen::ProjectFiles, registry
 use crate::project_tree::ProjectTreeState;
 use crate::required_tools;
 use eframe::egui;
-use egui_code_editor::{Completer, Syntax};
+use egui_code_editor::Syntax;
 use notify::Watcher as _;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -43,6 +43,7 @@ mod mcu_panel;
 mod structure_tab;
 
 mod editor_panel;
+pub(crate) mod editor_state;
 
 mod project_io;
 
@@ -255,7 +256,7 @@ pub fn diag_row_link_hint(
 /// The lines lit up by a jump from the Pins canvas: one for a pin click, one per
 /// wired pin for a module click. All in the same file — the editor shows one, and
 /// a band nobody can see is worse than a missing line.
-struct PinHighlight {
+pub(crate) struct PinHighlight {
     file: ProjectFileId,
     /// 1-based, sorted, deduplicated.
     lines: Vec<usize>,
@@ -465,11 +466,12 @@ enum BuildPanelTab {
     RequiredTools,
 }
 
-/// Which of the two code editors a keystroke / completion belongs to.
+/// Which of the two code editors a keystroke, popup or request belongs to.
 ///
-/// Only ONE completion popup can exist at a time — it belongs to one caret at
-/// one moment — so the completion state stays a single set, tagged with its
-/// owner rather than duplicated per editor.
+/// Each view owns its own [`EditorState`](editor_state::EditorState) now, so
+/// this is not a tag on shared state any more — it names WHICH state, at the few
+/// points that have to reach across: the completion popup's owner (only one
+/// caret can have a list up at a time) and [`LspAsker`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum EditorSlot {
     /// The main editor (left panel).
@@ -477,6 +479,22 @@ pub(crate) enum EditorSlot {
     Main,
     /// The second editor in the "Reference" tab.
     Reference,
+}
+
+/// Which view fired each outstanding rust-analyzer request.
+///
+/// `LspState` has ONE inbox per request kind: a single request can be in flight
+/// and its answer comes back with no idea who asked. That was fine with one
+/// editor. The answer is applied at frame TOP — before any view has drawn, and
+/// therefore before [`AppIde::with_editor`] has swapped anything — so the poll
+/// has to be told which view's state to write into. Recorded where the request
+/// goes out, read where it lands.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct LspAsker {
+    pub code_action: EditorSlot,
+    pub rename: EditorSlot,
+    pub inlay: EditorSlot,
+    pub definition: EditorSlot,
 }
 
 /// The source snippet shown in the F12 "Definition" tab (MCU Configurator,
@@ -1205,22 +1223,27 @@ pub struct AppIde {
     /// — and keyed by file, because a caret belonging to another file's editor
     /// must never be translated through this file's fold map.
     fold_ids: std::collections::HashMap<String, egui::Id>,
-    /// The code editor's egui widget id, captured after each render. Needed a
-    /// frame LATER, and before the widget exists: a folded editor is
-    /// non-interactive and therefore unfocused, so the keystroke that unfolds it
-    /// must also hand focus back — otherwise the file stays untypable until the
-    /// user clicks into it.
-    editor_widget_id: Option<egui::Id>,
+    /// The main editor's view state — popups, caret, find bar. Everything the
+    /// editor panel reads goes through here, so the same code can drive the
+    /// Reference editor by swapping this field with `ed_ref`.
+    ed: editor_state::EditorState,
+    /// The Reference editor's view state, parked while the main editor draws.
+    /// See [`AppIde::with_editor`].
+    ed_ref: editor_state::EditorState,
+    /// Which editor's state is currently installed in `ed`. Only [`with_editor`]
+    /// changes it, and only for the length of one closure — but the arbitration
+    /// code needs to ask "where does the Reference editor's popup live right
+    /// now?", and the answer depends on it.
+    ///
+    /// [`with_editor`]: AppIde::with_editor
+    ed_slot: EditorSlot,
+    /// Who asked for each rust-analyzer answer still in flight. See [`LspAsker`].
+    lsp_asker: LspAsker,
     /// Collapsed blocks per file: rel path → the 0-based line carrying the `{`
     /// of each folded block. View state only — never persisted, and cleared for
     /// a file the moment anything is typed into it (see
     /// [`fold`](crate::app::editor_panel::fold)).
     folds: std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
-    /// Set by a fold toggle: `(rel path, the block's header line, the screen y
-    /// it had BEFORE the toggle)`. The next frame re-anchors the scroll offset
-    /// so that line stays exactly where it was — folding 200 lines otherwise
-    /// slides the whole page under the pointer.
-    fold_anchor: Option<(String, usize, f32)>,
     /// Debug probes from the last `probe-rs list` scan — the shared selector on
     /// the RTT and Debug tabs (both drive probe-rs). Populated by `scan_probes`.
     probe_list: Vec<crate::probe::ProbeInfo>,
@@ -1244,81 +1267,15 @@ pub struct AppIde {
     /// Source breakpoints per workspace-relative path (1-based lines), toggled
     /// from the editor's line-number gutter. Session-only (not persisted).
     breakpoints: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>>,
-    /// Code-completion engine — stores the trie, current prefix and popup state.
-    /// Must live in the App (not a local) so state is preserved across frames.
-    completer: Completer,
-    /// True when the LSP completion popup is visible.
-    completion_open: bool,
-    /// Transient note shown at the cursor when a completion request came back
-    /// EMPTY — a silent popup flash was undiagnosable. Carries the reason
-    /// (e.g. "the file has no `mod …;` declaration") + when it appeared.
-    completion_note: Option<(String, std::time::Instant)>,
-    /// Index of the currently highlighted row in the completion popup.
-    completion_sel: usize,
-    /// Character-offset in the editor text where completion was triggered.
-    /// Used to compute the live prefix for filtering and to close the popup
-    /// when the cursor moves away.
-    completion_trigger_idx: usize,
-    /// Completion item deferred from a mouse-click on a popup row.
-    /// Applied at the start of the next frame (before the editor renders);
-    /// carries the whole item so snippet expansion sees `insert_is_snippet`.
-    completion_pending_insert: Option<lsp::CompletionItem>,
-    /// Filtered completion list from the last rendered frame.
-    /// Key handlers (Tab / Enter / Arrow) use this so they always operate
-    /// on the same slice the user sees, not the full unfiltered LSP list.
-    completion_filtered_items: Vec<lsp::CompletionItem>,
     /// Which editor asked for the open completion — decides where the popup is
     /// anchored and, crucially, WHICH buffer an accept writes into.
     completion_owner: EditorSlot,
-    /// Cargo.toml dependency-completion popup (crate names + live crates.io
-    /// versions). Independent of rust-analyzer.
-    cargo_complete: editor_panel::cargo_complete::CargoCompleteState,
-    /// Primary caret char-index from the previous frame, used to scroll the
-    /// editor so the caret stays in view when it moves off-screen (e.g.
-    /// Shift+Up/Down selection past the visible area).
-    last_caret_idx: Option<usize>,
-    /// Pending "jump to this diagnostic": the target file and its 1-based line.
-    /// Set when a row in the Cargo Check / rust-analyzer tab is clicked; applied
-    /// once the editor is displaying that file (scrolls the line to row ~10).
-    pending_scroll_to_line: Option<(ProjectFileId, usize)>,
-    /// The file + 1-based line + band colour of the last-clicked diagnostic.
-    /// Highlighted with a translucent band (colour keyed by severity, see
-    /// `diag_highlight_color`) in the editor until another diagnostic is clicked.
-    highlighted_error_line: Option<(ProjectFileId, usize, egui::Color32)>,
-    /// The file + 1-based line of the last F12 go-to-definition that landed in a
-    /// project file. Highlighted with a translucent yellow band (like the
-    /// Definition tab) until the next F12.
-    highlighted_def_line: Option<(ProjectFileId, usize)>,
-    /// The pulsing "here is your pin" highlight, or `None` when none is running.
-    highlighted_pin_lines: Option<PinHighlight>,
-    /// Live "usages" analysis (fn/struct/enum/const/… fade-if-unused + a
-    /// "references" popup) for whichever `.rs` file is currently displayed. See
-    /// `editor_panel::usages`.
-    usages: editor_panel::usages::UsagesState,
     /// Every `.rs` file's content (`"src/main.rs"` / `"src/{rel}"` → text) at
     /// the moment the last Cargo Check / Clippy run was kicked off — lets the
     /// "unused local variable" fade (which can only come from an on-demand
     /// compile, see `editor_panel::usages`) tell whether a diagnostic still
     /// matches the live text or has gone stale from a later edit.
     build_text_snapshot: HashMap<String, String>,
-    /// Extra caret positions for Ctrl+Shift+Up/Down multi-cursor editing (char
-    /// indices into the displayed file, in the order they were added — last
-    /// added is popped first by Ctrl+Shift+Down). See `editor_panel::multi_cursor`.
-    extra_cursors: Vec<editor_panel::multi_cursor::ExtraCaret>,
-    /// Which file `extra_cursors` belongs to — cleared on a file switch so
-    /// stale positions never leak into an unrelated file.
-    extra_cursors_file: Option<ProjectFileId>,
-    /// The primary caret's char index at the end of the previous frame — lets
-    /// multi-cursor replay tell a Backspace (deletes BEFORE the cursor) apart
-    /// from a Delete-key press (deletes AFTER it) — and, since it stores the
-    /// whole `(anchor, head)` selection, typing OVER a selection apart from
-    /// either, because then each caret replaces its OWN span.
-    mc_prev_primary_sel: Option<(usize, usize)>,
-    /// Did the code editor hold keyboard focus last frame? egui surrenders the
-    /// focused widget on Escape before any of our code runs, so this is the
-    /// only way to know whether the caret that just vanished was OURS — and
-    /// therefore whether to take the focus back.
-    editor_was_focused: bool,
     /// The SECOND (Reference) editor had keyboard focus last frame. Set where
     /// that editor renders; read by the main editor's keyboard-scope gate,
     /// which runs earlier in the frame — hence "last frame".
@@ -1355,63 +1312,10 @@ pub struct AppIde {
     /// that opens `src/main.rs` anyway if RA never reports indexing as finished
     /// (see the `Indexing` arm of the LSP lifecycle).
     lsp_indexing_since: Option<std::time::Instant>,
-    // ── Rename symbol (Ctrl+R → textDocument/rename) ─────────────────────────
-    /// While `true`, the rename input popup is shown.
-    rename_active: bool,
-    /// The new name being typed in the rename popup (pre-filled with the symbol).
-    rename_input: String,
-    /// The symbol's name BEFORE the rename, captured when the popup opens, so
-    /// the applied edits can be audited for occurrences RA did not reach.
-    rename_old_name: String,
-    /// The name submitted in the rename popup, so leftovers can be offered the
-    /// same target.
-    rename_new_name: String,
-    /// File + 0-based (line, char) where the rename was triggered.
-    rename_rel: String,
-    rename_line: u32,
-    rename_char: u32,
-    /// Screen position to anchor the rename popup at.
-    rename_popup_pos: egui::Pos2,
-    /// `true` after a rename request was sent, until RA's edits are applied.
-    rename_in_flight: bool,
-    // ── Code actions (Ctrl+Enter — RA assists / quick-fixes) ─────────────────
-    /// `true` after a codeAction request, until the list arrives.
-    code_action_in_flight: bool,
-    /// `true` after a codeAction/resolve request, until its edits arrive.
-    code_action_resolve_in_flight: bool,
-    /// The code actions to choose from (popup shown when > 1).
-    code_actions: Vec<lsp::CodeAction>,
-    /// Whether the chooser popup is open.
-    code_action_popup_open: bool,
-    /// Highlighted row in the chooser popup.
-    code_action_sel: usize,
-    /// Screen anchor for the chooser popup (the cursor rect when triggered).
-    code_action_popup_pos: egui::Pos2,
-    /// Chooser selection deferred to next frame's `init_frame` (so the edit
-    /// applies at frame TOP, avoiding the display_code write-back revert).
-    code_action_choice: Option<usize>,
-    /// The crate identifier the "Add dependency" row offers, for the caret the
-    /// last Ctrl+Enter was fired on. `Some` puts an extra row at the TOP of the
-    /// code-action list — rust-analyzer never produces it, because it does not
-    /// know Cargo.toml exists.
-    code_action_add_dep: Option<String>,
-    /// The crate chooser that row opens.
-    add_dep: editor_panel::add_dep::AddDepState,
     // ── Inline type hints (inferred type on the cursor's `let` line) ──────────
     /// Master switch for the cursor-line inferred-type ghost hint + its Tab
     /// accept; toggled from the editor toolbar ("Types" button). `true` default.
     inlay_types_enabled: bool,
-    /// The inferred-type hint to draw as ghost text after an untyped `let` on
-    /// the cursor's line, if any (its `text_edits` insert the type on Tab).
-    /// Cleared when the caret leaves an untyped `let`.
-    inlay_hint: Option<lsp::InlayHint>,
-    /// `(rel_path, 0-based line)` the last inlay request was fired for — so we
-    /// re-request when the caret moves to a different `let` line, or after RA
-    /// re-syncs (the request key is reset while the file is dirty).
-    inlay_requested: Option<(String, u32)>,
-    /// Set when Tab is pressed while the ghost hint shows; the type is inserted
-    /// at frame TOP next `init_frame` (like code actions, to dodge the revert).
-    inlay_accept_pending: bool,
     /// `true` when the in-flight rename came from a Clippy "Rename" button — once
     /// RA's edits land, clippy is re-run so its (now-stale) list refreshes.
     clippy_rename_pending: bool,
@@ -1420,29 +1324,19 @@ pub struct AppIde {
     /// edits land; a queued entry is skipped if its position no longer matches its
     /// `old_name` (a prior edit shifted it — it'll resurface on the final re-run).
     clippy_rename_queue: std::collections::VecDeque<crate::build::RenameFix>,
-    /// Request keyboard focus for the rename input on the frame it opens.
-    rename_focus: bool,
     /// Show the full-width translucent-yellow line background for git-changed
     /// lines in the editor. When off, only the gutter bars (green/amber/red)
     /// remain — the band was distracting while editing. Persisted (inverted, as
     /// `hide_diff_line_bg`). Toggled from the editor toolbar.
     diff_line_bg: bool,
-    // ── Find / Replace (Ctrl+F / Ctrl+H / Ctrl+Shift+F / Ctrl+Shift+H) ───────
-    /// Search bar state: mode, query/replacement text, results, match cursor.
-    find: editor_panel::find_replace::FindReplace,
     /// Code-editor font size in points, zoomed with Ctrl + `+`/`-`/`0`.
     editor_font_size: f32,
-    /// Full-definition highlight set by a triple-click on a `{`/`}` — `(file,
-    /// start, close)` inclusive char range, kept until the selection changes.
-    full_block_selection: Option<(ProjectFileId, usize, usize)>,
     // ── Serial monitor (built-in USART/UART console) ─────────────────────────
     serial: crate::serial::SerialMonitor,
     // ── Terminal (built-in streaming command console) ────────────────────────
     terminal: crate::terminal::TerminalConsole,
     // ── Git (commit/push/pull in the project directory) ──────────────────────
     git: crate::git::GitConsole,
-    /// Editor gutter diff (live in-memory text vs HEAD) + revert-hunk state.
-    diff_gutter: editor_panel::diff_gutter::DiffGutter,
     // ── Activity log (per-Save/Build/Flash timing breakdown) ─────────────────
     activity: Arc<Mutex<crate::activity::ActivityLog>>,
     /// MRU file-switch history + active Ctrl+Tab cycling session
@@ -1958,8 +1852,10 @@ impl AppIde {
             folds: std::collections::HashMap::new(),
             fold_guard: std::collections::HashMap::new(),
             fold_ids: std::collections::HashMap::new(),
-            editor_widget_id: None,
-            fold_anchor: None,
+            ed: editor_state::EditorState::new(),
+            ed_ref: editor_state::EditorState::new(),
+            ed_slot: EditorSlot::Main,
+            lsp_asker: LspAsker::default(),
             probe_list: Vec::new(),
             selected_probe: None,
             probe_scan_err: None,
@@ -1967,29 +1863,8 @@ impl AppIde {
             probe_scanning: false,
             last_flash_autoscan: None,
             breakpoints: std::collections::BTreeMap::new(),
-            // Completer: seeded with Rust keywords/types + learns words from code
-            completer: Completer::new_with_syntax(&Syntax::rust())
-                .with_auto_indent()
-                .with_user_words(),
-            completion_open: false,
-            completion_note: None,
-            completion_sel: 0,
-            completion_trigger_idx: 0,
-            completion_pending_insert: None,
-            completion_filtered_items: Vec::new(),
             completion_owner: EditorSlot::Main,
-            cargo_complete: editor_panel::cargo_complete::CargoCompleteState::default(),
-            last_caret_idx: None,
-            pending_scroll_to_line: None,
-            highlighted_error_line: None,
-            highlighted_def_line: None,
-            highlighted_pin_lines: None,
-            usages: editor_panel::usages::UsagesState::default(),
             build_text_snapshot: HashMap::new(),
-            extra_cursors: Vec::new(),
-            extra_cursors_file: None,
-            mc_prev_primary_sel: None,
-            editor_was_focused: false,
             reference_was_focused: false,
             reference_ctrl_space: false,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
@@ -1999,38 +1874,13 @@ impl AppIde {
             last_workspace_change: None,
             lsp_indexing_since: None,
             lsp_flush_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            rename_active: false,
-            rename_input: String::new(),
-            rename_old_name: String::new(),
-            rename_new_name: String::new(),
-            rename_rel: String::new(),
-            rename_line: 0,
-            rename_char: 0,
-            rename_popup_pos: egui::Pos2::ZERO,
-            rename_in_flight: false,
-            code_action_in_flight: false,
-            code_action_resolve_in_flight: false,
-            code_actions: Vec::new(),
-            code_action_popup_open: false,
-            code_action_sel: 0,
-            code_action_popup_pos: egui::Pos2::ZERO,
-            code_action_choice: None,
-            code_action_add_dep: None,
-            add_dep: editor_panel::add_dep::AddDepState::default(),
             inlay_types_enabled: true,
-            inlay_hint: None,
-            inlay_requested: None,
-            inlay_accept_pending: false,
             clippy_rename_pending: false,
             clippy_rename_queue: std::collections::VecDeque::new(),
-            rename_focus: false,
-            find: editor_panel::find_replace::FindReplace::default(),
             editor_font_size: editor_panel::DEFAULT_EDITOR_FONT_SIZE,
-            full_block_selection: None,
             serial: crate::serial::SerialMonitor::default(),
             terminal: crate::terminal::TerminalConsole::default(),
             git: crate::git::GitConsole::default(),
-            diff_gutter: editor_panel::diff_gutter::DiffGutter::default(),
             activity: Arc::new(Mutex::new(crate::activity::ActivityLog::default())),
             flushed_hashes: Arc::new(Mutex::new(std::collections::HashMap::new())),
             file_cycle: editor_panel::file_cycle::FileCycle::default(),
@@ -2253,6 +2103,40 @@ impl AppIde {
     fn has_project(&self) -> bool {
         self.selected_def().is_some()
     }
+    /// Apply a finished `textDocument/rename` across every file it touched.
+    ///
+    /// Its own method so the frame-top caller can run it inside
+    /// [`with_editor`](Self::with_editor) — the `rename_*` state it reads
+    /// belongs to whichever view fired the request.
+    fn poll_rename(&mut self) {
+        if !self.ed.rename_in_flight {
+            return;
+        }
+        let result = self.lsp_state.lock().unwrap().take_rename_result();
+        if let Some(edits) = result {
+            self.ed.rename_in_flight = false;
+            if !edits.is_empty() {
+                self.apply_rename_edits(edits);
+                // RA's reference search does not reach every position (a
+                // const-generic argument body is the known case), and it
+                // reports success regardless — so the stale name would
+                // otherwise surface much later as a compile error. Audit
+                // and show what is left; never edit it automatically.
+                let old = std::mem::take(&mut self.ed.rename_old_name);
+                let new = std::mem::take(&mut self.ed.rename_new_name);
+                self.report_rename_leftovers(&old, &new);
+            }
+            // Continue an "Apply all" / queued batch: fire the next rename. When
+            // the queue is drained, re-run clippy once so the list reflects all
+            // the renamed code (clippy_rename_pending was set when the batch
+            // started).
+            if !self.start_next_queued_rename() && self.clippy_rename_pending {
+                self.clippy_rename_pending = false;
+                self.start_clippy_run();
+            }
+            self.egui_ctx.request_repaint();
+        }
+    }
 
     /// Drive a Go-to-definition that was asked for while rust-analyzer could not
     /// answer: start the analyzer once, wait for it to be genuinely usable, then
@@ -2420,6 +2304,46 @@ impl AppIde {
 
     /// Show a short-lived message in the status bar (the same channel the
     /// export / save results use).
+    /// Run `f` with `slot`'s view state installed as `self.ed`.
+    ///
+    /// This is what makes a second full-featured editor affordable. The ~420
+    /// places that read `self.ed` all mean "the editor being drawn right now",
+    /// and the two views never draw at the same time — the main panel runs at
+    /// the top of the frame, the Reference tab later, inside the MCU panel. So
+    /// one swap point stands in for ~420 individual decisions about which view
+    /// is meant, and every feature the main editor has works in the second one
+    /// without knowing there is a second one.
+    ///
+    /// The state is swapped back unconditionally on the way out. `f` cannot
+    /// return early past that — the whole body is inside the closure — but a
+    /// PANIC inside `f` would leave the two swapped. That is accepted: an
+    /// unwinding egui frame is not a state this app recovers from anyway.
+    fn with_editor<R>(&mut self, slot: EditorSlot, f: impl FnOnce(&mut Self) -> R) -> R {
+        if slot == self.ed_slot {
+            return f(self);
+        }
+        std::mem::swap(&mut self.ed, &mut self.ed_ref);
+        let was = std::mem::replace(&mut self.ed_slot, slot);
+        let out = f(self);
+        std::mem::swap(&mut self.ed, &mut self.ed_ref);
+        self.ed_slot = was;
+        out
+    }
+
+    /// `slot`'s view state, wherever it is parked at the moment.
+    ///
+    /// Needed by the handful of places that arbitrate BETWEEN the two editors —
+    /// closing the popup of whichever one lost the keyboard, handing a keyboard
+    /// accept to the editor that owns the list. Everything else should use
+    /// `self.ed` and stay unaware that a second view exists.
+    fn ed_of(&mut self, slot: EditorSlot) -> &mut editor_state::EditorState {
+        if slot == self.ed_slot {
+            &mut self.ed
+        } else {
+            &mut self.ed_ref
+        }
+    }
+
     fn set_status_msg(&mut self, msg: String) {
         self.export_msg = msg;
         self.export_status_until =
@@ -2722,8 +2646,8 @@ impl AppIde {
         lines.dedup();
 
         self.selected_file = file;
-        self.pending_scroll_to_line = Some((file, lines[0]));
-        self.highlighted_pin_lines = Some(PinHighlight {
+        self.ed.pending_scroll_to_line = Some((file, lines[0]));
+        self.ed.highlighted_pin_lines = Some(PinHighlight {
             file,
             lines,
             start: now,
@@ -3281,46 +3205,26 @@ impl AppIde {
 
         // ── Code actions (Ctrl+Enter) — list / choice / resolve, applied at
         //    frame top so edits survive the editor's end-of-frame write-back. ─
-        self.poll_code_actions();
+        //
+        // Frame top is BEFORE either view has drawn, so no swap is in effect and
+        // `self.ed` is the main editor's. Each poll therefore runs in the state
+        // of whoever asked (see `LspAsker`) — without that, a code action fired
+        // from the Reference tab would apply to the main editor's popup.
+        let asker = self.lsp_asker;
+        self.with_editor(asker.code_action, Self::poll_code_actions);
 
         // ── Inline type hint — receive the cursor-line result and apply a Tab
         //    accept at frame top (same write-back-revert dodge as above). ──────
-        self.poll_inlay_hint();
+        self.with_editor(asker.inlay, Self::poll_inlay_hint);
 
         // ── Apply a completed rename (textDocument/rename) across files ───────
-        if self.rename_in_flight {
-            let result = self.lsp_state.lock().unwrap().take_rename_result();
-            if let Some(edits) = result {
-                self.rename_in_flight = false;
-                if !edits.is_empty() {
-                    self.apply_rename_edits(edits);
-                    // RA's reference search does not reach every position (a
-                    // const-generic argument body is the known case), and it
-                    // reports success regardless — so the stale name would
-                    // otherwise surface much later as a compile error. Audit
-                    // and show what is left; never edit it automatically.
-                    let old = std::mem::take(&mut self.rename_old_name);
-                    let new = std::mem::take(&mut self.rename_new_name);
-                    self.report_rename_leftovers(&old, &new);
-                }
-                // Continue an "Apply all" / queued batch: fire the next rename. When
-                // the queue is drained, re-run clippy once so the list reflects all
-                // the renamed code (clippy_rename_pending was set when the batch
-                // started).
-                if !self.start_next_queued_rename() && self.clippy_rename_pending {
-                    self.clippy_rename_pending = false;
-                    self.start_clippy_run();
-                }
-                self.egui_ctx.request_repaint();
-            }
-        }
+        self.with_editor(asker.rename, |s| s.poll_rename());
 
         self.poll_pending_goto();
-
         // ── Handle a completed F12 go-to-definition ──────────────────────────
-        // A definition in the CURRENT project opens editable in the main editor
-        // (navigate + scroll the line into view). A definition in another file
-        // (crate / std) is shown read-only in the Definition tab snippet.
+        // A definition in the CURRENT project opens editable in the view that
+        // ASKED (navigate + scroll the line into view). A definition in another
+        // file (crate / std) is shown read-only in the Definition tab snippet.
         if self.definition_in_flight {
             let result = self.lsp_state.lock().unwrap().take_definition_result();
             if let Some(loc) = result {
@@ -3331,9 +3235,23 @@ impl AppIde {
                     {
                         // Editable: open the file, scroll to the definition, and
                         // mark the def line with a yellow band (like the Def tab).
-                        self.selected_file = id;
-                        self.pending_scroll_to_line = Some((id, loc.line as usize + 1));
-                        self.highlighted_def_line = Some((id, loc.line as usize + 1));
+                        //
+                        // In the view that pressed F12 — jumping the MAIN editor
+                        // for an F12 pressed in the Reference tab would move the
+                        // file the user was reading FROM out from under them.
+                        if asker.definition == EditorSlot::Reference {
+                            if let Some(path) = crate::editor::gui::text_pos::selected_file_rel_path(
+                                &id,
+                                &self.project_tree.user_src_files,
+                            ) {
+                                self.reference_file = Some(path);
+                            }
+                        } else {
+                            self.selected_file = id;
+                        }
+                        let ed = self.ed_of(asker.definition);
+                        ed.pending_scroll_to_line = Some((id, loc.line as usize + 1));
+                        ed.highlighted_def_line = Some((id, loc.line as usize + 1));
                         // Not an error — clear the snippet; the MCU tab bar
                         // auto-leaves the (now empty) Definition tab.
                         self.definition_view = None;
@@ -4261,10 +4179,10 @@ impl eframe::App for AppIde {
             if let Some(rel) = id.rel_path(&self.project_tree.user_src_files)
                 && let Some(line) = self.first_error_line(&rel)
             {
-                self.pending_scroll_to_line = Some((id, line));
+                self.ed.pending_scroll_to_line = Some((id, line));
                 // Must be `diag_highlight_color`: a translucent wash painted
                 // OVER the text. A solid colour hides the very line it points at.
-                self.highlighted_error_line = Some((
+                self.ed.highlighted_error_line = Some((
                     id,
                     line,
                     diag_highlight_color(crate::lsp::DiagSeverity::Error),

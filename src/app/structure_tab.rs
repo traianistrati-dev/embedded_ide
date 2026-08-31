@@ -179,8 +179,8 @@ impl AppIde {
             // A symbol-row click also jumps to the item's line (same scroll +
             // highlight path the usages popup and F12 navigation use).
             if let Some(line) = click.line {
-                self.pending_scroll_to_line = Some((id, line));
-                self.highlighted_def_line = Some((id, line));
+                self.ed.pending_scroll_to_line = Some((id, line));
+                self.ed.highlighted_def_line = Some((id, line));
             } else if let Some(line) = self.first_error_line(&click.file_rel) {
                 // Clicking the node itself (not a symbol row): a node marked
                 // with the error border is clicked BECAUSE of that error, so
@@ -189,8 +189,8 @@ impl AppIde {
                 // The band MUST come from `diag_highlight_color` — it is a
                 // translucent wash (alpha 26) painted OVER the text. A solid
                 // colour here hid the very line it was pointing at.
-                self.pending_scroll_to_line = Some((id, line));
-                self.highlighted_error_line = Some((
+                self.ed.pending_scroll_to_line = Some((id, line));
+                self.ed.highlighted_error_line = Some((
                     id,
                     line,
                     crate::app::diag_highlight_color(crate::lsp::DiagSeverity::Error),

@@ -377,25 +377,25 @@ impl AppIde {
 
     /// Open the crate chooser for the identifier the code-action row offered.
     pub(super) fn open_add_dep_chooser(&mut self, ident: &str, pos: egui::Pos2) {
-        self.add_dep.items = candidates(ident);
-        self.add_dep.sel = 0;
-        self.add_dep.choice = None;
-        self.add_dep.note = None;
-        self.add_dep.fetch = None;
-        self.add_dep.manifest = Some(self.manifest_for_current_file());
-        self.add_dep.pos = pos;
-        self.add_dep.open = true;
+        self.ed.add_dep.items = candidates(ident);
+        self.ed.add_dep.sel = 0;
+        self.ed.add_dep.choice = None;
+        self.ed.add_dep.note = None;
+        self.ed.add_dep.fetch = None;
+        self.ed.add_dep.manifest = Some(self.manifest_for_current_file());
+        self.ed.add_dep.pos = pos;
+        self.ed.add_dep.open = true;
     }
 
     /// Frame-top step: act on a chooser pick, then on a finished fetch.
     /// Called from `poll_code_actions`, so the manifest write lands at frame top
     /// like every other applied edit.
     pub(super) fn poll_add_dep(&mut self) {
-        if let Some(i) = self.add_dep.choice.take() {
-            if let Some(c) = self.add_dep.items.get(i).cloned() {
+        if let Some(i) = self.ed.add_dep.choice.take() {
+            if let Some(c) = self.ed.add_dep.items.get(i).cloned() {
                 let shared = Arc::new(Mutex::new(VersionFetch::Loading));
-                self.add_dep.fetch = Some((c.name.clone(), shared.clone()));
-                self.add_dep.note = Some(format!("Fetching {}…", c.name));
+                self.ed.add_dep.fetch = Some((c.name.clone(), shared.clone()));
+                self.ed.add_dep.note = Some(format!("Fetching {}…", c.name));
                 let name = c.name;
                 std::thread::spawn(move || {
                     let result = match super::cargo_complete::fetch_versions(&name) {
@@ -410,7 +410,7 @@ impl AppIde {
             }
         }
 
-        let done = match &self.add_dep.fetch {
+        let done = match &self.ed.add_dep.fetch {
             Some((name, shared)) => match &*shared.lock().unwrap() {
                 VersionFetch::Loading => None,
                 VersionFetch::Done(d) => match d.versions.first() {
@@ -422,15 +422,15 @@ impl AppIde {
             None => None,
         };
         let Some(done) = done else { return };
-        self.add_dep.fetch = None;
+        self.ed.add_dep.fetch = None;
         match done {
             Ok((name, version)) => {
                 let version = short_version(&version);
                 self.write_dep_line(&name, &version);
-                self.add_dep.open = false;
-                self.add_dep.note = None;
+                self.ed.add_dep.open = false;
+                self.ed.add_dep.note = None;
             }
-            Err(e) => self.add_dep.note = Some(e),
+            Err(e) => self.ed.add_dep.note = Some(e),
         }
     }
 
@@ -441,7 +441,7 @@ impl AppIde {
     /// the red squiggle stays exactly where it was — which reads as "it did not
     /// work". The save also runs `cargo check` by itself when dependencies moved.
     fn write_dep_line(&mut self, name: &str, version: &str) {
-        let Some(path) = self.add_dep.manifest.clone() else {
+        let Some(path) = self.ed.add_dep.manifest.clone() else {
             return;
         };
         let Some(old) = self.manifest_text(&path).map(str::to_owned) else {
@@ -472,14 +472,14 @@ impl AppIde {
     /// renders (see `editor_panel/mod.rs`), same as the code-action popup; this
     /// only renders and handles clicks.
     pub(super) fn show_add_dep_popup(&mut self, ui: &mut egui::Ui) {
-        if !self.add_dep.open {
+        if !self.ed.add_dep.open {
             return;
         }
-        let sel = self.add_dep.sel;
-        let fetching = self.add_dep.fetch.is_some();
+        let sel = self.ed.add_dep.sel;
+        let fetching = self.ed.add_dep.fetch.is_some();
         let mut chosen: Option<usize> = None;
         egui::Area::new(egui::Id::new("add_dep_popup"))
-            .fixed_pos(self.add_dep.pos)
+            .fixed_pos(self.ed.add_dep.pos)
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
@@ -492,7 +492,7 @@ impl AppIde {
                             .color(ui.visuals().weak_text_color()),
                     );
                     if !fetching {
-                        for (i, c) in self.add_dep.items.iter().enumerate() {
+                        for (i, c) in self.ed.add_dep.items.iter().enumerate() {
                             let selected = i == sel;
                             let row = ui.horizontal(|ui| {
                                 let r = ui.selectable_label(
@@ -514,7 +514,7 @@ impl AppIde {
                             }
                         }
                     }
-                    if let Some(note) = &self.add_dep.note {
+                    if let Some(note) = &self.ed.add_dep.note {
                         ui.label(
                             egui::RichText::new(note)
                                 .size(11.0)
@@ -524,7 +524,7 @@ impl AppIde {
                 });
             });
         if let Some(i) = chosen {
-            self.add_dep.choice = Some(i);
+            self.ed.add_dep.choice = Some(i);
         }
     }
 }

@@ -9,7 +9,7 @@
 //! the bars sit under the breakpoint dot, so clicking to set a breakpoint
 //! reverted the hunk; revert now lives in the Git tab's diff view (+ Ctrl+Z).
 
-use crate::app::AppIde;
+use crate::app::{AppIde, ProjectFileId};
 use crate::git::{BaselineFetch, DiffHunk, compute_hunks, fetch_baseline};
 use eframe::egui;
 use std::sync::{Arc, Mutex};
@@ -93,14 +93,13 @@ impl AppIde {
     /// when the text or baseline changed (memoized on their hashes — the diff
     /// itself only runs on an actual edit). Call post-editor, with the frame's
     /// final text, right before [`AppIde::paint_diff_gutter`].
-    pub(super) fn tick_diff_gutter(&mut self, display_code: &str) {
+    pub(super) fn tick_diff_gutter(&mut self, display_code: &str, displayed_file: ProjectFileId) {
         let (Some(root), Some(path)) = (
             self.project_dir.clone(),
-            self.selected_file
-                .rel_path(&self.project_tree.user_src_files),
+            displayed_file.rel_path(&self.project_tree.user_src_files),
         ) else {
-            self.diff_gutter.hunks.clear();
-            self.diff_gutter.computed_hash = 0;
+            self.ed.diff_gutter.hunks.clear();
+            self.ed.diff_gutter.computed_hash = 0;
             return;
         };
 
@@ -113,16 +112,16 @@ impl AppIde {
 
         let key = (path, self.git.state.lock().unwrap().op_gen);
         let (fresh, done, content_hash) = {
-            let slot = self.diff_gutter.baseline.lock().unwrap();
+            let slot = self.ed.diff_gutter.baseline.lock().unwrap();
             (slot.key == key, slot.done, slot.content_hash)
         };
         if !fresh {
-            self.diff_gutter.hunks.clear();
-            self.diff_gutter.computed_hash = 0;
+            self.ed.diff_gutter.hunks.clear();
+            self.ed.diff_gutter.computed_hash = 0;
             fetch_baseline(
                 key,
                 dir,
-                Arc::clone(&self.diff_gutter.baseline),
+                Arc::clone(&self.ed.diff_gutter.baseline),
                 self.egui_ctx.clone(),
             );
             return;
@@ -136,22 +135,22 @@ impl AppIde {
         display_code.hash(&mut h);
         content_hash.hash(&mut h);
         let hash = h.finish().max(1);
-        if hash == self.diff_gutter.computed_hash {
+        if hash == self.ed.diff_gutter.computed_hash {
             return;
         }
-        self.diff_gutter.computed_hash = hash;
-        let baseline = self.diff_gutter.baseline.lock().unwrap().content.clone();
+        self.ed.diff_gutter.computed_hash = hash;
+        let baseline = self.ed.diff_gutter.baseline.lock().unwrap().content.clone();
         match baseline {
             Some(old) => {
-                self.diff_gutter.hunks = compute_hunks(&old, display_code);
-                self.diff_gutter.line_starts = line_starts(display_code);
-                self.diff_gutter.baseline_text = Some(old);
+                self.ed.diff_gutter.hunks = compute_hunks(&old, display_code);
+                self.ed.diff_gutter.line_starts = line_starts(display_code);
+                self.ed.diff_gutter.baseline_text = Some(old);
             }
             None => {
                 // Untracked file / no repo / unborn HEAD → no marks (an
                 // all-green untracked file would be noise).
-                self.diff_gutter.hunks.clear();
-                self.diff_gutter.baseline_text = None;
+                self.ed.diff_gutter.hunks.clear();
+                self.ed.diff_gutter.baseline_text = None;
             }
         }
     }
@@ -165,8 +164,9 @@ impl AppIde {
         editor_resp: &egui::text_edit::TextEditOutput,
         clip: egui::Rect,
         display_code: &str,
+        displayed_file: ProjectFileId,
     ) {
-        if self.diff_gutter.hunks.is_empty() || self.diff_gutter.computed_hash == 0 {
+        if self.ed.diff_gutter.hunks.is_empty() || self.ed.diff_gutter.computed_hash == 0 {
             return;
         }
         let galley = &editor_resp.galley;
@@ -174,7 +174,7 @@ impl AppIde {
         let total_chars = display_code.chars().count();
         let painter = ui.painter().with_clip_rect(clip);
 
-        let starts = &self.diff_gutter.line_starts;
+        let starts = &self.ed.diff_gutter.line_starts;
         let ci_of = |line: usize| {
             starts
                 .get(line)
@@ -187,7 +187,7 @@ impl AppIde {
             (gp.y + loc.min.y, gp.y + loc.max.y)
         };
 
-        for (i, hk) in self.diff_gutter.hunks.iter().enumerate() {
+        for (i, hk) in self.ed.diff_gutter.hunks.iter().enumerate() {
             let (y_top, y_bot, color) = if hk.new_len == 0 {
                 // Deletion marker: a wedge at the boundary line's top edge.
                 let (top, _) = y_of(ci_of(hk.new_start));
@@ -246,11 +246,11 @@ impl AppIde {
             let resp = ui.interact(
                 hit,
                 egui::Id::new("diff_gutter")
-                    .with(self.selected_file_key())
+                    .with(self.file_key(displayed_file))
                     .with(i),
                 egui::Sense::hover(),
             );
-            let baseline = self.diff_gutter.baseline_text.as_deref().unwrap_or("");
+            let baseline = self.ed.diff_gutter.baseline_text.as_deref().unwrap_or("");
             resp.on_hover_ui(|ui| {
                 ui.set_max_width(520.0);
                 let head = if hk.old_len == 0 {
@@ -284,11 +284,14 @@ impl AppIde {
         }
     }
 
-    /// A stable per-file discriminant for widget ids.
-    fn selected_file_key(&self) -> u64 {
+    /// A stable per-file, per-VIEW discriminant for widget ids. Both halves
+    /// matter: two views on the same file would otherwise register the same
+    /// hover id twice and egui would hand the click to whichever drew last.
+    fn file_key(&self, displayed_file: ProjectFileId) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}", self.selected_file).hash(&mut h);
+        format!("{:?}", displayed_file).hash(&mut h);
+        format!("{:?}", self.ed_slot).hash(&mut h);
         h.finish()
     }
 }

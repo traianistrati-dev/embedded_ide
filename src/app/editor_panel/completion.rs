@@ -65,7 +65,6 @@ impl AppIde {
         slot: crate::app::EditorSlot,
         owner_file: ProjectFileId,
     ) {
-        let is_main = slot == crate::app::EditorSlot::Main;
         // ── LSP completion: post-editor apply + trigger + popup ───────
         let cursor_char_idx = editor_resp
             .state
@@ -181,11 +180,11 @@ impl AppIde {
                             lsp.did_change(rel, &display_code, false);
                             lsp.request_completion(rel, line, col, None);
                         }
-                        self.completion_trigger_idx = idx;
-                        self.completion_sel = 0;
-                        self.completion_open = true;
+                        self.ed.completion_trigger_idx = idx;
+                        self.ed.completion_sel = 0;
+                        self.ed.completion_open = true;
                         self.completion_owner = slot;
-                        self.completion_note = None;
+                        self.ed.completion_note = None;
                     }
                 }
 
@@ -205,9 +204,9 @@ impl AppIde {
                             lsp.did_change(rel, &display_code, false);
                             lsp.request_completion(rel, line, col, Some('.'));
                         }
-                        self.completion_trigger_idx = idx;
-                        self.completion_sel = 0;
-                        self.completion_open = true;
+                        self.ed.completion_trigger_idx = idx;
+                        self.ed.completion_sel = 0;
+                        self.ed.completion_open = true;
                         self.completion_owner = slot;
                     }
                 }
@@ -232,9 +231,9 @@ impl AppIde {
                             lsp.did_change(rel, &display_code, false);
                             lsp.request_completion(rel, line, col, Some(':'));
                         }
-                        self.completion_trigger_idx = idx;
-                        self.completion_sel = 0;
-                        self.completion_open = true;
+                        self.ed.completion_trigger_idx = idx;
+                        self.ed.completion_sel = 0;
+                        self.ed.completion_open = true;
                         self.completion_owner = slot;
                     }
                 }
@@ -248,40 +247,41 @@ impl AppIde {
             // opened the popup. Comparing it against the OTHER editor's caret
             // yields a meaningless delta — almost always negative — which
             // closed the popup one frame after it opened.
-            if self.completion_open && self.completion_owner == slot {
+            if self.ed.completion_open && self.completion_owner == slot {
                 if let Some(idx) = cursor_char_idx {
                     let cursor = idx as isize;
-                    let trigger = self.completion_trigger_idx as isize;
+                    let trigger = self.ed.completion_trigger_idx as isize;
                     let delta = cursor - trigger;
                     // delta < 0  → user deleted back past trigger point
                     // delta > 80 → user moved far forward (switched context)
                     if delta < 0 || delta > 80 {
-                        self.completion_open = false;
+                        self.ed.completion_open = false;
                     }
                 }
             }
         }
 
         // ── Rename (Ctrl+R): capture the symbol + open the rename popup ──
-        // Main editor only: `rename_rel` / `rename_popup_pos` are singletons
-        // anchored to it, so a rename driven from the second editor would put
-        // its popup over the wrong code.
-        if is_main && ctrl_r_pressed && lsp_file_tracked {
+        // Both editors: `rename_rel` / `rename_popup_pos` live in the view's own
+        // `EditorState` now, so each anchors its popup over its own code. The
+        // ANSWER still arrives through one inbox — `LspAsker::rename` records
+        // who asked so the frame-top apply writes into the right view.
+        if ctrl_r_pressed && lsp_file_tracked {
             if let (Some(idx), Some(rel)) = (cursor_char_idx, current_rel_path.clone()) {
                 let word = super::rename::identifier_at(&display_code, idx);
                 if !word.is_empty() {
                     let (line, col) = lsp_cursor_pos(&display_code, idx);
-                    self.rename_active = true;
-                    self.rename_focus = true;
+                    self.ed.rename_active = true;
+                    self.ed.rename_focus = true;
                     // Kept so the finished rename can be audited for
                     // occurrences rust-analyzer did not reach.
-                    self.rename_old_name = word.clone();
-                    self.rename_input = word;
-                    self.rename_rel = rel;
-                    self.rename_line = line;
-                    self.rename_char = col;
+                    self.ed.rename_old_name = word.clone();
+                    self.ed.rename_input = word;
+                    self.ed.rename_rel = rel;
+                    self.ed.rename_line = line;
+                    self.ed.rename_char = col;
                     // Anchor the popup just below the cursor.
-                    self.rename_popup_pos = editor_resp
+                    self.ed.rename_popup_pos = editor_resp
                         .state
                         .cursor
                         .char_range()
@@ -314,7 +314,7 @@ impl AppIde {
         // Both funnel through the same result slot and navigation pipeline;
         // Ctrl+F12 resolves the `impl … for …` site where F12 on a trait
         // method would land on the trait's declaration.
-        if is_main && (f12_pressed || ctrl_f12_pressed) && lsp_file_tracked {
+        if (f12_pressed || ctrl_f12_pressed) && lsp_file_tracked {
             if let (Some(idx), Some(rel)) = (cursor_char_idx, current_rel_path.clone()) {
                 // `lsp_file_tracked` is a file-IDENTITY test, so a library's
                 // Cargo.toml passes it. rust-analyzer has nothing to say about
@@ -354,6 +354,10 @@ impl AppIde {
                         // the request was dropped inside `request_definition`
                         // and the flag stayed true for the rest of the session,
                         // polling a reply that could never arrive.
+                        // Which view asked decides where the definition
+                        // OPENS — the main editor switches `selected_file`, the
+                        // Reference tab switches its own file.
+                        self.lsp_asker.definition = slot;
                         self.definition_in_flight = sent;
                     } else {
                         // Park it: the frame loop starts the analyzer, waits for
@@ -378,7 +382,7 @@ impl AppIde {
         // function each frame over the same shared state, so without the owner
         // check the popup would be drawn twice — once anchored to the wrong
         // caret — and both would fight over the selection index.
-        if self.completion_open && self.completion_owner == slot {
+        if self.ed.completion_open && self.completion_owner == slot {
             let all_items = self.lsp_state.lock().unwrap().completion_items.clone();
 
             if !all_items.is_empty() {
@@ -399,16 +403,16 @@ impl AppIde {
 
                 // Persist filtered list so next frame's key handlers see
                 // exactly the same items the user sees right now.
-                self.completion_filtered_items = filtered.clone();
+                self.ed.completion_filtered_items = filtered.clone();
 
                 if filtered.is_empty() {
                     // Nothing matches the current prefix — hide the popup.
-                    self.completion_open = false;
+                    self.ed.completion_open = false;
                 } else {
                     // Items on screen — any earlier "why empty" note is stale.
-                    self.completion_note = None;
+                    self.ed.completion_note = None;
                     // Clamp selection into the visible filtered range.
-                    self.completion_sel = self.completion_sel.min(filtered.len() - 1);
+                    self.ed.completion_sel = self.ed.completion_sel.min(filtered.len() - 1);
 
                     // ── Wheel moves the SELECTION, not just the viewport ──────
                     // The selected row calls `scroll_to_me` every frame, so a
@@ -434,15 +438,15 @@ impl AppIde {
                     });
                     if notches != 0 {
                         let last = filtered.len() - 1;
-                        self.completion_sel = if notches > 0 {
+                        self.ed.completion_sel = if notches > 0 {
                             // Positive y scrolls the CONTENT down, i.e. moves
                             // towards the items above.
-                            self.completion_sel.saturating_sub(notches as usize)
+                            self.ed.completion_sel.saturating_sub(notches as usize)
                         } else {
-                            (self.completion_sel + (-notches) as usize).min(last)
+                            (self.ed.completion_sel + (-notches) as usize).min(last)
                         };
                     }
-                    let sel = self.completion_sel;
+                    let sel = self.ed.completion_sel;
 
                     // ── Popup screen position ────────────────────────────
                     let popup_pos = if let Some(char_range) = editor_resp.state.cursor.char_range()
@@ -525,8 +529,9 @@ impl AppIde {
 
                                             // Mouse click → deferred insert.
                                             if row_resp.clicked() {
-                                                self.completion_pending_insert = Some(item.clone());
-                                                self.completion_open = false;
+                                                self.ed.completion_pending_insert =
+                                                    Some(item.clone());
+                                                self.ed.completion_open = false;
                                             }
 
                                             // Scroll selected item into view.
@@ -660,14 +665,14 @@ impl AppIde {
                     // common real cause is a file that no `mod …;` declares —
                     // rust-analyzer detaches it and answers `null` to every
                     // completion request in it.
-                    self.completion_open = false;
+                    self.ed.completion_open = false;
                     let note = if timed_out && !resp_received {
                         "rust-analyzer did not answer (busy / indexing) — try again".to_owned()
                     } else {
                         self.unlinked_module_hint()
                             .unwrap_or_else(|| "no suggestions here".to_owned())
                     };
-                    self.completion_note = Some((note, std::time::Instant::now()));
+                    self.ed.completion_note = Some((note, std::time::Instant::now()));
                 } else {
                     // Still waiting — show a small spinner popup.
                     let popup_pos = cursor_char_idx.and_then(|_| {
@@ -719,12 +724,13 @@ impl AppIde {
         // so rust-analyzer does not analyze it at all). Cleared by its timeout,
         // by typing, or by the next successful popup.
         if let Some((note, at)) = self
+            .ed
             .completion_note
             .clone()
             .filter(|_| self.completion_owner == slot)
         {
             if at.elapsed().as_secs_f32() > 6.0 || editor_resp.response.changed() {
-                self.completion_note = None;
+                self.ed.completion_note = None;
             } else {
                 let pos = editor_resp
                     .state
@@ -771,26 +777,28 @@ impl AppIde {
         // Painted OUTSIDE the diagnostics gate below: it must show up on any
         // file the editor can display, whether or not rust-analyzer tracks it
         // and whether or not the inline-errors toggle is on.
-        if is_main {
-            for (line, color) in pin_pulse {
-                crate::editor::gui::show_line_band(
-                    ui,
-                    editor_resp.galley_pos,
-                    editor_clip,
-                    &editor_resp.galley,
-                    &display_code,
-                    line,
-                    color,
-                );
-            }
+        //
+        // No slot gate: the caller reads it from the VIEW's own
+        // `highlighted_pin_lines`, and only the editor a pin click targeted has
+        // one — so a view that was not the target is handed an empty list.
+        for (line, color) in pin_pulse {
+            crate::editor::gui::show_line_band(
+                ui,
+                editor_resp.galley_pos,
+                editor_clip,
+                &editor_resp.galley,
+                &display_code,
+                line,
+                color,
+            );
         }
 
         // ── Diagnostic overlays ───────────────────────────────────────
-        // Main editor only (see the slot doc): the second editor deliberately
-        // shows no squiggles — `diags_for_file` would resolve fine, but the
-        // click-to-navigate path and the highlight band are wired to the main
-        // view.
-        if is_main && lsp_file_tracked && self.inline_errors_enabled {
+        // Both editors. Everything here is driven by `current_rel_path` and
+        // bounded by `editor_clip`, and the two highlight bands arrive as
+        // parameters from the view's own state — nothing was ever specific to
+        // the main one.
+        if lsp_file_tracked && self.inline_errors_enabled {
             // Only draw the inline overlay when RA holds the CURRENT text for the
             // displayed file (per-file, not a global check). With pending edits
             // the diagnostics are stale — their line/col cling to a row that was
@@ -878,20 +886,22 @@ impl AppIde {
         }
 
         // ── Inferred-type ghost hint (cursor line only) ────────────────
-        // Main editor only: the Tab that accepts a hint is consumed in
-        // `mod.rs` for the main editor's caret (`inlay_accept_pending`).
+        // Both editors: the Tab that accepts a hint is consumed in the shared
+        // `show_code_view`, against whichever view holds the keyboard, and
+        // `inlay_accept_pending` is that view's own.
         // Independent of the inline-errors toggle: request/clear the hint for
         // the caret's untyped `let`, then draw it as dim ghost text at the END
         // of the line (Tab to insert — handled in `mod.rs`, applied in
         // `init_frame`). End-of-line, not inline after the name: an overlay
         // can't push the real code aside, so an inline hint overlapped the ` =
         // initializer` — drawing after the line keeps both readable.
-        let inlay_line = if is_main {
-            self.update_inlay_hint(&display_code, cursor_char_idx, current_rel_path.as_deref())
-        } else {
-            None
-        };
-        if let (Some(line), Some(hint)) = (inlay_line, self.inlay_hint.as_ref()) {
+        let inlay_line = self.update_inlay_hint(
+            &display_code,
+            cursor_char_idx,
+            current_rel_path.as_deref(),
+            slot,
+        );
+        if let (Some(line), Some(hint)) = (inlay_line, self.ed.inlay_hint.as_ref()) {
             // Only draw a hint that still belongs to the caret's current line.
             if hint.line == line {
                 let eol_idx = lsp_line_end_char_idx(&display_code, hint.line + 1);

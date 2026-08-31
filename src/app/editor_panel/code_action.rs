@@ -22,12 +22,13 @@ impl AppIde {
         display_code: &str,
         cursor_char_idx: Option<usize>,
         anchor: egui::Pos2,
+        slot: crate::app::EditorSlot,
     ) {
         let lsp_file = matches!(
             self.selected_file,
             ProjectFileId::MainRs | ProjectFileId::UserFile(_)
         );
-        if !lsp_file || self.code_action_in_flight {
+        if !lsp_file || self.ed.code_action_in_flight {
             return;
         }
         let Some(rel) =
@@ -47,22 +48,25 @@ impl AppIde {
         // Cargo.toml exists. Computed BEFORE the LSP is consulted, and offered
         // even when it is down: a missing dependency is a fact about Cargo.toml,
         // and needing a running analyzer to be told about it would be absurd.
-        self.code_action_add_dep = self.add_dep_candidate(display_code, idx);
-        self.code_action_popup_pos = anchor;
+        self.ed.code_action_add_dep = self.add_dep_candidate(display_code, idx);
+        self.ed.code_action_popup_pos = anchor;
         {
             let mut lsp = self.lsp_state.lock().unwrap();
             if !matches!(lsp.status, crate::lsp::LspStatus::Ready) {
                 // Nothing to wait for — show what we have, or nothing at all.
-                self.code_actions.clear();
-                self.code_action_sel = 0;
-                self.code_action_popup_open = self.code_action_add_dep.is_some();
+                self.ed.code_actions.clear();
+                self.ed.code_action_sel = 0;
+                self.ed.code_action_popup_open = self.ed.code_action_add_dep.is_some();
                 return;
             }
             lsp.did_change(&rel, display_code, false);
             lsp.request_code_actions(&rel, line, col);
         }
-        self.code_action_in_flight = true;
-        self.code_action_popup_open = false;
+        // The answer lands at frame top, before any view has drawn — record
+        // who asked so it is written into the right one.
+        self.lsp_asker.code_action = slot;
+        self.ed.code_action_in_flight = true;
+        self.ed.code_action_popup_open = false;
     }
 
     /// Poll code-action responses each frame (called from `init_frame`, so any
@@ -70,57 +74,57 @@ impl AppIde {
     /// deferred popup choice, and the resolve result.
     pub(crate) fn poll_code_actions(&mut self) {
         // 1) The action list arrived.
-        if self.code_action_in_flight {
+        if self.ed.code_action_in_flight {
             let actions = self.lsp_state.lock().unwrap().take_code_actions_result();
             if let Some(actions) = actions {
-                self.code_action_in_flight = false;
+                self.ed.code_action_in_flight = false;
                 // With our row present, neither shortcut holds: 0 actions is
                 // still a list of one, and 1 action must not auto-apply over
                 // the choice the user has not made yet.
-                let ours = self.code_action_add_dep.is_some();
+                let ours = self.ed.code_action_add_dep.is_some();
                 match actions.len() {
                     0 if !ours => {}
                     1 if !ours => self.begin_code_action(actions.into_iter().next().unwrap()),
                     _ => {
-                        self.code_actions = actions;
-                        self.code_action_sel = 0;
-                        self.code_action_popup_open = true;
+                        self.ed.code_actions = actions;
+                        self.ed.code_action_sel = 0;
+                        self.ed.code_action_popup_open = true;
                     }
                 }
             }
         }
 
         // 2) A popup choice deferred from last frame's render.
-        if let Some(i) = self.code_action_choice.take() {
-            match (i, self.code_action_add_dep.clone()) {
+        if let Some(i) = self.ed.code_action_choice.take() {
+            match (i, self.ed.code_action_add_dep.clone()) {
                 // Row 0 is ours when it is there — it applies no edit, it opens
                 // the crate chooser.
                 (0, Some(ident)) => {
-                    let pos = self.code_action_popup_pos;
+                    let pos = self.ed.code_action_popup_pos;
                     self.open_add_dep_chooser(&ident, pos);
                 }
                 (i, ours) => {
                     let offset = usize::from(ours.is_some());
-                    if let Some(a) = self.code_actions.get(i - offset).cloned() {
+                    if let Some(a) = self.ed.code_actions.get(i - offset).cloned() {
                         self.begin_code_action(a);
                     }
                 }
             }
-            self.code_actions.clear();
-            self.code_action_add_dep = None;
-            self.code_action_popup_open = false;
+            self.ed.code_actions.clear();
+            self.ed.code_action_add_dep = None;
+            self.ed.code_action_popup_open = false;
         }
         self.poll_add_dep();
 
         // 3) The resolve result arrived → apply.
-        if self.code_action_resolve_in_flight {
+        if self.ed.code_action_resolve_in_flight {
             let res = self
                 .lsp_state
                 .lock()
                 .unwrap()
                 .take_code_action_resolve_result();
             if let Some(edits) = res {
-                self.code_action_resolve_in_flight = false;
+                self.ed.code_action_resolve_in_flight = false;
                 if let Some(edits) = edits {
                     if !edits.is_empty() {
                         self.apply_rename_edits(edits);
@@ -140,7 +144,7 @@ impl AppIde {
                     .lock()
                     .unwrap()
                     .request_code_action_resolve(action.raw);
-                self.code_action_resolve_in_flight = true;
+                self.ed.code_action_resolve_in_flight = true;
             }
         }
     }
@@ -149,8 +153,8 @@ impl AppIde {
     /// Enter defers the choice to next frame's `poll_code_actions`; Esc closes.
     /// Called after the editor renders (like the completion popup).
     pub(super) fn show_code_action_popup(&mut self, ui: &mut egui::Ui) {
-        if !self.code_action_popup_open
-            || (self.code_actions.is_empty() && self.code_action_add_dep.is_none())
+        if !self.ed.code_action_popup_open
+            || (self.ed.code_actions.is_empty() && self.ed.code_action_add_dep.is_none())
         {
             return;
         }
@@ -158,14 +162,14 @@ impl AppIde {
         // editor renders (see `editor_panel/mod.rs`), not here — otherwise the
         // editor would process Enter first and insert a newline into the code.
         // This method only renders the list and handles mouse clicks.
-        if self.code_action_choice.is_some() {
+        if self.ed.code_action_choice.is_some() {
             return;
         }
 
-        let sel = self.code_action_sel;
+        let sel = self.ed.code_action_sel;
         let mut chosen: Option<usize> = None;
         egui::Area::new(egui::Id::new("code_action_popup"))
-            .fixed_pos(self.code_action_popup_pos)
+            .fixed_pos(self.ed.code_action_popup_pos)
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
@@ -173,7 +177,7 @@ impl AppIde {
                     ui.set_min_width(260.0);
                     ui.set_max_width(460.0);
                     let mut offset = 0;
-                    if let Some(ident) = &self.code_action_add_dep {
+                    if let Some(ident) = &self.ed.code_action_add_dep {
                         offset = 1;
                         let title = format!("Add dependency: {}", super::add_dep::dash_form(ident));
                         let row =
@@ -185,7 +189,7 @@ impl AppIde {
                             chosen = Some(0);
                         }
                     }
-                    for (i, a) in self.code_actions.iter().enumerate() {
+                    for (i, a) in self.ed.code_actions.iter().enumerate() {
                         let i = i + offset;
                         let selected = i == sel;
                         let row =
@@ -200,7 +204,7 @@ impl AppIde {
                 });
             });
         if let Some(i) = chosen {
-            self.code_action_choice = Some(i);
+            self.ed.code_action_choice = Some(i);
         }
     }
 }

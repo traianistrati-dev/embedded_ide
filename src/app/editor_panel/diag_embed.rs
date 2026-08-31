@@ -585,8 +585,8 @@ impl AppIde {
             if let Some(id) = crate::app::resolve_diag_file(&rel, &self.project_tree.user_src_files)
             {
                 self.selected_file = id;
-                self.pending_scroll_to_line = Some((id, line as usize));
-                self.highlighted_error_line = Some((
+                self.ed.pending_scroll_to_line = Some((id, line as usize));
+                self.ed.highlighted_error_line = Some((
                     id,
                     line as usize,
                     egui::Color32::from_rgba_unmultiplied(200, 50, 50, 40),
@@ -601,8 +601,8 @@ impl AppIde {
             if let Some(id) = crate::app::resolve_diag_file(&rel, &self.project_tree.user_src_files)
             {
                 self.selected_file = id;
-                self.pending_scroll_to_line = Some((id, line as usize));
-                self.highlighted_error_line = Some((
+                self.ed.pending_scroll_to_line = Some((id, line as usize));
+                self.ed.highlighted_error_line = Some((
                     id,
                     line as usize,
                     egui::Color32::from_rgba_unmultiplied(200, 50, 50, 40),
@@ -657,7 +657,7 @@ impl AppIde {
             if let Some(id) = crate::app::resolve_diag_file(&key, &self.project_tree.user_src_files)
             {
                 self.selected_file = id;
-                self.pending_scroll_to_line = Some((id, line));
+                self.ed.pending_scroll_to_line = Some((id, line));
             } else {
                 // Some files the Git tab lists have no editor view at all:
                 // `mcu.config` is the Configurator's own state on every chip,
@@ -810,8 +810,8 @@ impl AppIde {
                 crate::app::resolve_diag_file(&path, &self.project_tree.user_src_files)
             {
                 self.selected_file = id;
-                self.pending_scroll_to_line = Some((id, line));
-                self.highlighted_error_line = Some((id, line, color));
+                self.ed.pending_scroll_to_line = Some((id, line));
+                self.ed.highlighted_error_line = Some((id, line, color));
             }
         }
         Some(panel.response.rect.top())
@@ -873,7 +873,7 @@ impl AppIde {
                     &rn.new_name,
                 );
             }
-            self.rename_in_flight = true;
+            self.ed.rename_in_flight = true;
             self.egui_ctx.request_repaint();
             return true;
         }

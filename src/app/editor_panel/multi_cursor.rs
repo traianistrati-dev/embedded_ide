@@ -405,13 +405,13 @@ impl AppIde {
         // caret's own selection instead of collapsing it.
         caret_move: Option<(CaretMove, bool)>,
     ) -> Option<isize> {
-        if self.extra_cursors_file != Some(displayed_file) {
-            self.extra_cursors.clear();
-            self.extra_cursors_file = Some(displayed_file);
-            self.mc_prev_primary_sel = None;
+        if self.ed.extra_cursors_file != Some(displayed_file) {
+            self.ed.extra_cursors.clear();
+            self.ed.extra_cursors_file = Some(displayed_file);
+            self.ed.mc_prev_primary_sel = None;
         }
         if escape_pressed {
-            self.extra_cursors.clear();
+            self.ed.extra_cursors.clear();
         }
 
         let primary_idx = editor_resp
@@ -423,10 +423,10 @@ impl AppIde {
             .min(text_before.chars().count());
 
         if up_pressed {
-            self.extra_cursors = toggle_up(text_before, primary_idx, &self.extra_cursors);
+            self.ed.extra_cursors = toggle_up(text_before, primary_idx, &self.ed.extra_cursors);
         }
         if down_pressed {
-            self.extra_cursors = toggle_down(text_before, primary_idx, &self.extra_cursors);
+            self.ed.extra_cursors = toggle_down(text_before, primary_idx, &self.ed.extra_cursors);
         }
 
         // An arrow key moves the WHOLE cursor set, not just the primary —
@@ -434,19 +434,25 @@ impl AppIde {
         // has already moved the primary (this runs after the editor), so
         // `primary_idx` is its post-move position and the extras follow.
         if let Some((dir, extend)) = caret_move {
-            if !self.extra_cursors.is_empty() {
-                self.extra_cursors =
-                    move_extras(text_before, &self.extra_cursors, dir, extend, primary_idx);
+            if !self.ed.extra_cursors.is_empty() {
+                self.ed.extra_cursors = move_extras(
+                    text_before,
+                    &self.ed.extra_cursors,
+                    dir,
+                    extend,
+                    primary_idx,
+                );
             }
         }
 
         let mut shift = None;
-        if !self.extra_cursors.is_empty() && text_before != display_code.as_str() {
+        if !self.ed.extra_cursors.is_empty() && text_before != display_code.as_str() {
             // The primary's PREVIOUS selection, not just its index: it tells a
             // real Backspace/Delete keypress (which deletes text the caret does
             // not own, and must be replayed literally) apart from typing OVER a
             // selection (where every caret replaces its OWN span instead).
             let old_primary = self
+                .ed
                 .mc_prev_primary_sel
                 .unwrap_or((primary_idx, primary_idx));
             let (new_text, new_extras, primary_shift) = replay_edit(
@@ -454,14 +460,14 @@ impl AppIde {
                 display_code,
                 old_primary,
                 primary_idx,
-                &self.extra_cursors,
+                &self.ed.extra_cursors,
             );
             *display_code = new_text;
-            self.extra_cursors = new_extras;
+            self.ed.extra_cursors = new_extras;
             shift = Some(primary_shift);
         }
 
-        self.mc_prev_primary_sel = editor_resp
+        self.ed.mc_prev_primary_sel = editor_resp
             .state
             .cursor
             .char_range()
@@ -479,7 +485,7 @@ impl AppIde {
         galley: &egui::text::Galley,
         display_code: &str,
     ) {
-        if self.extra_cursors.is_empty() {
+        if self.ed.extra_cursors.is_empty() {
             return;
         }
         let total_chars = display_code.chars().count();
@@ -489,7 +495,7 @@ impl AppIde {
         // diagnostic bands.
         let sel_fill = egui::Color32::from_rgba_unmultiplied(255, 200, 60, 48);
 
-        for &caret in &self.extra_cursors {
+        for &caret in &self.ed.extra_cursors {
             // ── Selection band ────────────────────────────────────────────
             // Painted per ROW: a selection spanning several lines is not one
             // rectangle, and `pos_from_cursor` only gives a single glyph's box.

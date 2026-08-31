@@ -125,16 +125,16 @@ impl AppIde {
         // Offsets and the item list belong to the file they were computed in;
         // carrying them into another manifest would splice text at a position
         // that means nothing there.
-        if self.cargo_complete.for_file != Some(self.selected_file) {
-            self.cargo_complete.open = false;
-            self.cargo_complete.pending = None;
-            self.cargo_complete.items.clear();
-            self.cargo_complete.sel = 0;
-            self.cargo_complete.for_file = Some(self.selected_file);
+        if self.ed.cargo_complete.for_file != Some(self.selected_file) {
+            self.ed.cargo_complete.open = false;
+            self.ed.cargo_complete.pending = None;
+            self.ed.cargo_complete.items.clear();
+            self.ed.cargo_complete.sel = 0;
+            self.ed.cargo_complete.for_file = Some(self.selected_file);
         }
 
         // ── 1. Apply a pending accept (keyboard or mouse) ─────────────────────
-        if let Some(accept) = self.cargo_complete.pending.take() {
+        if let Some(accept) = self.ed.cargo_complete.pending.take() {
             if let Some(cur) = cursor_char_idx {
                 self.apply_cargo_accept(ui, editor_resp, display_code, cur, accept);
             }
@@ -151,45 +151,49 @@ impl AppIde {
                 if let Some(ctx) = cargo_context(display_code, cur) {
                     self.open_cargo_popup(&ctx);
                 } else {
-                    self.cargo_complete.open = false;
+                    self.ed.cargo_complete.open = false;
                 }
             }
         }
 
         // ── 3. Render (filter against the live prefix) ────────────────────────
-        if !self.cargo_complete.open {
+        if !self.ed.cargo_complete.open {
             return;
         }
         let Some(cur) = cursor_char_idx else {
-            self.cargo_complete.open = false;
+            self.ed.cargo_complete.open = false;
             return;
         };
         let Some(ctx) = cargo_context(display_code, cur) else {
             // Cursor left a completable position.
-            self.cargo_complete.open = false;
+            self.ed.cargo_complete.open = false;
             return;
         };
 
         // Rebuild the visible item list from the current context.
         let (items, loading, error) = self.cargo_items_for(&ctx);
-        self.cargo_complete.items = items.clone();
+        self.ed.cargo_complete.items = items.clone();
 
         if items.is_empty() && !loading {
             if error.is_none() {
                 // Nothing matches the typed prefix — drop the popup.
-                self.cargo_complete.open = false;
+                self.ed.cargo_complete.open = false;
                 return;
             }
         }
-        self.cargo_complete.sel = self.cargo_complete.sel.min(items.len().saturating_sub(1));
+        self.ed.cargo_complete.sel = self
+            .ed
+            .cargo_complete
+            .sel
+            .min(items.len().saturating_sub(1));
 
         self.render_cargo_popup(ui, editor_resp, &items, loading, error);
     }
 
     /// Configure the popup for a freshly detected context.
     fn open_cargo_popup(&mut self, ctx: &CargoCtx) {
-        self.cargo_complete.open = true;
-        self.cargo_complete.sel = 0;
+        self.ed.cargo_complete.open = true;
+        self.ed.cargo_complete.sel = 0;
         match ctx {
             CargoCtx::Version { crate_name, .. } | CargoCtx::Feature { crate_name, .. } => {
                 self.ensure_version_fetch(crate_name)
@@ -208,6 +212,7 @@ impl AppIde {
             } => {
                 self.ensure_version_fetch(crate_name);
                 let guard = self
+                    .ed
                     .cargo_complete
                     .version_fetch
                     .as_ref()
@@ -247,6 +252,7 @@ impl AppIde {
             } => {
                 self.ensure_version_fetch(crate_name);
                 let guard = self
+                    .ed
                     .cargo_complete
                     .version_fetch
                     .as_ref()
@@ -273,13 +279,14 @@ impl AppIde {
 
     /// Start a background fetch of `name`'s versions if not already cached.
     fn ensure_version_fetch(&mut self, name: &str) {
-        if self.cargo_complete.version_crate == name && self.cargo_complete.version_fetch.is_some()
+        if self.ed.cargo_complete.version_crate == name
+            && self.ed.cargo_complete.version_fetch.is_some()
         {
             return;
         }
         let shared = Arc::new(Mutex::new(VersionFetch::Loading));
-        self.cargo_complete.version_crate = name.to_string();
-        self.cargo_complete.version_fetch = Some(shared.clone());
+        self.ed.cargo_complete.version_crate = name.to_string();
+        self.ed.cargo_complete.version_fetch = Some(shared.clone());
         let name = name.to_string();
         std::thread::spawn(move || {
             let result = match fetch_versions(&name) {
@@ -303,7 +310,7 @@ impl AppIde {
         accept: CargoAccept,
     ) {
         let Some(ctx) = cargo_context(display_code, cursor) else {
-            self.cargo_complete.open = false;
+            self.ed.cargo_complete.open = false;
             return;
         };
         let chars: Vec<char> = display_code.chars().collect();
@@ -326,8 +333,8 @@ impl AppIde {
                     self.persist_cargo_toml(display_code);
                     // Switch straight to version completion for this crate.
                     self.ensure_version_fetch(&name);
-                    self.cargo_complete.open = true;
-                    self.cargo_complete.sel = 0;
+                    self.ed.cargo_complete.open = true;
+                    self.ed.cargo_complete.sel = 0;
                     ui.ctx().request_repaint();
                 }
             }
@@ -346,7 +353,7 @@ impl AppIde {
                     let new_cursor = start + insert.chars().count();
                     self.store_cargo_cursor(ui, editor_resp, new_cursor);
                     self.persist_cargo_toml(display_code);
-                    self.cargo_complete.open = false;
+                    self.ed.cargo_complete.open = false;
                 }
             }
             CargoAccept::Version(ver) => {
@@ -358,7 +365,7 @@ impl AppIde {
                     let new_cursor = start + ver.chars().count();
                     self.store_cargo_cursor(ui, editor_resp, new_cursor);
                     self.persist_cargo_toml(display_code);
-                    self.cargo_complete.open = false;
+                    self.ed.cargo_complete.open = false;
                 }
             }
         }
@@ -416,7 +423,7 @@ impl AppIde {
             editor_resp.response.rect.left_top()
         };
 
-        let sel = self.cargo_complete.sel;
+        let sel = self.ed.cargo_complete.sel;
         egui::Area::new(egui::Id::new("cargo_completion_popup"))
             .fixed_pos(popup_pos)
             .order(egui::Order::Foreground)
@@ -503,8 +510,8 @@ impl AppIde {
                                     );
                                 }
                                 if row_resp.clicked() {
-                                    self.cargo_complete.pending = Some(item.action.clone());
-                                    self.cargo_complete.open = false;
+                                    self.ed.cargo_complete.pending = Some(item.action.clone());
+                                    self.ed.cargo_complete.open = false;
                                 }
                                 if selected {
                                     row_resp.scroll_to_me(None);

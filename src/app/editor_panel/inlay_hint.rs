@@ -12,7 +12,7 @@
 //!     otherwise. Returns the caret's untyped-`let` line so the overlay only
 //!     draws a hint that still matches the current line.
 //!   * [`AppIde::poll_inlay_hint`] — called from `init_frame` at frame TOP:
-//!     receives the async result into `self.inlay_hint`, and applies a pending
+//!     receives the async result into `self.ed.inlay_hint`, and applies a pending
 //!     Tab accept. The edit runs at frame top so the editor's end-of-frame
 //!     write-back can't revert it (the same rule code actions follow).
 
@@ -30,6 +30,7 @@ impl AppIde {
         display_code: &str,
         cursor_char_idx: Option<usize>,
         rel: Option<&str>,
+        slot: crate::app::EditorSlot,
     ) -> Option<u32> {
         // Feature off, no caret, or not an LSP-tracked file → no hint.
         if !self.inlay_types_enabled {
@@ -70,13 +71,14 @@ impl AppIde {
             .unwrap()
             .last_sent_matches(rel, display_code);
         if !in_sync {
-            self.inlay_hint = None;
-            self.inlay_requested = None; // re-request once RA catches up
+            self.ed.inlay_hint = None;
+            self.ed.inlay_requested = None; // re-request once RA catches up
             return Some(line);
         }
 
         // In sync → request once per (file, line).
         let already = self
+            .ed
             .inlay_requested
             .as_ref()
             .is_some_and(|(r, l)| r == rel && *l == line);
@@ -91,11 +93,13 @@ impl AppIde {
                 }
             };
             if sent {
-                self.inlay_requested = Some((rel.to_owned(), line));
+                self.ed.inlay_requested = Some((rel.to_owned(), line));
+                // The answer is applied at frame top, before any view has drawn.
+                self.lsp_asker.inlay = slot;
                 // Drop a hint from the previous line while the new request is in
                 // flight, so a stale type never flashes.
-                if self.inlay_hint.as_ref().map(|h| h.line) != Some(line) {
-                    self.inlay_hint = None;
+                if self.ed.inlay_hint.as_ref().map(|h| h.line) != Some(line) {
+                    self.ed.inlay_hint = None;
                 }
             }
         }
@@ -111,27 +115,27 @@ impl AppIde {
         let result = self.lsp_state.lock().unwrap().take_inlay_result();
         if let Some((_rel, line, hints)) = result {
             // Keep the first type hint that sits on the requested line.
-            self.inlay_hint = hints.into_iter().find(|h| h.line == line);
+            self.ed.inlay_hint = hints.into_iter().find(|h| h.line == line);
         }
 
         // 2) Apply a pending Tab accept.
-        if self.inlay_accept_pending {
-            self.inlay_accept_pending = false;
-            if let Some(hint) = self.inlay_hint.take() {
+        if self.ed.inlay_accept_pending {
+            self.ed.inlay_accept_pending = false;
+            if let Some(hint) = self.ed.inlay_hint.take() {
                 if !hint.text_edits.is_empty() {
                     self.apply_rename_edits(hint.text_edits);
                 }
             }
             // Force a fresh request next frame for the (now typed) line.
-            self.inlay_requested = None;
+            self.ed.inlay_requested = None;
         }
     }
 
     /// Forget the current hint and its in-flight request key (so returning to
     /// the line re-requests, picking up any text change made meanwhile).
     fn clear_inlay_hint(&mut self) {
-        self.inlay_hint = None;
-        self.inlay_requested = None;
-        self.inlay_accept_pending = false;
+        self.ed.inlay_hint = None;
+        self.ed.inlay_requested = None;
+        self.ed.inlay_accept_pending = false;
     }
 }

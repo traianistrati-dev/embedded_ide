@@ -466,7 +466,7 @@ impl AppIde {
                 .and_then(|b| full_def_from_brace(&chars, b))
                 .or_else(|| full_def_from_line(&chars, lo, hi));
             if let Some((start, close)) = def {
-                self.full_block_selection = Some((displayed_file, start, close));
+                self.ed.full_block_selection = Some((displayed_file, start, close));
                 // Make the whole construct the editor selection (so it's
                 // visibly selected and Ctrl+C copies it).
                 let mut st = editor_resp.state.clone();
@@ -483,14 +483,14 @@ impl AppIde {
 
         // 2. A persisted triple-click selection — keep highlighting while the
         //    editor selection still matches it; clear once the user moves on.
-        if let Some((f, start, close)) = self.full_block_selection {
+        if let Some((f, start, close)) = self.ed.full_block_selection {
             if f == displayed_file {
                 if lo == start && hi == (close + 1).min(chars.len()) {
                     copy(start, close);
                     paint(start, close);
                     return true;
                 }
-                self.full_block_selection = None; // selection diverged
+                self.ed.full_block_selection = None; // selection diverged
             }
         }
 

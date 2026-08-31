@@ -217,15 +217,15 @@ let d = obj.raw;
 impl AppIde {
     /// Render the rename input popup (shown while `rename_active`). On submit it
     /// sends the rename request to RA; on Esc / Cancel it just closes.
-    pub(super) fn show_rename_popup(&mut self, ui: &mut egui::Ui) {
-        if !self.rename_active {
+    pub(super) fn show_rename_popup(&mut self, ui: &mut egui::Ui, slot: crate::app::EditorSlot) {
+        if !self.ed.rename_active {
             return;
         }
         let mut submit = false;
         let mut cancel = false;
 
         egui::Area::new(egui::Id::new("rename_popup"))
-            .fixed_pos(self.rename_popup_pos)
+            .fixed_pos(self.ed.rename_popup_pos)
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
@@ -236,13 +236,13 @@ impl AppIde {
                             .color(egui::Color32::from_rgb(170, 180, 200)),
                     );
                     let resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.rename_input)
+                        egui::TextEdit::singleline(&mut self.ed.rename_input)
                             .desired_width(200.0)
                             .hint_text("new name"),
                     );
-                    if self.rename_focus {
+                    if self.ed.rename_focus {
                         resp.request_focus();
-                        self.rename_focus = false;
+                        self.ed.rename_focus = false;
                     }
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         submit = true;
@@ -269,26 +269,28 @@ impl AppIde {
         }
 
         if cancel {
-            self.rename_active = false;
+            self.ed.rename_active = false;
             return;
         }
         if submit {
-            self.rename_active = false;
-            let new_name = self.rename_input.trim().to_owned();
+            self.ed.rename_active = false;
+            let new_name = self.ed.rename_input.trim().to_owned();
             if new_name.is_empty() {
                 return;
             }
             // Kept for the post-rename leftover audit (see `whole_word_lines`).
-            self.rename_new_name = new_name.clone();
+            self.ed.rename_new_name = new_name.clone();
             // Sync the current file to RA first (it may hold debounced-stale text),
             // then request the rename; the response is applied in init_frame.
-            let rel = self.rename_rel.clone();
+            let rel = self.ed.rename_rel.clone();
             let content = self.file_content_for(&rel);
             let mut lsp = self.lsp_state.lock().unwrap();
             lsp.did_change(&rel, &content, false);
-            lsp.request_rename(&rel, self.rename_line, self.rename_char, &new_name);
+            lsp.request_rename(&rel, self.ed.rename_line, self.ed.rename_char, &new_name);
             drop(lsp);
-            self.rename_in_flight = true;
+            // The answer lands at frame top, before any view has drawn.
+            self.lsp_asker.rename = slot;
+            self.ed.rename_in_flight = true;
             self.egui_ctx.request_repaint();
         }
     }

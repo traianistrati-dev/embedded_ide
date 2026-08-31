@@ -55,8 +55,11 @@ impl AppIde {
         editor_resp: &egui::text_edit::TextEditOutput,
         clip: egui::Rect,
         display_code: &str,
+        // The file THIS view is showing. Not `selected_file`: the second editor
+        // paints a different file, and the breakpoint set is keyed by path.
+        displayed_file: ProjectFileId,
     ) {
-        let Some(rel) = bp_path_of(self.selected_file, &self.project_tree.user_src_files) else {
+        let Some(rel) = bp_path_of(displayed_file, &self.project_tree.user_src_files) else {
             return;
         };
         let galley = &editor_resp.galley;

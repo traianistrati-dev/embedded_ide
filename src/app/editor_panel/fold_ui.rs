@@ -190,7 +190,7 @@ impl AppIde {
             // of hundred lines changes what sits at every pixel below it, and
             // egui also clamps the offset when the content shrinks — either way
             // the page slides out from under the pointer unless we correct it.
-            self.fold_anchor = Some((rel.to_owned(), head, y));
+            self.ed.fold_anchor = Some((rel.to_owned(), head, y));
         }
     }
 }
@@ -215,13 +215,13 @@ impl AppIde {
         map: &FoldMap,
         rel: &str,
     ) {
-        let Some((anchor_rel, line, old_y)) = self.fold_anchor.clone() else {
+        let Some((anchor_rel, line, old_y)) = self.ed.fold_anchor.clone() else {
             return;
         };
         if anchor_rel != rel {
             return; // the view moved to another file first
         }
-        self.fold_anchor = None;
+        self.ed.fold_anchor = None;
 
         let Some(disp_line) = map.display_line_of(line) else {
             return; // the header ended up inside another fold
