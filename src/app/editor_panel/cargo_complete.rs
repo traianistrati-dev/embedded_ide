@@ -966,9 +966,12 @@ fn filter_features(
         .collect()
 }
 
-/// Filter the curated embedded-crate list by `prefix` (case-insensitive).
-/// Prefix matches rank before substring matches; both are alphabetical within.
-fn filter_crates(prefix: &str) -> Vec<CargoItem> {
+/// Curated crates matching `prefix` (case-insensitive), best first: prefix
+/// matches rank before substring matches, alphabetical within each.
+///
+/// Shared with the "Add dependency" code action, which offers the SAME list the
+/// manifest's own `Ctrl+Space` does — one curated set, one ranking.
+pub(super) fn crate_matches(prefix: &str) -> Vec<(&'static str, &'static str)> {
     let p = prefix.to_lowercase();
     let mut starts: Vec<&(&str, &str)> = Vec::new();
     let mut contains: Vec<&(&str, &str)> = Vec::new();
@@ -984,6 +987,14 @@ fn filter_crates(prefix: &str) -> Vec<CargoItem> {
         .into_iter()
         .chain(contains)
         .take(80)
+        .map(|(n, d)| (*n, *d))
+        .collect()
+}
+
+/// Filter the curated embedded-crate list by `prefix` (case-insensitive).
+fn filter_crates(prefix: &str) -> Vec<CargoItem> {
+    crate_matches(prefix)
+        .into_iter()
         .map(|(name, desc)| CargoItem {
             label: name.to_string(),
             detail: desc.to_string(),
@@ -1025,7 +1036,7 @@ pub(crate) fn known_features(name: &str, version_req: &str) -> Option<Vec<String
 }
 
 /// Fetch a crate's sparse-index entry (versions + per-version features).
-fn fetch_versions(name: &str) -> Result<IndexData, String> {
+pub(super) fn fetch_versions(name: &str) -> Result<IndexData, String> {
     // The interactive completion has no deadline of its own — it already runs on
     // a background thread and the popup simply shows "Loading…".
     fetch_versions_with_timeout(name, std::time::Duration::from_secs(30))

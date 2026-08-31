@@ -16,6 +16,7 @@ use crate::panels::mcu_module::project_gen::ProjectFiles;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme};
 
+pub(crate) mod add_dep;
 mod brace_block;
 mod breakpoint_gutter;
 pub(crate) mod cargo_complete;
@@ -239,6 +240,7 @@ impl AppIde {
             if !editor_kbd_active {
                 self.cargo_complete.open = false;
                 self.code_action_popup_open = false;
+                self.add_dep.open = false;
             }
 
             // A deferred accept (mouse click, or a keyboard accept routed
@@ -327,8 +329,34 @@ impl AppIde {
             // (splitting the identifier the assist targets). Consuming here
             // keeps the accept clean. A choice is deferred to next frame's
             // `poll_code_actions` (so the edit applies at frame top).
-            if self.code_action_popup_open && !self.code_actions.is_empty() {
-                let count = self.code_actions.len();
+            // ── "Add dependency" crate chooser: same rule, and FIRST ─────
+            // It opens from the code-action popup and replaces it, so it must
+            // claim the keys before that block can see them.
+            if self.add_dep.open && !self.add_dep.items.is_empty() {
+                let count = self.add_dep.items.len();
+                let busy = self.add_dep.fetch.is_some();
+                ui.input_mut(|i| {
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                        self.add_dep.open = false;
+                        self.add_dep.fetch = None;
+                        self.add_dep.note = None;
+                    } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        self.add_dep.sel = (self.add_dep.sel + 1).min(count - 1);
+                    } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        self.add_dep.sel = self.add_dep.sel.saturating_sub(1);
+                    } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) && !busy {
+                        // Consumed even while a fetch is in flight, so Enter
+                        // does not fall through and split the line underneath.
+                        self.add_dep.choice = Some(self.add_dep.sel.min(count - 1));
+                    }
+                });
+            }
+            // The extra "Add dependency" row means the list can be one longer
+            // than `code_actions`, and non-empty when `code_actions` is empty.
+            let action_rows =
+                self.code_actions.len() + usize::from(self.code_action_add_dep.is_some());
+            if self.code_action_popup_open && !self.add_dep.open && action_rows > 0 {
+                let count = action_rows;
                 ui.input_mut(|i| {
                     if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
                         self.code_action_popup_open = false;
@@ -352,6 +380,7 @@ impl AppIde {
             if let Some((hint_line, hint_char)) = hint_pos {
                 let popup_up = self.completion_open
                     || self.code_action_popup_open
+                    || self.add_dep.open
                     || (self.cargo_complete.open && !self.cargo_complete.items.is_empty());
                 let caret_ok = self.last_caret_idx.map_or(false, |idx| {
                     let (l, c) = crate::editor::gui::text_pos::lsp_cursor_pos(&display_code, idx);
@@ -597,6 +626,7 @@ impl AppIde {
             // a newline. Ignored while the code-action popup is already open
             // (its own Enter handling wins there).
             let ctrl_enter_pressed = editor_kbd_active
+                && !self.add_dep.open
                 && !self.code_action_popup_open
                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
             // F12 → show the definition of the symbol at the cursor.
@@ -1247,6 +1277,7 @@ impl AppIde {
                 self.trigger_code_actions(&display_code, cursor_idx, anchor);
             }
             self.show_code_action_popup(ui);
+            self.show_add_dep_popup(ui);
 
             // ── Right-click context menu ──────────────────────────────────
             // Lists every editor command with its shortcut. A click drives

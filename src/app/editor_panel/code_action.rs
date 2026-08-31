@@ -43,9 +43,19 @@ impl AppIde {
         let chars: Vec<char> = display_code.chars().collect();
         let target = super::let_annotation::let_binding_pos(&chars, idx).unwrap_or(idx);
         let (line, col) = lsp_cursor_pos(display_code, target);
+        // Our own row — rust-analyzer never offers this one, it does not know
+        // Cargo.toml exists. Computed BEFORE the LSP is consulted, and offered
+        // even when it is down: a missing dependency is a fact about Cargo.toml,
+        // and needing a running analyzer to be told about it would be absurd.
+        self.code_action_add_dep = self.add_dep_candidate(display_code, idx);
+        self.code_action_popup_pos = anchor;
         {
             let mut lsp = self.lsp_state.lock().unwrap();
             if !matches!(lsp.status, crate::lsp::LspStatus::Ready) {
+                // Nothing to wait for — show what we have, or nothing at all.
+                self.code_actions.clear();
+                self.code_action_sel = 0;
+                self.code_action_popup_open = self.code_action_add_dep.is_some();
                 return;
             }
             lsp.did_change(&rel, display_code, false);
@@ -53,7 +63,6 @@ impl AppIde {
         }
         self.code_action_in_flight = true;
         self.code_action_popup_open = false;
-        self.code_action_popup_pos = anchor;
     }
 
     /// Poll code-action responses each frame (called from `init_frame`, so any
@@ -65,9 +74,13 @@ impl AppIde {
             let actions = self.lsp_state.lock().unwrap().take_code_actions_result();
             if let Some(actions) = actions {
                 self.code_action_in_flight = false;
+                // With our row present, neither shortcut holds: 0 actions is
+                // still a list of one, and 1 action must not auto-apply over
+                // the choice the user has not made yet.
+                let ours = self.code_action_add_dep.is_some();
                 match actions.len() {
-                    0 => {}
-                    1 => self.begin_code_action(actions.into_iter().next().unwrap()),
+                    0 if !ours => {}
+                    1 if !ours => self.begin_code_action(actions.into_iter().next().unwrap()),
                     _ => {
                         self.code_actions = actions;
                         self.code_action_sel = 0;
@@ -79,12 +92,25 @@ impl AppIde {
 
         // 2) A popup choice deferred from last frame's render.
         if let Some(i) = self.code_action_choice.take() {
-            if let Some(a) = self.code_actions.get(i).cloned() {
-                self.begin_code_action(a);
+            match (i, self.code_action_add_dep.clone()) {
+                // Row 0 is ours when it is there — it applies no edit, it opens
+                // the crate chooser.
+                (0, Some(ident)) => {
+                    let pos = self.code_action_popup_pos;
+                    self.open_add_dep_chooser(&ident, pos);
+                }
+                (i, ours) => {
+                    let offset = usize::from(ours.is_some());
+                    if let Some(a) = self.code_actions.get(i - offset).cloned() {
+                        self.begin_code_action(a);
+                    }
+                }
             }
             self.code_actions.clear();
+            self.code_action_add_dep = None;
             self.code_action_popup_open = false;
         }
+        self.poll_add_dep();
 
         // 3) The resolve result arrived → apply.
         if self.code_action_resolve_in_flight {
@@ -123,7 +149,9 @@ impl AppIde {
     /// Enter defers the choice to next frame's `poll_code_actions`; Esc closes.
     /// Called after the editor renders (like the completion popup).
     pub(super) fn show_code_action_popup(&mut self, ui: &mut egui::Ui) {
-        if !self.code_action_popup_open || self.code_actions.is_empty() {
+        if !self.code_action_popup_open
+            || (self.code_actions.is_empty() && self.code_action_add_dep.is_none())
+        {
             return;
         }
         // NOTE: keyboard nav / accept (Up/Down/Enter/Esc) is consumed BEFORE the
@@ -144,7 +172,21 @@ impl AppIde {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     ui.set_min_width(260.0);
                     ui.set_max_width(460.0);
+                    let mut offset = 0;
+                    if let Some(ident) = &self.code_action_add_dep {
+                        offset = 1;
+                        let title = format!("Add dependency: {}", super::add_dep::dash_form(ident));
+                        let row =
+                            ui.selectable_label(sel == 0, egui::RichText::new(title).size(12.0));
+                        if sel == 0 {
+                            row.scroll_to_me(None);
+                        }
+                        if row.clicked() {
+                            chosen = Some(0);
+                        }
+                    }
                     for (i, a) in self.code_actions.iter().enumerate() {
+                        let i = i + offset;
                         let selected = i == sel;
                         let row =
                             ui.selectable_label(selected, egui::RichText::new(&a.title).size(12.0));

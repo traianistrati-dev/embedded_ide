@@ -1390,6 +1390,13 @@ pub struct AppIde {
     /// Chooser selection deferred to next frame's `init_frame` (so the edit
     /// applies at frame TOP, avoiding the display_code write-back revert).
     code_action_choice: Option<usize>,
+    /// The crate identifier the "Add dependency" row offers, for the caret the
+    /// last Ctrl+Enter was fired on. `Some` puts an extra row at the TOP of the
+    /// code-action list — rust-analyzer never produces it, because it does not
+    /// know Cargo.toml exists.
+    code_action_add_dep: Option<String>,
+    /// The crate chooser that row opens.
+    add_dep: editor_panel::add_dep::AddDepState,
     // ── Inline type hints (inferred type on the cursor's `let` line) ──────────
     /// Master switch for the cursor-line inferred-type ghost hint + its Tab
     /// accept; toggled from the editor toolbar ("Types" button). `true` default.
@@ -2008,6 +2015,8 @@ impl AppIde {
             code_action_sel: 0,
             code_action_popup_pos: egui::Pos2::ZERO,
             code_action_choice: None,
+            code_action_add_dep: None,
+            add_dep: editor_panel::add_dep::AddDepState::default(),
             inlay_types_enabled: true,
             inlay_hint: None,
             inlay_requested: None,
