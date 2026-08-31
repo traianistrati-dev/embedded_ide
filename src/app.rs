@@ -1199,6 +1199,18 @@ pub struct AppIde {
     /// git restore) so folds keyed to line numbers do not end up pointing at
     /// somebody else's block.
     fold_guard: std::collections::HashMap<String, (u64, u64)>,
+    /// Per editor id (`code_editor:user:<path>`): the egui widget id that editor
+    /// got. Needed BEFORE the widget renders, to convert the stored caret from
+    /// buffer space into the projection the folded editor is about to be shown
+    /// — and keyed by file, because a caret belonging to another file's editor
+    /// must never be translated through this file's fold map.
+    fold_ids: std::collections::HashMap<String, egui::Id>,
+    /// The code editor's egui widget id, captured after each render. Needed a
+    /// frame LATER, and before the widget exists: a folded editor is
+    /// non-interactive and therefore unfocused, so the keystroke that unfolds it
+    /// must also hand focus back — otherwise the file stays untypable until the
+    /// user clicks into it.
+    editor_widget_id: Option<egui::Id>,
     /// Collapsed blocks per file: rel path → the 0-based line carrying the `{`
     /// of each folded block. View state only — never persisted, and cleared for
     /// a file the moment anything is typed into it (see
@@ -1938,6 +1950,8 @@ impl AppIde {
             debugger: crate::debugger::Debugger::default(),
             folds: std::collections::HashMap::new(),
             fold_guard: std::collections::HashMap::new(),
+            fold_ids: std::collections::HashMap::new(),
+            editor_widget_id: None,
             fold_anchor: None,
             probe_list: Vec::new(),
             selected_probe: None,

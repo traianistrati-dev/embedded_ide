@@ -750,8 +750,42 @@ impl AppIde {
                     || format_pressed
                     || mc_up_pressed
                     || mc_down_pressed;
-                let editing = editor_kbd_active && (line_op || fold::edit_pending(ui));
+                // Ask the narrow question while folded: is some OTHER text
+                // field focused? Everything else counts as ours. The find bar,
+                // the rename popup and the Reference editor are exactly the
+                // cases that must NOT unfold this file, and they all hold a
+                // real `TextEditState` of their own. `editor_kbd_active` is a
+                // wider heuristic and has read "somebody else owns the
+                // keyboard" when nobody did — which, on the unfold path, left
+                // the file untypable until the block was expanded by hand.
+                let owns_kbd = if self.folds.contains_key(rel) {
+                    let other_text_field = ui.ctx().memory(|m| m.focused()).is_some_and(|fid| {
+                        Some(fid) != self.editor_widget_id
+                            && egui::TextEdit::load_state(ui.ctx(), fid).is_some()
+                    });
+                    !self.reference_was_focused && !other_text_field
+                } else {
+                    editor_kbd_active
+                };
+                let editing = owns_kbd && (line_op || fold::edit_pending(ui));
                 if editing && self.folds.contains_key(rel) {
+                    // The caret needs no translation here: between frames it is
+                    // always in BUFFER space (see the two conversion points
+                    // around the editor render below), so it already means the
+                    // same place in the full text.
+                    //
+                    // The undo history does need clearing. egui snapshots
+                    // whatever text it is shown, so it holds PROJECTIONS, and a
+                    // Ctrl+Z after the unfold would write one back over the
+                    // file, deleting every folded body at once. Cleared here
+                    // rather than at the end of the frame, because an undo
+                    // pressed on THIS frame would otherwise still find it.
+                    if let Some(id) = self.editor_widget_id {
+                        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
+                            st.clear_undoer();
+                            st.store(ui.ctx(), id);
+                        }
+                    }
                     self.folds.remove(rel);
                 }
                 // Ctrl+Shift+Q, applied before the projection below so it takes
@@ -767,7 +801,7 @@ impl AppIde {
                     }
                 }
             }
-            let fold_map = match &fold_key {
+            let mut fold_map = match &fold_key {
                 Some(rel) => match self.folds.get(rel) {
                     Some(set) if !set.is_empty() => fold::FoldMap::new(&display_code, set),
                     _ => fold::FoldMap::identity(&display_code),
@@ -783,15 +817,43 @@ impl AppIde {
             // bar's own edits, above.
             let text_before_typing = display_code.clone();
 
-            // While folded the editor is handed the projection and its result is
-            // discarded; `display_code` keeps holding the real buffer for the
-            // write-back and for every analysis below.
+            // While folded the editor is handed the PROJECTION, and only the
+            // delta between what it was given and what it returns is adopted
+            // (below); `display_code` keeps holding the real buffer throughout,
+            // for the write-back and for every analysis below.
             let mut editor_text = if folded {
                 fold_map.display().to_owned()
             } else {
                 display_code.clone()
             };
-            let editor_resp = if is_rust_file {
+            // ── Caret in, caret out ──────────────────────────────────────
+            // The invariant: OUTSIDE the editor render the stored caret is in
+            // BUFFER space, always. That is what the ~20 places below expect —
+            // they pair `editor_resp.state.cursor` with `display_code` — and it
+            // is also fold-independent, so a fold toggled between frames needs
+            // no fixing up anywhere.
+            //
+            // The editor itself is the one exception: it is shown the
+            // projection, so it has to be handed a projected caret, and the
+            // one it gives back is projected too. Converted here and converted
+            // straight back after the render.
+            if folded {
+                if let Some(id) = self.fold_ids.get(&editor_id).copied() {
+                    if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
+                        if let Some(r) = st.cursor.char_range() {
+                            let to = |c: egui::text::CCursor| {
+                                egui::text::CCursor::new(fold_map.to_display_clamped(c.index))
+                            };
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                to(r.primary),
+                                to(r.secondary),
+                            )));
+                            st.store(ui.ctx(), id);
+                        }
+                    }
+                }
+            }
+            let mut editor_resp = if is_rust_file {
                 crate::editor::gui::code_editor::show_rust_with_completer(
                     ui,
                     &mut editor_text,
@@ -803,7 +865,10 @@ impl AppIde {
                     &mut self.completer,
                     suppress_keyword_completer,
                     crate::editor::gui::code_editor::Marks {
-                        read_only: folded,
+                        // Phase 3: the projection is editable. What comes back
+                        // is never adopted wholesale — only its DELTA, mapped
+                        // into the buffer below — so the hidden lines survive.
+                        read_only: false,
                         dead: &fold_map.map_ranges(&dead_ranges),
                         underline: &fold_map.map_ranges(&underline_ranges),
                     },
@@ -837,17 +902,96 @@ impl AppIde {
                 }
                 out
             };
+            // Remembered for the NEXT frame: the unfold-on-edit rule needs this
+            // id before the widget exists (see above).
+            self.editor_widget_id = Some(editor_resp.response.id);
+            self.fold_ids
+                .insert(editor_id.clone(), editor_resp.response.id);
+
             // Adopt what the editor produced — but ONLY on the Rust path, which
             // is the one handed `editor_text`. A config file (Cargo.toml,
             // memory.x, .gitignore) goes through the stock `CodeEditor` in the
             // branch above, which edits `display_code` DIRECTLY; assigning
             // `editor_text` over it there wrote back the pre-edit clone and
             // erased every keystroke as it was typed.
-            //
-            // Folded: the editor was handed a projection — discard it (nothing
-            // can have edited it; see the unfold-first rule above).
+            let mut folded_own_edit = false;
             if is_rust_file && !folded {
                 display_code = editor_text;
+            } else if is_rust_file {
+                // Folded: adopting the text would write the projection — the
+                // file minus its hidden lines — over the buffer. Adopt the
+                // DELTA instead, translated into buffer coordinates, and the
+                // hidden lines are untouched. An undo arrives here as just
+                // another delta, so it is correct for free.
+                if let Some((ds, de, ins)) = fold::text_delta(fold_map.display(), &editor_text) {
+                    let (bs, be) = (fold_map.to_buffer(ds), fold_map.to_buffer(de));
+                    let chars: Vec<char> = display_code.chars().collect();
+                    let (bs, be) = (bs.min(chars.len()), be.min(chars.len()));
+                    // The projection is the buffer minus whole LINES, so a
+                    // range that grew in the translation is one that spans a
+                    // folded block: Delete pressed at the end of a header line,
+                    // Backspace at the start of the closing brace's line.
+                    // Applying it would silently take the whole hidden body
+                    // with it. Expand the block and drop the keystroke instead
+                    // — one visible no-op beats an invisible deletion.
+                    if bs <= be && be - bs == de - ds {
+                        // Line bookkeeping BEFORE the splice: heads below the
+                        // edit have to move with their block.
+                        let at_line = chars[..bs].iter().filter(|&&c| c == '\n').count();
+                        let removed = chars[bs..be].iter().filter(|&&c| c == '\n').count();
+                        let added = ins.chars().filter(|&c| c == '\n').count();
+                        let mut next: String = chars[..bs].iter().collect();
+                        next.push_str(&ins);
+                        next.extend(&chars[be..]);
+                        display_code = next;
+                        folded_own_edit = true;
+                        if let Some(rel) = &fold_key {
+                            if let Some(set) = self.folds.get(rel) {
+                                let moved = fold::shift_heads(set, at_line, removed, added);
+                                // A head the edit deleted outright takes its
+                                // block's lines back into view, which makes
+                                // every older snapshot in egui's undo history a
+                                // projection of a structure that no longer
+                                // exists — undoing one would write it back and
+                                // delete that body for real. A head that merely
+                                // SHIFTED is harmless: the history stays usable
+                                // and Ctrl+Z keeps working through the fold.
+                                if moved.len() != set.len() {
+                                    if let Some(mut st) = egui::TextEdit::load_state(
+                                        ui.ctx(),
+                                        editor_resp.response.id,
+                                    ) {
+                                        st.clear_undoer();
+                                        st.store(ui.ctx(), editor_resp.response.id);
+                                    }
+                                }
+                                if moved.is_empty() {
+                                    self.folds.remove(rel);
+                                } else {
+                                    self.folds.insert(rel.clone(), moved);
+                                }
+                            }
+                        }
+                    } else if let Some(rel) = &fold_key {
+                        self.folds.remove(rel);
+                        if let Some(mut st) =
+                            egui::TextEdit::load_state(ui.ctx(), editor_resp.response.id)
+                        {
+                            st.clear_undoer();
+                            st.store(ui.ctx(), editor_resp.response.id);
+                        }
+                    }
+                }
+            }
+            // The fold set may have shifted with the edit above, and
+            // `display_code` certainly changed — rebuild the projection so every
+            // reader below (the gutter, the anchor, the write-back) sees one
+            // consistent pair.
+            if folded {
+                fold_map = match fold_key.as_ref().and_then(|rel| self.folds.get(rel)) {
+                    Some(set) if !set.is_empty() => fold::FoldMap::new(&display_code, set),
+                    _ => fold::FoldMap::identity(&display_code),
+                };
             }
 
             // ── Keep the caret in view when it moves off-screen ───────────
@@ -867,6 +1011,27 @@ impl AppIde {
             // Jump to a clicked diagnostic's line (queued by the bottom
             // panel). Runs after caret-follow so its precise offset wins.
             self.apply_pending_scroll(ui, &editor_resp, &editor_id, displayed_file);
+
+            // The other half of the caret invariant (see the conversion before
+            // the render): what the editor hands back is in projection space.
+            // Converted HERE, not straight after the render, because the three
+            // scroll helpers above are the only readers that pair the caret with
+            // the GALLEY — which is the projection. Everything below pairs it
+            // with `display_code`, the real buffer.
+            let mut caret_in_galley = None;
+            if folded {
+                if let Some(r) = editor_resp.state.cursor.char_range() {
+                    caret_in_galley = Some(r.primary.index);
+                    let to = |c: egui::text::CCursor| {
+                        egui::text::CCursor::new(fold_map.to_buffer(c.index))
+                    };
+                    let range = egui::text::CCursorRange::two(to(r.primary), to(r.secondary));
+                    editor_resp.state.cursor.set_char_range(Some(range));
+                    let mut st = editor_resp.state.clone();
+                    st.cursor.set_char_range(Some(range));
+                    st.store(ui.ctx(), editor_resp.response.id);
+                }
+            }
 
             // Everything from here on pairs `display_code` (the buffer) with the
             // galley the editor just built. While folded those two describe
@@ -1005,7 +1170,7 @@ impl AppIde {
                     &editor_resp.galley,
                     &display_code,
                 );
-                self.paint_primary_caret(ui, &editor_resp, editor_clip);
+                // (the caret is painted for BOTH states, just below)
                 // Git gutter marks (live diff vs HEAD, sees unsaved edits) +
                 // click-to-revert. A revert mutates `display_code`; the
                 // write-back below persists it (same as the context-menu Cut).
@@ -1017,6 +1182,12 @@ impl AppIde {
                 // pointer while a debug session is halted.
                 self.paint_debug_hover(ui, &editor_resp, editor_clip, &display_code);
             }
+
+            // Painted in both states, unlike the overlays above — but the
+            // caret in `editor_resp.state` has been converted to buffer space
+            // by now, and this places it against the GALLEY. While folded the
+            // projection-space index is passed in explicitly.
+            self.paint_primary_caret(ui, &editor_resp, editor_clip, caret_in_galley);
 
             // Fold carets + the "N lines hidden" badge. LAST on purpose: they
             // share the number column with the breakpoint strip, and egui gives
@@ -1035,7 +1206,13 @@ impl AppIde {
                 );
                 // Last, so it sees every fold change this frame — including the
                 // one the gutter just made.
-                self.guard_folds(&rel, &display_code, editor_resp.response.id, ui.ctx());
+                self.guard_folds(
+                    &rel,
+                    &display_code,
+                    editor_resp.response.id,
+                    ui.ctx(),
+                    folded_own_edit,
+                );
             }
 
             // ── Ctrl+Enter code actions (RA assists / quick-fixes) ────────
@@ -1524,23 +1701,30 @@ impl AppIde {
     /// it impossible to lose; when egui's own caret does draw, the two overlap
     /// pixel-for-pixel (same galley position, same colour, same width formula
     /// as the theme's `modify_style`).
+    /// `galley_idx`: the caret's index INTO THE GALLEY, when that is not what
+    /// `editor_resp.state` holds — while folded the stored caret has already
+    /// been converted back to buffer space, and the galley is the projection.
     fn paint_primary_caret(
         &self,
         ui: &egui::Ui,
         editor_resp: &egui::text_edit::TextEditOutput,
         clip: egui::Rect,
+        galley_idx: Option<usize>,
     ) {
         if !editor_resp.response.has_focus() {
             return;
         }
-        let Some(range) = editor_resp.state.cursor.char_range() else {
+        let Some(idx) = galley_idx.or_else(|| {
+            editor_resp
+                .state
+                .cursor
+                .char_range()
+                .map(|r| r.primary.index)
+        }) else {
             return;
         };
         // Clamp against a stale cursor index (file may have just shrunk).
-        let idx = range
-            .primary
-            .index
-            .min(editor_resp.galley.text().chars().count());
+        let idx = idx.min(editor_resp.galley.text().chars().count());
         let loc = editor_resp
             .galley
             .pos_from_cursor(egui::text::CCursor::new(idx));

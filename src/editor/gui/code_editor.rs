@@ -95,16 +95,17 @@ pub struct Marks<'a> {
     /// text on screen is missing whole lines, so the widget is made
     /// non-interactive.
     ///
-    /// This is not cosmetic. egui only runs its event handling — caret
-    /// placement, selection, editing, and the undo snapshots — when the widget
-    /// is interactive AND focused. Left interactive, the projection is captured
-    /// into the widget's own undo history, and one later Ctrl+Z writes it back
-    /// over the file: every folded block's body deleted at once. A caret placed
-    /// in it is an index into a SHORTER string, which nothing clamps or
-    /// translates, so the next keystroke lands somewhere else entirely.
+    /// Implemented by handing the widget an IMMUTABLE buffer, not by
+    /// `interactive(false)` — see the render site for why that difference cost
+    /// three failed fixes. egui refuses every edit at the source, while the
+    /// editor keeps focus, clicks, selection and scrolling.
     ///
-    /// Read-only closes both, and everything downstream keeps reading a caret
-    /// that is still in buffer coordinates.
+    /// The caller still has work to do: a caret placed in the projection is an
+    /// index into a SHORTER string, so it is translated back through
+    /// `FoldMap::to_buffer` when a keystroke unfolds the file, and the widget's
+    /// undo history is cleared at the same moment — egui snapshots whatever text
+    /// it is shown, and a later Ctrl+Z would write the projection over the
+    /// file.
     pub read_only: bool,
     /// De-emphasised (faded toward gray): never-referenced fn/struct/enum/const
     /// from the usages analysis, unused locals, unused generic parameters.
@@ -530,14 +531,42 @@ fn show_rust_editor(
                                 );
                                 ui.fonts_mut(|f| f.layout_job(job))
                             };
-                        let output = egui::TextEdit::multiline(text)
-                            .id_source(id)
-                            .interactive(!marks.read_only)
-                            .lock_focus(true)
-                            .desired_rows(rows)
-                            .desired_width(f32::INFINITY)
-                            .layouter(&mut layouter)
-                            .show(ui);
+                        // Read-only is expressed by handing the widget an
+                        // IMMUTABLE buffer, never by `interactive(false)`.
+                        //
+                        // That looked like the obvious way to do it and is a
+                        // trap: a non-interactive TextEdit gets `Sense::hover()`,
+                        // which is not focusable, so egui surrenders its focus
+                        // every frame AND it can no longer be clicked back into
+                        // focus. Since event handling is gated on
+                        // `interactive && has_focus`, losing focus that way is
+                        // terminal — the editor stays dead even after it becomes
+                        // mutable again, which is how folding a block made a
+                        // whole file untypable.
+                        //
+                        // `&str` implements `TextBuffer` with
+                        // `is_mutable() == false`: the widget keeps focus,
+                        // clicks and selection, and refuses every edit at the
+                        // source.
+                        let output = if marks.read_only {
+                            let frozen = text.as_str().to_owned();
+                            let mut view: &str = &frozen;
+                            egui::TextEdit::multiline(&mut view)
+                                .id_source(id)
+                                .lock_focus(true)
+                                .desired_rows(rows)
+                                .desired_width(f32::INFINITY)
+                                .layouter(&mut layouter)
+                                .show(ui)
+                        } else {
+                            egui::TextEdit::multiline(text)
+                                .id_source(id)
+                                .lock_focus(true)
+                                .desired_rows(rows)
+                                .desired_width(f32::INFINITY)
+                                .layouter(&mut layouter)
+                                .show(ui)
+                        };
                         out = Some(output);
                     });
             });

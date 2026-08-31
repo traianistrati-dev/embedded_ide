@@ -53,8 +53,14 @@ impl AppIde {
             }
             v
         };
+        // The galley was laid out BEFORE this frame's edit was adopted, so an
+        // index taken from the current projection can sit one character past
+        // its end — and `pos_from_cursor` has a `debug_assert!` on exactly
+        // that. One frame of a slightly stale arrow position beats a panic on
+        // the keystroke that adds a line.
+        let galley_len = galley.text().chars().count();
         let y_of = |disp_line: usize| -> Option<(f32, f32)> {
-            let ci = *starts.get(disp_line)?;
+            let ci = (*starts.get(disp_line)?).min(galley_len);
             let loc = galley.pos_from_cursor(egui::text::CCursor::new(ci));
             Some((gp.y + loc.min.y, gp.y + loc.max.y))
         };
@@ -139,7 +145,8 @@ impl AppIde {
                 let eol = starts
                     .get(disp_line + 1)
                     .map(|&s| s - 1)
-                    .unwrap_or(shown.chars().count());
+                    .unwrap_or(shown.chars().count())
+                    .min(galley_len);
                 let loc = galley.pos_from_cursor(egui::text::CCursor::new(eol));
                 let label = format!("... {} lines", region.hidden_count());
                 let font = egui::FontId::proportional(10.0);
@@ -233,6 +240,7 @@ impl AppIde {
                 }
             }
         }
+        let ci = ci.min(editor_resp.galley.text().chars().count());
         let loc = editor_resp
             .galley
             .pos_from_cursor(egui::text::CCursor::new(ci));
@@ -271,12 +279,17 @@ impl AppIde {
     /// different block's opening brace — folding something the user never asked
     /// to hide. (A change made by TYPING cannot reach here: it unfolds the file
     /// before the editor renders.)
+    /// `own_edit`: this frame's text change came from the editor itself, through
+    /// the folded delta path. Without that distinction the "the file changed
+    /// from outside, drop the folds" rule fires on every keystroke — which is
+    /// exactly the block re-expanding as soon as anything is typed.
     pub(super) fn guard_folds(
         &mut self,
         rel: &str,
         text: &str,
         editor_widget_id: egui::Id,
         ctx: &egui::Context,
+        own_edit: bool,
     ) {
         use std::hash::{Hash, Hasher};
         let folds_sig = |me: &Self| -> u64 {
@@ -295,10 +308,15 @@ impl AppIde {
         };
 
         if let Some((prev_folds, prev_text)) = self.fold_guard.get(rel).copied() {
-            if prev_text != text_sig && self.folds.contains_key(rel) {
+            if prev_text != text_sig && !own_edit && self.folds.contains_key(rel) {
                 self.folds.remove(rel);
             }
-            if prev_folds != folds_sig(self) {
+            // `own_edit` covers the undoer too: an edit made THROUGH the fold
+            // leaves the history holding projections of the same structure, one
+            // edit behind, which Ctrl+Z can still walk back correctly. The one
+            // case that cannot — an edit that deleted a fold header — clears the
+            // history at the point it happens.
+            if prev_folds != folds_sig(self) && !own_edit {
                 // `TextEditState` shares its undoer through an `Arc`, so clearing
                 // the loaded copy is enough — no `store` needed.
                 if let Some(mut state) = egui::TextEdit::load_state(ctx, editor_widget_id) {

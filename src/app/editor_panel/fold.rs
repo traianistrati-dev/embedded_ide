@@ -270,6 +270,70 @@ fn char_literal_end(chars: &[char], i: usize) -> Option<usize> {
     }
 }
 
+/// The single replaced range between two versions of a text: `(start, end,
+/// replacement)` in CHAR indices, where `start..end` indexes `before`. `None`
+/// when they are equal.
+///
+/// This is what lets a fold survive editing. The editor is handed a projection
+/// and hands one back; adopting that text wholesale would write the projection —
+/// the file minus the hidden lines — into the buffer. Adopting its DELTA instead
+/// keeps the hidden lines: the range is translated through
+/// [`FoldMap::to_buffer`] and spliced into the real text.
+///
+/// Common prefix + common suffix, which describes any single edit exactly — and
+/// one frame delivers at most one. It also handles an undo the same way, because
+/// a restored earlier projection is just another delta.
+pub fn text_delta(before: &str, after: &str) -> Option<(usize, usize, String)> {
+    if before == after {
+        return None;
+    }
+    let b: Vec<char> = before.chars().collect();
+    let a: Vec<char> = after.chars().collect();
+    let mut head = 0;
+    while head < b.len() && head < a.len() && b[head] == a[head] {
+        head += 1;
+    }
+    // The two tails must not run back past the shared head, or an insertion of
+    // text that repeats its surroundings would report a negative-length range.
+    let mut tail = 0;
+    while tail < b.len() - head && tail < a.len() - head && b[b.len() - 1 - tail] == a[a.len() - 1 - tail]
+    {
+        tail += 1;
+    }
+    Some((
+        head,
+        b.len() - tail,
+        a[head..a.len() - tail].iter().collect(),
+    ))
+}
+
+/// Move fold heads that sit BELOW an edit, so they keep pointing at their own
+/// block after the line count changed.
+///
+/// `at_line` is the 0-based buffer line the edit started on, `removed` / `added`
+/// the line counts it replaced and inserted. A head inside the replaced span is
+/// dropped: its block may not exist any more, and a stale head that lands on
+/// another block's brace would fold something the user never asked to hide.
+pub fn shift_heads(
+    heads: &BTreeSet<usize>,
+    at_line: usize,
+    removed: usize,
+    added: usize,
+) -> BTreeSet<usize> {
+    heads
+        .iter()
+        .filter_map(|&h| {
+            if h <= at_line {
+                Some(h)
+            } else if h <= at_line + removed {
+                None // inside what the edit replaced
+            } else {
+                Some((h + added).checked_sub(removed).unwrap_or(h))
+            }
+        })
+        .collect()
+}
+
 /// Is there input this frame that could MODIFY the buffer? Folds are cleared on
 /// one of these before the editor renders, so the keystroke lands on the full
 /// text and the editor's write-back is always the whole file.
@@ -280,31 +344,26 @@ pub fn edit_pending(ui: &egui::Ui) -> bool {
     use eframe::egui::{Event, Key};
     ui.input(|i| {
         i.events.iter().any(|e| match e {
-            Event::Text(_) | Event::Paste(_) | Event::Cut | Event::Copy => {
-                !matches!(e, Event::Copy)
-            }
+            // Typing, deleting and pasting are NOT here: since phase 3 the
+            // editor edits the projection and only its delta is adopted, so
+            // those all land in the right place with the fold intact.
+            //
+            // Cut and Copy still are. They put the SELECTION on the clipboard,
+            // and a selection spanning a folded block would hand over text with
+            // the hidden lines deleted — pasting that back is a way to lose
+            // them for real.
+            Event::Cut | Event::Copy => true,
             Event::Key {
                 key, pressed: true, ..
             } => {
-                matches!(
-                    key,
-                    Key::Backspace
-                    | Key::Delete
-                    | Key::Enter
-                    | Key::Tab
-                    // Undo/redo and the line-op shortcuts (comment, move,
-                    // duplicate, cut, format) all rewrite the buffer.
-                    | Key::Z
-                    | Key::Y
-                    | Key::D
-                    | Key::X
-                    | Key::F
-                    | Key::V
-                    | Key::Slash
-                    | Key::ArrowUp
-                    | Key::ArrowDown
-                ) && (i.modifiers.command
-                    || matches!(key, Key::Backspace | Key::Delete | Key::Enter | Key::Tab))
+                // The line ops (comment, move, duplicate, cut, format) rewrite
+                // the buffer from their own caret arithmetic rather than
+                // through the editor, so they need the full text.
+                i.modifiers.command
+                    && matches!(
+                        key,
+                        Key::D | Key::X | Key::F | Key::V | Key::Slash | Key::ArrowUp | Key::ArrowDown
+                    )
             }
             _ => false,
         })
@@ -409,14 +468,32 @@ impl FoldMap {
         (col <= v.len).then_some(v.disp_start + col)
     }
 
+    /// Like [`to_display`](Self::to_display), but total: a buffer index that
+    /// is HIDDEN lands at the end of the last visible line before it — the
+    /// header line of the block it is inside.
+    ///
+    /// The caret is stored in BUFFER space between frames (see the two
+    /// conversion points around the editor render in `editor_panel`), and it
+    /// can legitimately point into a folded block: F12, a search hit or a
+    /// diagnostic all place it there. It has to become *some* real display
+    /// position before the editor is shown, and the header is the honest one.
+    pub fn to_display_clamped(&self, buf_idx: usize) -> usize {
+        if self.identity {
+            return buf_idx;
+        }
+        match self.line_at(buf_idx) {
+            Some(v) => v.disp_start + (buf_idx - v.buf_start).min(v.len),
+            None => 0,
+        }
+    }
+
     /// Buffer char index for a display char index. Total: every display offset
     /// is a real buffer offset (no synthetic text exists).
     ///
-    /// The inverse of [`to_display`](Self::to_display) and the half phase 2 does
-    /// not need yet — while folded the editor is read-only, so no caret or edit
-    /// has to travel display → buffer. It exists (and is round-trip tested)
-    /// because it is the entry point for phase 3, where folds survive editing.
-    #[allow(dead_code)]
+    /// The inverse of [`to_display`](Self::to_display). Used when a keystroke
+    /// unfolds the file: the caret the user placed while folded is an index into
+    /// the projection, and it has to mean the same place in the buffer before
+    /// the keystroke is applied.
     pub fn to_buffer(&self, disp_idx: usize) -> usize {
         if self.identity {
             return disp_idx;
@@ -528,6 +605,138 @@ mod tests {
     fn unclosed_block_yields_no_region() {
         // Mid-typing: must not panic, must not invent a region.
         assert!(heads("fn f() {\n    x;\n").is_empty());
+    }
+
+    // ── Editing through a fold (phase 3) ─────────────────────────────────────
+
+    fn delta(before: &str, after: &str) -> Option<(usize, usize, String)> {
+        text_delta(before, after)
+    }
+
+    #[test]
+    fn no_change_is_no_delta() {
+        assert_eq!(delta("abc", "abc"), None);
+    }
+
+    #[test]
+    fn insertion_reports_an_empty_range() {
+        // "ab" -> "aXb": nothing removed, "X" inserted at 1.
+        assert_eq!(delta("ab", "aXb"), Some((1, 1, "X".to_owned())));
+    }
+
+    #[test]
+    fn deletion_reports_an_empty_replacement() {
+        assert_eq!(delta("aXb", "ab"), Some((1, 2, String::new())));
+    }
+
+    #[test]
+    fn replacement_reports_both() {
+        assert_eq!(delta("aXb", "aYYb"), Some((1, 2, "YY".to_owned())));
+    }
+
+    #[test]
+    fn repeated_text_around_an_insertion_stays_a_valid_range() {
+        // The naive prefix+suffix walk can run the tail back past the head here.
+        let d = delta("aa", "aaa").expect("a change");
+        assert!(d.0 <= d.1, "range start {} past end {}", d.0, d.1);
+        // …and applying it reproduces the new text.
+        let mut out: String = "aa".chars().take(d.0).collect();
+        out.push_str(&d.2);
+        out.extend("aa".chars().skip(d.1));
+        assert_eq!(out, "aaa");
+    }
+
+    #[test]
+    fn a_delta_round_trips_through_the_fold_map() {
+        // Type "X" at the start of the line after a folded block, and check the
+        // BUFFER gets it in the right place with the hidden lines intact.
+        let src = "fn a() {
+    x;
+    y;
+}
+after
+";
+        let m = folded_of(src, &[0]);
+        assert_eq!(m.display(), "fn a() {
+}
+after
+");
+        let edited = "fn a() {
+}
+Xafter
+";
+        let (s, e, ins) = delta(m.display(), edited).expect("a change");
+        let (bs, be) = (m.to_buffer(s), m.to_buffer(e));
+        let chars: Vec<char> = src.chars().collect();
+        let mut out: String = chars[..bs].iter().collect();
+        out.push_str(&ins);
+        out.extend(&chars[be..]);
+        assert_eq!(out, "fn a() {
+    x;
+    y;
+}
+Xafter
+");
+    }
+
+    #[test]
+    fn shift_heads_moves_only_what_is_below() {
+        let heads: BTreeSet<usize> = [2, 10, 20].into_iter().collect();
+        // Two lines inserted at line 5.
+        let out = shift_heads(&heads, 5, 0, 2);
+        assert_eq!(out.into_iter().collect::<Vec<_>>(), [2, 12, 22]);
+    }
+
+    #[test]
+    fn shift_heads_drops_a_head_inside_the_edit() {
+        let heads: BTreeSet<usize> = [2, 7, 20].into_iter().collect();
+        // Lines 5..=9 replaced by one line: the head at 7 is gone.
+        let out = shift_heads(&heads, 5, 4, 1);
+        assert_eq!(out.into_iter().collect::<Vec<_>>(), [2, 17]);
+    }
+
+    /// The rule the editor uses to refuse a delta: translated into the buffer,
+    /// a range that GREW is one that swallowed hidden lines.
+    fn crosses(m: &FoldMap, ds: usize, de: usize) -> bool {
+        m.to_buffer(de) - m.to_buffer(ds) != de - ds
+    }
+
+    #[test]
+    fn an_edit_on_a_visible_line_does_not_cross_a_fold() {
+        let src = "fn a() {\n    x;\n}\nafter\n";
+        let m = folded_of(src, &[0]);
+        // The whole "after" line, in display space.
+        let start = m.display().find("after").expect("visible");
+        assert!(!crosses(&m, start, start + 5));
+    }
+
+    #[test]
+    fn deleting_the_newline_under_a_fold_head_is_caught_as_crossing() {
+        // Caret at the end of the header line, Delete pressed: in the
+        // projection it joins two adjacent lines, in the buffer it would eat
+        // the whole hidden body.
+        let src = "fn a() {\n    x;\n    y;\n}\nafter\n";
+        let m = folded_of(src, &[0]);
+        let nl = m.display().find('\n').expect("a newline");
+        assert!(crosses(&m, nl, nl + 1));
+    }
+
+    #[test]
+    fn a_caret_inside_a_folded_block_lands_on_its_header() {
+        let src = "fn a() {\n    x;\n    y;\n}\nafter\n";
+        let m = folded_of(src, &[0]);
+        let hidden = src.find("y;").expect("hidden");
+        // End of the header line — the last visible position before it.
+        assert_eq!(m.to_display_clamped(hidden), "fn a() {".len());
+        // A visible index still round-trips exactly.
+        let after = src.find("after").expect("visible");
+        assert_eq!(m.to_buffer(m.to_display_clamped(after)), after);
+    }
+
+    #[test]
+    fn shift_heads_is_a_no_op_without_a_line_change() {
+        let heads: BTreeSet<usize> = [2, 10].into_iter().collect();
+        assert_eq!(shift_heads(&heads, 5, 0, 0), heads);
     }
 
     // ── Block comments ───────────────────────────────────────────────────────
