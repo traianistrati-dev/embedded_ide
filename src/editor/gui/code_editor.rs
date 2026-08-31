@@ -421,6 +421,22 @@ fn cached_rust_layout_job(
 
 /// The numbered-lines gutter, faithfully ported from `CodeEditor::numlines_show`
 /// (we never use the shift / only-natural options, so they're dropped).
+/// Which rendered rows are the HEADER of a collapsed block, from the line
+/// numbers alone — no extra state needed. The rows are consecutive buffer lines
+/// except across a fold, so a row whose number is not one less than the next
+/// row's is exactly the line holding the `{` of a block whose body is hidden.
+///
+/// An empty `numbers` means nothing is folded (the editor is showing the whole
+/// buffer and counts its own rows), so there are no gaps and no headers.
+fn folded_header_rows(numbers: &[usize]) -> std::collections::BTreeSet<usize> {
+    numbers
+        .windows(2)
+        .enumerate()
+        .filter(|(_, w)| w[1] > w[0] + 1)
+        .map(|(i, _)| i)
+        .collect()
+}
+
 fn numlines_show(
     ui: &mut egui::Ui,
     text: &str,
@@ -474,14 +490,35 @@ fn numlines_show(
     };
 
     let width = (max_indent + FOLD_GUTTER_CHARS) as f32 * fontsize * 0.5;
+
+    let folded_rows = folded_header_rows(numbers);
+
+    let plain = theme.type_color(TokenType::Comment(true));
+    // The same orange the highlighter gives `{` and `}` — the number picks up
+    // the colour of the braces whose contents it is standing in for.
+    let folded_fg = theme.type_color(TokenType::Punctuation('{'));
     let mut layouter = |ui: &egui::Ui, buf: &dyn TextBuffer, _wrap: f32| {
-        let job = egui::text::LayoutJob::single_section(
-            buf.as_str().to_string(),
-            egui::TextFormat::simple(
-                egui::FontId::monospace(fontsize),
-                theme.type_color(TokenType::Comment(true)),
-            ),
-        );
+        let font = egui::FontId::monospace(fontsize);
+        let job = if folded_rows.is_empty() {
+            egui::text::LayoutJob::single_section(
+                buf.as_str().to_string(),
+                egui::TextFormat::simple(font, plain),
+            )
+        } else {
+            let mut job = egui::text::LayoutJob::default();
+            for (row, line) in buf.as_str().split('\n').enumerate() {
+                if row > 0 {
+                    job.append("\n", 0.0, egui::TextFormat::simple(font.clone(), plain));
+                }
+                let fg = if folded_rows.contains(&row) {
+                    folded_fg
+                } else {
+                    plain
+                };
+                job.append(line, 0.0, egui::TextFormat::simple(font.clone(), fg));
+            }
+            job
+        };
         ui.fonts_mut(|f| f.layout_job(job))
     };
     ui.add(
@@ -654,6 +691,42 @@ pub fn show_rust_with_completer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn heads(numbers: &[usize]) -> Vec<usize> {
+        folded_header_rows(numbers).into_iter().collect()
+    }
+
+    #[test]
+    fn nothing_folded_colours_no_line_number() {
+        // Empty = the editor is counting its own rows, no projection.
+        assert!(heads(&[]).is_empty());
+        assert!(heads(&[1, 2, 3, 4]).is_empty());
+    }
+
+    #[test]
+    fn the_row_before_the_gap_is_the_folded_header() {
+        // `fn a() {` on line 10 with lines 11..=39 hidden: row 0 shows 10,
+        // row 1 shows 40 (the `}`). Row 0 is the header.
+        assert_eq!(heads(&[10, 40, 41]), [0]);
+    }
+
+    #[test]
+    fn two_folds_give_two_headers() {
+        // 1, [2..4 hidden], 5, 6, [7..8 hidden], 9
+        assert_eq!(heads(&[1, 5, 6, 9]), [0, 2]);
+    }
+
+    #[test]
+    fn a_fold_hiding_a_single_line_still_counts() {
+        assert_eq!(heads(&[3, 5]), [0]);
+    }
+
+    #[test]
+    fn a_header_on_the_last_numbered_row_is_not_reported() {
+        // There is always a visible `}` line after the hidden body, so this
+        // cannot happen — but the window walk must not index past the end.
+        assert!(heads(&[7]).is_empty());
+    }
 
     /// The memo must return exactly what a direct call produces, and any input
     /// change (text, dead ranges, font size) must recompute — never serve the
