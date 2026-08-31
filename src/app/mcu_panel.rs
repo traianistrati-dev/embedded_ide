@@ -169,9 +169,75 @@ fn module_details_ui(
         });
     }
 
+    // —— Not offered here ——
+    // Rows this chip or runtime does not draw, and WHY - but only where the
+    // panel already had the reason written down. A gate is an `if` that did not
+    // fire, and there are some forty of them here: inventing a sentence for each
+    // would be forty claims nobody checked. So this group is short on purpose,
+    // and everything else absent is simply absent.
+    let skipped = said.map(ConfigOut::skipped_fields).unwrap_or_default();
+    // …and the rest of this kind's rows that this chip did not draw. The roster
+    // is the union of everything the panel CAN draw, generated from the test
+    // matrix, so subtracting what it drew leaves exactly what is missing here.
+    //
+    // No reason is given for these: a gate is an `if` that did not fire, and
+    // forty invented sentences would be forty claims nobody checked. The ones
+    // above carry a reason because the panel already had it written down.
+    let drawn: Vec<&str> = said
+        .and_then(ConfigOut::fields)
+        .into_iter()
+        .flatten()
+        .map(|f| f.label.as_str())
+        .collect();
+    let absent: Vec<crate::panels::mcu_module::mcu::gui::module_docs::FieldDoc> = said
+        .map(|_| {
+            module_docs::ROSTER
+                .iter()
+                .find(|(k, _)| *k == m.kind.short())
+                .map_or(&[][..], |(_, rows)| *rows)
+                .iter()
+                .filter(|(label, _)| {
+                    !drawn.contains(label) && !skipped.iter().any(|s| s.label == *label)
+                })
+                .map(|(label, doc)| {
+                    crate::panels::mcu_module::mcu::gui::module_docs::FieldDoc {
+                        label: (*label).to_owned(),
+                        // A row whose meaning moves with the chip has no single
+                        // sentence, so it gets the label alone rather than one
+                        // of its forms picked at random.
+                        doc: std::borrow::Cow::Borrowed(
+                            doc.unwrap_or("Not offered on this chip or runtime."),
+                        ),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !skipped.is_empty() || !absent.is_empty() {
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new(
+            egui::RichText::new(format!(
+                "Not offered here — {}",
+                skipped.len() + absent.len()
+            ))
+            .size(11.0)
+            .strong()
+            .color(egui::Color32::from_gray(160)),
+        )
+        .id_salt(("vmod_skipped", m.kind))
+        .default_open(false)
+        .show(ui, |ui| {
+            // The explained ones first: they are the answers, and the rest is
+            // the list of what else this module has.
+            field_entries(ui, skipped, egui::Color32::from_rgb(190, 150, 110));
+            field_entries(ui, &absent, egui::Color32::from_gray(150));
+        });
+    }
+
     ui.add_space(10.0);
 
-    // ── Pins ──
+    // —— Pins ——
     ui.label(
         egui::RichText::new("Pins")
             .size(11.0)

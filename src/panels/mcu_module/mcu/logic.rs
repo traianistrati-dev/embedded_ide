@@ -295,9 +295,9 @@ impl Mcu {
                 .max()
                 .unwrap_or(0))
                 + 1;
-            let idx = self.modules.len() + 1;
+            let id = self.free_module_id("custom");
             self.modules.push(VirtualModule {
-                id: format!("custom_{idx}"),
+                id,
                 kind,
                 name: format!("Custom{inst}"),
                 pos: (0.0, 0.0),
@@ -1151,9 +1151,9 @@ impl Mcu {
             {
                 self.modules[pos].connections = connections;
             } else {
-                let idx = self.modules.len() + 1;
+                let id = self.free_module_id(&kind.short().to_ascii_lowercase());
                 self.modules.push(VirtualModule {
-                    id: format!("{}_{idx}", kind.short().to_ascii_lowercase()),
+                    id,
                     kind,
                     name: format!("{}{inst}", kind.short()),
                     pos: (0.0, 0.0),
@@ -1161,6 +1161,40 @@ impl Mcu {
                     connections,
                 });
             }
+        }
+    }
+
+    /// A module id nothing else is using.
+    ///
+    /// # Why `len() + 1` was not one
+    ///
+    /// Both id factories used to be `format!("{base}_{}", self.modules.len() + 1)`
+    /// — which is "one more than however many modules happen to exist", not "the
+    /// next free number". Remove a module and add another and the new one takes
+    /// an id that is still taken:
+    ///
+    /// ```text
+    /// wire USART0 + USART1   -> usart_1, usart_2
+    /// unwire USART0          -> usart_2
+    /// wire USART0 again      -> usart_2, usart_2      <- both, same id
+    /// ```
+    ///
+    /// The id is not decoration. It keys the list's `CollapsingState`, so two
+    /// modules sharing one open together and cannot be opened apart; it is the
+    /// `push_id` namespace for the whole config grid, so every widget inside
+    /// both collides and egui paints its ID-clash banner over the panel; and it
+    /// names the `mod <id>` block `ensure_module_models` writes into main.rs.
+    ///
+    /// Starts at the old number and walks up, so an id that was free stays the
+    /// id it always was — only a collision moves.
+    fn free_module_id(&self, base: &str) -> String {
+        let mut n = self.modules.len() + 1;
+        loop {
+            let id = format!("{base}_{n}");
+            if !self.modules.iter().any(|m| m.id == id) {
+                return id;
+            }
+            n += 1;
         }
     }
 
@@ -1172,6 +1206,123 @@ impl Mcu {
     /// Finds a pin by number (mutable)
     pub fn find_pin_mut(&mut self, number: usize) -> Option<&mut Pin> {
         self.iter_all_pins_mut().find(|p| p.number == number)
+    }
+}
+
+#[cfg(test)]
+mod module_id_tests {
+    use crate::panels::mcu_module::modules::ModuleKind;
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+    fn ids(mcu: &super::Mcu) -> Vec<String> {
+        mcu.modules.iter().map(|m| m.id.clone()).collect()
+    }
+
+    fn assert_distinct(mcu: &super::Mcu, when: &str) {
+        let got = ids(mcu);
+        let mut u = got.clone();
+        u.sort();
+        u.dedup();
+        assert_eq!(
+            u.len(),
+            got.len(),
+            "{when}: ids must be distinct, got {got:?}"
+        );
+    }
+
+    /// Removing a module and adding another must not hand out an id that is
+    /// still in use.
+    ///
+    /// The id was built from `modules.len() + 1` — "one more than however many
+    /// exist", not "the next free one" — so this exact sequence produced TWO
+    /// modules called `usart_2`. The id keys the list's `CollapsingState` and is
+    /// the `push_id` namespace for the config grid, so the pair opened and
+    /// closed together and egui painted its ID-clash banner over every widget in
+    /// both of their grids.
+    #[test]
+    fn a_re_wired_module_does_not_reuse_a_live_id() {
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32c3")
+            .expect("a bundled ESP32-C3")
+            .build_mcu();
+
+        let mut wired = 0;
+        for inst in [0u8, 1] {
+            for f in [PinFunction::UsartTx(inst), PinFunction::UsartRx(inst)] {
+                let free = mcu
+                    .iter_all_pins()
+                    .find(|p| {
+                        p.selected_function == PinFunction::Unset
+                            && p.available_functions.contains(&f)
+                    })
+                    .map(|p| p.number);
+                if let Some(n) = free {
+                    mcu.apply_pin_function(n, f);
+                    wired += 1;
+                }
+            }
+        }
+        assert_eq!(wired, 4, "the C3 has two USARTs to wire");
+        assert_eq!(mcu.modules.len(), 2);
+        assert_distinct(&mcu, "freshly wired");
+
+        // Move USART0 off its pads and back on — what a user does when the
+        // board wants the peripheral somewhere else.
+        let pads: Vec<usize> = mcu
+            .iter_all_pins()
+            .filter(|p| {
+                matches!(
+                    p.selected_function,
+                    PinFunction::UsartTx(0) | PinFunction::UsartRx(0)
+                )
+            })
+            .map(|p| p.number)
+            .collect();
+        for n in &pads {
+            mcu.apply_pin_function(*n, PinFunction::Unset);
+        }
+        assert_eq!(mcu.modules.len(), 1, "USART0's module went with its pads");
+
+        for n in &pads {
+            let f = mcu
+                .find_pin(*n)
+                .unwrap()
+                .available_functions
+                .iter()
+                .find(|f| matches!(f, PinFunction::UsartTx(0) | PinFunction::UsartRx(0)))
+                .cloned()
+                .expect("the pad still offers USART0");
+            mcu.apply_pin_function(*n, f);
+        }
+        assert_eq!(mcu.modules.len(), 2, "and came back");
+        assert_distinct(&mcu, "after a re-wire");
+    }
+
+    /// The Custom palette had the same defect, from the same expression.
+    #[test]
+    fn removing_a_custom_module_does_not_free_a_live_id() {
+        let mut mcu = crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx();
+        for _ in 0..3 {
+            assert!(mcu.add_module(ModuleKind::Custom));
+        }
+        assert_distinct(&mcu, "three customs");
+
+        // Drop the FIRST, so the count no longer matches the highest number.
+        let first = mcu.modules[0].id.clone();
+        mcu.modules.retain(|m| m.id != first);
+        assert!(mcu.add_module(ModuleKind::Custom));
+        assert_distinct(&mcu, "after removing one and adding another");
+    }
+
+    /// The numbering a project already has must not move: only a collision
+    /// does. Otherwise a `mod <id>` data-model block already written into
+    /// main.rs would be orphaned by a rename it never asked for.
+    #[test]
+    fn an_uncontested_id_keeps_the_number_it_always_had() {
+        let mut mcu = crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        assert_eq!(mcu.modules[0].id, "usart_1");
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        assert_eq!(mcu.modules[1].id, "spi_2");
     }
 }
 

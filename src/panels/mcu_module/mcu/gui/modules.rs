@@ -148,7 +148,8 @@ pub const RP_I2C_NOTE: &str = "embassy-rp's async I2C is interrupt driven and ta
 ///
 /// `Spi::new_blocking` exists in embassy-rp; this backend only emits the
 /// DMA form. The choice is real and unbuilt, not absent.
-fn rp_spi_init_locked(ui: &mut egui::Ui) {
+fn rp_spi_init_locked(ui: &mut egui::Ui, out: &mut ConfigOut) {
+    out.field("Async init", docs::ASYNC_INIT_LOCKED_RP);
     ui.label("Async init");
     let resp = ui.add_enabled_ui(false, |ui| {
         egui::ComboBox::from_id_salt("rp_spi_init_locked")
@@ -1564,7 +1565,8 @@ pub fn module_config_ui(
     // outright, on a row an Espressif chip sees too — where the driver is
     // esp-hal's and the DMA is the GDMA. Whatever the chip, the choice is the
     // same one: a standard blocking bus, or an .await-able one on DMA.
-    let async_row = |ui: &mut egui::Ui, mode: &mut AsyncBusMode| {
+    let async_row = |ui: &mut egui::Ui, out: &mut ConfigOut, mode: &mut AsyncBusMode| {
+        out.field("Async init", docs::ASYNC_INIT);
         ui.label("Async init");
         egui::ComboBox::from_id_salt("async_mode")
             .selected_text(match mode {
@@ -1600,7 +1602,8 @@ pub fn module_config_ui(
     // different mechanism behind it, so it says the mechanism: esp-hal takes a
     // channel in `with_dma`, and the driver that comes back is a different type
     // with different methods.
-    let esp_dma_row = |ui: &mut egui::Ui, mode: &mut AsyncBusMode| {
+    let esp_dma_row = |ui: &mut egui::Ui, out: &mut ConfigOut, mode: &mut AsyncBusMode| {
+        out.field("Transfers", docs::ESP_TRANSFERS);
         ui.label("Transfers");
         egui::ComboBox::from_id_salt("esp_dma")
             .selected_text(match mode {
@@ -1631,9 +1634,11 @@ pub fn module_config_ui(
     // a pooled DMA, and only the ones the request table names on a bolted one
     // (the original ESP32 and the S2, whose `DMA_SPI2` serves SPI2 alone).
     let esp_dma_channel_row = |ui: &mut egui::Ui,
+                               out: &mut ConfigOut,
                                dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
                                request: &str,
                                chan: &mut String| {
+        out.field("DMA channel", docs::ESP_DMA_CHANNEL);
         ui.label("DMA channel");
         // The allocator's own list, not a second one built to match it.
         let options = crate::panels::mcu_module::codegen_esp::dma_candidates(dma, request);
@@ -1716,7 +1721,10 @@ pub fn module_config_ui(
     // hdsel / rtse / ctse at all, and the SWAP / TXINV / RXINV bits do not exist
     // in F1 silicon. Leaving the rows out silently makes a user who just used
     // them on a G0 project hunt for them; this says why.
-    let f1_serial_note = |ui: &mut egui::Ui| {
+    let f1_serial_note = |ui: &mut egui::Ui, out: &mut ConfigOut| {
+        for row in ["Data direction", "Line", "Hardware flow control"] {
+            out.skip(row, docs::SKIP_F1_SERIAL);
+        }
         ui.label("");
         ui.label(
             egui::RichText::new(
@@ -1772,10 +1780,15 @@ pub fn module_config_ui(
         // drew, and not re-derived from the family somewhere else.
         out.field(
             "Data direction",
-            if opts.len() == 1 {
-                docs::USART_DIRECTION_LOCKED
-            } else {
+            if opts.len() > 1 {
                 docs::USART_DIRECTION
+            } else if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+                // The same three-way choice the hover below makes. They read
+                // ONE const each, so a fourth form cannot reach one and not the
+                // other.
+                docs::USART_DIRECTION_LOCKED_RP
+            } else {
+                docs::USART_DIRECTION_LOCKED
             },
         );
         ui.label("Data direction");
@@ -1975,6 +1988,7 @@ pub fn module_config_ui(
         .show(ui, |ui| {
             match &mut m.config {
                 ModuleConfig::Touch(cfg) => {
+                    out.field("Scan", docs::TOUCH_SCAN);
                     ui.label("Scan");
                     egui::ComboBox::from_id_salt("touchscan")
                         .selected_text(cfg.scan.label())
@@ -1991,6 +2005,7 @@ pub fn module_config_ui(
                         );
                     ui.end_row();
 
+                    out.field("Touched when", docs::TOUCH_THRESHOLD_MODE);
                     ui.label("Touched when");
                     egui::ComboBox::from_id_salt("touchthr")
                         .selected_text(cfg.threshold_mode.label())
@@ -2006,6 +2021,7 @@ pub fn module_config_ui(
                         );
                     ui.end_row();
 
+                    out.field("Threshold", docs::TOUCH_THRESHOLD);
                     ui.label("Threshold");
                     ui.add(egui::DragValue::new(&mut cfg.threshold).range(1..=65535))
                         .on_hover_text(
@@ -2015,6 +2031,7 @@ pub fn module_config_ui(
                         );
                     ui.end_row();
 
+                    out.field("Measurement", docs::TOUCH_MEASUREMENT);
                     ui.label("Measurement")
                         .on_hover_text("Cycles of the 8 MHz touch clock, per measurement.");
                     ui.add(
@@ -2024,18 +2041,24 @@ pub fn module_config_ui(
 
                     // The sleep timer only exists in continuous mode; showing it
                     // in one-shot would be a control that changes nothing.
+                    if !cfg.scan.is_continuous() {
+                        out.skip("Sleep cycles", docs::SKIP_TOUCH_SLEEP);
+                    }
                     if cfg.scan.is_continuous() {
+                        out.field("Sleep cycles", docs::TOUCH_SLEEP_CYCLES);
                         ui.label("Sleep cycles")
                             .on_hover_text("Idle time between background measurements.");
                         ui.add(egui::DragValue::new(&mut cfg.sleep_cycles).range(1..=0xffff));
                         ui.end_row();
                     }
+                    out.all_fields_documented();
                 }
                 ModuleConfig::LcdCam(cfg) => {
                     // The camera is the OTHER half and its own module, so this
                     // one chooses only between the two display shapes.
                     let camera = cfg.mode.is_camera();
                     if !camera {
+                        out.field("Mode", docs::LCDCAM_MODE);
                         ui.label("Mode");
                         egui::ComboBox::from_id_salt("lcd_mode")
                             .selected_text(cfg.mode.label())
@@ -2054,6 +2077,14 @@ pub fn module_config_ui(
                         ui.end_row();
                     }
 
+                    out.field(
+                        "Bus width",
+                        if camera {
+                            docs::LCDCAM_WIDTH_CAM
+                        } else {
+                            docs::LCDCAM_WIDTH
+                        },
+                    );
                     ui.label("Bus width");
                     egui::ComboBox::from_id_salt("lcd_width")
                         .selected_text(format!("{}-bit", cfg.width))
@@ -2072,6 +2103,18 @@ pub fn module_config_ui(
                     // A camera in SLAVE mode is clocked by the sensor, so the
                     // number below changes nothing. Said, rather than hidden.
                     let slave_cam = cfg.mode.is_camera() && !cfg.master_clock;
+                    out.field(
+                        "Pixel clock",
+                        if slave_cam {
+                            docs::LCDCAM_PIXEL_CLOCK_SLAVE
+                        } else if camera {
+                            docs::LCDCAM_PIXEL_CLOCK_CAM
+                        } else if cfg.mode == LcdCamMode::Dpi {
+                            docs::LCDCAM_PIXEL_CLOCK_DPI
+                        } else {
+                            docs::LCDCAM_PIXEL_CLOCK_I8080
+                        },
+                    );
                     ui.label("Pixel clock");
                     ui.horizontal(|ui| {
                         ui.add_enabled(
@@ -2093,6 +2136,7 @@ pub fn module_config_ui(
                     ui.end_row();
 
                     if cfg.mode.is_camera() {
+                        out.field("Master clock", docs::LCDCAM_MASTER_CLOCK);
                         ui.label("Master clock");
                         ui.checkbox(&mut cfg.master_clock, "this chip clocks the sensor")
                             .on_hover_text(
@@ -2107,6 +2151,7 @@ pub fn module_config_ui(
                         // An RGB panel has no controller: every one of these
                         // numbers comes off its datasheet, and a wrong one is a
                         // rolling picture rather than a build error.
+                        out.field("Active area", docs::LCDCAM_ACTIVE_AREA);
                         ui.label("Active area");
                         ui.horizontal(|ui| {
                             ui.add(egui::DragValue::new(&mut cfg.h_active).range(1..=4095));
@@ -2118,6 +2163,7 @@ pub fn module_config_ui(
                         });
                         ui.end_row();
 
+                        out.field("Total", docs::LCDCAM_TOTAL);
                         ui.label("Total")
                             .on_hover_text("Active area plus blanking - from the panel datasheet.");
                         ui.horizontal(|ui| {
@@ -2127,6 +2173,7 @@ pub fn module_config_ui(
                         });
                         ui.end_row();
 
+                        out.field("Front porch", docs::LCDCAM_FRONT_PORCH);
                         ui.label("Front porch");
                         ui.horizontal(|ui| {
                             ui.add(egui::DragValue::new(&mut cfg.h_front_porch).range(0..=1023));
@@ -2135,6 +2182,7 @@ pub fn module_config_ui(
                         });
                         ui.end_row();
 
+                        out.field("Sync width", docs::LCDCAM_SYNC_WIDTH);
                         ui.label("Sync width");
                         ui.horizontal(|ui| {
                             ui.add(egui::DragValue::new(&mut cfg.hsync_width).range(1..=1023));
@@ -2144,6 +2192,7 @@ pub fn module_config_ui(
                         ui.end_row();
                     }
 
+                    out.field("Transfers", docs::LCDCAM_TRANSFERS);
                     ui.label("Transfers");
                     ui.label(
                         egui::RichText::new("DMA, always")
@@ -2156,8 +2205,10 @@ pub fn module_config_ui(
                          this one got.",
                     );
                     ui.end_row();
+                    out.all_fields_documented();
                 }
                 ModuleConfig::ParlIo(cfg) => {
+                    out.field("Direction", docs::PARLIO_DIRECTION);
                     ui.label("Direction");
                     egui::ComboBox::from_id_salt("parl_dir")
                         .selected_text(cfg.direction.label())
@@ -2175,6 +2226,16 @@ pub fn module_config_ui(
 
                     ui.label("Bus width");
                     let widths = ParlIoWidth::options(family);
+                    // After `widths`, which is what decides the form: only the
+                    // chips with the pads for it offer 16-bit.
+                    out.field(
+                        "Bus width",
+                        if widths.len() == 5 {
+                            docs::PARLIO_WIDTH
+                        } else {
+                            docs::PARLIO_WIDTH_NO_16
+                        },
+                    );
                     egui::ComboBox::from_id_salt("parl_width")
                         .selected_text(cfg.width.label())
                         .show_ui(ui, |ui| {
@@ -2193,6 +2254,7 @@ pub fn module_config_ui(
                         });
                     ui.end_row();
 
+                    out.field("Clock", docs::PARLIO_CLOCK);
                     ui.label("Clock");
                     ui.horizontal(|ui| {
                         ui.add(
@@ -2224,6 +2286,7 @@ pub fn module_config_ui(
                     );
                     ui.end_row();
 
+                    out.field("Bit order", docs::PARLIO_BIT_ORDER);
                     ui.label("Bit order");
                     egui::ComboBox::from_id_salt("parl_order")
                         .selected_text(cfg.bit_order.label())
@@ -2234,6 +2297,7 @@ pub fn module_config_ui(
                         });
                     ui.end_row();
 
+                    out.field("DMA buffer", docs::PARLIO_DMA_BUFFER);
                     ui.label("DMA buffer");
                     ui.add(
                         egui::DragValue::new(&mut cfg.buffer_bytes)
@@ -2245,6 +2309,7 @@ pub fn module_config_ui(
                          form - its constructor takes a channel.",
                     );
                     ui.end_row();
+                    out.all_fields_documented();
                 }
                 ModuleConfig::Mcpwm(cfg) => {
                     // One duty row per WIRED output: the six are not all in use,
@@ -2272,7 +2337,8 @@ pub fn module_config_ui(
                     // would be a control that changes nothing.
                     if ops.len() > 1 {
                         for op in &ops {
-                            ui.label(format!("OP{op} timer"));
+                            out.field("Operator timer", docs::MCPWM_OP_TIMER);
+                        ui.label(format!("OP{op} timer"));
                             let mut t = cfg.timer_of(*op);
                             egui::ComboBox::from_id_salt(format!("mcpwmtim{op}"))
                                 .selected_text(format!("Timer {t}"))
@@ -2304,6 +2370,14 @@ pub fn module_config_ui(
                             format!(" T{t}")
                         };
                         let (freq, period) = cfg.timer_mut(*t);
+                        out.field(
+                            "Frequency",
+                            if one {
+                                docs::MCPWM_FREQUENCY
+                            } else {
+                                docs::MCPWM_FREQUENCY_PER_TIMER
+                            },
+                        );
                         ui.label(format!("Frequency{tag}"));
                         let mut set: Option<u32> = None;
                         ui.horizontal(|ui| {
@@ -2329,6 +2403,14 @@ pub fn module_config_ui(
                         }
                         ui.end_row();
 
+                        out.field(
+                            "Resolution",
+                            if one {
+                                docs::MCPWM_RESOLUTION
+                            } else {
+                                docs::MCPWM_RESOLUTION_PER_TIMER
+                            },
+                        );
                         ui.label(format!("Resolution{tag}"));
                         let steps = u32::from(*period) + 1;
                         ui.horizontal(|ui| {
@@ -2353,6 +2435,7 @@ pub fn module_config_ui(
                     }
 
                     for (op, is_b, lbl) in wired {
+                        out.field("Duty", docs::MCPWM_DUTY);
                         ui.label(format!("Duty {lbl}"));
                         let mut pct = f32::from(cfg.duty_x100_of(op, is_b)) / 100.0;
                         let steps = u32::from(cfg.timer_period(cfg.timer_of(op))) + 1;
@@ -2375,6 +2458,7 @@ pub fn module_config_ui(
                         }
                         ui.end_row();
                     }
+                    out.all_fields_documented();
                 }
                 ModuleConfig::Pcnt(cfg) => {
                     // A unit has two channels and each is wired on its own, so
@@ -2402,6 +2486,7 @@ pub fn module_config_ui(
                         };
                         let mut k = cfg.channel(*ch);
 
+                        out.field("Counts", docs::PCNT_COUNTS);
                         ui.label(format!("Counts{tag}"));
                         ui.horizontal(|ui| {
                             for (lbl, mode, id) in [
@@ -2427,6 +2512,14 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
 
+                        out.field(
+                            "Control input",
+                            if *has_ctrl {
+                                docs::PCNT_CTRL
+                            } else {
+                                docs::PCNT_CTRL_ABSENT
+                            },
+                        );
                         ui.label(format!("Control input{tag}"));
                         ui.add_enabled_ui(*has_ctrl, |ui| {
                             ui.horizontal(|ui| {
@@ -2462,6 +2555,7 @@ pub fn module_config_ui(
                     // The second channel is the other half of a quadrature
                     // encoder, and nothing else says so.
                     if one {
+                        out.field("Second channel", docs::PCNT_SECOND_CHANNEL);
                         ui.label("Second channel");
                         ui.label(
                             egui::RichText::new("assign PCNT EDGE1 on the canvas")
@@ -2476,6 +2570,7 @@ pub fn module_config_ui(
                         ui.end_row();
                     }
 
+                    out.field("Limits", docs::PCNT_LIMITS);
                     ui.label("Limits");
                     ui.horizontal(|ui| {
                         ui.add(
@@ -2497,6 +2592,7 @@ pub fn module_config_ui(
                     );
                     ui.end_row();
 
+                    out.field("Glitch filter", docs::PCNT_FILTER);
                     ui.label("Glitch filter");
                     ui.horizontal(|ui| {
                         ui.add(
@@ -2519,11 +2615,20 @@ pub fn module_config_ui(
                          hardware caps it at 1023.",
                     );
                     ui.end_row();
+                    out.all_fields_documented();
                 }
                 ModuleConfig::Rmt(cfg) => {
                     ui.label("Direction");
                     let dirs = RmtDirection::options(family, cfg.instance);
                     let locked = dirs.len() == 1;
+                    out.field(
+                        "Direction",
+                        if locked {
+                            docs::RMT_DIRECTION_LOCKED
+                        } else {
+                            docs::RMT_DIRECTION
+                        },
+                    );
                     ui.add_enabled_ui(!locked, |ui| {
                         egui::ComboBox::from_id_salt("rmt_dir")
                             .selected_text(cfg.direction.label())
@@ -2542,6 +2647,7 @@ pub fn module_config_ui(
                     });
                     ui.end_row();
 
+                    out.field("Clock divider", docs::RMT_CLK_DIVIDER);
                     ui.label("Clock divider");
                     ui.horizontal(|ui| {
                         ui.add(
@@ -2568,6 +2674,7 @@ pub fn module_config_ui(
                     ui.end_row();
 
                     if cfg.direction.is_tx() {
+                        out.field("Idle level", docs::RMT_IDLE_LEVEL);
                         ui.label("Idle level");
                         egui::ComboBox::from_id_salt("rmt_idle")
                             .selected_text(if cfg.idle_high { "High" } else { "Low" })
@@ -2579,6 +2686,7 @@ pub fn module_config_ui(
                             .on_hover_text("Where the pad rests between trains.");
                         ui.end_row();
                     } else {
+                        out.field("Idle threshold", docs::RMT_IDLE_THRESHOLD);
                         ui.label("Idle threshold");
                         ui.add(
                             egui::DragValue::new(&mut cfg.idle_threshold)
@@ -2592,6 +2700,7 @@ pub fn module_config_ui(
                         ui.end_row();
                     }
 
+                    out.field("Carrier", docs::RMT_CARRIER);
                     ui.label("Carrier");
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut cfg.carrier, "");
@@ -2613,6 +2722,7 @@ pub fn module_config_ui(
                          demodulates. Off for WS2812 and 1-Wire, which want the edges raw.",
                     );
                     ui.end_row();
+                    out.all_fields_documented();
                 }
                 // LPUART reuses the USART settings struct, so it reuses this
                 // whole arm — only the DMA request table differs (`uart_bus`).
@@ -2635,6 +2745,9 @@ pub fn module_config_ui(
                     // and hidden on a TX-only DMA link, which has none either.
                     let tx_only_dma =
                         cfg.mode == UsartMode::Dma && cfg.direction == UsartDirection::TxOnly;
+                    if tx_only_dma {
+                        out.skip("RX/TX buffer", docs::SKIP_USART_BUF_TX_ONLY);
+                    }
                     if is_async && !tx_only_dma {
                         let dma = cfg.mode == UsartMode::Dma;
                         // The label AND the sentence both turn on the transport
@@ -2783,7 +2896,7 @@ pub fn module_config_ui(
                     } else if let Some(chans) =
                         codegen::stm32::blocking_dma_channels(family, uart_bus, cfg.instance)
                     {
-                        f1_serial_note(ui);
+                        f1_serial_note(ui, out);
                         f1_half_bus_note(
                             ui,
                             "USART",
@@ -2808,7 +2921,11 @@ pub fn module_config_ui(
                 }
                 ModuleConfig::Spi(cfg) => {
                     let roles = SpiRole::options(family);
+                    if roles.len() == 1 {
+                        out.skip("Role", docs::SKIP_SPI_ROLE);
+                    }
                     if roles.len() > 1 {
+                        out.field("Role", docs::SPI_ROLE);
                         ui.label("Role");
                         egui::ComboBox::from_id_salt("spirole")
                             .selected_text(cfg.role.label())
@@ -2833,6 +2950,16 @@ pub fn module_config_ui(
                     if !modes.contains(&cfg.mode) {
                         cfg.mode = modes[0];
                     }
+                    out.field(
+                        "SPI mode",
+                        if modes.len() < 4 {
+                            docs::SPI_MODE_SLAVE_ESP32
+                        } else if slave {
+                            docs::SPI_MODE_SLAVE
+                        } else {
+                            docs::SPI_MODE
+                        },
+                    );
                     ui.label("SPI mode");
                     egui::ComboBox::from_id_salt("spimode")
                         .selected_text(format!("Mode {}", cfg.mode))
@@ -2853,7 +2980,11 @@ pub fn module_config_ui(
                     // Async only: the STM32F1 HAL's SPI takes no bit-order
                     // argument, so the field would be a control that does
                     // nothing there.
+                    if !is_async {
+                        out.skip("Bit order", docs::SKIP_SPI_BIT_ORDER);
+                    }
                     if is_async {
+                        out.field("Bit order", docs::SPI_BIT_ORDER);
                         ui.label("Bit order");
                         egui::ComboBox::from_id_salt("spibitorder")
                             .selected_text(match cfg.bit_order {
@@ -2884,6 +3015,8 @@ pub fn module_config_ui(
                     // Shown as a line rather than hidden, or the row would just
                     // vanish and leave the reader wondering.
                     if slave {
+                        out.field("Clock", docs::SPI_CLOCK_SLAVE);
+                        out.field("Transfers", docs::SPI_TRANSFERS_SLAVE);
                         ui.label("Clock");
                         ui.label(
                             egui::RichText::new("driven by the master")
@@ -2903,8 +3036,10 @@ pub fn module_config_ui(
                              whatever the runtime. The Configuration tab shows which.",
                         );
                         ui.end_row();
+                        out.all_fields_documented();
                         return;
                     }
+                    out.field("Clock", docs::SPI_CLOCK);
                     ui.label("Clock");
                     egui::ComboBox::from_id_salt("spiclk")
                         .selected_text(hz_label(cfg.clock_hz))
@@ -2923,22 +3058,22 @@ pub fn module_config_ui(
                         // `impl Spi<'d, Blocking>` and hands back a
                         // `SpiDma<'d, Blocking>`, so a blocking project puts a
                         // master on DMA exactly as an async one does.
-                        esp_dma_row(ui, &mut pending.1);
+                        esp_dma_row(ui, out, &mut pending.1);
                         if pending.1 == AsyncBusMode::AsyncDma {
                             // ONE channel per bus on an ESP: `with_dma` drives
                             // both directions from it, unlike embassy's pair.
                             let req = format!("SPI{}", cfg.instance);
-                            esp_dma_channel_row(ui, dma, &req, &mut cfg.dma_tx);
+                            esp_dma_channel_row(ui, out, dma, &req, &mut cfg.dma_tx);
                         }
                     } else if is_async {
                         if crate::panels::mcu_module::codegen::rp::is_rp(family) {
-                            rp_spi_init_locked(ui);
+                            rp_spi_init_locked(ui, out);
                             out.note(RP_DMA_NOTE);
                         } else {
                             // NOT folded into the chain above: dropping this
                             // call took the Async-init combo off every STM32,
                             // and nothing but reading the screen would say so.
-                            async_row(ui, &mut pending.1);
+                            async_row(ui, out, &mut pending.1);
                             if pending.1 == AsyncBusMode::AsyncDma {
                                 let inst = cfg.instance;
                                 dma_row(
@@ -2967,11 +3102,39 @@ pub fn module_config_ui(
                     } else {
                         api_row(ui, out, &mut pending.0);
                     }
+                    // The master path ends here; the slave path marked itself
+                    // before its early return.
+                    out.all_fields_documented();
                 }
                 // One TIMER: the frequency it shares, then a duty slider per
                 // channel actually wired — the channel list comes from the
                 // module's own connections, so it mirrors the canvas.
                 ModuleConfig::Timer(cfg) => {
+                    // A PWM module is a TIM on an STM32, an LEDC timer on an
+                    // ESP and a PWM SLICE on a Pico - three different things
+                    // wearing one panel. `per_family` picks the sentence once
+                    // so no row has to repeat the test.
+                    let t_esp = family.starts_with("esp");
+                    let t_rp = crate::panels::mcu_module::codegen::rp::is_rp(family);
+                    let per_family = |stm32: &'static str,
+                                      esp_: &'static str,
+                                      rp_: &'static str| {
+                        if t_rp {
+                            rp_
+                        } else if t_esp {
+                            esp_
+                        } else {
+                            stm32
+                        }
+                    };
+                    out.field(
+                        "Frequency",
+                        per_family(
+                            docs::TIMER_FREQUENCY,
+                            docs::TIMER_FREQUENCY_ESP,
+                            docs::TIMER_FREQUENCY_RP,
+                        ),
+                    );
                     ui.label("Frequency");
                     ui.horizontal(|ui| {
                         ui.add(
@@ -2998,6 +3161,7 @@ pub fn module_config_ui(
                     if family.starts_with("esp") {
                         let max = esp_ledc_max_bits(cfg.freq_hz);
                         let min = esp_ledc_min_bits(cfg.freq_hz);
+                        out.field("Duty resolution", docs::TIMER_DUTY_RESOLUTION_ESP);
                         ui.label("Duty resolution");
                         ui.horizontal(|ui| {
                             let text = match cfg.duty_res_bits {
@@ -3047,6 +3211,14 @@ pub fn module_config_ui(
                     // `SimplePwm::new`; the note below says why the other
                     // runtimes do not show it.
                     if is_async {
+                        out.field(
+                            "Counter",
+                            if t_rp {
+                                docs::TIMER_COUNTING_INERT_RP
+                            } else {
+                                docs::TIMER_COUNTING
+                            },
+                        );
                         ui.label("Counter");
                         egui::ComboBox::from_id_salt("pwm_counting")
                             .selected_text(cfg.counting.label())
@@ -3076,6 +3248,14 @@ pub fn module_config_ui(
                         }
                     }
                     if pads.is_empty() {
+                        out.field(
+                            "Channels",
+                            per_family(
+                                docs::TIMER_CHANNELS_EMPTY,
+                                docs::TIMER_CHANNELS_EMPTY_ESP,
+                                docs::TIMER_CHANNELS_EMPTY_RP,
+                            ),
+                        );
                         ui.label("Channels");
                         ui.label(
                             egui::RichText::new("none wired yet")
@@ -3088,6 +3268,10 @@ pub fn module_config_ui(
                     for (ch, pins) in &pads {
                         let (ch, sig) = (*ch, format!("CH{ch}"));
                         let pin = pins.join(", ");
+                        out.field(
+                            "Channel duty",
+                            per_family(docs::TIMER_DUTY, docs::TIMER_DUTY_ESP, docs::TIMER_DUTY_RP),
+                        );
                         ui.label(format!("{sig} duty  ({pin})"));
                         // Percent with two decimals, stored as hundredths: a
                         // servo's 1.5 ms of a 20 ms frame is 7.5 %, and whole
@@ -3114,6 +3298,16 @@ pub fn module_config_ui(
                             // config with rows of defaults.
                             let before = cfg.channel_of(ch);
                             let mut shape = before;
+                            out.field(
+                                "Channel output",
+                                if t_rp {
+                                    docs::TIMER_CHANNEL_OUTPUT_INERT_RP
+                                } else if pins.iter().any(|p| p.starts_with(&format!("CH{ch}N"))) {
+                                    docs::TIMER_CHANNEL_OUTPUT_COMPLEMENTARY
+                                } else {
+                                    docs::TIMER_CHANNEL_OUTPUT
+                                },
+                            );
                             ui.label(format!("{sig} output"));
                             ui.horizontal(|ui| {
                                 egui::ComboBox::from_id_salt(("pwm_drive", ch))
@@ -3172,6 +3366,7 @@ pub fn module_config_ui(
                         .any(|s| s.starts_with("CH") && s.ends_with('N'));
                     if has_comp && is_async {
                         if is_advanced_timer(cfg.instance) {
+                            out.field("Dead time", docs::TIMER_DEAD_TIME);
                             ui.label("Dead time");
                             ui.add(
                                 egui::DragValue::new(&mut cfg.dead_time)
@@ -3213,6 +3408,7 @@ pub fn module_config_ui(
                             let before = cfg.break_of(*i);
                             let mut b = before;
                             let name = if *i == 1 { "BKIN" } else { "BKIN2" };
+                            out.field("Break input", docs::TIMER_BREAK_INPUT);
                             ui.label(format!("{name} fault"));
                             ui.horizontal(|ui| {
                                 egui::ComboBox::from_id_salt(("brk_pol", i))
@@ -3249,6 +3445,7 @@ pub fn module_config_ui(
                             }
                             ui.end_row();
                         }
+                        out.field("After a fault", docs::TIMER_AUTO_OUTPUT_ENABLE);
                         ui.label("After a fault");
                         ui.checkbox(
                             &mut cfg.auto_output_enable,
@@ -3320,6 +3517,7 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    out.all_fields_documented();
                 }
                 // The HSPI. The smallest panel of the four external-memory
                 // controllers, because the driver is: two widths, and the octal
@@ -3336,6 +3534,16 @@ pub fn module_config_ui(
                         .into_iter()
                         .filter(|m| m.lanes() == lanes)
                         .collect();
+                    // Which form was drawn is `fits`, and it is only known here -
+                    // after the label, because the wired data lines decide it.
+                    out.field(
+                        "Mode",
+                        if fits.is_empty() {
+                            docs::HSPI_MODE_NO_FIT
+                        } else {
+                            docs::HSPI_MODE
+                        },
+                    );
                     if fits.is_empty() {
                         ui.label(
                             egui::RichText::new(format!(
@@ -3371,6 +3579,7 @@ pub fn module_config_ui(
                         ui.end_row();
                     }
 
+                    out.field("Device", docs::HSPI_DEVICE);
                     ui.label("Device");
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("hspi_size")
@@ -3414,6 +3623,7 @@ pub fn module_config_ui(
                         .color(egui::Color32::from_gray(140)),
                     );
                     ui.end_row();
+                    out.all_fields_documented();
                 }
                 // One XSPI port — the OCTOSPI panel one step wider, with the
                 // strobes derived from the wiring rather than asked for.
@@ -3430,6 +3640,16 @@ pub fn module_config_ui(
                         .into_iter()
                         .filter(|m| m.lanes() == lanes)
                         .collect();
+                    // Which form was drawn is `fits`, and it is only known here -
+                    // after the label, because the wired data lines decide it.
+                    out.field(
+                        "Mode",
+                        if fits.is_empty() {
+                            docs::XSPI_MODE_NO_FIT
+                        } else {
+                            docs::XSPI_MODE
+                        },
+                    );
                     if fits.is_empty() {
                         ui.label(
                             egui::RichText::new(format!(
@@ -3458,6 +3678,7 @@ pub fn module_config_ui(
                     }
                     ui.end_row();
 
+                    out.field("Device", docs::XSPI_DEVICE);
                     ui.label("Device");
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("xspi_size")
@@ -3502,6 +3723,18 @@ pub fn module_config_ui(
                             "DQS0".to_owned()
                         };
                         let warn = !cfg.mode.takes_dqs() || (dqs1 && cfg.mode != XspiMode::Hexa);
+                        out.field(
+                            "Strobe",
+                            if !cfg.mode.takes_dqs() {
+                                docs::XSPI_STROBE_IGNORED
+                            } else if dqs1 && cfg.mode == XspiMode::Hexa {
+                                docs::XSPI_STROBE_DUAL
+                            } else if dqs1 {
+                                docs::XSPI_STROBE_SECOND_UNUSED
+                            } else {
+                                docs::XSPI_STROBE
+                            },
+                        );
                         ui.label(
                             egui::RichText::new(text).size(10.5).color(if warn {
                                 egui::Color32::from_rgb(200, 140, 60)
@@ -3523,6 +3756,7 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    out.all_fields_documented();
                 }
                 // One OCTOSPI port. The width narrows the mode but does not
                 // decide it: single and dual share two pads, octal and dual-quad
@@ -3540,6 +3774,16 @@ pub fn module_config_ui(
                         .into_iter()
                         .filter(|m| m.lanes() == lanes)
                         .collect();
+                    // Which form was drawn is `fits`, and it is only known here -
+                    // after the label, because the wired data lines decide it.
+                    out.field(
+                        "Mode",
+                        if fits.is_empty() {
+                            docs::OSPI_MODE_NO_FIT
+                        } else {
+                            docs::OSPI_MODE
+                        },
+                    );
                     if fits.is_empty() {
                         ui.label(
                             egui::RichText::new(format!(
@@ -3570,6 +3814,7 @@ pub fn module_config_ui(
                     }
                     ui.end_row();
 
+                    out.field("Device", docs::OSPI_DEVICE);
                     ui.label("Device");
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("ospi_size")
@@ -3630,6 +3875,7 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    out.all_fields_documented();
                 }
                 // The external-flash controller. Which BANKS are wired is
                 // which constructor embassy gets, so the panel reports the shape
@@ -3650,6 +3896,14 @@ pub fn module_config_ui(
                     let ok2 = io2 == 4 && ncs2;
                     let clk = conn_rows.iter().any(|(sig, _, _)| *sig == "CLK");
 
+                    out.field(
+                        "Wiring",
+                        if clk && (ok1 || ok2) {
+                            docs::QSPI_WIRING
+                        } else {
+                            docs::QSPI_WIRING_INCOMPLETE
+                        },
+                    );
                     ui.label("Wiring");
                     let (text, colour) = match (clk, ok1, ok2) {
                         (true, true, true) => (
@@ -3677,6 +3931,7 @@ pub fn module_config_ui(
                     ui.label(egui::RichText::new(text).size(11.0).color(colour));
                     ui.end_row();
 
+                    out.field("Flash size", docs::QSPI_FLASH_SIZE);
                     ui.label("Flash size");
                     egui::ComboBox::from_id_salt("qspi_size")
                         .selected_text(cfg.memory_size_label())
@@ -3696,6 +3951,7 @@ pub fn module_config_ui(
                         );
                     ui.end_row();
 
+                    out.field("Address", docs::QSPI_ADDRESS);
                     ui.label("Address");
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("qspi_addr")
@@ -3735,6 +3991,7 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    out.all_fields_documented();
                 }
                 // The SD-card controller. The bus WIDTH is not a setting: how
                 // many data lanes are wired is the width, and each width is a
@@ -3751,6 +4008,14 @@ pub fn module_config_ui(
                         8 => Some(8),
                         _ => None,
                     };
+                    out.field(
+                        "Bus width",
+                        if width.is_some() {
+                            docs::SDMMC_WIDTH
+                        } else {
+                            docs::SDMMC_WIDTH_UNSUPPORTED
+                        },
+                    );
                     ui.label("Bus width");
                     match width {
                         Some(w) => {
@@ -3772,6 +4037,7 @@ pub fn module_config_ui(
                     }
                     ui.end_row();
 
+                    out.field("Data timeout", docs::SDMMC_DATA_TIMEOUT);
                     ui.label("Data timeout");
                     ui.add(
                         egui::DragValue::new(&mut cfg.data_timeout)
@@ -3812,6 +4078,7 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    out.all_fields_documented();
                 }
                 // One SAI unit, two independent sub-blocks. Each one that has
                 // its three clock/data pads wired gets its own rows — the module
@@ -3825,6 +4092,7 @@ pub fn module_config_ui(
                         })
                         .collect();
                     if wired.is_empty() {
+                        out.field("Sub-blocks", docs::SAI_SUBBLOCKS);
                         ui.label("Sub-blocks");
                         ui.label(
                             egui::RichText::new("none wired yet")
@@ -3838,6 +4106,7 @@ pub fn module_config_ui(
                         let letter = if *b == 1 { "A" } else { "B" };
                         let before = cfg.block_of(*b);
                         let mut blk = before;
+                        out.field("Stream", docs::SAI_STREAM);
                         ui.label(format!("{letter} stream"));
                         ui.horizontal(|ui| {
                             egui::ComboBox::from_id_salt(("sai_dir", b))
@@ -3867,6 +4136,7 @@ pub fn module_config_ui(
                         });
                         ui.end_row();
 
+                        out.field("Frame", docs::SAI_FRAME);
                         ui.label(format!("{letter} frame"));
                         ui.horizontal(|ui| {
                             egui::ComboBox::from_id_salt(("sai_sm", b))
@@ -3908,6 +4178,7 @@ pub fn module_config_ui(
                             } else {
                                 (dma_map::Dir::Rx, &mut cfg.dma_b)
                             };
+                            out.field("DMA", docs::SAI_DMA);
                             // SAI has no entry in the hand-written DMA tables, so
                             // the picker offers nothing and the allocator does the
                             // choosing. The row is here for the day it does.
@@ -3953,6 +4224,7 @@ pub fn module_config_ui(
                         .color(egui::Color32::from_gray(140)),
                     );
                     ui.end_row();
+                    out.all_fields_documented();
                 }
                 // One DAC block. The channel rows come from the module's own
                 // connections, so they mirror the canvas — same shape as the
@@ -3965,6 +4237,7 @@ pub fn module_config_ui(
                         })
                         .collect();
                     if chans.is_empty() {
+                        out.field("Channels", docs::DAC_CHANNELS);
                         ui.label("Channels");
                         ui.label(
                             egui::RichText::new("none wired yet")
@@ -3981,6 +4254,10 @@ pub fn module_config_ui(
                     let esp = crate::panels::mcu_module::codegen::family::is_esp(family);
                     let (top, mid) = if esp { (255u16, 128u16) } else { (4095, 2048) };
                     for (ch, pin) in &chans {
+                        out.field(
+                            "Start level",
+                            if esp { docs::DAC_START_ESP } else { docs::DAC_START },
+                        );
                         ui.label(format!("OUT{ch} start  ({pin})"));
                         let mut v = cfg.value_of(*ch).min(top);
                         ui.horizontal(|ui| {
@@ -4034,6 +4311,7 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    out.all_fields_documented();
                 }
                 // One SPI block running as audio. Every setting here is a
                 // field of embassy's `i2s::Config`, plus the ring buffer the
@@ -4041,6 +4319,7 @@ pub fn module_config_ui(
                 ModuleConfig::I2s(cfg) => {
                     let is_esp =
                         crate::panels::mcu_module::codegen::family::is_esp(family);
+                    out.field("Sample rate", docs::I2S_SAMPLE_RATE);
                     ui.label("Sample rate");
                     ui.horizontal(|ui| {
                         ui.add(
@@ -4058,6 +4337,7 @@ pub fn module_config_ui(
                     });
                     ui.end_row();
 
+                    out.field("Direction", docs::I2S_DIRECTION);
                     ui.label("Direction");
                     egui::ComboBox::from_id_salt("i2s_dir")
                         .selected_text(cfg.direction.label())
@@ -4074,6 +4354,10 @@ pub fn module_config_ui(
                         );
                     ui.end_row();
 
+                    out.field(
+                        "Role",
+                        if is_esp { docs::I2S_ROLE_ESP } else { docs::I2S_ROLE },
+                    );
                     ui.label("Role");
                     egui::ComboBox::from_id_salt("i2s_mode")
                         .selected_text(cfg.mode.label())
@@ -4084,6 +4368,14 @@ pub fn module_config_ui(
                         });
                     ui.end_row();
 
+                    out.field(
+                        "Standard",
+                        if is_esp {
+                            docs::I2S_STANDARD_ESP
+                        } else {
+                            docs::I2S_STANDARD
+                        },
+                    );
                     ui.label("Standard");
                     egui::ComboBox::from_id_salt("i2s_std")
                         .selected_text(cfg.standard.label())
@@ -4094,6 +4386,10 @@ pub fn module_config_ui(
                         });
                     ui.end_row();
 
+                    out.field(
+                        "Format",
+                        if is_esp { docs::I2S_FORMAT_ESP } else { docs::I2S_FORMAT },
+                    );
                     ui.label("Format");
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("i2s_fmt")
@@ -4122,6 +4418,7 @@ pub fn module_config_ui(
                     });
                     ui.end_row();
 
+                    out.field("Ring buffer", docs::I2S_BUFFER);
                     ui.label("Ring buffer");
                     ui.add(
                         egui::DragValue::new(&mut cfg.buffer_len)
@@ -4137,6 +4434,9 @@ pub fn module_config_ui(
 
                     if is_async {
                         let inst = cfg.instance;
+                        // Drawn by `dma_one`, which takes its label as an argument, so
+                        // the row cannot document itself the way the others do.
+                        out.field("DMA", docs::I2S_DMA);
                         // The DMA requests are the SPI block's — same silicon,
                         // same request lines.
                         if cfg.direction.is_tx() {
@@ -4163,8 +4463,10 @@ pub fn module_config_ui(
                         .color(egui::Color32::from_gray(140)),
                     );
                     ui.end_row();
+                    out.all_fields_documented();
                 }
                 ModuleConfig::I2c(cfg) => {
+                    out.field("Clock", docs::I2C_CLOCK);
                     ui.label("Clock");
                     egui::ComboBox::from_id_salt("i2cclk")
                         .selected_text(hz_label(cfg.clock_hz))
@@ -4177,6 +4479,7 @@ pub fn module_config_ui(
                     // `time` feature, which only the async dependency line pulls
                     // in (through `time-driver-any`).
                     if is_async {
+                        out.field("Timeout", docs::I2C_TIMEOUT);
                         ui.label("Timeout");
                         ui.horizontal(|ui| {
                             ui.add(
@@ -4201,6 +4504,7 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    out.field("Address (7-bit)", docs::I2C_ADDRESS);
                     ui.label("Address (7-bit)");
                     ui.add(
                         egui::DragValue::new(&mut cfg.address)
@@ -4211,7 +4515,7 @@ pub fn module_config_ui(
                     if is_async && crate::panels::mcu_module::codegen::rp::is_rp(family) {
                         out.note(RP_I2C_NOTE);
                     } else if is_async {
-                        async_row(ui, &mut pending.1);
+                        async_row(ui, out, &mut pending.1);
                         if pending.1 == AsyncBusMode::AsyncDma {
                             let inst = cfg.instance;
                             dma_row(
@@ -4239,9 +4543,14 @@ pub fn module_config_ui(
                         }
                         api_row(ui, out, &mut pending.0);
                     }
+                    out.all_fields_documented();
                 }
                 ModuleConfig::Can(cfg) => {
                     let esp = crate::panels::mcu_module::codegen::family::is_esp(family);
+                    out.field(
+                        "Bit rate",
+                        if esp { docs::CAN_BITRATE_ESP } else { docs::CAN_BITRATE },
+                    );
                     ui.label("Bit rate");
                     egui::ComboBox::from_id_salt("canbr")
                         .selected_text(format!("{} kbit", cfg.bitrate / 1_000))
@@ -4265,7 +4574,11 @@ pub fn module_config_ui(
                     ui.end_row();
 
                     let modes = CanMode::options(family);
+                    if modes.len() == 1 {
+                        out.skip("Mode", docs::SKIP_CAN_MODE);
+                    }
                     if modes.len() > 1 {
+                        out.field("Mode", docs::CAN_MODE);
                         ui.label("Mode");
                         egui::ComboBox::from_id_salt("canmode")
                             .selected_text(cfg.mode.label())
@@ -4279,6 +4592,7 @@ pub fn module_config_ui(
 
                         // Only the ESP has the second constructor. Everywhere
                         // else this row would be a switch that changes nothing.
+                        out.field("Transceiver", docs::CAN_TRANSCEIVER);
                         ui.label("Transceiver");
                         ui.checkbox(&mut cfg.transceiver, "on the pads")
                             .on_hover_text(
@@ -4298,12 +4612,14 @@ pub fn module_config_ui(
                             wired_can,
                         );
                     }
+                    out.all_fields_documented();
                 }
                 ModuleConfig::Usb(cfg) => {
                     // Two controllers on one pad pair: which one the pads go to
                     // is the first question, and it decides every row below.
                     let roles = UsbRole::options(family);
                     if roles.len() > 1 {
+                        out.field("Controller", docs::USB_CONTROLLER);
                         ui.label("Controller");
                         egui::ComboBox::from_id_salt("usbrole")
                             .selected_text(cfg.role.label())
@@ -4332,6 +4648,7 @@ pub fn module_config_ui(
                     if crate::panels::mcu_module::codegen::family::is_esp(family)
                         && !cfg.role.is_otg()
                     {
+                        out.field("Identity", docs::USB_IDENTITY);
                         ui.label("Identity");
                         ui.label(
                             egui::RichText::new("303a:1001  ·  fixed in silicon")
@@ -4342,6 +4659,7 @@ pub fn module_config_ui(
                             "The USB Serial/JTAG peripheral enumerates with Espressif's own VID:PID and a fixed descriptor set. Nothing here can change it - a board that needs its own identity uses a USB stack over the OTG controller instead, which this chip may not have.",
                         );
                         ui.end_row();
+                        out.field("Port", docs::USB_PORT);
                         ui.label("Port");
                         ui.label(
                             egui::RichText::new("CDC serial, on the chip's own pads")
@@ -4352,8 +4670,12 @@ pub fn module_config_ui(
                             "A board with a USB-UART bridge chip shows that as well; the two are different devices to the host.",
                         );
                         ui.end_row();
+                        // This path draws fewer rows and leaves here, so it
+                        // marks its own roster complete.
+                        out.all_fields_documented();
                         return;
                     }
+                    out.field("Product", docs::USB_PRODUCT);
                     ui.label("Product");
                     ui.add(
                         egui::TextEdit::singleline(&mut cfg.product)
@@ -4361,13 +4683,16 @@ pub fn module_config_ui(
                             .hint_text("device name shown to host"),
                     );
                     ui.end_row();
+                    out.field("Vendor ID", docs::USB_VID);
                     ui.label("Vendor ID");
                     ui.add(egui::DragValue::new(&mut cfg.vid).hexadecimal(4, false, true));
                     ui.end_row();
+                    out.field("Product ID", docs::USB_PID);
                     ui.label("Product ID");
                     ui.add(egui::DragValue::new(&mut cfg.pid).hexadecimal(4, false, true));
                     ui.end_row();
                     if cfg.role.is_otg() {
+                        out.field("Stack", docs::USB_STACK);
                         ui.label("Stack");
                         ui.label(
                             egui::RichText::new("usb-device + usbd-serial")
@@ -4380,6 +4705,9 @@ pub fn module_config_ui(
                              for any other the crate offers.",
                         );
                         ui.end_row();
+                        // This path draws fewer rows and leaves here, so it
+                        // marks its own roster complete.
+                        out.all_fields_documented();
                         return;
                     }
                     // Not a HAL constraint like the four above — the USB init
@@ -4395,6 +4723,7 @@ pub fn module_config_ui(
                             wired_usb,
                         );
                     }
+                    out.all_fields_documented();
                 }
                 // ── Custom: a hand-picked pin list ────────────────────────
                 // No auto-wiring and no peripheral config — just the pins, in
@@ -4410,6 +4739,7 @@ pub fn module_config_ui(
                     // live in the first) stretch that column, shoving this box to
                     // the far right, away from the Name field it belongs beside.
                     ui.horizontal(|ui| {
+                        out.field("Struct", docs::CUSTOM_STRUCT);
                         custom_field_label(ui, "Struct");
                         let hint = derived_struct_name(&cfg.custom_label, cfg.instance);
                         ui.add(
@@ -4427,6 +4757,7 @@ pub fn module_config_ui(
                     // "Pins" sits on its OWN row right under Struct, and the
                     // rows below start at the far left — the panel then reads as
                     // a list instead of a label with a block hanging off it.
+                    out.field("Pins", docs::CUSTOM_PINS);
                     ui.label(egui::RichText::new("Pins").strong());
                     ui.end_row();
 
@@ -4529,6 +4860,7 @@ pub fn module_config_ui(
                         ui.end_row();
                     }
 
+                    out.field("Add pin", docs::CUSTOM_ADD_PIN);
                     // "+ Add pin" - only FREE pins (see `pin_blocked`).
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt(("custom_add_pin", m_id.clone()))
@@ -4593,6 +4925,24 @@ pub fn module_config_ui(
                     let incomplete = !unconfigured.is_empty();
                     let current_sig = custom_pins_sig(&cfg.pins, pin_sigs);
                     let pending = cfg.has_pending_pins(&current_sig);
+                    out.field(
+                        "Update",
+                        if !pending {
+                            docs::CUSTOM_UPDATE_DISABLED
+                        } else if incomplete {
+                            docs::CUSTOM_UPDATE_INCOMPLETE
+                        } else {
+                            docs::CUSTOM_UPDATE
+                        },
+                    );
+                    out.field(
+                        "Pin function",
+                        if incomplete {
+                            docs::CUSTOM_PIN_UNSET
+                        } else {
+                            docs::CUSTOM_PIN_FUNCTION
+                        },
+                    );
                     let warn_id = egui::Id::new(("custom_update_warn", m_id.clone()));
                     ui.horizontal(|ui| {
                         let btn = ui.add_enabled(
@@ -4681,6 +5031,9 @@ pub fn module_config_ui(
                             ui.ctx().data_mut(|d| d.remove::<String>(warn_id));
                         }
                     }
+                    // Every row this arm draws is documented above; its pin list
+                    // is the pane's own Pins section, not a config row.
+                    out.all_fields_documented();
                 }
             }
 
@@ -4987,46 +5340,277 @@ mod tests {
         assert_eq!(stm.elsewhere_fields()[1].doc, docs::SHARED_NAME);
     }
 
-    /// Every doc the USART arm hands out is a NAMED const from `module_docs`.
+    /// Every doc ANY arm hands out is a NAMED const from `module_docs`.
     ///
     /// This is the invariant the whole design rests on: the hover and the pane
     /// read one `&'static str`, so they cannot drift. An inline literal at a row
-    /// site would still compile and still look right in the pane — and would be
+    /// site would still compile and still look right in the pane - and would be
     /// the second copy this module exists to prevent. Here it fails.
+    ///
+    /// Runs every kind against four chips and three runtimes, which is also the
+    /// only thing that exercises most of these arms at all.
     #[test]
     fn every_field_doc_is_a_named_const() {
-        const KNOWN: &[&str] = &[
-            docs::INIT_API,
-            docs::INIT_API_ESP,
-            docs::INIT_API_NATIVE,
-            docs::INIT_API_DMA,
-            docs::BLOCKING_TRANSPORT,
-            docs::DMA_CHANNEL,
-            docs::USART_BAUD,
-            docs::USART_DATA_BITS,
-            docs::USART_PARITY,
-            docs::USART_STOP_BITS,
-            docs::USART_BUF_BUFFERED,
-            docs::USART_BUF_DMA,
-            docs::USART_ASYNC_TRANSPORT,
-            docs::USART_TRANSFERS_ESP,
-            docs::USART_DIRECTION,
-            docs::USART_DIRECTION_LOCKED,
-            docs::USART_LINE,
-            docs::USART_LINE_ABSENT,
-            docs::USART_FLOW,
-            docs::USART_HALF_DUPLEX_READBACK,
-        ];
-        for (family, is_async, is_native) in CELLS {
+        for kind in ModuleKind::ALL {
+            for family in ["stm32f1", "stm32g0", "esp32c3", "rp2040"] {
+                for (is_async, is_native) in [(false, false), (true, false), (false, true)] {
+                    for extras in [false, true] {
+                        let out = drive(
+                            kind,
+                            kind.default_config(1),
+                            family,
+                            is_async,
+                            is_native,
+                            extras,
+                        );
+                        let seen = out.fields().into_iter().flatten();
+                        for f in seen.chain(out.elsewhere_fields()) {
+                            assert!(
+                                docs::ALL_DOCS.iter().any(|(_, d)| *d == f.doc.as_ref()),
+                                "{kind:?} on {family}: {:?} carries a doc that is not a                                  module_docs const:
+{}",
+                                f.label,
+                                f.doc
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every arm says it documents its rows, so no kind shows an empty pane.
+    ///
+    /// The gate exists so a half-rolled-out kind shows nothing rather than a
+    /// partial roster; now that every arm is done, a kind that goes quiet is a
+    /// regression rather than work in progress.
+    #[test]
+    fn every_kind_has_a_finished_roster() {
+        for kind in ModuleKind::ALL {
+            let out = drive(kind, kind.default_config(1), "esp32c3", false, false, false);
+            assert!(
+                out.fields().is_some(),
+                "{kind:?} never called all_fields_documented()"
+            );
+        }
+    }
+
+    /// The config STATES worth driving for a kind, not just its default.
+    ///
+    /// Several rows are gated by the module's own settings rather than by the
+    /// chip - Touch's sleep interval belongs to the continuous scan, and the
+    /// default scan is one-shot. A matrix that only varies the chip never draws
+    /// them, so it cannot tell "this row is gated" from "this row does not
+    /// exist", which is exactly what the skip tests below have to distinguish.
+    fn config_variants(kind: ModuleKind) -> Vec<crate::panels::mcu_module::modules::ModuleConfig> {
+        use crate::panels::mcu_module::modules::{ModuleConfig, TouchScan};
+        let mut out = vec![kind.default_config(1)];
+        if let ModuleConfig::Touch(mut c) = kind.default_config(1) {
+            c.scan = TouchScan::Continuous;
+            out.push(ModuleConfig::Touch(c));
+        }
+        out
+    }
+
+    /// Every cell of the matrix, as (kind, family, is_async, is_native).
+    ///
+    /// Wider than the USART cells below: the arms differ by family far more than
+    /// by runtime, and several are drawn on one chip only.
+    fn every_cell() -> Vec<(ModuleKind, &'static str, bool, bool)> {
+        let mut out = Vec::new();
+        for kind in ModuleKind::ALL {
+            for family in ["stm32f1", "stm32g0", "esp32", "esp32c3", "rp2040"] {
+                for (a, n) in [(false, false), (true, false), (false, true)] {
+                    out.push((kind, family, a, n));
+                }
+            }
+        }
+        out
+    }
+
+    /// Walk every cell and collect, per kind, every row label it ever draws and
+    /// the doc each label was given.
+    ///
+    /// The one source for both the roster table and the tests that pin it, so
+    /// the table cannot be generated from one reading and checked against
+    /// another.
+    fn matrix_labels() -> std::collections::BTreeMap<
+        &'static str,
+        std::collections::BTreeMap<String, std::collections::BTreeSet<&'static str>>,
+    > {
+        let mut out: std::collections::BTreeMap<
+            &'static str,
+            std::collections::BTreeMap<String, std::collections::BTreeSet<&'static str>>,
+        > = std::collections::BTreeMap::new();
+        for (kind, family, is_async, is_native) in every_cell() {
             for extras in [false, true] {
-                let out = drive_usart(family, *is_async, *is_native, extras, |_| {});
-                for f in out.fields().unwrap() {
-                    assert!(
-                        KNOWN.contains(&f.doc.as_ref()),
-                        "{family}: {:?} carries a doc that is not a module_docs const:\n{}",
-                        f.label,
-                        f.doc
-                    );
+                for cfg in config_variants(kind) {
+                    let o = drive(kind, cfg, family, is_async, is_native, extras);
+                    for f in o.fields().into_iter().flatten() {
+                        let named = docs::ALL_DOCS
+                            .iter()
+                            .find(|(_, d)| *d == f.doc.as_ref())
+                            .map(|(n, _)| *n);
+                        let e = out
+                            .entry(kind.short())
+                            .or_default()
+                            .entry(f.label.clone())
+                            .or_default();
+                        if let Some(n) = named {
+                            e.insert(n);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Print `ROSTER` for pasting into `module_docs.rs`.
+    ///
+    /// ```text
+    /// cargo test regenerate_the_roster -- --ignored --nocapture
+    /// ```
+    ///
+    /// The table is DERIVED, never hand-written: it is the union of every label
+    /// the panel draws across every chip, runtime and config state the matrix
+    /// reaches. `the_roster_matches_the_matrix` then pins it from both sides, so
+    /// a row added without regenerating fails rather than going quietly missing.
+    ///
+    /// A label whose doc is the same in every cell carries that const's NAME; a
+    /// label whose meaning changes with the chip carries none, because there is
+    /// no single sentence to show for a row this chip did not draw.
+    #[test]
+    #[ignore]
+    fn regenerate_the_roster() {
+        println!("pub const ROSTER: &[(&str, &[(&str, Option<&str>)])] = &[");
+        for (kind, rows) in matrix_labels() {
+            println!("    (\"{kind}\", &[");
+            for (label, named) in rows {
+                let doc = if named.len() == 1 {
+                    format!("Some({})", named.iter().next().unwrap())
+                } else {
+                    "None".to_owned()
+                };
+                println!("        (\"{label}\", {doc}),");
+            }
+            println!("    ]),");
+        }
+        println!("];");
+    }
+
+    /// The roster is exactly what the matrix draws - no more, no less.
+    ///
+    /// Pinned from BOTH sides on purpose. Missing an entry means the pane will
+    /// not mention a setting this module has, which is the silence the roster
+    /// exists to end; a spare entry means it names a row nothing can draw any
+    /// more, which is worse - the reader goes looking for a control that was
+    /// deleted.
+    ///
+    /// Regenerate rather than patch by hand:
+    /// `cargo test regenerate_the_roster -- --ignored --nocapture`.
+    #[test]
+    fn the_roster_matches_the_matrix() {
+        let seen = matrix_labels();
+        let listed: std::collections::BTreeMap<&str, Vec<&str>> = docs::ROSTER
+            .iter()
+            .map(|(k, rows)| (*k, rows.iter().map(|(l, _)| *l).collect()))
+            .collect();
+
+        for (kind, rows) in &seen {
+            let have = listed
+                .get(kind)
+                .unwrap_or_else(|| panic!("{kind} draws rows but is absent from ROSTER"));
+            for label in rows.keys() {
+                assert!(
+                    have.contains(&label.as_str()),
+                    "{kind} draws {label:?}, which ROSTER does not list - regenerate it"
+                );
+            }
+        }
+        for (kind, rows) in &listed {
+            let drawn = seen
+                .get(kind)
+                .unwrap_or_else(|| panic!("ROSTER lists {kind}, which draws nothing"));
+            for label in rows {
+                assert!(
+                    drawn.contains_key(*label),
+                    "ROSTER lists {kind} {label:?}, which no chip or runtime draws -                      regenerate it"
+                );
+            }
+        }
+    }
+
+    /// The roster is keyed by the kind's short name, so two kinds sharing one
+    /// would silently merge their rows.
+    #[test]
+    fn every_kind_has_its_own_short_name() {
+        let mut seen: Vec<&str> = ModuleKind::ALL.iter().map(|k| k.short()).collect();
+        let before = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "two kinds share a short name");
+    }
+
+    /// A row explained as ABSENT must be a row that exists somewhere.
+    ///
+    /// "Not offered here" is the pane saying why you cannot find a setting. If
+    /// the label it names is one no cell ever draws, the pane is explaining the
+    /// absence of something that does not exist - a sentence about nothing,
+    /// which is worse than silence. This is also what catches a row being
+    /// renamed while its skip keeps the old label.
+    #[test]
+    fn every_skipped_row_is_a_row_some_chip_draws() {
+        let mut drawn: std::collections::HashSet<(ModuleKind, String)> =
+            std::collections::HashSet::new();
+        let mut skipped: std::collections::HashSet<(ModuleKind, String)> =
+            std::collections::HashSet::new();
+        for (kind, family, is_async, is_native) in every_cell() {
+            for extras in [false, true] {
+                for cfg in config_variants(kind) {
+                    let out = drive(kind, cfg, family, is_async, is_native, extras);
+                    for f in out.fields().into_iter().flatten() {
+                        drawn.insert((kind, f.label.clone()));
+                    }
+                    for f in out.skipped_fields() {
+                        skipped.insert((kind, f.label.clone()));
+                    }
+                }
+            }
+        }
+        assert!(!skipped.is_empty(), "the matrix reached no skip at all");
+        for (kind, label) in &skipped {
+            assert!(
+                drawn.contains(&(*kind, label.clone())),
+                "{kind:?} explains why {label:?} is absent, but no chip or runtime ever \n                 draws a row by that name"
+            );
+        }
+    }
+
+    /// A row is never both drawn and explained as absent in the SAME cell.
+    ///
+    /// The two answer opposite questions, so a cell that says both has a gate
+    /// whose two halves disagree - and the pane would show the row's meaning
+    /// under Fields and its absence under Not offered here, at once.
+    #[test]
+    fn no_cell_both_draws_a_row_and_explains_its_absence() {
+        for (kind, family, is_async, is_native) in every_cell() {
+            for extras in [false, true] {
+                for cfg in config_variants(kind) {
+                    let out = drive(kind, cfg, family, is_async, is_native, extras);
+                    let here: Vec<&str> = out
+                        .fields()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| f.label.as_str())
+                        .collect();
+                    for f in out.skipped_fields() {
+                        assert!(
+                            !here.contains(&f.label.as_str()),
+                            "{kind:?} on {family} (async={is_async}, native={is_native}) both draws \n                         {:?} and says it is not offered",
+                            f.label
+                        );
+                    }
                 }
             }
         }
@@ -5152,6 +5736,106 @@ mod tests {
             f.iter().find(|f| f.label == "Line").unwrap().doc,
             docs::USART_LINE_ABSENT
         );
+    }
+
+    /// Every row this panel draws with a plain label is documented in the same
+    /// arm that drew it.
+    ///
+    /// # Why this reads the source instead of running the panel
+    ///
+    /// The failure it exists to catch is someone adding a row and not adding the
+    /// `out.field(...)` beside it. No amount of driving the panel finds that: the
+    /// new row simply is not in the roster, and a roster the test does not know
+    /// about looks exactly like a roster that is complete. The only place the
+    /// omission is visible is the source.
+    ///
+    /// Scope, stated rather than assumed:
+    ///
+    /// * Only `ui.label("literal")`. In this file a ROW label is a plain string
+    ///   and a value or caption is a `RichText`, so that one rule separates them.
+    /// * Only inside `module_config_ui`, and per ARM: "Mode" means one thing in
+    ///   the CAN arm and another in the OCTOSPI one, so documenting it once must
+    ///   not excuse the other.
+    /// * `ui.label(format!(...))` rows are NOT checked here. Their label changes
+    ///   per wired channel, so the roster carries one generic entry instead -
+    ///   which the per-kind roster tests cover.
+    #[test]
+    fn every_drawn_row_is_documented_by_the_arm_that_drew_it() {
+        const SRC: &str = include_str!("modules.rs");
+
+        // Labels that are not rows. Each one is here for a stated reason, so a
+        // new exception has to argue for itself.
+        const NOT_A_ROW: &[&str] = &[
+            // A two-character separator between the two number fields of
+            // LCD_CAM's "Active area" row, not a row of its own.
+            "x",
+        ];
+
+        let body = {
+            let a = SRC.find("pub fn module_config_ui(").expect("the panel");
+            let b = SRC[a..].find("\n#[cfg(test)]").expect("its end") + a;
+            &SRC[a..b]
+        };
+
+        // Split into the shared prologue (the row closures) and one chunk per
+        // `ModuleConfig::` arm. Both draw rows; both must document them.
+        let mut chunks: Vec<(&str, &str)> = Vec::new();
+        let mut starts: Vec<usize> = body
+            .match_indices("                ModuleConfig::")
+            .map(|(i, _)| i)
+            .collect();
+        starts.push(body.len());
+        chunks.push(("<shared row closures>", &body[..starts[0]]));
+        for w in starts.windows(2) {
+            let chunk = &body[w[0]..w[1]];
+            let name = chunk
+                .split_once('(')
+                .map_or("?", |(h, _)| h.trim())
+                .trim_start_matches("ModuleConfig::");
+            chunks.push((name, chunk));
+        }
+
+        let mut missing: Vec<String> = Vec::new();
+        for (arm, chunk) in chunks {
+            let documented: Vec<&str> = collect_between(chunk, "out.field(", '"');
+            for label in collect_between(chunk, "ui.label(\"", '"') {
+                if NOT_A_ROW.contains(&label) || documented.contains(&label) {
+                    continue;
+                }
+                missing.push(format!("{arm}: {label:?}"));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these rows are drawn but not documented - add `out.field(<label>, docs::…)` \
+             beside each, and a const in module_docs.rs:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    /// Every string that follows `needle` up to the next `close`, deduplicated.
+    ///
+    /// Deliberately not a parser: it only has to find `ui.label("X")` and
+    /// `out.field("X"` in one hand-written file, and a real parse would be more
+    /// machinery than the rule is worth.
+    fn collect_between<'a>(hay: &'a str, needle: &str, close: char) -> Vec<&'a str> {
+        let mut out: Vec<&str> = Vec::new();
+        let mut rest = hay;
+        while let Some(i) = rest.find(needle) {
+            let after = &rest[i + needle.len()..];
+            // `out.field(` may be followed by a newline and indentation before
+            // the string, which rustfmt does whenever the line is long.
+            let after = after.trim_start();
+            let after = after.strip_prefix('"').unwrap_or(after);
+            if let Some(j) = after.find(close) {
+                let found = &after[..j];
+                if !found.is_empty() && !found.contains('\n') && !out.contains(&found) {
+                    out.push(found);
+                }
+            }
+            rest = &rest[i + needle.len()..];
+        }
+        out
     }
 
     /// The picker offers what the PAD offers, and nothing else.

@@ -33,9 +33,56 @@ pub fn parse_from_source(source: &str) -> Vec<VirtualModule> {
                     cfg.migrate_duty();
                 }
             }
+            dedupe_ids(&mut modules);
             Some(modules)
         })
         .unwrap_or_default()
+}
+
+/// Give every module its own id, for projects saved with two that shared one.
+///
+/// `Mcu::free_module_id` stops this happening again, but a project written
+/// before it exists still has the pair on disk — and a duplicate id is not
+/// cosmetic. It keys the module list's `CollapsingState`, so the two open and
+/// close as one and cannot be told apart; it is the `push_id` namespace for the
+/// whole config grid, so every widget in both collides and egui paints its
+/// ID-clash banner across the panel; and it names the `mod <id>` data-model
+/// block in `main.rs`.
+///
+/// The FIRST keeps the id. That is the one whose `mod <id>` block — if there is
+/// one — already belongs to it; the second was sharing a block that was never
+/// unambiguously its own, so moving it loses nothing that was not already lost.
+fn dedupe_ids(modules: &mut [VirtualModule]) {
+    let mut seen: Vec<String> = Vec::with_capacity(modules.len());
+    for i in 0..modules.len() {
+        if !seen.contains(&modules[i].id) {
+            seen.push(modules[i].id.clone());
+            continue;
+        }
+        // Same shape as a fresh id, so a healed project is indistinguishable
+        // from one that never had the bug.
+        let base = modules[i]
+            .id
+            .rsplit_once('_')
+            .map_or(modules[i].id.as_str(), |(b, n)| {
+                if n.chars().all(|c| c.is_ascii_digit()) {
+                    b
+                } else {
+                    modules[i].id.as_str()
+                }
+            })
+            .to_owned();
+        let mut n = modules.len() + 1;
+        let fresh = loop {
+            let candidate = format!("{base}_{n}");
+            if !seen.contains(&candidate) && !modules.iter().any(|m| m.id == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        modules[i].id = fresh.clone();
+        seen.push(fresh);
+    }
 }
 
 /// Refresh the `@modules` marker in `code` so it reflects `modules` (placed just
@@ -75,6 +122,75 @@ mod tests {
     use crate::panels::mcu_module::modules::{
         Connection, ModuleConfig, ModuleKind, ModuleSignal, TimerModuleConfig, UsartModuleConfig,
     };
+
+    /// A project saved with two modules sharing one id is healed on load.
+    ///
+    /// This is what a project written before `Mcu::free_module_id` looks like on
+    /// disk: unwire a peripheral, wire it again, save. Both modules answered to
+    /// `usart_2`, so the list opened them together and egui's ID-clash banner
+    /// covered the config column.
+    #[test]
+    fn a_saved_pair_that_shared_an_id_is_pulled_apart_on_load() {
+        let two = vec![
+            VirtualModule {
+                id: "usart_2".into(),
+                kind: ModuleKind::GenericInterfaceUsart,
+                name: "USART0".into(),
+                pos: (0.0, 0.0),
+                config: ModuleConfig::Usart(UsartModuleConfig::new(0)),
+                connections: vec![],
+            },
+            VirtualModule {
+                id: "usart_2".into(),
+                kind: ModuleKind::GenericInterfaceUsart,
+                name: "USART1".into(),
+                pos: (0.0, 0.0),
+                config: ModuleConfig::Usart(UsartModuleConfig::new(1)),
+                connections: vec![],
+            },
+        ];
+        let line = marker_line(&two).expect("a marker for two modules");
+        let back = parse_from_source(&line);
+        assert_eq!(back.len(), 2);
+        assert_ne!(back[0].id, back[1].id, "healed: {:?}", back_ids(&back));
+        // The FIRST keeps its id — it is the one any `mod usart_2` block in
+        // main.rs already belongs to.
+        assert_eq!(back[0].id, "usart_2");
+        assert_eq!(back[0].name, "USART0");
+        assert_eq!(back[1].name, "USART1");
+        // …and the new one looks like an id that was never wrong.
+        assert!(back[1].id.starts_with("usart_"), "{}", back[1].id);
+    }
+
+    /// A project with no collision must come back byte-for-byte the same: a
+    /// renamed id would orphan its `mod <id>` data-model block in main.rs.
+    #[test]
+    fn healthy_ids_are_left_exactly_as_they_were() {
+        let two = vec![
+            VirtualModule {
+                id: "usart_1".into(),
+                kind: ModuleKind::GenericInterfaceUsart,
+                name: "USART0".into(),
+                pos: (0.0, 0.0),
+                config: ModuleConfig::Usart(UsartModuleConfig::new(0)),
+                connections: vec![],
+            },
+            VirtualModule {
+                id: "spi_7".into(),
+                kind: ModuleKind::GenericInterfaceUsart,
+                name: "USART1".into(),
+                pos: (0.0, 0.0),
+                config: ModuleConfig::Usart(UsartModuleConfig::new(1)),
+                connections: vec![],
+            },
+        ];
+        let back = parse_from_source(&marker_line(&two).unwrap());
+        assert_eq!(back_ids(&back), ["usart_1", "spi_7"]);
+    }
+
+    fn back_ids(v: &[VirtualModule]) -> Vec<&str> {
+        v.iter().map(|m| m.id.as_str()).collect()
+    }
 
     /// A project saved before duty was stored in hundredths keeps its duty:
     /// the whole-percent map is folded in on the way back, so 75 % stays 75 %
