@@ -331,10 +331,55 @@ impl Mcu {
             return false;
         };
 
-        // Assign the picked pins; the module itself is created (with default
-        // config) by `reconcile_modules`, the single source of truth that mirrors
-        // pin assignments — so the palette and the Peripherals tab behave the same.
-        for (sig, pin) in &chosen {
+        self.add_module_wired(inst, &chosen)
+    }
+
+    /// Commit a wiring the caller already decided on.
+    ///
+    /// The tail of [`add_module`](Self::add_module), split out so the two ways
+    /// of adding a module - autowire's pick and the user's own choice in the
+    /// palette dialog - end at exactly the same three lines. A second copy is
+    /// how the two would drift into disagreeing about what a module IS.
+    ///
+    /// The module itself is created (with its default config) by
+    /// `reconcile_modules`, the single source of truth mirroring pin
+    /// assignments; nothing here builds a `VirtualModule`, because a
+    /// hand-built one would be duplicated on the next reconcile.
+    ///
+    /// The whole set is written BEFORE the reconcile, and `apply_pin_function`
+    /// is deliberately not used: it would run `auto_assign_partners` per pad
+    /// and move the pins the caller just chose.
+    /// Returns `false` and changes NOTHING when the wiring is not one the chip
+    /// can form - every pad must be able to carry its signal AND be free (or
+    /// already carrying exactly it). Checked whole, before anything is written,
+    /// so a half-applied wiring cannot exist.
+    ///
+    /// The dialog enumerates from `autowire::eligible` and so cannot normally
+    /// produce a bad set - but it holds its choice across frames, and the chip
+    /// moves underneath it: a pad free when the dialog opened can be taken by
+    /// the time it is confirmed. Without this the confirm would overwrite that
+    /// pad, and whichever module owned it would lose a connection - or, if it
+    /// owned only that one, be dropped by `reconcile_modules` with its config.
+    pub fn add_module_wired(
+        &mut self,
+        inst: u8,
+        chosen: &[(crate::panels::mcu_module::modules::ModuleSignal, usize)],
+    ) -> bool {
+        if chosen.is_empty() {
+            return false;
+        }
+        let formable = chosen.iter().all(|(sig, pin)| {
+            let want = sig.pin_function(inst);
+            self.find_pin(*pin).is_some_and(|p| {
+                !p.reserved
+                    && p.available_functions.contains(&want)
+                    && (p.selected_function == PinFunction::Unset || p.selected_function == want)
+            })
+        });
+        if !formable {
+            return false;
+        }
+        for (sig, pin) in chosen {
             if let Some(p) = self.find_pin_mut(*pin) {
                 p.selected_function = sig.pin_function(inst);
             }
@@ -346,6 +391,58 @@ impl Mcu {
     /// Remove a module by id, resetting the pins it was wired to back to `Unset`
     /// (so removing a _USART/SPI/I2C frees its pins, mirroring "unplugging" the
     /// device).
+    /// Move one pin's function to ANOTHER pad, as a single operation.
+    ///
+    /// Deliberately NOT `apply_pin_function` twice, because neither order works:
+    ///
+    /// * clearing the old pad first runs `deselect_partners`, which takes the
+    ///   whole bus with it - a USART TX drags its RX to `Unset`, the module
+    ///   loses every connection, and `reconcile_modules` then hands the
+    ///   re-created one a fresh `default_config`, so the baud rate the user set
+    ///   is gone;
+    /// * setting the new pad first leaves TWO pads carrying the same function,
+    ///   and `reconcile_modules` does not de-duplicate by signal - the module
+    ///   grows a second row for one wire.
+    ///
+    /// `auto_assign_partners` must not run here either: the partners are
+    /// already placed, and re-picking them would move pads the user did not ask
+    /// about. So the whole edit is one write-pair followed by one reconcile,
+    /// which is also how [`add_module`](Self::add_module) commits.
+    ///
+    /// Returns `false` and changes nothing when the destination cannot carry
+    /// the function - the caller offers only pads that can, but the check is
+    /// here so the model cannot be driven into a state the panel forbids.
+    pub fn move_pin_function(&mut self, from: usize, to: usize) -> bool {
+        if from == to {
+            return false;
+        }
+        let Some(func) = self.find_pin(from).map(|p| p.selected_function.clone()) else {
+            return false;
+        };
+        if func == PinFunction::Unset {
+            return false;
+        }
+        let reachable = self.find_pin(to).is_some_and(|p| {
+            !p.reserved
+                && p.available_functions.contains(&func)
+                && (p.selected_function == PinFunction::Unset || p.selected_function == func)
+        });
+        if !reachable {
+            return false;
+        }
+        if let Some(p) = self.find_pin_mut(from) {
+            p.selected_function = PinFunction::Unset;
+            // An armed edge belonged to the pad as an INPUT; the pad is now
+            // unassigned, and a stale edge would arm a pin nothing drives.
+            p.irq = None;
+        }
+        if let Some(p) = self.find_pin_mut(to) {
+            p.selected_function = func;
+        }
+        self.reconcile_modules();
+        true
+    }
+
     pub fn remove_module(&mut self, id: &str) {
         let pins: Vec<usize> = self
             .modules
@@ -1750,5 +1847,180 @@ fn set_module_style(config: &mut ModuleConfig, api: ApiStyle, async_mode: AsyncB
             c.async_mode = async_mode;
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod moving_a_signal_to_another_pad {
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind, ModuleSignal};
+    use crate::panels::mcu_module::pins::PinFunction;
+
+    /// A Pico, because the bundled F103 models no remap pads at all - each of
+    /// its three USART TX signals sits on exactly one pad, so there is nowhere
+    /// to move to and the case cannot be expressed there. On an RP the same
+    /// UART reaches four pads.
+    fn usart_mcu() -> crate::panels::mcu_module::mcu::Mcu {
+        let mut mcu = builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        mcu
+    }
+
+    fn pin_of(mcu: &crate::panels::mcu_module::mcu::Mcu, sig: ModuleSignal) -> usize {
+        mcu.modules[0]
+            .connections
+            .iter()
+            .find(|c| c.signal == sig)
+            .map(|c| c.mcu_pin)
+            .expect("signal is wired")
+    }
+
+    /// The module survives the move with its config, and the wire does not
+    /// double.
+    ///
+    /// Both halves are the reason this is not `apply_pin_function` twice:
+    /// clearing first drags the partner to `Unset` and the re-created module
+    /// gets a fresh `default_config`; setting first leaves two pads on one
+    /// function and `reconcile_modules` makes two connections out of them.
+    #[test]
+    fn the_module_and_its_settings_come_along() {
+        let mut mcu = usart_mcu();
+        // A setting worth losing, so the test can see it survive.
+        if let ModuleConfig::Usart(c) = &mut mcu.modules[0].config {
+            c.baud_rate = 9600;
+        }
+        let tx = pin_of(&mcu, ModuleSignal::Tx);
+        let rx = pin_of(&mcu, ModuleSignal::Rx);
+        let want = mcu.find_pin(tx).expect("tx pin").selected_function.clone();
+
+        // Somewhere else the same TX can go.
+        let dest = mcu
+            .iter_all_pins()
+            .find(|p| {
+                p.number != tx
+                    && !p.reserved
+                    && p.available_functions.contains(&want)
+                    && p.selected_function == PinFunction::Unset
+            })
+            .map(|p| p.number)
+            .expect("the F103 remaps USART TX to a second pad");
+
+        assert!(mcu.move_pin_function(tx, dest));
+
+        assert_eq!(mcu.modules.len(), 1, "still one module");
+        assert_eq!(pin_of(&mcu, ModuleSignal::Tx), dest, "TX moved");
+        assert_eq!(pin_of(&mcu, ModuleSignal::Rx), rx, "RX did not");
+        assert_eq!(
+            mcu.modules[0]
+                .connections
+                .iter()
+                .filter(|c| c.signal == ModuleSignal::Tx)
+                .count(),
+            1,
+            "one wire, not two"
+        );
+        assert_eq!(
+            mcu.find_pin(tx).expect("old pad").selected_function,
+            PinFunction::Unset,
+            "the old pad is free again"
+        );
+        match &mcu.modules[0].config {
+            ModuleConfig::Usart(c) => assert_eq!(c.baud_rate, 9600, "the config survived"),
+            other => panic!("still a USART: {other:?}"),
+        }
+    }
+
+    /// A destination that cannot carry the signal changes nothing at all.
+    #[test]
+    fn an_impossible_move_is_refused_whole() {
+        let mut mcu = usart_mcu();
+        let tx = pin_of(&mcu, ModuleSignal::Tx);
+        let before: Vec<(usize, PinFunction)> = mcu
+            .iter_all_pins()
+            .map(|p| (p.number, p.selected_function.clone()))
+            .collect();
+        // A pad that offers no USART TX at all.
+        let want = mcu.find_pin(tx).expect("tx").selected_function.clone();
+        let bad = mcu
+            .iter_all_pins()
+            .find(|p| !p.reserved && !p.available_functions.contains(&want))
+            .map(|p| p.number)
+            .expect("some pad cannot carry a USART TX");
+        assert!(!mcu.move_pin_function(tx, bad));
+        let after: Vec<(usize, PinFunction)> = mcu
+            .iter_all_pins()
+            .map(|p| (p.number, p.selected_function.clone()))
+            .collect();
+        assert_eq!(before, after, "nothing moved");
+        assert!(
+            !mcu.move_pin_function(tx, tx),
+            "a move onto itself is a no-op"
+        );
+    }
+}
+
+#[cfg(test)]
+mod a_wiring_is_committed_whole_or_not_at_all {
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::modules::ModuleSignal;
+    use crate::panels::mcu_module::pins::PinFunction;
+
+    /// `add_module_wired` is public and the dialog holds its choice across
+    /// frames, so the check belongs in the model rather than only in the panel:
+    /// a pad that cannot carry the signal must not be written at all.
+    #[test]
+    fn a_pad_that_cannot_carry_the_signal_is_refused() {
+        let mut mcu = builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu();
+        let want = ModuleSignal::Tx.pin_function(0);
+        let bad = mcu
+            .iter_all_pins()
+            .find(|p| !p.reserved && !p.available_functions.contains(&want))
+            .map(|p| p.number)
+            .expect("a pad with no USART0 TX");
+
+        assert!(!mcu.add_module_wired(0, &[(ModuleSignal::Tx, bad)]));
+        assert_eq!(
+            mcu.find_pin(bad).expect("the pad").selected_function,
+            PinFunction::Unset,
+            "nothing was written"
+        );
+        assert!(mcu.modules.is_empty(), "and no module appeared");
+    }
+
+    /// Whole or not at all: one bad pad must not leave the good ones written.
+    #[test]
+    fn one_bad_pad_rolls_the_whole_set_back() {
+        let mut mcu = builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        let tx_want = ModuleSignal::Tx.pin_function(0);
+        let good = mcu
+            .iter_all_pins()
+            .find(|p| p.available_functions.contains(&tx_want))
+            .map(|p| p.number)
+            .expect("a UART0 TX pad");
+        let rx_want = ModuleSignal::Rx.pin_function(0);
+        let bad = mcu
+            .iter_all_pins()
+            .find(|p| !p.reserved && !p.available_functions.contains(&rx_want))
+            .map(|p| p.number)
+            .expect("a pad with no UART0 RX");
+
+        assert!(!mcu.add_module_wired(0, &[(ModuleSignal::Tx, good), (ModuleSignal::Rx, bad)]));
+        assert_eq!(
+            mcu.find_pin(good).expect("the good pad").selected_function,
+            PinFunction::Unset,
+            "the pad that COULD have been written was not"
+        );
     }
 }

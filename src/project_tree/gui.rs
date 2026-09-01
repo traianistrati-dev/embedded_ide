@@ -155,7 +155,10 @@ pub(crate) fn validate_rename(
         return Err(format!("`{clean}` is not a usable file name."));
     }
     if let Some(reason) = generated_file_reason(old_path) {
-        return Err(format!("Can't rename `{}` - {reason}.", base_name(old_path)));
+        return Err(format!(
+            "Can't rename `{}` - {reason}.",
+            base_name(old_path)
+        ));
     }
 
     let new_path = match old_path.rfind('/') {
@@ -1784,10 +1787,7 @@ pub fn show_project_tree(
         }) {
             Ok(new_path) => {
                 *renaming_file = None;
-                *rename_request = Some(RenameRequest {
-                    old_path,
-                    new_path,
-                });
+                *rename_request = Some(RenameRequest { old_path, new_path });
             }
             // Empty reason = "nothing changed": close the input, say nothing.
             Err(reason) if reason.is_empty() => *renaming_file = None,

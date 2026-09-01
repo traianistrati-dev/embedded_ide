@@ -200,7 +200,10 @@ impl AppIde {
         // One at a time: a second rename while one is in flight would apply its
         // edits against indices the first is about to shift.
         if self.pending_rename.is_some() {
-            set_tree_notice(ctx, "A rename is already in progress — try again.".to_owned());
+            set_tree_notice(
+                ctx,
+                "A rename is already in progress — try again.".to_owned(),
+            );
             return;
         }
         if let Some(reason) = reference_update_blocker(self, &req) {
@@ -433,11 +436,23 @@ mod imp;
 
     #[test]
     fn a_malformed_path_attribute_is_ignored() {
-        assert_eq!(path_attr_values("#[path]
-mod x;").count(), 0);
+        assert_eq!(
+            path_attr_values(
+                "#[path]
+mod x;"
+            )
+            .count(),
+            0
+        );
         // Unterminated on its line - not a path we should reason about.
-        assert_eq!(path_attr_values("#[path = 
-mod x;").count(), 0);
+        assert_eq!(
+            path_attr_values(
+                "#[path = 
+mod x;"
+            )
+            .count(),
+            0
+        );
         assert_eq!(path_attr_values("// no attributes here").count(), 0);
     }
 

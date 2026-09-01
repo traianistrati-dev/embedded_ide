@@ -335,6 +335,13 @@ fn module_details_ui(
     ui.add_space(8.0);
 }
 
+/// Hover for the palette's "Choose pins..." entry.
+///
+/// Out here because it is longer than `max_width` and inline it takes the whole
+/// panel function out of rustfmt's reach, the same reason as
+/// [`add_module_hint`].
+const CHOOSE_PINS_HINT: &str = "Pick the peripheral instance and every pad yourself. It opens on the wiring shown above, so confirming straight away is the same as choosing Auto.";
+
 /// Why a palette entry is greyed out.
 ///
 /// Out here for the same reason as [`add_module_hint`]: these sentences are
@@ -783,6 +790,12 @@ impl AppIde {
                     // A module added from the palette: its config is opened, and
                     // a collapsed panel opens with it.
                     let mut open_after_add: Option<String> = None;
+                    // "Choose pins..." was clicked: the dialog is seeded AFTER
+                    // this block, because seeding reads `mcu` and the panel
+                    // still holds it borrowed here.
+                    let mut pick_request: Option<
+                        crate::panels::mcu_module::modules::ModuleKind,
+                    > = None;
                     let mut open_sig = 0_u64;
                     // The panel hugs its content (an egui bottom panel stores
                     // the CONTENT's rect, not the size it was given), so the body
@@ -979,7 +992,15 @@ impl AppIde {
                                             ui.set_min_width(190.0);
                                             for kind in offered {
                                                 let hw_only = mcu.hardware_only_reason(kind);
-                                                let can_add = hw_only.is_none() && mcu.can_add_module(kind);
+                                                // ONE search per entry, for both
+                                                // answers - see `palette_entry`.
+                                                // Asking `can_add_module` and then
+                                                // the preview separately ran the
+                                                // whole exhaustive wiring search
+                                                // twice per kind, per frame.
+                                                let (addable, auto_pads) =
+                                                    mod_gui::palette_entry(mcu, kind);
+                                                let can_add = hw_only.is_none() && addable;
                                                 let hover = add_module_hint(kind);
                                                 // Colour the button's TEXT with the peripheral's
                                                 // colour ONLY when a module of this kind is already
@@ -1001,33 +1022,107 @@ impl AppIde {
                                                 } else {
                                                     egui::RichText::new(label).size(11.0)
                                                 };
-                                                if ui
-                                                    .add_enabled(can_add, egui::Button::new(text))
-                                                    .on_hover_text(hover)
-                                                    .on_disabled_hover_text(
-                                                        add_module_block_reason(kind, hw_only),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    // Snapshot for Ctrl+Z BEFORE the add; drop it
-                                                    // again if the add found no free pins.
-                                                    mcu.push_module_undo(format!("Add {}", kind.short()));
-                                                    if mcu.add_module(kind) {
-                                                        modules_changed = true;
-                                                        // Adding from a collapsed bar means
-                                                        // "I want to set this up" — so the
-                                                        // panel opens with the new module's
-                                                        // config already unfolded, instead
-                                                        // of leaving the click looking like
-                                                        // it did nothing.
-                                                        open_after_add =
-                                                            mcu.modules.last().map(|m| m.id.clone());
-                                                        collapsed = false;
-                                                    } else {
-                                                        mcu.discard_last_module_undo();
-                                                    }
-                                                    ui.close();
+                                                // A SUBMENU rather than a button.
+                                                // The automatic wiring is right
+                                                // most of the time and wrong in a
+                                                // way the IDE cannot detect: which
+                                                // pads the BOARD needs free is
+                                                // nowhere in the pin model. So the
+                                                // one-click path keeps the first
+                                                // slot - one extra hover - and the
+                                                // override sits beside it.
+                                                if !can_add {
+                                                    ui.add_enabled(false, egui::Button::new(text))
+                                                        .on_disabled_hover_text(
+                                                            add_module_block_reason(kind, hw_only),
+                                                        );
+                                                    continue;
                                                 }
+                                                // Custom is a one-click kind: it
+                                                // has no signals, so there is
+                                                // nothing to choose and a submenu
+                                                // would offer an entry that does
+                                                // nothing. Its pads are added in
+                                                // its own config panel.
+                                                if kind.is_custom() {
+                                                    if ui
+                                                        .add(egui::Button::new(text))
+                                                        .on_hover_text(hover)
+                                                        .clicked()
+                                                    {
+                                                        mcu.push_module_undo(format!(
+                                                            "Add {}",
+                                                            kind.short()
+                                                        ));
+                                                        if mcu.add_module(kind) {
+                                                            modules_changed = true;
+                                                            open_after_add = mcu
+                                                                .modules
+                                                                .last()
+                                                                .map(|m| m.id.clone());
+                                                            collapsed = false;
+                                                        } else {
+                                                            mcu.discard_last_module_undo();
+                                                        }
+                                                        ui.close();
+                                                    }
+                                                    continue;
+                                                }
+                                                ui.menu_button(text, |ui| {
+                                                    ui.set_min_width(190.0);
+                                                    let auto_label = match &auto_pads {
+                                                        Some(p) => format!("Auto - {p}"),
+                                                        None => "Auto (best fit)".to_owned(),
+                                                    };
+                                                    if ui
+                                                        .button(
+                                                            egui::RichText::new(auto_label)
+                                                                .size(11.0),
+                                                        )
+                                                        .on_hover_text(hover)
+                                                        .clicked()
+                                                    {
+                                                        // Snapshot for Ctrl+Z BEFORE the add; drop it
+                                                        // again if the add found no free pins.
+                                                        mcu.push_module_undo(format!(
+                                                            "Add {}",
+                                                            kind.short()
+                                                        ));
+                                                        if mcu.add_module(kind) {
+                                                            modules_changed = true;
+                                                            // Adding from a collapsed bar means
+                                                            // "I want to set this up" — so the
+                                                            // panel opens with the new module's
+                                                            // config already unfolded, instead
+                                                            // of leaving the click looking like
+                                                            // it did nothing.
+                                                            open_after_add = mcu
+                                                                .modules
+                                                                .last()
+                                                                .map(|m| m.id.clone());
+                                                            collapsed = false;
+                                                        } else {
+                                                            mcu.discard_last_module_undo();
+                                                        }
+                                                        ui.close();
+                                                    }
+                                                    ui.separator();
+                                                    if ui
+                                                        .button(
+                                                            egui::RichText::new("Choose pins...")
+                                                                .size(11.0),
+                                                        )
+                                                        .on_hover_text(CHOOSE_PINS_HINT)
+                                                        .clicked()
+                                                    {
+                                                        // No undo snapshot yet - the dialog
+                                                        // can be cancelled, and a phantom
+                                                        // entry would make the next Ctrl+Z
+                                                        // look like it skipped a step.
+                                                        pick_request = Some(kind);
+                                                        ui.close();
+                                                    }
+                                                });
                                             }
                                         },
                                     );
@@ -1173,10 +1268,9 @@ impl AppIde {
                                     .iter_all_pins()
                                     .map(|p| (p.number, p.selected_function.clone()))
                                     .collect();
-                                let mut pin_fn_choice: Option<(
-                                    usize,
-                                    crate::panels::mcu_module::pins::logic::pin_function::PinFunction,
-                                )> = None;
+                                let mut pin_fn_choice: Option<
+                                    crate::panels::mcu_module::mcu::gui::modules::PinEdit,
+                                > = None;
                                 let pin_sigs: std::collections::HashMap<usize, String> = mcu
                                     .iter_all_pins()
                                     .map(|p| {
@@ -1714,9 +1808,18 @@ impl AppIde {
                                 // A function picked from a Custom module's pin
                                 // button — same path as clicking the pin on the
                                 // chip, so partners/labels stay consistent.
-                                if let Some((num, func)) = pin_fn_choice {
-                                    mcu.apply_pin_function(num, func);
-                                    modules_changed = true;
+                                match pin_fn_choice {
+                                    Some(mod_gui::PinEdit::Set(num, func)) => {
+                                        mcu.apply_pin_function(num, func);
+                                        modules_changed = true;
+                                    }
+                                    // A signal dragged to another pad. One
+                                    // operation on purpose - the two-step form
+                                    // either wipes the bus or doubles the wire.
+                                    Some(mod_gui::PinEdit::Move { from, to }) => {
+                                        modules_changed = mcu.move_pin_function(from, to);
+                                    }
+                                    None => {}
                                 }
                                 // Pin labels a Custom module's rows edited (the
                                 // mirror of the field inside its canvas box) —
@@ -1788,6 +1891,78 @@ impl AppIde {
                     self.vmod_collapsed = collapsed;
                     self.vmod_body_h = body_h;
                     self.vmod_info_id = info_id;
+
+                    // ── "Choose pins..." ─────────────────────────────────
+                    // Seeded here, not in the click handler: the seed runs the
+                    // same `pick_pins` the plain add would, which needs `&mcu`
+                    // while the panel above still holds it borrowed.
+                    if let Some(kind) = pick_request
+                        && let Some(mcu) = &self.mcu
+                    {
+                        self.add_module_pick =
+                            crate::app::add_module_dialog::AddModulePick::seed(mcu, kind);
+                    }
+                    // Seeded from a chip that is no longer loaded - a project
+                    // switch while this was open. The pad numbers mean nothing
+                    // now, so it goes rather than reappearing over the new chip.
+                    if let (Some(pick), Some(mcu)) = (&self.add_module_pick, &self.mcu)
+                        && !crate::app::add_module_dialog::belongs_to(pick, mcu)
+                    {
+                        self.add_module_pick = None;
+                    }
+                    if let Some(pick) = &mut self.add_module_pick {
+                        use crate::app::add_module_dialog::{PickOutcome, show as show_pick};
+                        let outcome = match &self.mcu {
+                            Some(mcu) => show_pick(ui, mcu, pick),
+                            None => PickOutcome::Cancelled,
+                        };
+                        match outcome {
+                            PickOutcome::Pending => {}
+                            PickOutcome::Cancelled => self.add_module_pick = None,
+                            PickOutcome::Confirmed => {
+                                let (kind, inst, wiring) =
+                                    (pick.kind, pick.instance, pick.wiring());
+                                if let Some(mcu) = &mut self.mcu {
+                                    // The undo snapshot goes here rather than
+                                    // where the dialog opened: a cancelled
+                                    // dialog must leave the Ctrl+Z stack
+                                    // exactly as it found it.
+                                    mcu.push_module_undo(format!("Add {}", kind.short()));
+                                    mcu.add_module_wired(inst, &wiring);
+                                    modules_changed = true;
+                                    // Same courtesy as the plain add: the new
+                                    // module opens with its config unfolded.
+                                    open_after_add = mcu.modules.last().map(|m| m.id.clone());
+                                    self.vmod_collapsed = false;
+                                }
+                                self.add_module_pick = None;
+                            }
+                        }
+                    }
+                    // The dialog commits AFTER the panel body has run, so the
+                    // module it created was never in this frame's list and the
+                    // loop that unfolds a new module's config never saw it.
+                    // Unfolding it here writes the same egui state that loop
+                    // does, keyed the same way (`cs_id`, line 1315).
+                    //
+                    // `set_open` takes `&mut self` on a value loaded from the
+                    // context - it changes a COPY, and without `store` nothing
+                    // reaches egui at all. The config simply stayed folded on
+                    // this path while the one-click path opened it.
+                    //
+                    // The details pane is deliberately NOT touched: opening it
+                    // unasked squeezes the config column that was just
+                    // unfolded, and the plain "Auto" add never did that.
+                    if let Some(id) = open_after_add {
+                        let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(
+                            ui.ctx(),
+                            egui::Id::new(("vmod_hdr", id.as_str())),
+                            false,
+                        );
+                        st.set_open(true);
+                        st.store(ui.ctx());
+                        ui.ctx().request_repaint();
+                    }
 
                     if modules_changed {
                         if let Some(mcu) = &self.mcu {

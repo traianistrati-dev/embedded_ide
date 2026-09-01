@@ -23,6 +23,7 @@ pub(crate) mod tabs;
 pub(crate) mod helpers;
 use helpers::apply_dark_theme;
 
+mod add_module_dialog;
 mod chip_filter_ui;
 mod chip_search_ui;
 mod clock_import_dialog;
@@ -1060,6 +1061,12 @@ pub struct AppIde {
     /// module is collapsed or removed — the pane is a view of a config that is
     /// on screen, not a window that outlives it.
     vmod_info_id: Option<String>,
+    /// The "+ Add module -> Choose pins..." dialog, while it is open.
+    ///
+    /// State rather than a per-frame value because the choice is made across
+    /// frames, and it holds the SEED from autowire - so confirming without
+    /// touching a row reproduces the plain one-click add exactly.
+    add_module_pick: Option<crate::app::add_module_dialog::AddModulePick>,
     /// The header's "Reset pins" is ARMED and waiting for confirmation.
     ///
     /// It wipes every pin function on the chip — and with them the Virtual
@@ -1801,6 +1808,7 @@ impl AppIde {
             vmod_open_sig: 0,
             vmod_collapsed: false,
             vmod_info_id: None,
+            add_module_pick: None,
             reset_pins_confirm: false,
             structure_cache: None,
             structure_view: Default::default(),

@@ -121,6 +121,22 @@ const CUSTOM_LABEL_W: f32 = 52.0;
 /// line.
 pub const CUSTOM_FIELD_W: f32 = 160.0;
 
+/// One pin edit a module's config panel asks the caller to make.
+///
+/// A plain `(pin, function)` could only ever SET, and half of what this panel
+/// needs is a MOVE - "this signal is on the wrong pad, put it on that one".
+/// Expressed as one value rather than two out-parameters so the caller cannot
+/// be handed both in a frame and silently apply one.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PinEdit {
+    /// Give this pad this function, through `apply_pin_function` - partners and
+    /// labels follow, exactly as if the pad had been clicked on the canvas.
+    Set(usize, PinFunction),
+    /// Carry the function on `from` over to `to`, through `move_pin_function`.
+    /// Not two `Set`s: see that method for why either order breaks.
+    Move { from: usize, to: usize },
+}
+
 /// Why an RP shows no DMA channel picker.
 ///
 /// On this chip the channel is not a decision anyone can get right or wrong:
@@ -689,9 +705,8 @@ fn draw_box(
         egui::FontId::proportional(10.0 * scale),
         egui::Color32::from_rgb(150, 150, 160),
     );
-    // Live preview of the resulting variable name(s) above the rename field —
-    // updates as the user types (same as the pin's `pc13_out_board_led`).
-    // Clipped to the box so a long label can't overflow the border.
+    // The resulting variable name(s). Clipped to the box so a long label
+    // cannot overflow the border.
     painter.with_clip_rect(rect).text(
         egui::pos2(rect.left() + 10.0, rect.bottom() - 26.0),
         egui::Align2::LEFT_BOTTOM,
@@ -699,6 +714,28 @@ fn draw_box(
         egui::FontId::proportional(9.0 * scale),
         egui::Color32::from_rgb(140, 140, 150),
     );
+    // The user's name for the module, SHOWN and not edited.
+    //
+    // It used to be a `TextEdit` put over this rect in a second, mutable pass
+    // over the same boxes. Two editors for one string is one too many: the
+    // module's `Name:` row in the Virtual-modules panel is the one that has
+    // room for it, sits beside everything else the module owns, and cannot be
+    // hit by accident while dragging a box around the canvas.
+    //
+    // Empty draws nothing rather than a placeholder: an empty box row is quiet,
+    // and a hint reading "name" in a field nobody can type into would be a
+    // control that lies about itself.
+    let name = m.config.custom_label();
+    if !name.is_empty() {
+        let field = label_field_rect(rect);
+        painter.with_clip_rect(rect).text(
+            egui::pos2(field.left(), field.center().y),
+            egui::Align2::LEFT_CENTER,
+            name,
+            egui::FontId::proportional(10.0 * scale),
+            egui::Color32::from_rgb(190, 195, 210),
+        );
+    }
 }
 
 /// Font multiplier for a module box's texts: 1 normally, `SELECTED_TEXT_SCALE`
@@ -948,9 +985,13 @@ pub fn draw_modules(
         mcu.modules[i].pos = (0.0, 0.0);
     }
 
-    // ── 4. Rename fields (mutable pass) ───────────────────────────────────────
-    // The typed text is appended to the module's generated variable name(s);
-    // regenerated every frame by `update_main_rs`, so it updates as you type.
+    // ── 4. A Custom module's PIN names (mutable pass) ─────────────────────────
+    // The only editable text left on a module box. It names a PIN, not the
+    // module: the module's own name is drawn read-only by `draw_box`, and edited
+    // in the Virtual-modules panel where there is room for it.
+    //
+    // Still a second pass over the same boxes because these need `&mut Mcu` to
+    // reach `pin.custom_label`, and the painter pass above holds `&Mcu`.
     for (i, box_rect) in field_pass {
         // Same selection state the box was painted with, so its fields grow with
         // the rest of it. Read BEFORE the mutable `find_pin_mut` borrows below.
@@ -1010,16 +1051,6 @@ pub fn draw_modules(
                 }
             }
         }
-        let field_rect = label_field_rect(box_rect);
-        let label = mcu.modules[i].config.custom_label_mut();
-        ui.push_id(("module_label", i), |ui| {
-            ui.put(
-                field_rect,
-                egui::TextEdit::singleline(label)
-                    .hint_text("name")
-                    .font(egui::FontId::proportional(10.0 * scale)),
-            );
-        });
     }
 
     if let Some(id) = clicked_id {
@@ -1287,6 +1318,132 @@ fn rp_pwm_notes(
     out
 }
 
+/// The pads the AUTOMATIC pick would take, as a short label for the palette.
+///
+/// Shown on the "Auto" entry so the choice is informed before it is made -
+/// seeing `Auto - GP24 / GP25` next to `Choose pins...` is what tells a Pico
+/// owner that the automatic wiring is about to take the on-board LED. `None`
+/// when nothing is free, which the palette already renders as a greyed entry.
+///
+/// This runs the same `pick_pins` the add itself will run, so the label cannot
+/// promise pads the add then declines to use.
+pub fn auto_wiring_summary(
+    mcu: &crate::panels::mcu_module::mcu::Mcu,
+    kind: ModuleKind,
+) -> Option<String> {
+    palette_entry(mcu, kind).1
+}
+
+/// Both answers the palette needs about one kind, from ONE search.
+///
+/// `(can this be added, the pads the automatic pick would take)`. They used to
+/// be two calls - `Mcu::can_add_module` and `auto_wiring_summary` - and each
+/// runs the same exhaustive `pick_pins`. That doubled the cost of drawing the
+/// palette, which is already the most expensive thing on the bar: measured on
+/// the bundled chips, one open frame costs 270 ms on an ESP32-S3 for the
+/// feasibility half alone, and asking twice made it 530 ms. One call restores
+/// it.
+///
+/// The two guards `can_add_module` applies come first and cost nothing, so this
+/// agrees with it by construction rather than by copying its rules - asserted
+/// in `the_palette_agrees_with_the_model`.
+pub fn palette_entry(
+    mcu: &crate::panels::mcu_module::mcu::Mcu,
+    kind: ModuleKind,
+) -> (bool, Option<String>) {
+    use crate::panels::mcu_module::modules::autowire;
+    if kind.is_single_instance() && mcu.modules.iter().any(|m| m.kind == kind) {
+        return (false, None);
+    }
+    // A Custom module claims no peripheral and wires nothing, so there is
+    // always room for another and never a wiring to preview.
+    if kind.is_custom() {
+        return (true, None);
+    }
+    let (required, optional) = kind.signals();
+    let used: std::collections::HashSet<usize> = mcu
+        .modules
+        .iter()
+        .flat_map(|m| m.connections.iter().map(|c| c.mcu_pin))
+        .collect();
+    let used_instances: std::collections::HashSet<u8> = mcu
+        .modules
+        .iter()
+        .filter(|m| m.kind == kind)
+        .map(|m| m.instance())
+        .collect();
+    let Some((_, chosen)) = autowire::pick_pins(mcu, &used, &used_instances, required, optional)
+    else {
+        return (false, None);
+    };
+    let names: Vec<String> = chosen
+        .iter()
+        .filter_map(|(_, n)| mcu.find_pin(*n))
+        .map(|p| p.name.clone())
+        .collect();
+    let preview = (!names.is_empty()).then(|| names.join(" / "));
+    (true, preview)
+}
+
+/// Whether this family moves a peripheral's pads as ONE group, so a single
+/// signal cannot be re-pointed on its own.
+///
+/// True only on stm32f1, and only for a bus that has more than one pad. There
+/// one AFIO bit remaps ALL of a peripheral's signals together: SPI1 is
+/// PA5/PA6/PA7 or PB3/PB4/PB5, I2C1 is PB6/PB7 or PB8/PB9, and nothing mixed.
+/// `stm32f1xx_hal` encodes that in its `Pins` impls, so a mixed set is not an
+/// odd choice - it is a project that does not compile, which is the failure
+/// `auto_assign_partners` was rewritten to stop producing (see its doc).
+///
+/// The chip definitions carry NO remap-group data - `autowire` only ever
+/// approximated it with the `ports` score, and that approximation cannot even
+/// see the I2C case, where both groups live on port B. So the honest move is to
+/// not offer the choice here rather than to offer it with a warning: a pad
+/// picker that generates an unbuildable project is worse than no pad picker.
+/// Single-pad signals (a timer channel, an ADC input) are unaffected.
+fn f1_moves_as_a_group(family: &str, module_pads: usize) -> bool {
+    family == "stm32f1" && module_pads > 1
+}
+
+/// Pads that could carry `want` and are FREE, other than the one holding it.
+///
+/// The chip's own answer, uncapped. `autowire`'s search looks at the first
+/// `MAX_PER_SIGNAL` pads per signal because it has a combination budget to live
+/// within; a menu has none, and on a GPIO-matrix part the two numbers are far
+/// apart - an ESP32-C3 offers 21 pads for a UART TX. Capping the menu the way
+/// the search is capped would hide exactly the pad the user opened it to find.
+///
+/// "Free" is `Unset`, not "not blocked": a pad already carrying another
+/// peripheral cannot take this one without silently unwiring that, which is a
+/// second edit the user did not ask for.
+fn free_pads_for(
+    want: &PinFunction,
+    holder: usize,
+    pin_funcs: &HashMap<usize, Vec<PinFunction>>,
+    pin_funcs_current: &HashMap<usize, PinFunction>,
+    // Number of pads the module has. On stm32f1 a multi-pad peripheral cannot
+    // move ONE of them: see `f1_moves_as_a_group`.
+    family: &str,
+    module_pads: usize,
+) -> Vec<usize> {
+    if f1_moves_as_a_group(family, module_pads) {
+        return Vec::new();
+    }
+    let mut v: Vec<usize> = pin_funcs
+        .iter()
+        .filter(|(n, fns)| {
+            **n != holder
+                && fns.contains(want)
+                && pin_funcs_current
+                    .get(n)
+                    .is_none_or(|f| *f == PinFunction::Unset)
+        })
+        .map(|(n, _)| *n)
+        .collect();
+    v.sort_unstable();
+    v
+}
+
 fn free_pwm_channels(
     timer: u8,
     wired: &BTreeSet<String>,
@@ -1340,7 +1497,7 @@ pub fn module_config_ui(
     // Functions selectable per pin, behind the pin-name buttons.
     pin_funcs: &HashMap<usize, Vec<PinFunction>>,
     // Set when a function is picked from a pin button; the caller applies it.
-    pin_fn_choice: &mut Option<(usize, PinFunction)>,
+    pin_fn_choice: &mut Option<PinEdit>,
     // EMBASSY async. The ESP has an async runtime too, but none of its rows
     // turn on it: `with_dma`, `UartTx::new` and `.with_cts()` are all on the
     // blocking drivers, so what decides there is the FAMILY (`esp` below).
@@ -4813,7 +4970,7 @@ pub fn module_config_ui(
                                             )
                                             .clicked()
                                         {
-                                            *pin_fn_choice = Some((num, f.clone()));
+                                            *pin_fn_choice = Some(PinEdit::Set(num, f.clone()));
                                             ui.close();
                                         }
                                     }
@@ -5095,7 +5252,7 @@ pub fn module_config_ui(
                                             // uses, so the duty follows the
                                             // channel (`carry_pwm_channel`) and
                                             // the module re-wires itself.
-                                            *pin_fn_choice = Some((
+                                            *pin_fn_choice = Some(PinEdit::Set(
                                                 *num,
                                                 PinFunction::TimerPwm {
                                                     timer: m_inst,
@@ -5117,7 +5274,80 @@ pub fn module_config_ui(
                     } else {
                         ui.label(format!("{sig} {} pin", ph::ARROW_RIGHT));
                     }
-                    ui.label(pin);
+                    // The pad is a PICKER, not a caption. Auto-wiring chooses
+                    // one legal wiring out of many and cannot know which pads
+                    // the board needs free; this is the repair for that, and it
+                    // is a MOVE - the two-step form either wipes the bus
+                    // (`deselect_partners`) or leaves two pads on one signal.
+                    let want = pin_funcs_current.get(num).cloned();
+                    let others: Vec<usize> = want
+                        .as_ref()
+                        .map(|w| {
+                            free_pads_for(
+                                w,
+                                *num,
+                                pin_funcs,
+                                pin_funcs_current,
+                                family,
+                                conn_rows.len(),
+                            )
+                        })
+                        .unwrap_or_default();
+                    if others.is_empty() {
+                        ui.label(pin).on_hover_text(
+                            if f1_moves_as_a_group(family, conn_rows.len()) {
+                                "On an STM32F1 one AFIO bit remaps ALL of a peripheral's pads together - SPI1 is PA5/PA6/PA7 or PB3/PB4/PB5, and nothing mixed - so a single signal cannot move on its own. Re-wire the whole bus on the Pins canvas instead."
+                            } else {
+                                "No other pad on this chip can carry this signal while staying free."
+                            },
+                        );
+                    } else {
+                        ui.menu_button(
+                            egui::RichText::new(format!("{pin} {}", ph::CARET_DOWN)).size(11.0),
+                            |ui| {
+                                ui.set_min_width(140.0);
+                                ui.label(
+                                    egui::RichText::new("move this signal to")
+                                        .size(10.0)
+                                        .color(egui::Color32::GRAY),
+                                );
+                                ui.separator();
+                                // Every pad the CHIP offers, not the eight the
+                                // automatic search looks at - a menu capped the
+                                // way the search is would hide exactly the pad
+                                // being hunted for.
+                                egui::ScrollArea::vertical().max_height(220.0).show(
+                                    ui,
+                                    |ui| {
+                                        for n in &others {
+                                            let name = pin_names
+                                                .get(n)
+                                                .cloned()
+                                                .unwrap_or_else(|| format!("pin{n}"));
+                                            if ui
+                                                .selectable_label(
+                                                    false,
+                                                    egui::RichText::new(name).size(10.5),
+                                                )
+                                                .clicked()
+                                            {
+                                                *pin_fn_choice = Some(PinEdit::Move {
+                                                    from: *num,
+                                                    to: *n,
+                                                });
+                                                ui.close();
+                                            }
+                                        }
+                                    },
+                                );
+                            },
+                        )
+                        .response
+                        .on_hover_text(
+                            "Which pad carries this signal. Moving it here keeps the module and \
+                             everything configured on it - only the wire moves.",
+                        );
+                    }
                     ui.end_row();
                 }
             }
@@ -6113,5 +6343,178 @@ mod tests {
         );
         assert!(is_advanced_timer(1) && is_advanced_timer(8) && is_advanced_timer(20));
         assert!(!is_advanced_timer(16) && !is_advanced_timer(2));
+    }
+}
+
+#[cfg(test)]
+mod the_palette_agrees_with_the_model {
+    use super::palette_entry;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::modules::ModuleKind;
+
+    /// `palette_entry`'s first answer must be exactly `can_add_module`'s.
+    ///
+    /// They are two implementations of one question - the palette merged them
+    /// with the pad preview so the exhaustive search runs once per entry
+    /// instead of twice. A drift between them is a greyed-out entry that can be
+    /// added, or an enabled one that cannot.
+    #[test]
+    fn the_addable_flag_is_the_models_own_answer() {
+        for d in builtin_definitions() {
+            let mut mcu = d.build_mcu();
+            for kind in ModuleKind::ALL {
+                if !mcu.supports_module(kind) {
+                    continue;
+                }
+                // Drive the chip to exhaustion, checking agreement at each step
+                // - the interesting answers are the ones near the end.
+                for _ in 0..4 {
+                    let (addable, preview) = palette_entry(&mcu, kind);
+                    assert_eq!(addable, mcu.can_add_module(kind), "{} {kind:?}", d.id);
+                    if !addable {
+                        break;
+                    }
+                    // A kind that CAN be added and wires pads must preview them;
+                    // Custom wires none, so it previews none.
+                    assert_eq!(
+                        preview.is_none(),
+                        kind.is_custom(),
+                        "{} {kind:?}: preview presence follows the wiring",
+                        d.id
+                    );
+                    mcu.add_module(kind);
+                }
+            }
+        }
+    }
+
+    /// The preview names the pads the add will really take.
+    #[test]
+    fn the_preview_is_the_wiring_that_gets_committed() {
+        for id in ["rp2040_pico", "stm32f103c8t6", "esp32c3"] {
+            let mut mcu = builtin_definitions()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("built-in {id}"))
+                .build_mcu();
+            let kind = ModuleKind::GenericInterfaceSpi;
+            let Some(preview) = palette_entry(&mcu, kind).1 else {
+                continue;
+            };
+            assert!(mcu.add_module(kind));
+            let mut got: Vec<String> = mcu.modules[0]
+                .connections
+                .iter()
+                .filter_map(|c| mcu.find_pin(c.mcu_pin))
+                .map(|p| p.name.clone())
+                .collect();
+            got.sort();
+            let mut want: Vec<String> = preview.split(" / ").map(str::to_owned).collect();
+            want.sort();
+            assert_eq!(got, want, "{id}: the label promised what the add did");
+        }
+    }
+}
+
+#[cfg(test)]
+mod the_move_picker_respects_the_silicon {
+    use super::free_pads_for;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::modules::ModuleKind;
+    use crate::panels::mcu_module::pins::PinFunction;
+    use std::collections::HashMap;
+
+    /// On an STM32F1 a bus pad may NOT be re-pointed on its own.
+    ///
+    /// One AFIO bit remaps a peripheral's whole set: SPI1 is PA5/PA6/PA7 or
+    /// PB3/PB4/PB5, I2C1 is PB6/PB7 or PB8/PB9, and `stm32f1xx-hal` has a
+    /// `Pins` impl for neither mixture. Offering PB3 for the SCK of a bus whose
+    /// MISO/MOSI are PA6/PA7 produced a project that does not compile - the
+    /// exact failure `auto_assign_partners` was rewritten to stop producing,
+    /// arriving through a new door.
+    #[test]
+    fn an_f1_bus_pad_is_not_offered_a_partner_of_the_other_group() {
+        let mut mcu = builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu();
+        for kind in [
+            ModuleKind::GenericInterfaceSpi,
+            ModuleKind::GenericInterfaceI2c,
+        ] {
+            let mut fresh = mcu.clone();
+            assert!(fresh.add_module(kind));
+            let pin_funcs: HashMap<usize, Vec<PinFunction>> = fresh
+                .iter_all_pins()
+                .filter(|p| !p.reserved)
+                .map(|p| (p.number, p.available_functions.clone()))
+                .collect();
+            let current: HashMap<usize, PinFunction> = fresh
+                .iter_all_pins()
+                .map(|p| (p.number, p.selected_function.clone()))
+                .collect();
+            let pads = fresh.modules[0].connections.len();
+            for c in &fresh.modules[0].connections {
+                let want = current.get(&c.mcu_pin).cloned().expect("wired");
+                let offered =
+                    free_pads_for(&want, c.mcu_pin, &pin_funcs, &current, "stm32f1", pads);
+                assert!(
+                    offered.is_empty(),
+                    "{kind:?}: {want:?} must not be movable on its own, got {offered:?}"
+                );
+            }
+        }
+        // ...and the guard is about the FAMILY, not about this being hard: the
+        // same bus on a Pico moves freely.
+        mcu = builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        let pin_funcs: HashMap<usize, Vec<PinFunction>> = mcu
+            .iter_all_pins()
+            .filter(|p| !p.reserved)
+            .map(|p| (p.number, p.available_functions.clone()))
+            .collect();
+        let current: HashMap<usize, PinFunction> = mcu
+            .iter_all_pins()
+            .map(|p| (p.number, p.selected_function.clone()))
+            .collect();
+        let pads = mcu.modules[0].connections.len();
+        let c = &mcu.modules[0].connections[0];
+        let want = current.get(&c.mcu_pin).cloned().expect("wired");
+        assert!(
+            !free_pads_for(&want, c.mcu_pin, &pin_funcs, &current, "rp2040", pads).is_empty(),
+            "an RP pad moves freely - no remap group there"
+        );
+    }
+
+    /// A single-pad signal has no group to break, so the F1 guard leaves it be.
+    #[test]
+    fn an_f1_single_pad_signal_still_moves() {
+        let mut mcu = builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceTimer));
+        assert_eq!(mcu.modules[0].connections.len(), 1, "one channel wired");
+        let pin_funcs: HashMap<usize, Vec<PinFunction>> = mcu
+            .iter_all_pins()
+            .filter(|p| !p.reserved)
+            .map(|p| (p.number, p.available_functions.clone()))
+            .collect();
+        let current: HashMap<usize, PinFunction> = mcu
+            .iter_all_pins()
+            .map(|p| (p.number, p.selected_function.clone()))
+            .collect();
+        let c = &mcu.modules[0].connections[0];
+        let want = current.get(&c.mcu_pin).cloned().expect("wired");
+        // Not asserted non-empty (the chip may offer only one pad for it) -
+        // asserted only that the GROUP guard did not fire.
+        assert!(!super::f1_moves_as_a_group("stm32f1", 1));
+        let _ = free_pads_for(&want, c.mcu_pin, &pin_funcs, &current, "stm32f1", 1);
     }
 }

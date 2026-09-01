@@ -21,8 +21,21 @@ use super::ModuleSignal;
 use crate::panels::mcu_module::mcu::model::Mcu;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 
-/// Candidate pins considered per signal (chip order). A signal with more
-/// alternatives than this is vanishingly rare; the cap just bounds the search.
+/// Candidate pins the AUTOMATIC search considers per signal, in chip order.
+///
+/// A bound on the search, not on the chip - and it is deliberately left at 8
+/// even though a GPIO-matrix part offers far more (an ESP32-C3 has 21 pads for
+/// `UsartTx(0)`). Raising it alone would make the search WORSE, not better:
+/// [`MAX_COMBOS`] is 512 = 8x8x8, so a three-signal bus is explored
+/// EXHAUSTIVELY inside this window today, while 21 candidates against the same
+/// budget would let `walk` finish only the first pad of the first signal and
+/// call that the ranking. Raising both turns a per-frame call
+/// (`can_add_module` runs this for every palette entry, every frame) into
+/// something 18x larger.
+///
+/// The pads outside the window are not lost - they are simply not the
+/// AUTOMATIC choice. [`eligible_for`] is uncapped, so every picker in the UI
+/// offers all of them; that is where "the pad I actually want" belongs.
 const MAX_PER_SIGNAL: usize = 8;
 /// Upper bound on the wirings explored per instance.
 const MAX_COMBOS: usize = 512;
@@ -45,14 +58,31 @@ const MAX_INSTANCE: u8 = 17;
 ///    legal combination at all.
 /// 3. `sides` — pins on opposite edges of the chip mean wires across the body.
 /// 4. `spread` — how far apart the pins sit, so a compact block wins.
-/// 5. `instance` — pure tie-break, keeping the old "lowest instance" order.
+/// 5. `board_use` — a pad the board already spends on something else (its own
+///    NAME says so). Second-to-last on purpose: it settles TIES and must never
+///    outrank the port/side rules, which stand in for what the silicon can form.
+/// 6. `instance` — pure tie-break, keeping the old "lowest instance" order.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct Score {
     unassigned: usize,
     ports: usize,
     sides: usize,
     spread: usize,
+    board_use: usize,
     instance: u8,
+}
+
+/// Whether a pin's own NAME says the board already spends it on something.
+///
+/// The definitions annotate exactly those pads: `GP25 (on-board LED)`,
+/// `GP24 (VBUS sense)`, `PB3 (JTDO-TRACESWO)`. Ranked next-to-last on purpose -
+/// it must never override the port/side rules, which stand in for what the
+/// silicon can actually form. It only settles TIES, and that is where it
+/// matters: on a Pico the second "+ USART" scored dead level across four
+/// wirings and took GP24/GP25 - the VBUS sense and the on-board LED - purely
+/// because those two pads are declared first in the chip file.
+fn is_board_used(name: &str) -> bool {
+    name.contains('(')
 }
 
 /// The GPIO port a pin name belongs to — the leading letters (`PB5` → `PB`,
@@ -82,9 +112,15 @@ fn side_map(mcu: &Mcu) -> HashMap<usize, u8> {
     m
 }
 
-/// Every pin that could carry `want`: free (or already set to exactly this
+/// EVERY pin that could carry `want`: free (or already set to exactly this
 /// function) and not taken by another module or an earlier signal.
-fn eligible_for(mcu: &Mcu, taken: &HashSet<usize>, want: &PinFunction) -> Vec<usize> {
+///
+/// Uncapped, and `pub(crate)` for that reason: this is what the pin pickers in
+/// the panel enumerate, and a picker that offered 8 of a C3's 21 pads would
+/// look exactly as arbitrary as the automatic choice the user is complaining
+/// about. The search applies [`MAX_PER_SIGNAL`] itself, where the budget it has
+/// to live within is known.
+pub(crate) fn eligible_for(mcu: &Mcu, taken: &HashSet<usize>, want: &PinFunction) -> Vec<usize> {
     mcu.iter_all_pins()
         .filter(|p| !p.reserved && !taken.contains(&p.number))
         .filter(|p| {
@@ -92,13 +128,45 @@ fn eligible_for(mcu: &Mcu, taken: &HashSet<usize>, want: &PinFunction) -> Vec<us
                 && (p.selected_function == *want || p.selected_function == PinFunction::Unset)
         })
         .map(|p| p.number)
-        .take(MAX_PER_SIGNAL)
         .collect()
 }
 
 /// [`eligible_for`], addressed the way a module names its signals.
-fn eligible(mcu: &Mcu, taken: &HashSet<usize>, sig: ModuleSignal, inst: u8) -> Vec<usize> {
+pub(crate) fn eligible(
+    mcu: &Mcu,
+    taken: &HashSet<usize>,
+    sig: ModuleSignal,
+    inst: u8,
+) -> Vec<usize> {
     eligible_for(mcu, taken, &sig.pin_function(inst))
+}
+
+/// [`eligible`], trimmed to what the automatic search can afford to explore.
+///
+/// Stops AT the cap rather than collecting the chip and truncating. `pick_pins`
+/// asks this thousands of times per instance, for every palette entry, on every
+/// frame the menu is open - building a forty-element Vec each time to keep
+/// eight of it was measurably a third of that frame.
+fn eligible_capped(mcu: &Mcu, taken: &HashSet<usize>, sig: ModuleSignal, inst: u8) -> Vec<usize> {
+    eligible_for_limited(mcu, taken, &sig.pin_function(inst), MAX_PER_SIGNAL)
+}
+
+/// [`eligible_for`] that stops after `limit` pads.
+fn eligible_for_limited(
+    mcu: &Mcu,
+    taken: &HashSet<usize>,
+    want: &PinFunction,
+    limit: usize,
+) -> Vec<usize> {
+    mcu.iter_all_pins()
+        .filter(|p| !p.reserved && !taken.contains(&p.number))
+        .filter(|p| {
+            p.available_functions.contains(want)
+                && (p.selected_function == *want || p.selected_function == PinFunction::Unset)
+        })
+        .map(|p| p.number)
+        .take(limit)
+        .collect()
 }
 
 /// Rank a candidate set of `(function the pin is wanted for, pin number)`.
@@ -115,6 +183,7 @@ fn score(
     let mut unassigned = 0;
     let mut ports: HashSet<&str> = HashSet::new();
     let mut side_set: HashSet<u8> = HashSet::new();
+    let mut board_use = 0;
     let (mut lo, mut hi) = (usize::MAX, 0usize);
     for (want, num) in chosen {
         if let Some(pin) = mcu.find_pin(*num) {
@@ -122,6 +191,9 @@ fn score(
                 unassigned += 1;
             }
             ports.insert(port_of(&pin.name));
+            if is_board_used(&pin.name) {
+                board_use += 1;
+            }
         }
         if let Some(&s) = sides.get(num) {
             side_set.insert(s);
@@ -134,6 +206,7 @@ fn score(
         ports: ports.len(),
         sides: side_set.len(),
         spread: hi.saturating_sub(lo),
+        board_use,
         instance: inst,
     }
 }
@@ -207,7 +280,7 @@ pub fn pick_pins(
         }
         let lists: Vec<Vec<usize>> = required
             .iter()
-            .map(|&sig| eligible(mcu, used, sig, inst))
+            .map(|&sig| eligible_capped(mcu, used, sig, inst))
             .collect();
         if lists.iter().any(|l| l.is_empty()) {
             continue; // this instance can't satisfy some required signal
@@ -228,7 +301,7 @@ pub fn pick_pins(
             // best — an NSS on the far side of the chip would otherwise undo the
             // compactness the required pins were chosen for.
             for &sig in optional {
-                let pick = eligible(mcu, &taken, sig, inst)
+                let pick = eligible_capped(mcu, &taken, sig, inst)
                     .into_iter()
                     .min_by_key(|&num| {
                         let mut trial = chosen.clone();
@@ -253,6 +326,33 @@ pub fn pick_pins(
     }
 
     best.map(|(_, inst, chosen)| (inst, chosen))
+}
+
+/// Which peripheral instances could host this module at all.
+///
+/// The instance loop of [`pick_pins`] with the scoring stripped out: an
+/// instance qualifies when every REQUIRED signal has at least one pad left. The
+/// palette dialog needs the list rather than the winner, because choosing the
+/// instance is half of "put it where I want it" - autowire ranks the instance
+/// LAST, so a compact wiring on USART3 beats a scattered one on USART1 and the
+/// user never sees that USART1 was possible.
+///
+/// Uncapped, like [`eligible_for`]: this answers what the chip can do.
+pub fn instances_for(
+    mcu: &Mcu,
+    used: &HashSet<usize>,
+    used_instances: &HashSet<u8>,
+    required: &[ModuleSignal],
+) -> Vec<u8> {
+    (0u8..=MAX_INSTANCE)
+        .filter(|inst| {
+            !used_instances.contains(inst)
+                && !required.is_empty()
+                && required
+                    .iter()
+                    .all(|&sig| !eligible(mcu, used, sig, *inst).is_empty())
+        })
+        .collect()
 }
 
 /// Pins for the partner signals of a pin the user assigned BY HAND — the SPI
@@ -287,9 +387,16 @@ pub fn pick_partners(
     let mut taken: HashSet<usize> = HashSet::new();
     taken.insert(source_pin);
 
+    // CAPPED, like `pick_pins`: this is a search under the same `MAX_COMBOS`
+    // budget, not an enumeration for a menu. Handing it the uncapped list makes
+    // it WORSE - measured on the bundled chips, an esp32s3 wants 1892
+    // combinations against a budget of 512, and `walk` fills that budget
+    // depth-first from the first candidate of the first partner. The ranking
+    // then covers only that corner, which is exactly the bias the exhaustive
+    // search was written to remove.
     let lists: Vec<Vec<usize>> = partners
         .iter()
-        .map(|want| eligible_for(mcu, &taken, want))
+        .map(|want| eligible_for_limited(mcu, &taken, want, MAX_PER_SIGNAL))
         .collect();
     // A partner with nowhere to go is dropped, not a reason to wire nothing:
     // the old first-fit assigned what it could, and so does this.
@@ -708,5 +815,92 @@ mod tests {
             w.contains(&39) && w.contains(&40) && w.contains(&41),
             "the user's own pins are reused, got {w:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod the_pads_the_search_may_reach {
+    use super::*;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::modules::ModuleKind;
+
+    fn chip(id: &str) -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu()
+    }
+
+    /// The enumeration a PICKER sees is the whole chip, not the search window.
+    ///
+    /// On a GPIO-matrix part the two numbers are far apart, and the gap is the
+    /// user's complaint: a menu built on the search's list would offer 8 of the
+    /// 21 pads that can carry the signal, and look every bit as arbitrary as
+    /// the automatic pick.
+    #[test]
+    fn a_picker_is_offered_every_legal_pad_not_the_first_eight() {
+        let mcu = chip("esp32c3");
+        let none = HashSet::new();
+        let all = eligible(&mcu, &none, ModuleSignal::Tx, 0);
+        assert!(
+            all.len() > MAX_PER_SIGNAL,
+            "a C3 has more UART TX pads than the search window: {}",
+            all.len()
+        );
+        // ...and the search still keeps to its budget, because MAX_COMBOS is
+        // sized for it.
+        assert_eq!(
+            eligible_capped(&mcu, &none, ModuleSignal::Tx, 0).len(),
+            MAX_PER_SIGNAL
+        );
+    }
+
+    /// A pad the BOARD already spends is the last one to be taken.
+    ///
+    /// The Pico's definition annotates exactly four: the on-board LED, VBUS
+    /// sense, VSYS sense and the SMPS mode pin. The second "+ USART" used to
+    /// land on two of them - not because they scored better, but because they
+    /// scored the SAME and are declared earlier in the chip file.
+    #[test]
+    fn a_board_pad_is_not_taken_while_a_plain_one_is_free() {
+        let mut mcu = chip("rp2040_pico");
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let annotated: Vec<String> = mcu
+            .modules
+            .iter()
+            .flat_map(|m| m.connections.iter())
+            .filter_map(|c| mcu.find_pin(c.mcu_pin))
+            .map(|p| p.name.clone())
+            .filter(|n| super::is_board_used(n))
+            .collect();
+        assert!(
+            annotated.is_empty(),
+            "no board-committed pad was taken: {annotated:?}"
+        );
+    }
+
+    /// The term ranks BELOW the geometry, so it can only settle a tie - it must
+    /// never pull a wiring onto two ports or two sides of the chip.
+    #[test]
+    fn the_board_term_never_outranks_the_hardware_terms() {
+        let worse_geometry = Score {
+            unassigned: 0,
+            ports: 2,
+            sides: 1,
+            spread: 4,
+            board_use: 0,
+            instance: 0,
+        };
+        let board_pad_but_compact = Score {
+            unassigned: 0,
+            ports: 1,
+            sides: 1,
+            spread: 4,
+            board_use: 2,
+            instance: 0,
+        };
+        assert!(board_pad_but_compact < worse_geometry);
     }
 }
