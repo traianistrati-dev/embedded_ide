@@ -355,6 +355,48 @@ pub fn instances_for(
         .collect()
 }
 
+/// Whether ANY wiring exists - the question [`Mcu::can_add_module`] asks.
+///
+/// The same search as [`pick_pins`] and deliberately not a second copy of its
+/// rules: same instance loop, same `eligible_capped` candidate lists, same
+/// `walk`. What it drops is everything that exists only to RANK - it stops at
+/// the first complete assignment instead of enumerating up to `MAX_COMBOS` of
+/// them per instance, scores none of them, and never builds the side map.
+///
+/// Exactly equivalent to `pick_pins(..).is_some()`, and asserted so against
+/// every bundled chip in `the_two_searches_agree`: `pick_pins` yields `Some`
+/// iff some instance produced at least one combination, and an optional signal
+/// can only ever be ADDED to a set, never make it fail.
+///
+/// Worth its own function because the palette asks this for every entry it
+/// draws, on every frame the menu is open, and the ranking it was throwing away
+/// cost 119 ms of that frame on an ESP32-S3.
+pub fn any_wiring(
+    mcu: &Mcu,
+    used: &HashSet<usize>,
+    used_instances: &HashSet<u8>,
+    required: &[ModuleSignal],
+) -> bool {
+    for inst in 0u8..=MAX_INSTANCE {
+        if used_instances.contains(&inst) {
+            continue;
+        }
+        let lists: Vec<Vec<usize>> = required
+            .iter()
+            .map(|&sig| eligible_capped(mcu, used, sig, inst))
+            .collect();
+        if lists.iter().any(|l| l.is_empty()) {
+            continue;
+        }
+        let mut found: Vec<Vec<usize>> = Vec::new();
+        walk(&lists, 0, &mut Vec::new(), &mut found, 1);
+        if !found.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Pins for the partner signals of a pin the user assigned BY HAND — the SPI
 /// MISO/MOSI that go with an SCK, the USART RX that goes with a TX.
 ///
@@ -902,5 +944,132 @@ mod the_pads_the_search_may_reach {
             instance: 0,
         };
         assert!(board_pad_but_compact < worse_geometry);
+    }
+}
+
+/// What one open-palette frame costs. `cargo test palette_frame_cost -- --ignored --nocapture`
+#[cfg(test)]
+mod palette_cost {
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::modules::ModuleKind;
+    use std::time::Instant;
+
+    /// The palette redraws every frame while its menu is open, and asks about
+    /// every kind the chip offers. This is the number that matters.
+    #[test]
+    #[ignore]
+    fn palette_frame_cost() {
+        for id in ["stm32f103c8t6", "rp2040_pico", "esp32c3", "esp32s3"] {
+            let mcu = builtin_definitions()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("built-in {id}"))
+                .build_mcu();
+            let kinds: Vec<ModuleKind> = ModuleKind::ALL
+                .into_iter()
+                .filter(|k| mcu.supports_module(*k))
+                .collect();
+
+            let t = Instant::now();
+            let mut n = 0;
+            for k in &kinds {
+                if mcu.can_add_module(*k) {
+                    n += 1;
+                }
+            }
+            let feasibility = t.elapsed();
+
+            // The pad preview, for ONE kind - the submenu that is open.
+            let t = Instant::now();
+            let one = kinds
+                .iter()
+                .find(|k| !k.is_custom())
+                .copied()
+                .unwrap_or(ModuleKind::Custom);
+            let _ = crate::panels::mcu_module::mcu::gui::modules::auto_wiring_summary(&mcu, one);
+            let preview = t.elapsed();
+
+            println!(
+                "FRAME {id:<16} kinds={:<3} addable={n:<3} feasibility={feasibility:?} \
+                 preview(1 kind)={preview:?}",
+                kinds.len()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod the_two_searches_agree {
+    use super::{any_wiring, pick_pins};
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::modules::ModuleKind;
+    use std::collections::HashSet;
+
+    /// `any_wiring` must answer exactly `pick_pins(..).is_some()`.
+    ///
+    /// The whole point of the cheap search is that it asks the SAME question,
+    /// so the palette cannot grey out an entry the add would accept, or offer
+    /// one the add would refuse. Driven to exhaustion on every bundled chip and
+    /// every kind it supports, because the answers only get interesting once
+    /// the pads start running out.
+    #[test]
+    fn the_cheap_search_answers_what_the_full_one_does() {
+        let mut checked = 0usize;
+        for d in builtin_definitions() {
+            let mut mcu = d.build_mcu();
+            for kind in ModuleKind::ALL {
+                if kind.is_custom() || !mcu.supports_module(kind) {
+                    continue;
+                }
+                let (required, optional) = kind.signals();
+                // Past exhaustion on purpose: the last iterations are the ones
+                // where one search could say yes and the other no.
+                for _ in 0..6 {
+                    let used: HashSet<usize> = mcu
+                        .modules
+                        .iter()
+                        .flat_map(|m| m.connections.iter().map(|c| c.mcu_pin))
+                        .collect();
+                    let used_instances: HashSet<u8> = mcu
+                        .modules
+                        .iter()
+                        .filter(|m| m.kind == kind)
+                        .map(|m| m.instance())
+                        .collect();
+                    let cheap = any_wiring(&mcu, &used, &used_instances, required);
+                    let full =
+                        pick_pins(&mcu, &used, &used_instances, required, optional).is_some();
+                    assert_eq!(cheap, full, "{} {kind:?}", d.id);
+                    checked += 1;
+                    if !cheap {
+                        break;
+                    }
+                    mcu.add_module(kind);
+                }
+            }
+        }
+        assert!(checked > 200, "the sweep really ran: {checked} cases");
+    }
+
+    /// An OPTIONAL signal can never turn a possible wiring into an impossible
+    /// one - which is why the cheap search may ignore optionals entirely.
+    #[test]
+    fn an_optional_signal_cannot_make_a_wiring_fail() {
+        for d in builtin_definitions() {
+            let mcu = d.build_mcu();
+            for kind in ModuleKind::ALL {
+                if kind.is_custom() || !mcu.supports_module(kind) {
+                    continue;
+                }
+                let (required, optional) = kind.signals();
+                if optional.is_empty() {
+                    continue;
+                }
+                let none = HashSet::new();
+                let with = pick_pins(&mcu, &none, &HashSet::new(), required, optional).is_some();
+                let without = pick_pins(&mcu, &none, &HashSet::new(), required, &[]).is_some();
+                assert_eq!(with, without, "{} {kind:?}", d.id);
+            }
+        }
     }
 }

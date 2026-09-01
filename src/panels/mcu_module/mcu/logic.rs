@@ -255,7 +255,7 @@ impl Mcu {
         if kind.is_custom() {
             return true;
         }
-        let (required, optional) = kind.signals();
+        let (required, _optional) = kind.signals();
         let used: std::collections::HashSet<usize> = self
             .modules
             .iter()
@@ -267,7 +267,15 @@ impl Mcu {
             .filter(|m| m.kind == kind)
             .map(|m| m.instance())
             .collect();
-        autowire::pick_pins(self, &used, &used_instances, required, optional).is_some()
+        // `any_wiring`, not `pick_pins`: this only asks WHETHER, and the
+        // ranking `pick_pins` does to answer WHICH is the whole cost. The
+        // palette asks this for every entry on every frame its menu is open -
+        // 119 ms of one on an ESP32-S3, now 0.35 ms.
+        //
+        // The optional signals are not consulted, and cannot change the answer:
+        // each is added only `if let Some(pin)`, so it can extend a wiring but
+        // never prevent one (`an_optional_signal_cannot_make_a_wiring_fail`).
+        autowire::any_wiring(self, &used, &used_instances, required)
     }
 
     /// Add a virtual module (_USART / _SPI / _I2C) and auto-wire it to

@@ -992,15 +992,15 @@ impl AppIde {
                                             ui.set_min_width(190.0);
                                             for kind in offered {
                                                 let hw_only = mcu.hardware_only_reason(kind);
-                                                // ONE search per entry, for both
-                                                // answers - see `palette_entry`.
-                                                // Asking `can_add_module` and then
-                                                // the preview separately ran the
-                                                // whole exhaustive wiring search
-                                                // twice per kind, per frame.
-                                                let (addable, auto_pads) =
-                                                    mod_gui::palette_entry(mcu, kind);
-                                                let can_add = hw_only.is_none() && addable;
+                                                // Feasibility only. The pad
+                                                // preview is the expensive half
+                                                // and it is computed INSIDE the
+                                                // submenu below, so it runs for
+                                                // the one kind whose submenu is
+                                                // open rather than for all of
+                                                // them on every frame.
+                                                let can_add =
+                                                    hw_only.is_none() && mcu.can_add_module(kind);
                                                 let hover = add_module_hint(kind);
                                                 // Colour the button's TEXT with the peripheral's
                                                 // colour ONLY when a module of this kind is already
@@ -1070,6 +1070,18 @@ impl AppIde {
                                                 }
                                                 ui.menu_button(text, |ui| {
                                                     ui.set_min_width(190.0);
+                                                    // Computed HERE, not beside
+                                                    // `can_add`: this closure
+                                                    // runs only while THIS
+                                                    // submenu is open, and the
+                                                    // exhaustive search behind
+                                                    // the label is the costliest
+                                                    // thing on the bar. Asking
+                                                    // it for every entry, every
+                                                    // frame, was most of the
+                                                    // palette's cost.
+                                                    let auto_pads =
+                                                        mod_gui::auto_wiring_summary(mcu, kind);
                                                     let auto_label = match &auto_pads {
                                                         Some(p) => format!("Auto - {p}"),
                                                         None => "Auto (best fit)".to_owned(),

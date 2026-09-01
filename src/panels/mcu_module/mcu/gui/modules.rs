@@ -1331,34 +1331,11 @@ pub fn auto_wiring_summary(
     mcu: &crate::panels::mcu_module::mcu::Mcu,
     kind: ModuleKind,
 ) -> Option<String> {
-    palette_entry(mcu, kind).1
-}
-
-/// Both answers the palette needs about one kind, from ONE search.
-///
-/// `(can this be added, the pads the automatic pick would take)`. They used to
-/// be two calls - `Mcu::can_add_module` and `auto_wiring_summary` - and each
-/// runs the same exhaustive `pick_pins`. That doubled the cost of drawing the
-/// palette, which is already the most expensive thing on the bar: measured on
-/// the bundled chips, one open frame costs 270 ms on an ESP32-S3 for the
-/// feasibility half alone, and asking twice made it 530 ms. One call restores
-/// it.
-///
-/// The two guards `can_add_module` applies come first and cost nothing, so this
-/// agrees with it by construction rather than by copying its rules - asserted
-/// in `the_palette_agrees_with_the_model`.
-pub fn palette_entry(
-    mcu: &crate::panels::mcu_module::mcu::Mcu,
-    kind: ModuleKind,
-) -> (bool, Option<String>) {
     use crate::panels::mcu_module::modules::autowire;
-    if kind.is_single_instance() && mcu.modules.iter().any(|m| m.kind == kind) {
-        return (false, None);
-    }
-    // A Custom module claims no peripheral and wires nothing, so there is
-    // always room for another and never a wiring to preview.
+    // A Custom module claims no peripheral and wires nothing, so there is never
+    // a wiring to preview.
     if kind.is_custom() {
-        return (true, None);
+        return None;
     }
     let (required, optional) = kind.signals();
     let used: std::collections::HashSet<usize> = mcu
@@ -1372,17 +1349,13 @@ pub fn palette_entry(
         .filter(|m| m.kind == kind)
         .map(|m| m.instance())
         .collect();
-    let Some((_, chosen)) = autowire::pick_pins(mcu, &used, &used_instances, required, optional)
-    else {
-        return (false, None);
-    };
+    let (_, chosen) = autowire::pick_pins(mcu, &used, &used_instances, required, optional)?;
     let names: Vec<String> = chosen
         .iter()
         .filter_map(|(_, n)| mcu.find_pin(*n))
         .map(|p| p.name.clone())
         .collect();
-    let preview = (!names.is_empty()).then(|| names.join(" / "));
-    (true, preview)
+    (!names.is_empty()).then(|| names.join(" / "))
 }
 
 /// Whether this family moves a peripheral's pads as ONE group, so a single
@@ -6348,47 +6321,15 @@ mod tests {
 
 #[cfg(test)]
 mod the_palette_agrees_with_the_model {
-    use super::palette_entry;
+    use super::auto_wiring_summary;
     use crate::panels::mcu_module::builtins::builtin_definitions;
     use crate::panels::mcu_module::modules::ModuleKind;
 
-    /// `palette_entry`'s first answer must be exactly `can_add_module`'s.
+    /// The label names the pads the add will really take.
     ///
-    /// They are two implementations of one question - the palette merged them
-    /// with the pad preview so the exhaustive search runs once per entry
-    /// instead of twice. A drift between them is a greyed-out entry that can be
-    /// added, or an enabled one that cannot.
-    #[test]
-    fn the_addable_flag_is_the_models_own_answer() {
-        for d in builtin_definitions() {
-            let mut mcu = d.build_mcu();
-            for kind in ModuleKind::ALL {
-                if !mcu.supports_module(kind) {
-                    continue;
-                }
-                // Drive the chip to exhaustion, checking agreement at each step
-                // - the interesting answers are the ones near the end.
-                for _ in 0..4 {
-                    let (addable, preview) = palette_entry(&mcu, kind);
-                    assert_eq!(addable, mcu.can_add_module(kind), "{} {kind:?}", d.id);
-                    if !addable {
-                        break;
-                    }
-                    // A kind that CAN be added and wires pads must preview them;
-                    // Custom wires none, so it previews none.
-                    assert_eq!(
-                        preview.is_none(),
-                        kind.is_custom(),
-                        "{} {kind:?}: preview presence follows the wiring",
-                        d.id
-                    );
-                    mcu.add_module(kind);
-                }
-            }
-        }
-    }
-
-    /// The preview names the pads the add will really take.
+    /// Two searches now answer the palette - the cheap `any_wiring` behind
+    /// `can_add_module` for whether an entry is enabled, and `pick_pins` behind
+    /// this label for what it will take. They must not disagree.
     #[test]
     fn the_preview_is_the_wiring_that_gets_committed() {
         for id in ["rp2040_pico", "stm32f103c8t6", "esp32c3"] {
@@ -6398,7 +6339,7 @@ mod the_palette_agrees_with_the_model {
                 .unwrap_or_else(|| panic!("built-in {id}"))
                 .build_mcu();
             let kind = ModuleKind::GenericInterfaceSpi;
-            let Some(preview) = palette_entry(&mcu, kind).1 else {
+            let Some(preview) = auto_wiring_summary(&mcu, kind) else {
                 continue;
             };
             assert!(mcu.add_module(kind));
@@ -6412,6 +6353,35 @@ mod the_palette_agrees_with_the_model {
             let mut want: Vec<String> = preview.split(" / ").map(str::to_owned).collect();
             want.sort();
             assert_eq!(got, want, "{id}: the label promised what the add did");
+        }
+    }
+
+    /// An entry that is enabled has a wiring to show, and one that is not has
+    /// none. The two searches must not disagree about that either.
+    #[test]
+    fn an_enabled_entry_always_has_a_preview() {
+        for d in builtin_definitions() {
+            let mut mcu = d.build_mcu();
+            for kind in ModuleKind::ALL {
+                if !mcu.supports_module(kind) || kind.is_custom() {
+                    continue;
+                }
+                // ...all the way to exhaustion, where the answers get
+                // interesting.
+                for _ in 0..4 {
+                    let can = mcu.can_add_module(kind);
+                    assert_eq!(
+                        can,
+                        auto_wiring_summary(&mcu, kind).is_some(),
+                        "{} {kind:?}: enabled iff there is a wiring",
+                        d.id
+                    );
+                    if !can {
+                        break;
+                    }
+                    mcu.add_module(kind);
+                }
+            }
         }
     }
 }
