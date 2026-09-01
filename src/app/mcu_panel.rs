@@ -1442,11 +1442,18 @@ impl AppIde {
                                                             m.kind,
                                                             m.instance(),
                                                         );
-                                                        // Same 10 %-opacity tint as
-                                                        // the module's box on the
-                                                        // canvas; the OPEN one is
-                                                        // brighter, so the list says
-                                                        // which config is on the right.
+                                                        // The same idea as the
+                                                        // module's box on the
+                                                        // canvas: the peripheral's
+                                                        // colour, well diluted. Not
+                                                        // the same NUMBER - the box
+                                                        // lerps 16 % towards it over
+                                                        // an opaque ground, this
+                                                        // lays 10 % alpha over
+                                                        // whatever is behind. The
+                                                        // OPEN one is brighter, so
+                                                        // the list says which config
+                                                        // is on the right.
                                                         let bg = egui::Color32::from_rgba_unmultiplied(
                                                             c.r(),
                                                             c.g(),

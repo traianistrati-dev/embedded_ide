@@ -38,6 +38,10 @@ use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 /// offers all of them; that is where "the pad I actually want" belongs.
 const MAX_PER_SIGNAL: usize = 8;
 /// Upper bound on the wirings explored per instance.
+///
+/// A backstop rather than a working limit: measured over the bundled chips, the
+/// worst case (an ESP32-S3 I2S) walks 672 combinations summed over all eighteen
+/// instances, and no chip reaches this cap on even one of them.
 const MAX_COMBOS: usize = 512;
 /// Highest peripheral instance number tried.
 ///
@@ -169,60 +173,179 @@ fn eligible_for_limited(
         .collect()
 }
 
+/// What ranking needs to know about one pad.
+struct PinFact<'a> {
+    /// The GPIO port letters, as [`port_of`] reads them.
+    port: &'a str,
+    /// Which edge of the chip, or `None` for a ball in the grid.
+    side: Option<u8>,
+    /// The pad's own name says the board already spends it - see
+    /// [`is_board_used`].
+    board_used: bool,
+    /// What the pad currently carries.
+    func: &'a PinFunction,
+}
+
+/// The chip, read ONCE per search.
+///
+/// Ranking used to ask `Mcu::find_pin` for every pad of every candidate wiring,
+/// and that is a LINEAR SCAN over the whole chip through a five-way iterator
+/// chain (`iter_all_pins`) - twenty-four thousand calls and two hundred
+/// thousand pin visits for the worst bundled case, an ESP32-S3 I2S.
+///
+/// Worth removing, but it is NOT where the time went: measured, substituting a
+/// map for `find_pin` and changing nothing else is worth about 8%. The search
+/// spent its time re-deriving the optional signals' candidate lists inside the
+/// combination loop, and re-scoring the whole set for every candidate of them -
+/// see [`ScoreAcc`] and the `opt_pads` hoist. Said plainly because the wrong
+/// attribution would send the next reader at the wrong thing.
+struct PinFacts<'a> {
+    by_num: HashMap<usize, PinFact<'a>>,
+}
+
+impl<'a> PinFacts<'a> {
+    fn of(mcu: &'a Mcu) -> Self {
+        let sides = side_map(mcu);
+        Self {
+            by_num: mcu
+                .iter_all_pins()
+                .map(|p| {
+                    (
+                        p.number,
+                        PinFact {
+                            port: port_of(&p.name),
+                            side: sides.get(&p.number).copied(),
+                            board_used: is_board_used(&p.name),
+                            func: &p.selected_function,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A [`Score`] under construction, so a set can be ranked once and then asked
+/// what ONE more pad would make of it.
+///
+/// Every term folds: three are sums, one is a bitmask union, two are a running
+/// min and max, and the port count is a set whose SIZE is all that is read. So
+/// "the score of these pads plus that one" needs no second pass over the pads -
+/// which is what the optional-signal loop was doing, once per candidate, five
+/// hundred combinations deep.
+#[derive(Clone)]
+struct ScoreAcc<'a> {
+    unassigned: usize,
+    ports: Vec<&'a str>,
+    side_bits: u8,
+    board_use: usize,
+    lo: usize,
+    hi: usize,
+}
+
+impl<'a> ScoreAcc<'a> {
+    fn new() -> Self {
+        Self {
+            unassigned: 0,
+            ports: Vec::new(),
+            side_bits: 0,
+            board_use: 0,
+            lo: usize::MAX,
+            hi: 0,
+        }
+    }
+
+    fn add(&mut self, facts: &'a PinFacts<'a>, want: &PinFunction, num: usize) {
+        if let Some(f) = facts.by_num.get(&num) {
+            if *f.func != *want {
+                self.unassigned += 1;
+            }
+            if !self.ports.contains(&f.port) {
+                self.ports.push(f.port);
+            }
+            if f.board_used {
+                self.board_use += 1;
+            }
+            if let Some(s) = f.side {
+                self.side_bits |= 1 << s;
+            }
+        }
+        self.lo = self.lo.min(num);
+        self.hi = self.hi.max(num);
+    }
+
+    fn finish(&self, inst: u8) -> Score {
+        Score {
+            unassigned: self.unassigned,
+            ports: self.ports.len(),
+            sides: self.side_bits.count_ones() as usize,
+            spread: self.hi.saturating_sub(self.lo),
+            board_use: self.board_use,
+            instance: inst,
+        }
+    }
+
+    /// What this set WOULD score with one more pad on it - without touching the
+    /// accumulator, and without a second pass or an allocation.
+    fn with(&self, facts: &PinFacts<'_>, inst: u8, want: &PinFunction, num: usize) -> Score {
+        let mut unassigned = self.unassigned;
+        let mut ports = self.ports.len();
+        let mut side_bits = self.side_bits;
+        let mut board_use = self.board_use;
+        if let Some(f) = facts.by_num.get(&num) {
+            if *f.func != *want {
+                unassigned += 1;
+            }
+            if !self.ports.contains(&f.port) {
+                ports += 1;
+            }
+            if f.board_used {
+                board_use += 1;
+            }
+            if let Some(s) = f.side {
+                side_bits |= 1 << s;
+            }
+        }
+        Score {
+            unassigned,
+            ports,
+            sides: side_bits.count_ones() as usize,
+            spread: self.hi.max(num).saturating_sub(self.lo.min(num)),
+            board_use,
+            instance: inst,
+        }
+    }
+}
+
+/// Rank a candidate set, from the facts rather than from the chip.
+///
+/// Takes the pads as an ITERATOR so a caller naming them by module signal does
+/// not have to materialise a `Vec` of `(PinFunction, usize)` per candidate -
+/// which, at one allocation per wiring per instance, was the second cost after
+/// `find_pin`.
+///
+/// `ports` and `sides` are counted without a `HashSet` each: a wiring has at
+/// most a handful of pads, so a four-slot linear scan beats hashing, and a side
+/// is one of four values, which is a bitmask.
+fn score_pads(
+    facts: &PinFacts,
+    inst: u8,
+    pads: impl Iterator<Item = (PinFunction, usize)>,
+) -> Score {
+    let mut acc = ScoreAcc::new();
+    for (want, num) in pads {
+        acc.add(facts, &want, num);
+    }
+    acc.finish(inst)
+}
+
 /// Rank a candidate set of `(function the pin is wanted for, pin number)`.
 ///
 /// It is keyed on the FUNCTION rather than on a module signal so the same
 /// ranking serves both callers: a whole module's wiring, and the partners of a
 /// single pin the user assigned by hand.
-fn score(
-    mcu: &Mcu,
-    inst: u8,
-    chosen: &[(PinFunction, usize)],
-    sides: &HashMap<usize, u8>,
-) -> Score {
-    let mut unassigned = 0;
-    let mut ports: HashSet<&str> = HashSet::new();
-    let mut side_set: HashSet<u8> = HashSet::new();
-    let mut board_use = 0;
-    let (mut lo, mut hi) = (usize::MAX, 0usize);
-    for (want, num) in chosen {
-        if let Some(pin) = mcu.find_pin(*num) {
-            if pin.selected_function != *want {
-                unassigned += 1;
-            }
-            ports.insert(port_of(&pin.name));
-            if is_board_used(&pin.name) {
-                board_use += 1;
-            }
-        }
-        if let Some(&s) = sides.get(num) {
-            side_set.insert(s);
-        }
-        lo = lo.min(*num);
-        hi = hi.max(*num);
-    }
-    Score {
-        unassigned,
-        ports: ports.len(),
-        sides: side_set.len(),
-        spread: hi.saturating_sub(lo),
-        board_use,
-        instance: inst,
-    }
-}
-
-/// `score` for a set named by module signals.
-fn score_signals(
-    mcu: &Mcu,
-    inst: u8,
-    chosen: &[(ModuleSignal, usize)],
-    sides: &HashMap<usize, u8>,
-) -> Score {
-    let by_fn: Vec<(PinFunction, usize)> = chosen
-        .iter()
-        .map(|&(sig, num)| (sig.pin_function(inst), num))
-        .collect();
-    score(mcu, inst, &by_fn, sides)
+fn score(facts: &PinFacts, inst: u8, chosen: &[(PinFunction, usize)]) -> Score {
+    score_pads(facts, inst, chosen.iter().cloned())
 }
 
 /// All distinct-pin combinations of `lists` (one pin per required signal), up to
@@ -271,56 +394,96 @@ pub fn pick_pins(
     required: &[ModuleSignal],
     optional: &[ModuleSignal],
 ) -> Option<(u8, Vec<(ModuleSignal, usize)>)> {
-    let sides = side_map(mcu);
+    let facts = PinFacts::of(mcu);
     let mut best: Option<(Score, u8, Vec<(ModuleSignal, usize)>)> = None;
+    // Reused across combinations instead of reallocated per candidate.
+    let mut chosen: Vec<(ModuleSignal, usize)> = Vec::new();
 
     for inst in 0u8..=MAX_INSTANCE {
         if used_instances.contains(&inst) {
             continue;
         }
-        let lists: Vec<Vec<usize>> = required
-            .iter()
-            .map(|&sig| eligible_capped(mcu, used, sig, inst))
-            .collect();
-        if lists.iter().any(|l| l.is_empty()) {
+        // Built with an early exit rather than `map().collect()`: an instance
+        // the chip does not have fails on its FIRST signal, and there are
+        // eighteen of those for every two or three real ones. Collecting all
+        // four lists before looking at any of them scanned the chip three times
+        // over for nothing, on most iterations of this loop.
+        let Some(lists) = signal_lists(mcu, used, required, inst) else {
             continue; // this instance can't satisfy some required signal
-        }
+        };
+
+        // The pads each OPTIONAL signal could take, minus only what other
+        // modules hold - hoisted out of the combination loop, which used to
+        // re-scan the whole chip for every one of them.
+        //
+        // UNCAPPED on purpose, and the cap re-applied per combination below:
+        // the search's `take(MAX_PER_SIGNAL)` has to happen AFTER this
+        // combination's own pads are excluded, or a candidate list would come
+        // back one short instead of reaching for the next pad. That is the one
+        // detail that makes this hoist give the same answer as the scan.
+        // Bounded, and the bound is a proof rather than a guess: the loop
+        // below drops only pads already in `chosen` before taking
+        // `MAX_PER_SIGNAL`, and `chosen` never holds more than one pad per
+        // signal - so no candidate past this many can ever be reached, and
+        // truncating here cannot change the answer.
+        //
+        // The optionals have to be counted too, not just the required pads:
+        // by the time the SECOND optional signal is placed, `chosen` already
+        // holds the first one. Leaving them out made the list one short in
+        // exactly that case, which is what the differential test caught.
+        //
+        // Without the bound an ESP32-S3 walked forty-odd pads per optional
+        // signal per combination, five hundred combinations deep per instance.
+        let opt_cap = MAX_PER_SIGNAL + required.len() + optional.len();
+        let opt_pads: Vec<Vec<usize>> = optional
+            .iter()
+            .map(|&sig| {
+                let mut v = eligible(mcu, used, sig, inst);
+                v.truncate(opt_cap);
+                v
+            })
+            .collect();
 
         let mut combos: Vec<Vec<usize>> = Vec::new();
         walk(&lists, 0, &mut Vec::new(), &mut combos, MAX_COMBOS);
 
         for combo in combos {
-            let mut chosen: Vec<(ModuleSignal, usize)> = required
-                .iter()
-                .copied()
-                .zip(combo.iter().copied())
-                .collect();
-            let mut taken: HashSet<usize> = used.clone();
-            taken.extend(combo.iter().copied());
+            chosen.clear();
+            chosen.extend(required.iter().copied().zip(combo.iter().copied()));
+            // The required pads, ranked ONCE. Each optional candidate then asks
+            // what it would make of this, instead of the whole set being folded
+            // again per candidate.
+            let mut acc = ScoreAcc::new();
+            for &(sig, num) in chosen.iter() {
+                acc.add(&facts, &sig.pin_function(inst), num);
+            }
             // An optional signal takes whichever of its pins keeps the whole set
             // best — an NSS on the far side of the chip would otherwise undo the
             // compactness the required pins were chosen for.
-            for &sig in optional {
-                let pick = eligible_capped(mcu, &taken, sig, inst)
-                    .into_iter()
-                    .min_by_key(|&num| {
-                        let mut trial = chosen.clone();
-                        trial.push((sig, num));
-                        score_signals(mcu, inst, &trial, &sides)
-                    });
+            for (i, &sig) in optional.iter().enumerate() {
+                // `chosen` holds the combination plus the optionals already
+                // placed, and it is at most a handful of pads - so a linear
+                // scan of it beats the `HashSet` clone the old code made per
+                // combination.
+                let pick = opt_pads[i]
+                    .iter()
+                    .copied()
+                    .filter(|n| !chosen.iter().any(|&(_, c)| c == *n))
+                    .take(MAX_PER_SIGNAL)
+                    .min_by_key(|&num| acc.with(&facts, inst, &sig.pin_function(inst), num));
                 if let Some(num) = pick {
-                    taken.insert(num);
+                    acc.add(&facts, &sig.pin_function(inst), num);
                     chosen.push((sig, num));
                 }
             }
 
-            let sc = score_signals(mcu, inst, &chosen, &sides);
+            let sc = acc.finish(inst);
             let better = match &best {
                 None => true,
                 Some((bs, _, _)) => sc < *bs,
             };
             if better {
-                best = Some((sc, inst, chosen));
+                best = Some((sc, inst, chosen.clone()));
             }
         }
     }
@@ -355,6 +518,25 @@ pub fn instances_for(
         .collect()
 }
 
+/// Every required signal's candidate pads for one instance, or `None` as soon
+/// as one of them has nowhere to go.
+fn signal_lists(
+    mcu: &Mcu,
+    used: &HashSet<usize>,
+    required: &[ModuleSignal],
+    inst: u8,
+) -> Option<Vec<Vec<usize>>> {
+    let mut lists = Vec::with_capacity(required.len());
+    for &sig in required {
+        let l = eligible_capped(mcu, used, sig, inst);
+        if l.is_empty() {
+            return None;
+        }
+        lists.push(l);
+    }
+    Some(lists)
+}
+
 /// Whether ANY wiring exists - the question [`Mcu::can_add_module`] asks.
 ///
 /// The same search as [`pick_pins`] and deliberately not a second copy of its
@@ -381,13 +563,9 @@ pub fn any_wiring(
         if used_instances.contains(&inst) {
             continue;
         }
-        let lists: Vec<Vec<usize>> = required
-            .iter()
-            .map(|&sig| eligible_capped(mcu, used, sig, inst))
-            .collect();
-        if lists.iter().any(|l| l.is_empty()) {
+        let Some(lists) = signal_lists(mcu, used, required, inst) else {
             continue;
-        }
+        };
         let mut found: Vec<Vec<usize>> = Vec::new();
         walk(&lists, 0, &mut Vec::new(), &mut found, 1);
         if !found.is_empty() {
@@ -425,7 +603,7 @@ pub fn pick_partners(
     if partners.is_empty() {
         return Vec::new();
     }
-    let sides = side_map(mcu);
+    let facts = PinFacts::of(mcu);
     let mut taken: HashSet<usize> = HashSet::new();
     taken.insert(source_pin);
 
@@ -465,7 +643,7 @@ pub fn pick_partners(
             with_source.push((func.clone(), source_pin));
             // The instance tie-break is meaningless here (the instance is the
             // user's, already fixed by `func`), so any constant will do.
-            score(mcu, 0, &with_source, &sides)
+            score(&facts, 0, &with_source)
         })
         .unwrap_or_default()
 }
@@ -979,19 +1157,24 @@ mod palette_cost {
             }
             let feasibility = t.elapsed();
 
-            // The pad preview, for ONE kind - the submenu that is open.
-            let t = Instant::now();
-            let one = kinds
-                .iter()
-                .find(|k| !k.is_custom())
-                .copied()
-                .unwrap_or(ModuleKind::Custom);
-            let _ = crate::panels::mcu_module::mcu::gui::modules::auto_wiring_summary(&mcu, one);
-            let preview = t.elapsed();
+            // The pad preview, for the WORST kind. A mean over the cheap ones
+            // would flatter it: the frame is only as fast as the submenu the
+            // user actually opened.
+            let mut preview = std::time::Duration::ZERO;
+            let mut worst = ModuleKind::Custom;
+            for k in kinds.iter().filter(|k| !k.is_custom()) {
+                let t = Instant::now();
+                let _ = crate::panels::mcu_module::mcu::gui::modules::auto_wiring_summary(&mcu, *k);
+                let e = t.elapsed();
+                if e > preview {
+                    preview = e;
+                    worst = *k;
+                }
+            }
 
             println!(
                 "FRAME {id:<16} kinds={:<3} addable={n:<3} feasibility={feasibility:?} \
-                 preview(1 kind)={preview:?}",
+                 worst preview={preview:?} ({worst:?})",
                 kinds.len()
             );
         }
@@ -1071,5 +1254,242 @@ mod the_two_searches_agree {
                 assert_eq!(with, without, "{} {kind:?}", d.id);
             }
         }
+    }
+}
+
+/// The search EXACTLY as it stood before it was made fast, kept as the oracle.
+///
+/// `pick_pins` decides where every peripheral in every generated project goes,
+/// so an optimisation of it has one acceptance criterion and it is not "the
+/// tests still pass": it must return the SAME instance and the SAME pin list,
+/// in the same order, for every input. A faster search that quietly prefers a
+/// different pad would rewire every user's project on their next Save, and no
+/// existing test would say a word.
+///
+/// So the old body lives on here, verbatim, and
+/// `the_fast_search_returns_what_the_old_one_did` runs both over every bundled
+/// chip, every module kind, and a spread of prefill states, comparing results
+/// exactly. Delete this module only when `pick_pins` stops being load-bearing.
+#[cfg(test)]
+mod reference_search {
+    use super::*;
+
+    /// The search window, FROZEN at what it was when this oracle was taken.
+    ///
+    /// Not `super::MAX_PER_SIGNAL`. An oracle that reads the same constant as
+    /// the code it checks moves with it, and the one class of change it would
+    /// then be blind to is the one that matters most here: narrowing the window
+    /// re-wires real projects onto different pads, and both sides of the
+    /// comparison would agree about it. That is not hypothetical - it happened
+    /// to this very file, the constant went 8 -> 6, and the differential test
+    /// stayed green.
+    ///
+    /// So changing `MAX_PER_SIGNAL` now BREAKS this test, and that is the
+    /// intent: the window is part of the answer, and moving it is a decision to
+    /// declare here, not a tuning knob to turn quietly.
+    const REF_MAX_PER_SIGNAL: usize = 8;
+
+    /// The oracle's own candidate list, on the frozen window.
+    fn eligible_capped(
+        mcu: &Mcu,
+        taken: &HashSet<usize>,
+        sig: ModuleSignal,
+        inst: u8,
+    ) -> Vec<usize> {
+        eligible_for_limited(mcu, taken, &sig.pin_function(inst), REF_MAX_PER_SIGNAL)
+    }
+
+    fn score(
+        mcu: &Mcu,
+        inst: u8,
+        chosen: &[(PinFunction, usize)],
+        sides: &HashMap<usize, u8>,
+    ) -> Score {
+        let mut unassigned = 0;
+        let mut ports: HashSet<&str> = HashSet::new();
+        let mut side_set: HashSet<u8> = HashSet::new();
+        let mut board_use = 0;
+        let (mut lo, mut hi) = (usize::MAX, 0usize);
+        for (want, num) in chosen {
+            if let Some(pin) = mcu.find_pin(*num) {
+                if pin.selected_function != *want {
+                    unassigned += 1;
+                }
+                ports.insert(port_of(&pin.name));
+                if is_board_used(&pin.name) {
+                    board_use += 1;
+                }
+            }
+            if let Some(&s) = sides.get(num) {
+                side_set.insert(s);
+            }
+            lo = lo.min(*num);
+            hi = hi.max(*num);
+        }
+        Score {
+            unassigned,
+            ports: ports.len(),
+            sides: side_set.len(),
+            spread: hi.saturating_sub(lo),
+            board_use,
+            instance: inst,
+        }
+    }
+
+    fn score_signals(
+        mcu: &Mcu,
+        inst: u8,
+        chosen: &[(ModuleSignal, usize)],
+        sides: &HashMap<usize, u8>,
+    ) -> Score {
+        let by_fn: Vec<(PinFunction, usize)> = chosen
+            .iter()
+            .map(|&(sig, num)| (sig.pin_function(inst), num))
+            .collect();
+        score(mcu, inst, &by_fn, sides)
+    }
+
+    pub fn pick_pins(
+        mcu: &Mcu,
+        used: &HashSet<usize>,
+        used_instances: &HashSet<u8>,
+        required: &[ModuleSignal],
+        optional: &[ModuleSignal],
+    ) -> Option<(u8, Vec<(ModuleSignal, usize)>)> {
+        let sides = side_map(mcu);
+        let mut best: Option<(Score, u8, Vec<(ModuleSignal, usize)>)> = None;
+
+        for inst in 0u8..=MAX_INSTANCE {
+            if used_instances.contains(&inst) {
+                continue;
+            }
+            let lists: Vec<Vec<usize>> = required
+                .iter()
+                .map(|&sig| eligible_capped(mcu, used, sig, inst))
+                .collect();
+            if lists.iter().any(|l| l.is_empty()) {
+                continue; // this instance can't satisfy some required signal
+            }
+
+            let mut combos: Vec<Vec<usize>> = Vec::new();
+            walk(&lists, 0, &mut Vec::new(), &mut combos, MAX_COMBOS);
+
+            for combo in combos {
+                let mut chosen: Vec<(ModuleSignal, usize)> = required
+                    .iter()
+                    .copied()
+                    .zip(combo.iter().copied())
+                    .collect();
+                let mut taken: HashSet<usize> = used.clone();
+                taken.extend(combo.iter().copied());
+                // An optional signal takes whichever of its pins keeps the whole set
+                // best — an NSS on the far side of the chip would otherwise undo the
+                // compactness the required pins were chosen for.
+                for &sig in optional {
+                    let pick = eligible_capped(mcu, &taken, sig, inst)
+                        .into_iter()
+                        .min_by_key(|&num| {
+                            let mut trial = chosen.clone();
+                            trial.push((sig, num));
+                            score_signals(mcu, inst, &trial, &sides)
+                        });
+                    if let Some(num) = pick {
+                        taken.insert(num);
+                        chosen.push((sig, num));
+                    }
+                }
+
+                let sc = score_signals(mcu, inst, &chosen, &sides);
+                let better = match &best {
+                    None => true,
+                    Some((bs, _, _)) => sc < *bs,
+                };
+                if better {
+                    best = Some((sc, inst, chosen));
+                }
+            }
+        }
+
+        best.map(|(_, inst, chosen)| (inst, chosen))
+    }
+}
+
+#[cfg(test)]
+mod the_fast_search_matches_the_reference {
+    use super::{pick_pins, reference_search};
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::modules::ModuleKind;
+    use crate::panels::mcu_module::pins::PinFunction;
+    use std::collections::HashSet;
+
+    /// Byte-for-byte the same answer, on every chip, kind and prefill state.
+    ///
+    /// The acceptance criterion for making `pick_pins` fast. Not "the tests
+    /// still pass" - a search that quietly preferred a different pad would
+    /// rewire every project on its next Save and nothing else would notice.
+    #[test]
+    fn the_fast_search_returns_what_the_old_one_did() {
+        let mut cases = 0usize;
+        for d in builtin_definitions() {
+            for kind in ModuleKind::ALL {
+                let base = d.build_mcu();
+                if kind.is_custom() || !base.supports_module(kind) {
+                    continue;
+                }
+                let (required, optional) = kind.signals();
+
+                // A spread of states: empty, then with pads spoken for, then
+                // with instances spoken for, then both - the corners where a
+                // ranking can start to differ.
+                for prefill in 0..5usize {
+                    let mut mcu = base.clone();
+                    // Park some pads on GPIO so the candidate lists shrink
+                    // unevenly, which is what makes ties appear.
+                    let victims: Vec<usize> = mcu
+                        .iter_all_pins()
+                        .filter(|p| !p.reserved)
+                        .map(|p| p.number)
+                        .step_by(3)
+                        .take(prefill * 2)
+                        .collect();
+                    for n in victims {
+                        if let Some(p) = mcu.find_pin_mut(n) {
+                            p.selected_function = PinFunction::GpioOutput;
+                        }
+                    }
+                    for _ in 0..prefill.min(2) {
+                        mcu.add_module(kind);
+                    }
+
+                    let used: HashSet<usize> = mcu
+                        .modules
+                        .iter()
+                        .flat_map(|m| m.connections.iter().map(|c| c.mcu_pin))
+                        .collect();
+                    let used_instances: HashSet<u8> = mcu
+                        .modules
+                        .iter()
+                        .filter(|m| m.kind == kind)
+                        .map(|m| m.instance())
+                        .collect();
+
+                    let fast = pick_pins(&mcu, &used, &used_instances, required, optional);
+                    let slow = reference_search::pick_pins(
+                        &mcu,
+                        &used,
+                        &used_instances,
+                        required,
+                        optional,
+                    );
+                    assert_eq!(
+                        fast, slow,
+                        "{} {kind:?} prefill={prefill}: the fast search diverged",
+                        d.id
+                    );
+                    cases += 1;
+                }
+            }
+        }
+        assert!(cases > 300, "the sweep really ran: {cases} cases");
     }
 }

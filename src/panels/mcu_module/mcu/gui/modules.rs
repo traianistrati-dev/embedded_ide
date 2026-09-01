@@ -36,17 +36,124 @@ const CUSTOM_ROW_H: f32 = 21.0;
 /// Height of a module's box. A Custom module grows by one row per pin, because
 /// its pins' rename fields live INSIDE the box, grouped under the module name,
 /// instead of floating separately beside the chip.
+/// The six families the canvas draws, over the twenty-four kinds.
+///
+/// # Six and not twenty-four
+///
+/// A reader separates five to seven silhouettes at a glance, and the outline
+/// budget here is smaller still: [`facing_terminal`] pins a wire to a rect EDGE,
+/// so only the corners of the end facing AWAY from the chip may be cut, and
+/// `PathShape::fill` is convex-only, which rules out notches, tabs and stepped
+/// edges. What is left is a chamfer, a bevel and a rounded end - three motifs.
+///
+/// Grouping is not a compromise for that budget, though. The ESP-only kinds
+/// (PARL_IO, LCD_CAM, Touch, MCPWM, PCNT, RMT) never share a canvas with the
+/// STM32-only ones (LPUART, SAI, SDMMC, the four external-memory ports), so no
+/// real project shows more than four or five of these at once. A vocabulary of
+/// twenty-four marks is one nobody could see side by side long enough to learn.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum BoxShape {
+    /// A bus with a handful of named lines. The plain rounded box everything
+    /// else reads as "not that".
+    Serial,
+    /// External memory and cards: one back corner cut at 45°, the pin-1 bevel
+    /// of a memory package.
+    Memory,
+    /// A parallel port. Taller, because it is: eight to twenty-three signals
+    /// have to share one edge, and `facing_terminal` gives them the box height
+    /// minus sixteen pixels to do it in.
+    Parallel,
+    /// Timing and drive: one pad, one waveform. A keystone - wide at the chip,
+    /// narrow at the back.
+    Driver,
+    /// A link that leaves the board. Rounded at the back, the only non-angular
+    /// member of the set.
+    OffBoard,
+    /// A module the user authored. Square corners, as before.
+    Custom,
+}
+
+impl BoxShape {
+    pub fn of(kind: ModuleKind) -> Self {
+        use ModuleKind as K;
+        match kind {
+            K::GenericInterfaceUsart
+            | K::GenericInterfaceLpuart
+            | K::GenericInterfaceSpi
+            | K::GenericInterfaceI2c
+            | K::GenericInterfaceI2s
+            | K::GenericInterfaceSai => Self::Serial,
+
+            K::GenericInterfaceQspi
+            | K::GenericInterfaceOspi
+            | K::GenericInterfaceXspi
+            | K::GenericInterfaceHspi
+            | K::GenericInterfaceSdmmc => Self::Memory,
+
+            K::GenericInterfaceParlIo
+            | K::GenericInterfaceParlIoRx
+            | K::GenericInterfaceLcdCam
+            | K::GenericInterfaceCamera => Self::Parallel,
+
+            // Touch and PCNT sit here as the other one-pad waveform things: a
+            // touch channel and an edge counter are read the same way a PWM
+            // output is written.
+            K::GenericInterfaceTimer
+            | K::GenericInterfaceMcpwm
+            | K::GenericInterfaceRmt
+            | K::GenericInterfaceDac
+            | K::GenericInterfaceTouch
+            | K::GenericInterfacePcnt => Self::Driver,
+
+            K::GenericInterfaceCan | K::GenericInterfaceUsb => Self::OffBoard,
+
+            K::Custom => Self::Custom,
+        }
+    }
+
+    /// Is this family drawn as a plain rectangle?
+    ///
+    /// The two that are keep `rect_filled` / `rect_stroke`, and with them corner
+    /// ROUNDING, which is a `RectShape` property no polygon can carry.
+    fn is_rect(self) -> bool {
+        matches!(self, Self::Serial | Self::Custom)
+    }
+
+    /// The box height this family gets.
+    ///
+    /// By KIND and never by live wire count: `box_h` only sees a
+    /// `&VirtualModule`, `dragged_half_extent` cannot recompute connections at
+    /// all - and a box that changes size while you are wiring it is worse than
+    /// no cue.
+    fn height(self) -> f32 {
+        match self {
+            // Room for the signals, and the tallest thing on the canvas.
+            Self::Parallel => 130.0,
+            // One pad and a short summary; the keystone needs the height gone
+            // anyway, or the cut eats the text.
+            Self::Driver | Self::OffBoard => 78.0,
+            Self::Serial | Self::Memory | Self::Custom => BOX_H,
+        }
+    }
+}
+
 fn box_h(m: &VirtualModule) -> f32 {
     if m.kind.is_custom() {
         let n = match &m.config {
             ModuleConfig::Custom(c) => c.pins.len(),
             _ => 0,
         };
-        BOX_H + n as f32 * CUSTOM_ROW_H
+        BoxShape::Custom.height() + n as f32 * CUSTOM_ROW_H
     } else {
-        BOX_H
+        BoxShape::of(m.kind).height()
     }
 }
+
+/// The tallest box any module can be, before a Custom module's pin rows.
+///
+/// What [`MARGIN_Y`] has to reserve: it used to name `BOX_H`, which was every
+/// box's height and is now only the middle tier.
+const BOX_H_MAX: f32 = 130.0;
 
 /// Every pin whose NAME belongs to a virtual module, so `io_arrows` must not
 /// also float a rename field for it beside the chip.
@@ -206,10 +313,10 @@ const PIN_GAP: f32 = 18.0;
 /// beyond the pins without overlapping the chip). Horizontal fits a box's width,
 /// vertical its height.
 pub const MARGIN_X: f32 = PIN_HEIGHT + PIN_GAP + BOX_W + 24.0;
-pub const MARGIN_Y: f32 = PIN_HEIGHT + PIN_GAP + BOX_H + 24.0;
+pub const MARGIN_Y: f32 = PIN_HEIGHT + PIN_GAP + BOX_H_MAX + 24.0;
 
 /// Which side of the chip a pin sits on.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Side {
     Right,
     Left,
@@ -425,30 +532,42 @@ fn packed_rect(
 /// A terminal point on the box edge that faces the chip, aligned to `anchor`
 /// (clamped to the edge), so the wire to the pin is short and doesn't cross the
 /// chip.
+/// How far a wire terminal is kept from a box's corners.
+///
+/// `facing_terminal` has always had this margin; `nearest_edge` had none, which
+/// was harmless while every box was a plain rectangle and is not once a corner
+/// can be cut away. A terminal landing in the eight pixels a chamfer removes
+/// would sit in empty canvas with its wire pointing at nothing.
+const CORNER_INSET: f32 = 8.0;
+
 fn facing_terminal(box_rect: egui::Rect, side: Side, anchor: egui::Pos2) -> egui::Pos2 {
     match side {
         Side::Right => egui::pos2(
             box_rect.left(),
-            anchor
-                .y
-                .clamp(box_rect.top() + 8.0, box_rect.bottom() - 8.0),
+            anchor.y.clamp(
+                box_rect.top() + CORNER_INSET,
+                box_rect.bottom() - CORNER_INSET,
+            ),
         ),
         Side::Left => egui::pos2(
             box_rect.right(),
-            anchor
-                .y
-                .clamp(box_rect.top() + 8.0, box_rect.bottom() - 8.0),
+            anchor.y.clamp(
+                box_rect.top() + CORNER_INSET,
+                box_rect.bottom() - CORNER_INSET,
+            ),
         ),
         Side::Top => egui::pos2(
-            anchor
-                .x
-                .clamp(box_rect.left() + 8.0, box_rect.right() - 8.0),
+            anchor.x.clamp(
+                box_rect.left() + CORNER_INSET,
+                box_rect.right() - CORNER_INSET,
+            ),
             box_rect.bottom(),
         ),
         Side::Bottom => egui::pos2(
-            anchor
-                .x
-                .clamp(box_rect.left() + 8.0, box_rect.right() - 8.0),
+            anchor.x.clamp(
+                box_rect.left() + CORNER_INSET,
+                box_rect.right() - CORNER_INSET,
+            ),
             box_rect.top(),
         ),
     }
@@ -463,6 +582,130 @@ pub fn nearest_edge(rect: egui::Rect, target: egui::Pos2) -> egui::Pos2 {
         target.x.clamp(rect.left(), rect.right()),
         target.y.clamp(rect.top(), rect.bottom()),
     )
+}
+
+/// Nearest point on a closed polygon's boundary to `target`.
+///
+/// What a dragged module box needs, and what a rect clamp cannot give once a
+/// corner is cut away: [`nearest_edge`] would happily return a point inside the
+/// chamfer, leaving the terminal dot and its wire in empty canvas beside the
+/// outline. An inset would have been an approximation - the cut is up to 42 % of
+/// an edge, not eight pixels - so this walks the real outline instead.
+///
+/// [`nearest_edge`] stays for the pin rename fields in `io_arrows`, which are
+/// plain rectangles and always will be.
+pub fn nearest_on_outline(poly: &[egui::Pos2], target: egui::Pos2) -> egui::Pos2 {
+    let mut best = poly[0];
+    let mut best_d2 = f32::INFINITY;
+    for (a, b) in poly
+        .iter()
+        .zip(poly.iter().cycle().skip(1))
+        .take(poly.len())
+    {
+        let seg = *b - *a;
+        let len2 = seg.length_sq();
+        // A degenerate edge (two identical points) would divide by zero; its
+        // endpoint is the answer anyway.
+        let t = if len2 > f32::EPSILON {
+            ((target - *a).dot(seg) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let p = *a + seg * t;
+        let d2 = (target - p).length_sq();
+        if d2 < best_d2 {
+            best_d2 = d2;
+            best = p;
+        }
+    }
+    best
+}
+
+/// The outline of a module box, clockwise from the top-left corner.
+///
+/// # The one rule
+///
+/// The edge FACING THE CHIP is never touched. [`facing_terminal`] pins every
+/// auto-placed wire onto that edge, so cutting it would strand terminals; every
+/// shape in [`BoxShape`] therefore spends its whole budget on the two corners of
+/// the opposite edge. That is also why the vocabulary is chamfers and rounds and
+/// nothing else: `PathShape::fill` is convex-only, so a notch or a step would
+/// stroke as a line floating inside an intact square fill.
+///
+/// Depth is a fraction of the BACK EDGE's length, capped at 45 % of the
+/// perpendicular dimension so a shape reads the same whichever side of the chip
+/// its module landed on.
+fn silhouette(rect: egui::Rect, shape: BoxShape, side: Side) -> Vec<egui::Pos2> {
+    let (tl, tr) = (rect.left_top(), rect.right_top());
+    let (br, bl) = (rect.right_bottom(), rect.left_bottom());
+    let corners = [tl, tr, br, bl];
+
+    // Which two corners belong to the edge pointing AWAY from the chip. `side`
+    // is the chip side the box sits on, so `Side::Right` means the box is to the
+    // right and its LEFT edge faces the chip.
+    let back: [usize; 2] = match side {
+        Side::Right => [1, 2],
+        Side::Left => [3, 0],
+        Side::Top => [0, 1],
+        Side::Bottom => [2, 3],
+    };
+
+    let along = match side {
+        Side::Right | Side::Left => rect.height(),
+        Side::Top | Side::Bottom => rect.width(),
+    };
+    let across = match side {
+        Side::Right | Side::Left => rect.width(),
+        Side::Top | Side::Bottom => rect.height(),
+    };
+    let cut = |frac: f32| (frac * along).min(0.45 * across);
+
+    let (depth, both, round) = match shape {
+        BoxShape::Serial | BoxShape::Custom => (0.0, false, false),
+        BoxShape::Memory => (cut(0.40), false, false),
+        BoxShape::Parallel => (cut(0.20), true, false),
+        BoxShape::Driver => (cut(0.42), true, false),
+        BoxShape::OffBoard => (cut(0.35), true, true),
+    };
+    if depth <= 0.0 {
+        return corners.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(12);
+    for (i, c) in corners.iter().enumerate() {
+        let cut_here = i == back[0] || (both && i == back[1]);
+        if !cut_here {
+            out.push(*c);
+            continue;
+        }
+        // Walk `depth` back along the edge that arrives, and `depth` forward
+        // along the one that leaves.
+        let prev = corners[(i + 3) % 4];
+        let next = corners[(i + 1) % 4];
+        let a = *c + (prev - *c).normalized() * depth;
+        let b = *c + (next - *c).normalized() * depth;
+        if round {
+            // A quarter arc, as five segments. Enough that it reads as a curve
+            // at 400 % and cheap enough not to matter at any zoom.
+            const STEPS: usize = 5;
+            for k in 0..=STEPS {
+                let t = k as f32 / STEPS as f32;
+                // Quadratic Bezier with the corner as its control point - the
+                // standard rounded corner, and it stays convex.
+                let u = 1.0 - t;
+                out.push(
+                    ((a.to_vec2() * (u * u))
+                        + (c.to_vec2() * (2.0 * u * t))
+                        + (b.to_vec2() * (t * t)))
+                        .to_pos2(),
+                );
+            }
+        } else {
+            out.push(a);
+            out.push(b);
+        }
+    }
+    out
 }
 
 /// The module name without the `_` prefix (e.g. `_I2C1` → `I2C1`).
@@ -634,10 +877,28 @@ fn label_field_rect(box_rect: egui::Rect) -> egui::Rect {
     )
 }
 
+/// `base` moved `t` of the way towards `towards`.
+///
+/// Not `Color32::lerp` — egui has none — and deliberately not blending the
+/// alpha: both ends are opaque here and a premultiplied blend would darken the
+/// result instead of colouring it.
+fn tint(base: egui::Color32, towards: egui::Color32, t: f32) -> egui::Color32 {
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    egui::Color32::from_rgb(
+        mix(base.r(), towards.r()),
+        mix(base.g(), towards.g()),
+        mix(base.b(), towards.b()),
+    )
+}
+
 fn draw_box(
     painter: &egui::Painter,
     rect: egui::Rect,
     m: &VirtualModule,
+    // Which side of the chip this box sits on. Needed only for the outline: the
+    // edge facing the chip is the one that must stay square, and it is the
+    // opposite of this.
+    side: Side,
     connected: bool,
     color: egui::Color32,
     native_forced: bool,
@@ -650,19 +911,50 @@ fn draw_box(
     // box grows by `SELECTED_TEXT_SCALE`, not just the title.
     selected: bool,
 ) {
-    // Background: normal dark, or a red pulse (dark ↔ red by `t`) while the
-    // remove-confirm for this module is open.
+    // Background: the panel dark, tinted towards the module's own colour, or a
+    // red pulse while the remove-confirm for this module is open.
+    //
+    // # Why the fill and not something cleverer
+    //
+    // The fill was `rgb(38, 42, 50)` for all twenty-four kinds, so the LARGEST
+    // area of the box carried no information at all: the colour lived only on
+    // the 1.4 px border and the title. Both of those die on zoom-out — a stroke
+    // is scaled before tessellation, so at 25 % the border is a third of a pixel
+    // and the 13 px title is three. Area is the one channel that survives, and
+    // it was the one going unused.
+    //
+    // Sixteen percent, not more: the box must still read as part of the diagram
+    // rather than as a coloured card, and the borders of two modules of the same
+    // kind still have to be told apart from their fills.
+    //
+    // Only when CONNECTED. A module with no pins has no peripheral colour to
+    // claim — it is drawn in the muted red the border and title already use.
     let fill = match removing_blink {
         Some(t) => {
             let lerp = |a: u8, c: u8| (a as f32 + (c as f32 - a as f32) * t).round() as u8;
             egui::Color32::from_rgb(lerp(38, 190), lerp(42, 45), lerp(50, 45))
         }
+        None if connected => tint(egui::Color32::from_rgb(38, 42, 50), color, 0.16),
         None => egui::Color32::from_rgb(38, 42, 50),
     };
-    // SQUARE corners mark a user-authored (Custom) module; the peripheral ones
-    // stay rounded, so the two kinds are told apart at a glance.
+    // SQUARE corners still mark a user-authored (Custom) module; the peripheral
+    // families stay rounded, and four of the six also cut the corners of the
+    // edge pointing away from the chip - see `BoxShape` and `silhouette`.
+    let shape = BoxShape::of(m.kind);
     let radius = if m.kind.is_custom() { 0.0 } else { 6.0 };
-    painter.rect_filled(rect, radius, fill);
+    let outline = silhouette(rect, shape, side);
+    // A rectangle keeps `rect_filled`, which a path cannot match: corner
+    // ROUNDING is a `RectShape` property and there is no rounded-polygon shape.
+    // The cut families have no rounding left to lose.
+    if shape.is_rect() {
+        painter.rect_filled(rect, radius, fill);
+    } else {
+        painter.add(egui::Shape::convex_polygon(
+            outline.clone(),
+            fill,
+            egui::Stroke::NONE,
+        ));
+    }
     // A pending removal outranks the selection: the box is about to disappear,
     // which is the more urgent thing to say about it.
     let stroke = if removing_blink.is_some() {
@@ -674,7 +966,14 @@ fn draw_box(
     } else {
         egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(120, 90, 90)) // disconnected
     };
-    painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Middle);
+    if shape.is_rect() {
+        painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Middle);
+    } else {
+        // `closed_line` strokes centred on the path, which is what
+        // `StrokeKind::Middle` does for the rect - so the border keeps its
+        // weight and the two families sit at the same visual depth.
+        painter.add(egui::Shape::closed_line(outline, stroke));
+    }
 
     const TITLE_SIZE: f32 = 13.0;
     let scale = text_scale(selected);
@@ -844,20 +1143,32 @@ pub fn draw_modules(
             boxes.push((e.idx, rect, e.conns.clone(), e.side, true, false));
         }
     }
+    // Which way a box faces when its PINS cannot say.
+    //
+    // `dominant_side` is a majority vote over a module's wired pins, so a
+    // floating module has no vote and a dragged one may have been pulled to the
+    // other side of the chip entirely. Both used to be told `Side::Right`
+    // outright, which was invisible while the box was a symmetric rectangle -
+    // and stops being invisible the moment one end of it is shaped.
+    let facing = |rect: egui::Rect| {
+        let d = rect.center() - chip_center;
+        if d.x.abs() >= d.y.abs() {
+            if d.x >= 0.0 { Side::Right } else { Side::Left }
+        } else if d.y >= 0.0 {
+            Side::Bottom
+        } else {
+            Side::Top
+        }
+    };
+
     // Disconnected modules stack in the right margin.
     let mut fy = chip_rect.top();
     for i in floating_idx {
         let min = egui::pos2(chip_rect.right() + PIN_HEIGHT + PIN_GAP, fy);
         let h = box_h(&mcu.modules[i]);
         fy += h + BOX_GAP;
-        boxes.push((
-            i,
-            egui::Rect::from_min_size(min, egui::vec2(BOX_W, h)),
-            Vec::new(),
-            Side::Right,
-            false,
-            false,
-        ));
+        let rect = egui::Rect::from_min_size(min, egui::vec2(BOX_W, h));
+        boxes.push((i, rect, Vec::new(), facing(rect), false, false));
     }
     // Manually-dragged boxes: placed at chip centre + stored offset.
     for (i, conns) in manual_mods {
@@ -867,7 +1178,7 @@ pub fn draw_modules(
             egui::vec2(BOX_W, box_h(&mcu.modules[i])),
         );
         let connected = !conns.is_empty();
-        boxes.push((i, rect, conns, Side::Right, connected, true));
+        boxes.push((i, rect, conns, facing(rect), connected, true));
     }
 
     // ── 3. Draw boxes + wires; detect a header click to expand the list entry. ─
@@ -898,6 +1209,7 @@ pub fn draw_modules(
             painter,
             *rect,
             m,
+            *side,
             *connected,
             module_color(m.kind, inst),
             native_forced,
@@ -910,7 +1222,7 @@ pub fn draw_modules(
             // A dragged box's stored side no longer implies an edge, so aim the
             // wire at the box edge nearest the pin; auto boxes keep their side.
             let term = if *manual {
-                nearest_edge(*rect, *anchor)
+                nearest_on_outline(&silhouette(*rect, BoxShape::of(m.kind), *side), *anchor)
             } else {
                 facing_terminal(*rect, *side, *anchor)
             };
@@ -957,12 +1269,18 @@ pub fn draw_modules(
             drag_updates.push((*i, (off.x, off.y)));
         }
         if resp.hovered() || resp.dragged() {
-            painter.rect_stroke(
-                *rect,
-                6.0,
-                egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(50)),
-                egui::StrokeKind::Middle,
-            );
+            // The SAME outline the box was drawn with. A rectangle here over a
+            // chamfered box would read as a second, wrong border.
+            let ring = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(50));
+            let shape = BoxShape::of(mcu.modules[*i].kind);
+            if shape.is_rect() {
+                painter.rect_stroke(*rect, 6.0, ring, egui::StrokeKind::Middle);
+            } else {
+                painter.add(egui::Shape::closed_line(
+                    silhouette(*rect, shape, *side),
+                    ring,
+                ));
+            }
         }
         if resp.clicked() {
             clicked_id = Some(m.id.clone());
@@ -6039,6 +6357,129 @@ mod tests {
             rest = &rest[i + needle.len()..];
         }
         out
+    }
+
+    /// Every kind has a family, and the six families are all reachable.
+    ///
+    /// A `match` with a catch-all would silently drop a new kind into whatever
+    /// arm came last; there is no catch-all, so this only has to prove the
+    /// grouping is not lopsided.
+    #[test]
+    fn every_kind_lands_in_a_family() {
+        use std::collections::BTreeSet;
+        let seen: BTreeSet<BoxShape> = ModuleKind::ALL.iter().map(|k| BoxShape::of(*k)).collect();
+        assert_eq!(seen.len(), 6, "all six families are used: {seen:?}");
+        for kind in ModuleKind::ALL {
+            // Custom is the only kind allowed in its own family.
+            if BoxShape::of(kind) == BoxShape::Custom {
+                assert!(kind.is_custom(), "{kind:?} is not a Custom module");
+            }
+        }
+    }
+
+    /// The edge facing the chip is never cut.
+    ///
+    /// This is the rule the whole shape vocabulary is built around:
+    /// `facing_terminal` pins every auto-placed wire onto that edge, so a shape
+    /// that shortened it would strand terminals in empty canvas. Checked for
+    /// every family on all four sides.
+    #[test]
+    fn the_chip_facing_edge_stays_whole() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(170.0, 98.0));
+        for shape in [
+            BoxShape::Serial,
+            BoxShape::Memory,
+            BoxShape::Parallel,
+            BoxShape::Driver,
+            BoxShape::OffBoard,
+            BoxShape::Custom,
+        ] {
+            for side in [Side::Right, Side::Left, Side::Top, Side::Bottom] {
+                let poly = silhouette(rect, shape, side);
+                // The two corners of the facing edge must still be corners of
+                // the bounding rect - nothing has moved them inward.
+                let (a, b) = match side {
+                    Side::Right => (rect.left_top(), rect.left_bottom()),
+                    Side::Left => (rect.right_top(), rect.right_bottom()),
+                    Side::Top => (rect.left_bottom(), rect.right_bottom()),
+                    Side::Bottom => (rect.left_top(), rect.right_top()),
+                };
+                for want in [a, b] {
+                    assert!(
+                        poly.iter().any(|p| (*p - want).length() < 0.01),
+                        "{shape:?} on {side:?} moved the facing corner {want:?}"
+                    );
+                }
+                // And every auto-placed terminal lands ON that outline.
+                for t in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                    let anchor = a + (b - a) * t;
+                    let term = facing_terminal(rect, side, anchor);
+                    let on = nearest_on_outline(&poly, term);
+                    assert!(
+                        (term - on).length() < 0.01,
+                        "{shape:?} on {side:?}: terminal {term:?} is off the outline"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A silhouette never leaves its bounding rect.
+    ///
+    /// The rect is what `packed_rect` reserves, what the painter is grown to,
+    /// and what egui hit-tests. A shape spilling past it would be clipped on one
+    /// side of the canvas and unclickable on the other.
+    #[test]
+    fn a_silhouette_stays_inside_its_rect() {
+        for (w, h) in [
+            (170.0_f32, 98.0_f32),
+            (170.0, 78.0),
+            (170.0, 130.0),
+            (40.0, 20.0),
+        ] {
+            let rect = egui::Rect::from_min_size(egui::pos2(-30.0, 12.0), egui::vec2(w, h));
+            for shape in [
+                BoxShape::Memory,
+                BoxShape::Parallel,
+                BoxShape::Driver,
+                BoxShape::OffBoard,
+            ] {
+                for side in [Side::Right, Side::Left, Side::Top, Side::Bottom] {
+                    for p in silhouette(rect, shape, side) {
+                        assert!(
+                            rect.expand(0.01).contains(p),
+                            "{shape:?} on {side:?} at {w}x{h}: {p:?} escapes {rect:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A cut really removes area - otherwise the shape is a rectangle wearing a
+    /// different name, and the canvas gains nothing.
+    #[test]
+    fn a_cut_family_is_not_just_a_rectangle() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(170.0, 98.0));
+        for shape in [
+            BoxShape::Memory,
+            BoxShape::Parallel,
+            BoxShape::Driver,
+            BoxShape::OffBoard,
+        ] {
+            let poly = silhouette(rect, shape, Side::Right);
+            assert!(poly.len() > 4, "{shape:?} produced a plain quad");
+            // A point just inside the cut corner is outside the outline.
+            let corner = rect.right_top() + egui::vec2(-4.0, 4.0);
+            let on = nearest_on_outline(&poly, corner);
+            assert!(
+                (on - corner).length() > 0.5,
+                "{shape:?}: the top-right corner was not cut"
+            );
+        }
+        for shape in [BoxShape::Serial, BoxShape::Custom] {
+            assert_eq!(silhouette(rect, shape, Side::Right).len(), 4, "{shape:?}");
+        }
     }
 
     /// The picker offers what the PAD offers, and nothing else.
