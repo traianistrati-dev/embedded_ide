@@ -26,6 +26,16 @@ enum DraggedItem {
     Folder(String),
 }
 
+/// A validated file rename the tree wants performed. Carried to the app rather
+/// than applied here: the module-reference rewrite has to run BEFORE the file
+/// moves, and only the app can talk to rust-analyzer.
+#[derive(Clone, Debug)]
+pub struct RenameRequest {
+    pub old_path: String,
+    /// Project-root-relative, same folder as `old_path`.
+    pub new_path: String,
+}
+
 /// The last path segment of a `src/`-relative path (the bare file/folder name).
 fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
@@ -111,6 +121,63 @@ pub(crate) fn generated_file_reason(path: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Validate a rename typed into a tree row and build the new project-root-
+/// relative path, or explain the refusal in a sentence fit for the tree notice.
+///
+/// A rename is a NAME, never a path: typing `sub/x.rs` used to change the
+/// in-memory path while `std::fs::rename` failed on the missing directory, so
+/// memory and disk silently diverged until the next full write. Moving is what
+/// drag-and-drop is for, so a separator is refused rather than half-honoured.
+///
+/// `taken` answers whether a project-root-relative path is already used - the
+/// caller feeds it BOTH files and folders, because a file may not take a
+/// folder's name either (the old check looked only at files). It must match
+/// CASE-INSENSITIVELY: on Windows `b.rs` and `B.rs` are one file, so an exact
+/// comparison would report the name free and then let `fs::rename` overwrite
+/// the other file.
+pub(crate) fn validate_rename(
+    old_path: &str,
+    typed: &str,
+    taken: impl Fn(&str) -> bool,
+) -> Result<String, String> {
+    let clean = typed.trim();
+    if clean.is_empty() {
+        return Err("Type a name first.".to_owned());
+    }
+    if clean.contains('/') || clean.contains('\\') {
+        return Err(format!(
+            "`{clean}` looks like a path - a rename takes a NAME. Drag the file onto a folder to move it."
+        ));
+    }
+    if clean == "." || clean == ".." || clean.contains('\0') {
+        return Err(format!("`{clean}` is not a usable file name."));
+    }
+    if let Some(reason) = generated_file_reason(old_path) {
+        return Err(format!("Can't rename `{}` - {reason}.", base_name(old_path)));
+    }
+
+    let new_path = match old_path.rfind('/') {
+        Some(i) => format!("{}/{clean}", &old_path[..i]),
+        None => clean.to_owned(),
+    };
+    if new_path == old_path {
+        return Err(String::new()); // unchanged: cancel quietly, nothing to say
+    }
+    // Windows renames are case-insensitive, so `radar.rs` -> `Radar.rs` can
+    // leave the file untouched while everything downstream believes it moved.
+    // Refused on every platform so a project can't behave differently on one.
+    if new_path.eq_ignore_ascii_case(old_path) {
+        return Err(format!(
+            "`{}` and `{clean}` differ only in capitalisation - Windows treats those as the same file.",
+            base_name(old_path)
+        ));
+    }
+    if taken(&new_path) {
+        return Err(format!("`{clean}` already exists here."));
+    }
+    Ok(new_path)
 }
 
 const TREE_NOTICE_ID: &str = "__tree_move_notice__";
@@ -840,6 +907,8 @@ pub fn show_project_tree(
     // Set when a file row carrying the RED error badge is clicked; the app
     // scrolls the editor to that file's first error instead of its top.
     goto_error: &mut Option<ProjectFileId>,
+    // A validated file rename for the app to perform (see `RenameRequest`).
+    rename_request: &mut Option<RenameRequest>,
 ) {
     // Diagnostic status of the user files (cargo + rust-analyzer), so
     // `user_file_row` can flag them: `true` = has ERRORS (red icon), `false` =
@@ -1688,24 +1757,49 @@ pub fn show_project_tree(
         *save_needed = true;
     }
 
-    // Rename
+    // Rename. The typed name is validated BEFORE it is consumed: a refusal
+    // leaves the input open with the text still in it (it used to be `take()`n
+    // and thrown away, so a rejected rename lost what you typed and said
+    // nothing about why).
+    //
+    // Nothing is moved here. The rename is handed to the app as a REQUEST,
+    // because renaming a `.rs` file has to ask rust-analyzer to rewrite the
+    // `mod` / `use` / path references FIRST - `workspace/willRenameFiles` needs
+    // the old path to still exist on disk and in the analyzer's VFS.
     if let Some(confirm_idx) = do_rename_file {
-        if let Some((_, new_name)) = renaming_file.take() {
-            let old_path = user_src_files[confirm_idx].0.clone();
-            let clean = new_name.trim().to_string();
-            if !clean.is_empty() {
-                let new_path = if let Some(slash) = old_path.rfind('/') {
-                    format!("{}/{clean}", &old_path[..slash])
-                } else {
-                    clean
-                };
-                if new_path != old_path && !user_src_files.iter().any(|(p, _)| p == &new_path) {
-                    let old_dest = workspace_dir.join(&old_path);
-                    let new_dest = workspace_dir.join(&new_path);
-                    let _ = std::fs::rename(&old_dest, &new_dest);
-                    user_src_files[confirm_idx].0 = new_path;
-                    *save_needed = true;
-                }
+        let typed = renaming_file
+            .as_ref()
+            .map(|(_, n)| n.clone())
+            .unwrap_or_default();
+        let old_path = user_src_files[confirm_idx].0.clone();
+        match validate_rename(&old_path, &typed, |cand| {
+            user_src_files
+                .iter()
+                .any(|(p, _)| p.eq_ignore_ascii_case(cand))
+                || user_src_folders.iter().any(|f| f.eq_ignore_ascii_case(cand))
+                // `src/main.rs` is GENERATED and never appears in
+                // `user_src_files`, so nothing above would notice a rename
+                // landing on it.
+                || cand.eq_ignore_ascii_case("src/main.rs")
+        }) {
+            Ok(new_path) => {
+                *renaming_file = None;
+                *rename_request = Some(RenameRequest {
+                    old_path,
+                    new_path,
+                });
+            }
+            // Empty reason = "nothing changed": close the input, say nothing.
+            Err(reason) if reason.is_empty() => *renaming_file = None,
+            Err(reason) => {
+                // Re-arm the focus flag the input consumed on its first frame.
+                // Without this the box stays open but unfocused, `lost_focus()`
+                // fires next frame and cancels the edit - so a refusal would
+                // still throw away what was typed, which is what this whole
+                // branch exists to avoid.
+                let fid = egui::Id::new(("__rename_file__", confirm_idx));
+                ui.memory_mut(|m| m.data.insert_temp(fid, true));
+                set_tree_notice(ui.ctx(), reason);
             }
         }
     } else if cancel_rename_file {
@@ -2475,6 +2569,80 @@ fn user_file_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rename is a NAME. Typing a path used to change the in-memory path
+    /// while `fs::rename` failed on the missing directory - memory and disk
+    /// diverged silently until the next full write.
+    #[test]
+    fn a_path_is_refused_not_half_applied() {
+        for typed in ["sub/x.rs", "..\\x.rs", "a/b.rs"] {
+            let err = validate_rename("src/a.rs", typed, |_| false)
+                .expect_err(&format!("`{typed}` must be refused"));
+            assert!(!err.is_empty(), "the refusal has to say something");
+        }
+    }
+
+    /// Windows renames are case-insensitive, so this would leave the file
+    /// untouched while everything downstream believed it moved.
+    #[test]
+    fn a_case_only_rename_is_refused() {
+        let err = validate_rename("src/radar.rs", "Radar.rs", |_| false).unwrap_err();
+        assert!(err.contains("capitalisation"), "{err}");
+        // But a real rename that merely SHARES some letters is fine.
+        assert_eq!(
+            validate_rename("src/radar.rs", "radar_io.rs", |_| false).unwrap(),
+            "src/radar_io.rs"
+        );
+    }
+
+    /// The old check looked only at files, so a file could take a folder's name.
+    #[test]
+    fn a_folder_name_is_taken_too() {
+        let taken = |p: &str| p == "src/drivers";
+        let err = validate_rename("src/a.rs", "drivers", taken).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+    }
+
+    /// Renaming an auto-generated file leaves the sync recreating the original
+    /// and keeping the copy - you end up with both.
+    #[test]
+    fn generated_files_refuse_the_rename() {
+        let err = validate_rename("src/pins/configs/usart1.rs", "uart1.rs", |_| false).unwrap_err();
+        assert!(err.contains("auto-generated"), "{err}");
+    }
+
+    /// An unchanged name is not an error - it closes the input silently.
+    #[test]
+    fn an_unchanged_name_is_a_quiet_cancel() {
+        assert_eq!(
+            validate_rename("src/a.rs", "  a.rs  ", |_| false).unwrap_err(),
+            "",
+            "an empty reason means: say nothing"
+        );
+    }
+
+    /// Windows resolves `b.rs` and `B.rs` to ONE file, so an exact comparison
+    /// would call the name free and let `fs::rename` overwrite the other file.
+    #[test]
+    fn a_collision_is_case_insensitive() {
+        let taken = |p: &str| p.eq_ignore_ascii_case("src/beta.rs");
+        let err = validate_rename("src/a.rs", "Beta.rs", taken).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+    }
+
+    /// The new path keeps the old folder.
+    #[test]
+    fn the_folder_is_preserved() {
+        assert_eq!(
+            validate_rename("mylib/src/radar.rs", "radar_io.rs", |_| false).unwrap(),
+            "mylib/src/radar_io.rs"
+        );
+        // A file at the project root has no folder to keep.
+        assert_eq!(
+            validate_rename("notes.md", "readme.md", |_| false).unwrap(),
+            "readme.md"
+        );
+    }
 
     /// Realistic floor with egui's default spacing: 4 pad + 6 separator
     /// + 2 * 3 item spacing + 18 row.

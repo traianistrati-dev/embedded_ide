@@ -36,6 +36,8 @@ mod diag_panel;
 
 mod project_panel;
 
+mod file_rename;
+
 mod tree_clipboard;
 
 mod mcu_panel;
@@ -1515,6 +1517,9 @@ pub struct AppIde {
     /// Share of the project tree's height for the main project vs LIBRARIES,
     /// dragged via the splitter between them. Persisted across restarts.
     tree_split_ratio: f32,
+    /// A tree file rename waiting on rust-analyzer's `willRenameFiles` answer
+    /// (see `app::file_rename`). The file has NOT moved yet while this is set.
+    pending_rename: Option<file_rename::PendingRename>,
     /// Open "Extract to library crate" dialog, if any.
     extract_crate: Option<extract_crate_dialog::ExtractCrateDialog>,
     /// Open "Clone a library from git" dialog, if any.
@@ -1957,6 +1962,7 @@ impl AppIde {
             } else {
                 persisted.tree_split_ratio.clamp(0.15, 0.85)
             },
+            pending_rename: None,
             extract_crate: None,
             clone_library_dialog: None,
             clone_project_dialog: None,
@@ -3220,6 +3226,11 @@ impl AppIde {
         // ── Apply a completed rename (textDocument/rename) across files ───────
         self.with_editor(asker.rename, |s| s.poll_rename());
 
+        // ── A tree FILE rename waiting on `workspace/willRenameFiles` ────────
+        // Separate from the symbol rename above: this one moves a file once the
+        // answer (or the timeout) arrives.
+        self.poll_file_rename(&self.egui_ctx.clone());
+
         self.poll_pending_goto();
         // ── Handle a completed F12 go-to-definition ──────────────────────────
         // A definition in the CURRENT project opens editable in the view that
@@ -4172,6 +4183,12 @@ impl eframe::App for AppIde {
         // The badge is what the user clicked, so a file with no locatable line
         // still selects normally rather than reporting a failure - a cargo
         // diagnostic without a line span is the realistic case.
+        // A confirmed tree rename. Not applied by the tree: renaming a `.rs`
+        // file asks rust-analyzer to rewrite `mod` / `use` / path references
+        // FIRST, which only works while the old path still exists.
+        if let Some(req) = signals.rename_request {
+            self.begin_file_rename(&ui.ctx().clone(), req);
+        }
         if let Some(id) = signals.goto_error {
             // No `selected_file = id` here: the row's click handler already wrote
             // it through the `&mut` the tree holds. Re-assigning would only hide

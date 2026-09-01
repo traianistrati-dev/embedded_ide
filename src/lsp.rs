@@ -336,6 +336,15 @@ pub struct LspState {
     pub completion_request_sent_at: Option<std::time::Instant>,
     /// The request id of the pending `textDocument/rename`, if any.
     rename_req_id: Option<u64>,
+    /// In-flight `workspace/willRenameFiles` (a FILE rename, not a symbol one).
+    /// Kept apart from `rename_req_id` so a module rename and a Ctrl+R symbol
+    /// rename can never drain each other's reply.
+    will_rename_req_id: Option<u64>,
+    /// Set when that reply arrives (including a refusal, which is an empty
+    /// edit list) so the poller stops waiting.
+    pub will_rename_response_received: bool,
+    /// Text edits rust-analyzer wants applied for the file rename.
+    pub will_rename_edits: Vec<RenameEdit>,
     /// Set when a rename response (success OR error) arrives; the app then
     /// applies `rename_edits` and clears this.
     pub rename_response_received: bool,
@@ -432,6 +441,9 @@ impl Default for LspState {
             next_req_id: 1,
             completion_request_sent_at: None,
             rename_req_id: None,
+            will_rename_req_id: None,
+            will_rename_response_received: false,
+            will_rename_edits: Vec::new(),
             rename_response_received: false,
             rename_edits: Vec::new(),
             code_action_req_id: None,
@@ -729,6 +741,57 @@ impl LspState {
             })
             .to_string(),
         );
+    }
+
+    /// Ask what text must change if `old_rel` is renamed to `new_rel`
+    /// (`workspace/willRenameFiles`). Poll [`take_will_rename_result`].
+    ///
+    /// Sent BEFORE the file moves: rust-analyzer resolves the old path against
+    /// its VFS and calls `is_dir()` on it, so both must still exist. It replies
+    /// with TEXT EDITS ONLY - it deliberately drops the file-system half of the
+    /// change (`file_system_edits.clear()`) because the client is the one doing
+    /// the move. That is exactly this IDE's shape, and it is why this is used
+    /// instead of `textDocument/rename` on the `mod` declaration.
+    ///
+    /// Known server-side limits, all silent (an empty reply, never an error):
+    /// the two paths must share a parent directory, `mod.rs` is refused in
+    /// either direction, and the file must already be reachable in the module
+    /// tree.
+    pub fn request_will_rename(&mut self, old_rel: &str, new_rel: &str) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.will_rename_req_id = Some(id);
+        self.will_rename_response_received = false;
+        self.will_rename_edits.clear();
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "workspace/willRenameFiles",
+                "params": {
+                    "files": [{
+                        "oldUri": format!("{}/{}", self.root_uri, old_rel),
+                        "newUri": format!("{}/{}", self.root_uri, new_rel),
+                    }]
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    /// Take the file-rename edits once RA has responded. `None` while nothing
+    /// is ready; `Some(vec![])` when RA had nothing to change (or refused), so
+    /// the caller stops waiting and moves the file anyway.
+    pub fn take_will_rename_result(&mut self) -> Option<Vec<RenameEdit>> {
+        if self.will_rename_response_received {
+            self.will_rename_response_received = false;
+            Some(std::mem::take(&mut self.will_rename_edits))
+        } else {
+            None
+        }
     }
 
     /// Take the rename edits once RA has responded, clearing the pending state.
@@ -1154,6 +1217,9 @@ impl LspState {
         self.rename_req_id = None;
         self.rename_response_received = false;
         self.rename_edits.clear();
+        self.will_rename_req_id = None;
+        self.will_rename_response_received = false;
+        self.will_rename_edits.clear();
         self.definition_req_id = None;
         self.implementation_req_id = None;
         self.definition_response_received = false;
@@ -1309,6 +1375,22 @@ fn launch(
             "rootUri":   root_uri,
             "workspaceFolders": [{ "uri": root_uri, "name": "project" }],
             "capabilities": {
+                // File-operation capability, for `workspace/willRenameFiles`:
+                // renaming a `.rs` file in the project tree asks rust-analyzer
+                // what `mod` / `use` / path references have to change, and the
+                // IDE applies those edits before doing the move itself.
+                //
+                // Advertising this ALSO changes `textDocument/rename`: when a
+                // symbol rename would move a file (renaming a `mod` name), RA
+                // strips the text edits and returns only the file-move op,
+                // expecting us to ask again through willRenameFiles. That path
+                // already did nothing here - without a `resourceOperations`
+                // capability RA fails the whole request - so nothing regresses,
+                // but it is why `resourceOperations` is deliberately NOT
+                // advertised: the two mechanisms cannot both be used.
+                "workspace": {
+                    "fileOperations": { "willRename": true },
+                },
                 "textDocument": {
                     "synchronization": {
                         "dynamicRegistration": false,
@@ -1981,6 +2063,13 @@ fn handle_incoming(
                     s.rename_edits = parse_workspace_edit(&msg["result"], root_uri);
                     s.rename_response_received = true;
                     ctx.request_repaint();
+                } else if s.will_rename_req_id == Some(req_id) {
+                    // A file rename's edits. `null` is a legitimate answer
+                    // ("nothing to change") and parses to an empty vec.
+                    s.will_rename_req_id = None;
+                    s.will_rename_edits = parse_workspace_edit(&msg["result"], root_uri);
+                    s.will_rename_response_received = true;
+                    ctx.request_repaint();
                 } else if s.definition_req_id == Some(req_id) {
                     s.definition_req_id = None;
                     s.definition_result = parse_definition(&msg["result"]);
@@ -2061,6 +2150,12 @@ fn handle_incoming(
                     // Rename failed / not allowed → empty edits, stop waiting.
                     s.rename_req_id = None;
                     s.rename_response_received = true;
+                    ctx.request_repaint();
+                } else if s.will_rename_req_id == Some(req_id) {
+                    // Same: an error means "no edits", and the caller then
+                    // renames the file without touching any references.
+                    s.will_rename_req_id = None;
+                    s.will_rename_response_received = true;
                     ctx.request_repaint();
                 } else if s.definition_req_id == Some(req_id) {
                     s.definition_req_id = None;

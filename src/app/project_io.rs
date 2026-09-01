@@ -38,6 +38,11 @@ impl AppIde {
         self.last_workspace_change = Some(std::time::Instant::now());
 
         self.selected_file = ProjectFileId::MainRs;
+        // An in-flight file rename belongs to the project being LEFT. Its reply
+        // carries edits addressed by project-root-relative path, so leaving it
+        // armed would let rust-analyzer's answer about the old project rewrite
+        // the new one's files at the old one's coordinates.
+        self.pending_rename = None;
         self.renaming_file = None;
         self.renaming_folder = None;
         self.new_src_name = None;

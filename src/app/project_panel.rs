@@ -50,6 +50,10 @@ pub(super) struct ProjectPanelSignals {
     /// A file row carrying the RED error badge was clicked - jump the editor to
     /// that file's FIRST error rather than leaving it at the top.
     pub goto_error: Option<crate::app::ProjectFileId>,
+    /// A validated file rename for the app to perform. The tree deliberately
+    /// does NOT move the file itself: the module-reference rewrite has to run
+    /// while the old path still exists.
+    pub rename_request: Option<crate::project_tree::gui::RenameRequest>,
 }
 
 impl AppIde {
@@ -170,6 +174,7 @@ impl AppIde {
         let mut clip_copy: Option<crate::project_tree::clipboard::CopyRequest> = None;
         let mut clip_paste: Option<crate::project_tree::clipboard::PasteRequest> = None;
         let mut goto_error: Option<crate::app::ProjectFileId> = None;
+        let mut rename_request: Option<crate::project_tree::gui::RenameRequest> = None;
 
         // Collapsed: the panel is not built at all, so the editor and the MCU
         // zone take the width back. This function still RUNS, because it is
@@ -413,6 +418,7 @@ impl AppIde {
                                 &mut clip_copy,
                                 &mut clip_paste,
                                 &mut goto_error,
+                                &mut rename_request,
                             );
                         }
                         _ => {
@@ -448,6 +454,7 @@ impl AppIde {
             clip_copy,
             clip_paste,
             goto_error,
+            rename_request,
         }
     }
 }
