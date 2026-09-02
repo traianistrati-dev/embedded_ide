@@ -976,6 +976,23 @@ fn draw_box(
     } else {
         egui::Color32::from_rgb(175, 150, 150)
     };
+    // A PWM module carries a thumbnail of what it makes, in the corner - the
+    // same shape the config panel draws, at a size that fits beside the title.
+    // Only this kind: every other module's output is a bus, and a bus has no
+    // one waveform to draw.
+    if matches!(m.config, ModuleConfig::Timer(_)) {
+        let r = box_legend_rect(rect, side, scale);
+        let wave = if connected {
+            color
+        } else {
+            egui::Color32::from_rgb(150, 130, 130)
+        };
+        painter.line(pwm_legend_wave(r), egui::Stroke::new(1.0_f32, wave));
+        painter.line(
+            pwm_legend_average(r),
+            egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(205, 85, 70)),
+        );
+    }
     let title_size = TITLE_SIZE * scale;
     painter.text(
         rect.center_top() + egui::vec2(0.0, 13.0),
@@ -1105,6 +1122,42 @@ fn pwm_legend_average(r: egui::Rect) -> Vec<egui::Pos2> {
         pts.push(egui::pos2(x0 + group, y(*d)));
     }
     pts
+}
+
+/// The legend as it appears on the CANVAS box: same shape, corner-sized.
+///
+/// Unscaled size. The box is [`BOX_W`] wide and its title sits centred at the
+/// top, so this has to be narrow enough to clear a title of a few characters -
+/// which is what a module base name is (`PWM0`, `TIM3`).
+const BOX_LEGEND_SIZE: egui::Vec2 = egui::vec2(52.0, 17.0);
+
+/// Where it sits inside a module box: a corner the silhouette does not cut.
+///
+/// Top right wherever that is available - which is the common case, a box
+/// hanging below the chip. But [`silhouette`] bevels the corners of the BACK
+/// edge, the one facing away from the chip, and a `Driver` box (which is what a
+/// PWM module is) has BOTH of them cut, 35 px deep. Pinning the legend to the
+/// top right would put it outside the outline on every module sitting above the
+/// chip, and outside on the right for one sitting beside it.
+///
+/// So the corner follows the side: hug the edge that FACES the chip, which is
+/// never cut, and prefer the right of it.
+///
+/// Scaled with the box's texts, so a selected module's legend grows with its
+/// title instead of sliding out of proportion.
+fn box_legend_rect(rect: egui::Rect, side: Side, scale: f32) -> egui::Rect {
+    let size = BOX_LEGEND_SIZE * scale;
+    let (x, y) = match side {
+        // Box below the chip: its top edge faces up, and is square.
+        Side::Bottom => (rect.right() - 8.0 - size.x, rect.top() + 6.0),
+        // Box above: the cut corners are the top ones.
+        Side::Top => (rect.right() - 8.0 - size.x, rect.bottom() - 6.0 - size.y),
+        // Box to the right of the chip: its right-hand corners are cut, so the
+        // legend goes left.
+        Side::Right => (rect.left() + 8.0, rect.top() + 6.0),
+        Side::Left => (rect.right() - 8.0 - size.x, rect.top() + 6.0),
+    };
+    egui::Rect::from_min_size(egui::pos2(x, y), size)
 }
 
 /// Draw the legend at the top right of a PWM module's config.
@@ -7206,5 +7259,86 @@ mod the_pwm_legend_draws_what_it_claims {
             );
             assert_eq!(got.size(), PWM_LEGEND_SIZE);
         }
+    }
+}
+
+#[cfg(test)]
+mod the_box_legend_stays_inside_the_silhouette {
+    use super::{
+        BOX_W, BoxShape, Side, box_legend_rect, pwm_legend_average, pwm_legend_wave, silhouette,
+    };
+    use crate::panels::mcu_module::modules::ModuleKind;
+    use eframe::egui;
+
+    /// Winding-number test: is `p` inside the closed polygon?
+    fn inside(poly: &[egui::Pos2], p: egui::Pos2) -> bool {
+        let mut wind = 0i32;
+        for i in 0..poly.len() {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            let cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+            if a.y <= p.y {
+                if b.y > p.y && cross > 0.0 {
+                    wind += 1;
+                }
+            } else if b.y <= p.y && cross < 0.0 {
+                wind -= 1;
+            }
+        }
+        wind != 0
+    }
+
+    /// The silhouette bevels the corners of the edge facing AWAY from the chip,
+    /// and a PWM module's shape has both of them cut 35 px deep. A legend
+    /// pinned to one corner would hang outside the outline on half the sides of
+    /// the chip - which is exactly what a picture drawn over a beveled corner
+    /// looks like.
+    #[test]
+    fn every_side_puts_it_somewhere_the_outline_covers() {
+        let shape = BoxShape::of(ModuleKind::GenericInterfaceTimer);
+        for h in [78.0_f32, 98.0, 130.0] {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, h));
+            for side in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
+                for scale in [1.0_f32, 1.15] {
+                    let poly = silhouette(rect, shape, side);
+                    let r = box_legend_rect(rect, side, scale);
+                    for corner in [
+                        r.left_top(),
+                        r.right_top(),
+                        r.left_bottom(),
+                        r.right_bottom(),
+                    ] {
+                        assert!(
+                            inside(&poly, corner),
+                            "h={h} {side:?} scale={scale}: {corner:?} is outside the box outline"
+                        );
+                    }
+                    // ...and the drawing itself, not only its bounding box.
+                    for p in pwm_legend_wave(r)
+                        .iter()
+                        .chain(pwm_legend_average(r).iter())
+                    {
+                        assert!(
+                            inside(&poly, *p),
+                            "h={h} {side:?}: a stroke point {p:?} escaped the outline"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// It clears the title, which is centred at the top of the box.
+    #[test]
+    fn it_does_not_sit_on_the_title() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, 98.0));
+        let r = box_legend_rect(rect, Side::Bottom, 1.15);
+        // The title is drawn CENTER_CENTER on the box's mid-line; anything
+        // starting right of centre leaves it the room it had.
+        assert!(
+            r.left() > rect.center().x,
+            "legend starts at {} , box centre is {}",
+            r.left(),
+            rect.center().x
+        );
     }
 }
