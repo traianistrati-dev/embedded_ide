@@ -728,6 +728,20 @@ pub fn module_title(m: &VirtualModule) -> String {
 /// Live preview of the generated handle variable name(s), with the user's
 /// label appended — the module analogue of the pin's `pc13_out_board_led`
 /// caption. SPI/I2C have one handle; USART has two (`_txN` / `_rxN`).
+/// The binding name(s) this module generates, as a list.
+///
+/// [`handle_preview`] renders them for the box, where one string is what a
+/// painter wants. Callers that need to FIND those bindings in the source want
+/// them apart: a Native USART is two handles (`_tx0, _rx0`), and searching for
+/// the joined string would match neither line.
+pub(crate) fn handle_names(m: &VirtualModule, native_forced: bool) -> Vec<String> {
+    handle_preview(m, native_forced)
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
     let n = m.instance();
     let lbl = sanitize_label(m.config.custom_label());
@@ -1004,7 +1018,7 @@ fn draw_box(
         } else {
             LEGEND_GREY_OFF
         };
-        paint_legend(&painter.with_clip_rect(rect), &l, grey, 1.0);
+        paint_legend(&painter.with_clip_rect(rect), &l, grey);
     }
     let title_size = TITLE_SIZE * scale;
     painter.text(
@@ -1186,6 +1200,13 @@ fn legend_of(kind: ModuleKind, r: egui::Rect) -> Option<Legend> {
         // Inventing a difference here would be the misleading option.
         K::GenericInterfaceI2s | K::GenericInterfaceSai => i2s_legend_shape(r),
         K::GenericInterfaceMcpwm => mcpwm_legend_shape(r),
+        // LPUART draws the USART picture for the same reason SAI draws I2S's:
+        // what goes on the pad IS a UART frame. Its real difference - it clocks
+        // from a low-speed source and can wake the part from Stop - has no
+        // scope picture at all, and inventing one would be the misleading
+        // option.
+        K::GenericInterfaceUsart | K::GenericInterfaceLpuart => uart_legend_shape(r),
+        K::GenericInterfaceCan => can_legend_shape(r),
         _ => return None,
     })
 }
@@ -1247,10 +1268,15 @@ fn usb_legend_shape(r: egui::Rect) -> Legend {
 fn square_edges(pts: Vec<egui::Pos2>) -> Vec<egui::Pos2> {
     let mut out = Vec::with_capacity(pts.len() + pts.len() / 2);
     for (i, p) in pts.iter().enumerate() {
-        if i > 0 && (p.y - pts[i - 1].y).abs() > f32::EPSILON && (p.x - pts[i - 1].x).abs() < 0.01 {
-            // already a vertical move
-        } else if i > 0 && (p.y - pts[i - 1].y).abs() > f32::EPSILON {
-            out.push(egui::pos2(pts[i - 1].x, p.y));
+        let changes_level = i > 0 && (p.y - pts[i - 1].y).abs() > f32::EPSILON;
+        let same_x = i > 0 && (p.x - pts[i - 1].x).abs() < 0.01;
+        if changes_level && !same_x {
+            // HOLD the old level to the new x, then jump - not jump first and
+            // then run along at the new level. The two are mirror images and
+            // only one of them is the signal: the wrong side makes a line that
+            // is meant to stay high until a transition drop the moment the
+            // previous point ends.
+            out.push(egui::pos2(p.x, pts[i - 1].y));
         }
         out.push(*p);
     }
@@ -1330,13 +1356,75 @@ const LEGEND_GREY_OFF: egui::Color32 = egui::Color32::from_gray(120);
 const LEGEND_ACCENT: egui::Color32 = egui::Color32::from_rgb(205, 85, 70);
 
 /// Paint a legend into `r`.
-fn paint_legend(painter: &egui::Painter, l: &Legend, grey: egui::Color32, w: f32) {
+fn paint_legend(painter: &egui::Painter, l: &Legend, grey: egui::Color32) {
     for row in &l.signal {
-        painter.line(row.clone(), egui::Stroke::new(w, grey));
+        painter.line(row.clone(), egui::Stroke::new(LEGEND_SIGNAL_STROKE, grey));
     }
     for row in &l.accent {
-        painter.line(row.clone(), egui::Stroke::new(w * 1.2, LEGEND_ACCENT));
+        painter.line(row.clone(), egui::Stroke::new(LEGEND_STROKE, LEGEND_ACCENT));
     }
+}
+
+/// USART and LPUART: one asynchronous frame.
+///
+/// Idle high, a start bit down, data, a stop bit back up. The two framing edges
+/// are the accent because they ARE the peripheral - there is no clock line, and
+/// the receiver has only those two edges to find the byte with. It is also what
+/// separates this from SPI without reading any detail: a UART picture has no
+/// second row, because the peripheral has no clock pin.
+fn uart_legend_shape(r: egui::Rect) -> Legend {
+    // Idle, start, six data bits, stop, idle.
+    let bits = [
+        true, false, true, true, false, true, false, false, true, true,
+    ];
+    let slot = r.width() / bits.len() as f32;
+    let start_x = r.left() + slot;
+    let stop_x = r.left() + slot * 8.0;
+    Legend::new()
+        .signal(levels(r, &bits))
+        .accent(vec![
+            egui::pos2(start_x, r.top()),
+            egui::pos2(start_x, r.bottom()),
+        ])
+        .accent(vec![
+            egui::pos2(stop_x, r.bottom()),
+            egui::pos2(stop_x, r.top()),
+        ])
+}
+
+/// CAN: the one bit somebody else drives.
+///
+/// Recessive high at rest, a dominant start, a stretch of bits, and then the
+/// ACK slot - the single bit the transmitter sends recessive and every
+/// listening node pulls down. That bit is the accent because it is the only
+/// thing on this wire that is not the sender's, and it is what makes the
+/// picture CAN rather than a UART frame.
+///
+/// Drawn as a HORIZONTAL run in the middle, against the UART's two vertical
+/// ticks at the ends: the two are the closest pair in the whole set - one row,
+/// idle high, opening low bit - so the accent has to differ in count, place AND
+/// orientation, not only in place.
+///
+/// Deliberately NOT the mirrored CAN_H / CAN_L pair a scope shows, even though
+/// that is the canonical picture: this module's pads are the controller-side
+/// RX/TX, and its config can turn the transceiver off entirely, in which case
+/// the differential pair does not physically exist.
+fn can_legend_shape(r: egui::Rect) -> Legend {
+    let bits = [
+        true, false, true, false, false, true, false, true, false, true,
+    ];
+    let slot = r.width() / bits.len() as f32;
+    // The ACK slot: one dominant bit, near the middle.
+    let ack = 5;
+    let (x0, x1) = (
+        r.left() + slot * ack as f32,
+        r.left() + slot * (ack as f32 + 1.0),
+    );
+    let mut shown = bits;
+    shown[ack] = false;
+    Legend::new()
+        .signal(levels(r, &shown))
+        .accent(vec![egui::pos2(x0, r.bottom()), egui::pos2(x1, r.bottom())])
 }
 
 /// A row's level per slot, turned into a square wave with its vertical edges.
@@ -1385,21 +1473,35 @@ fn spi_legend_shape(r: egui::Rect) -> Legend {
 /// are not attempted; the shoulders are.
 fn i2c_legend_shape(r: egui::Rect) -> Legend {
     let rows = legend_rows(r, 2);
-    let (a, b) = (r.left() + r.width() / 6.0, r.right() - r.width() / 6.0);
-    let burst = egui::Rect::from_min_max(egui::pos2(a, rows[0].top()), rows[0].max);
-    let burst = egui::Rect::from_min_max(burst.min, egui::pos2(b, rows[0].bottom()));
-    // SCL: flat high, a burst, flat high again.
+    let shoulder = r.width() / 6.0;
+    // The clock burst, and - INSIDE the flat shoulders rather than at their
+    // edge - where the two conditions happen. SCL has to be unambiguously high
+    // at both, which is the whole reason they can serve as delimiters; putting
+    // them level with the first and last clock edge would draw a START that is
+    // not one.
+    let (a, b) = (r.left() + shoulder, r.right() - shoulder);
+    let (start_x, stop_x) = (r.left() + shoulder * 0.5, r.right() - shoulder * 0.5);
+    let burst = egui::Rect::from_min_max(
+        egui::pos2(a, rows[0].top()),
+        egui::pos2(b, rows[0].bottom()),
+    );
     let mut scl = vec![egui::pos2(rows[0].left(), rows[0].top())];
     scl.extend(clock(burst, 4));
+    // `square_wave` ends on the baseline, and SCL has to be HIGH again for the
+    // STOP to be one - so it rises at the end of the burst, not at the far edge
+    // of the box.
+    scl.push(egui::pos2(b, rows[0].top()));
     scl.push(egui::pos2(rows[0].right(), rows[0].top()));
-    // SDA: high, down at START, bits, up at STOP, high.
+    // SDA: high, down at START, bits, up at STOP, high again. The last bit is
+    // low so the STOP is a real rising edge rather than a line that was already
+    // there.
     let sda = &rows[1];
-    let bits = [false, true, false, true];
+    let bits = [false, true, false, false];
     let bit_w = (b - a) / bits.len() as f32;
     let mut d = vec![
         egui::pos2(sda.left(), sda.top()),
-        egui::pos2(a, sda.top()),
-        egui::pos2(a, sda.bottom()),
+        egui::pos2(start_x, sda.top()),
+        egui::pos2(start_x, sda.bottom()),
     ];
     for (i, high) in bits.iter().enumerate() {
         let y = if *high { sda.top() } else { sda.bottom() };
@@ -1407,13 +1509,20 @@ fn i2c_legend_shape(r: egui::Rect) -> Legend {
         d.push(egui::pos2(x0, y));
         d.push(egui::pos2(x0 + bit_w, y));
     }
-    d.push(egui::pos2(b, sda.top()));
+    d.push(egui::pos2(stop_x, sda.bottom()));
+    d.push(egui::pos2(stop_x, sda.top()));
     d.push(egui::pos2(sda.right(), sda.top()));
     Legend::new()
         .signal(square_edges(scl))
         .signal(square_edges(d))
-        .accent(vec![egui::pos2(a, sda.top()), egui::pos2(a, sda.bottom())])
-        .accent(vec![egui::pos2(b, sda.bottom()), egui::pos2(b, sda.top())])
+        .accent(vec![
+            egui::pos2(start_x, sda.top()),
+            egui::pos2(start_x, sda.bottom()),
+        ])
+        .accent(vec![
+            egui::pos2(stop_x, sda.bottom()),
+            egui::pos2(stop_x, sda.top()),
+        ])
 }
 
 /// I2S and SAI: a bit clock, and the word select that is far slower than it.
@@ -1496,10 +1605,35 @@ const PWM_LEGEND_PULSES: usize = 3;
 /// this height, small enough not to push the first config row down.
 const PWM_LEGEND_SIZE: egui::Vec2 = egui::vec2(150.0, 38.0);
 
-/// Where the legend goes inside the strip reserved for it: hard right.
+/// The signal, and the accent that has to stand out from it.
+const LEGEND_SIGNAL_STROKE: f32 = 1.0;
+/// The WIDEST stroke `paint_legend` draws - named as a constant, and used both
+/// to draw with and to reserve room for, so the two cannot drift apart.
+///
+/// It matters because egui centres a stroke ON its path: a line drawn along the
+/// bottom of a rect puts half its width BELOW that rect, and a clip at the
+/// rect's edge takes that half away. `the_widest_stroke_is_the_one_reserved_for`
+/// keeps this the maximum.
+const LEGEND_STROKE: f32 = 1.2;
+
+/// Where the legend goes inside the strip reserved for it: hard right, and half
+/// a stroke clear of the top and bottom.
+///
+/// The inset is not padding. A square wave's low level is drawn exactly ON
+/// `r.bottom()` and its high level exactly ON `r.top()` - that is what makes the
+/// two read as levels rather than as a band. With the legend filling its strip
+/// edge to edge and the painter clipped to that strip, half of the bottom line
+/// and half of the top one were cut away: the USB legend, whose two rows BOTH
+/// end on a row bottom, showed it worst.
+///
+/// The canvas box never had the fault because `box_legend_rect` already sits
+/// 6 px inside the box.
 fn pwm_legend_rect(strip: egui::Rect) -> egui::Rect {
     egui::Rect::from_min_size(
-        egui::pos2(strip.right() - PWM_LEGEND_SIZE.x, strip.top()),
+        egui::pos2(
+            strip.right() - PWM_LEGEND_SIZE.x,
+            strip.top() + LEGEND_STROKE / 2.0,
+        ),
         PWM_LEGEND_SIZE,
     )
 }
@@ -1586,13 +1720,16 @@ fn signal_legend(ui: &mut egui::Ui, kind: ModuleKind) {
     if legend_of(kind, probe).is_none() {
         return;
     }
+    // A stroke taller than the picture, so the lines drawn on its top and
+    // bottom edges have their full width inside the clip - see
+    // `pwm_legend_rect`.
     let (strip, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), PWM_LEGEND_SIZE.y),
+        egui::vec2(ui.available_width(), PWM_LEGEND_SIZE.y + LEGEND_STROKE),
         egui::Sense::hover(),
     );
     let r = pwm_legend_rect(strip);
     if let Some(l) = legend_of(kind, r) {
-        paint_legend(&ui.painter().with_clip_rect(strip), &l, LEGEND_GREY, 1.0);
+        paint_legend(&ui.painter().with_clip_rect(strip), &l, LEGEND_GREY);
     }
     ui.interact(r, ui.id().with("signal_legend"), egui::Sense::hover())
         .on_hover_text(docs::legend_hover(kind));
@@ -7585,14 +7722,18 @@ mod the_box_shows_one_caption {
 mod the_signal_legends {
     use super::{
         BOX_LEGEND_SIZE, BOX_W, BoxShape, LEGEND_ACCENT, LEGEND_GREY, LEGEND_GREY_OFF,
-        PWM_LEGEND_SIZE, Side, box_legend_rect, docs, legend_of, silhouette,
+        LEGEND_SIGNAL_STROKE, LEGEND_STROKE, PWM_LEGEND_SIZE, Side, box_legend_rect, docs,
+        legend_of, pwm_legend_rect, silhouette,
     };
     use crate::panels::mcu_module::modules::ModuleKind;
     use eframe::egui;
 
     /// The kinds that get a picture. Ten others deliberately do not - see
     /// `legend_of` for the three reasons.
-    const WITH: [ModuleKind; 10] = [
+    const WITH: [ModuleKind; 13] = [
+        ModuleKind::GenericInterfaceUsart,
+        ModuleKind::GenericInterfaceLpuart,
+        ModuleKind::GenericInterfaceCan,
         ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceUsb,
         ModuleKind::GenericInterfaceTouch,
@@ -7606,7 +7747,10 @@ mod the_signal_legends {
     ];
 
     /// Everything except the two that are deliberately not logic levels.
-    const SQUARE: [ModuleKind; 8] = [
+    const SQUARE: [ModuleKind; 11] = [
+        ModuleKind::GenericInterfaceUsart,
+        ModuleKind::GenericInterfaceLpuart,
+        ModuleKind::GenericInterfaceCan,
         ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceUsb,
         ModuleKind::GenericInterfacePcnt,
@@ -7627,6 +7771,55 @@ mod the_signal_legends {
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceMcpwm,
     ];
+
+    /// A legend never has half a line clipped off its own strip.
+    ///
+    /// The picture is drawn ON its rect's edges - a square wave's low level sits
+    /// exactly at the bottom, its high level exactly at the top, and that is
+    /// what makes the two read as levels. egui centres a stroke on its path, so
+    /// each of those lines puts half its width OUTSIDE the rect. When the strip
+    /// and the rect were the same box and the painter was clipped to the strip,
+    /// that half was cut: the USB legend lost the bottom of both its rows, which
+    /// is what the bug report was about.
+    #[test]
+    fn the_legend_strip_has_room_for_the_stroke() {
+        // The strip `signal_legend` allocates, at a plausible card width.
+        let strip = egui::Rect::from_min_size(
+            egui::pos2(12.0, 40.0),
+            egui::vec2(300.0, PWM_LEGEND_SIZE.y + LEGEND_STROKE),
+        );
+        let r = pwm_legend_rect(strip);
+        let half = LEGEND_STROKE / 2.0;
+        assert!(
+            r.top() - strip.top() >= half - 0.001,
+            "only {} above the picture, need {half}",
+            r.top() - strip.top()
+        );
+        assert!(
+            strip.bottom() - r.bottom() >= half - 0.001,
+            "only {} below the picture, need {half}",
+            strip.bottom() - r.bottom()
+        );
+        // The picture itself keeps its full size - the room came from the strip.
+        assert_eq!(r.size(), PWM_LEGEND_SIZE);
+
+        // And every point of every legend, at that rect, is inside the strip
+        // once its stroke is accounted for.
+        for kind in ModuleKind::ALL {
+            let Some(l) = legend_of(kind, r) else {
+                continue;
+            };
+            for row in l.signal.iter().chain(l.accent.iter()) {
+                for p in row {
+                    assert!(
+                        strip.contains(egui::pos2(p.x, p.y - half))
+                            && strip.contains(egui::pos2(p.x, p.y + half)),
+                        "{kind:?}: {p:?} is drawn half outside the clip"
+                    );
+                }
+            }
+        }
+    }
 
     fn sizes() -> [egui::Rect; 2] {
         [
@@ -7808,6 +8001,191 @@ mod the_signal_legends {
                     "{kind:?}: every one repeats the same warning, because the same misreading is available for all of them"
                 );
             }
+        }
+    }
+
+    /// The one thing that tells SPI and I2C apart at 52 px.
+    ///
+    /// Both are two rows, both are clock-on-top and data-below, and neither
+    /// has a detail legible at that width. The separator is the SHOULDERS:
+    /// I2C's clock is flat HIGH at both ends because START and STOP happen with
+    /// SCL high, while SPI's runs edge to edge. Lose that and the two become
+    /// one picture - so it is asserted rather than left to a reviewer's eye.
+    #[test]
+    fn i2c_has_the_shoulders_that_spi_does_not() {
+        let r = sizes()[0];
+        let clock_of = |kind: ModuleKind| -> Vec<egui::Pos2> {
+            legend_of(kind, r).expect("has a legend").signal[0].clone()
+        };
+        // The level a row holds at a given x, read off its polyline.
+        let level_at = |row: &[egui::Pos2], x: f32| -> f32 {
+            let mut y = row[0].y;
+            for p in row {
+                if p.x <= x + 0.01 {
+                    y = p.y;
+                }
+            }
+            y
+        };
+        let shoulder = r.width() / 12.0;
+        let i2c = clock_of(ModuleKind::GenericInterfaceI2c);
+        let spi = clock_of(ModuleKind::GenericInterfaceSpi);
+        let rows = super::legend_rows(r, 2);
+        let high = rows[0].top();
+
+        // I2C: high at both ends, and flat there - no edge inside a shoulder.
+        for x in [r.left() + shoulder, r.right() - shoulder] {
+            assert!(
+                (level_at(&i2c, x) - high).abs() < 0.01,
+                "I2C SCL is high at {x}, which is what makes START and STOP possible"
+            );
+        }
+        let edges_in_shoulder = i2c
+            .windows(2)
+            .filter(|p| (p[0].x - p[1].x).abs() < 0.01)
+            .filter(|p| p[0].x < r.left() + shoulder || p[0].x > r.right() - shoulder)
+            .count();
+        assert_eq!(
+            edges_in_shoulder, 0,
+            "I2C SCL does not toggle in its shoulders"
+        );
+
+        // SPI: the clock is already toggling inside the same margins.
+        let spi_edges_in_shoulder = spi
+            .windows(2)
+            .filter(|p| (p[0].x - p[1].x).abs() < 0.01)
+            .filter(|p| p[0].x < r.left() + shoulder || p[0].x > r.right() - shoulder)
+            .count();
+        assert!(
+            spi_edges_in_shoulder > 0,
+            "SPI's clock runs edge to edge - that is the whole difference"
+        );
+    }
+
+    /// MCPWM's two outputs are never high together.
+    ///
+    /// The dead time is the reason the peripheral is not just two PWMs: for
+    /// that window both are off, and a bridge that skips it shoots through. A
+    /// picture that showed them overlapping would teach the opposite.
+    #[test]
+    fn the_complementary_pair_is_never_on_together() {
+        let r = sizes()[0];
+        let l = legend_of(ModuleKind::GenericInterfaceMcpwm, r).expect("has a legend");
+        let rows = super::legend_rows(r, 2);
+        let level_at = |row: &[egui::Pos2], x: f32| -> f32 {
+            let mut y = row[0].y;
+            for p in row {
+                if p.x <= x + 0.01 {
+                    y = p.y;
+                }
+            }
+            y
+        };
+        let mut both_off = 0;
+        let steps = 200;
+        for i in 0..steps {
+            let x = r.left() + r.width() * (i as f32 + 0.5) / steps as f32;
+            let up = (level_at(&l.signal[0], x) - rows[0].top()).abs() < 0.01;
+            let down = (level_at(&l.signal[1], x) - rows[1].top()).abs() < 0.01;
+            assert!(!(up && down), "both outputs high at x={x}");
+            if !up && !down {
+                both_off += 1;
+            }
+        }
+        assert!(
+            both_off > 0,
+            "and there IS a window where neither is on - that window is the point"
+        );
+    }
+
+    /// The room reserved really is the widest stroke drawn.
+    ///
+    /// Two constants that must stay ordered: reserve less than you draw and the
+    /// clip eats half a line, which is the defect this pair was introduced to
+    /// close.
+    #[test]
+    fn the_widest_stroke_is_the_one_reserved_for() {
+        assert!(
+            LEGEND_STROKE >= LEGEND_SIGNAL_STROKE,
+            "the reserved width must cover every stroke a legend draws"
+        );
+    }
+
+    /// The UART and CAN pictures must not read as the same thing.
+    ///
+    /// They are the closest pair in the set: one row each, both idle high, both
+    /// opening with a low bit, and no detail legible at 52 px. The separation
+    /// is carried entirely by the accent, so it has to differ in COUNT, PLACE
+    /// and ORIENTATION - two vertical ticks at the extremes against one
+    /// horizontal run in the middle. Any one of those three alone would be too
+    /// fine to see at that size.
+    ///
+    /// If this pair still does not read on a real canvas, the answer is to drop
+    /// the CAN picture - not to weaken the UART one, which has no neighbour.
+    #[test]
+    fn the_uart_and_can_accents_differ_three_ways() {
+        let r = sizes()[0];
+        let uart = legend_of(ModuleKind::GenericInterfaceUsart, r).expect("has a legend");
+        let can = legend_of(ModuleKind::GenericInterfaceCan, r).expect("has a legend");
+
+        let vertical = |row: &Vec<egui::Pos2>| row.iter().all(|p| (p.x - row[0].x).abs() < 0.01);
+        // COUNT.
+        assert_eq!(
+            uart.accent.len(),
+            2,
+            "the UART frame is marked at both ends"
+        );
+        assert_eq!(can.accent.len(), 1, "CAN has one ACK slot");
+        // ORIENTATION.
+        assert!(
+            uart.accent.iter().all(vertical),
+            "the UART marks are edges, drawn as vertical ticks"
+        );
+        assert!(
+            !vertical(&can.accent[0]),
+            "the CAN mark is a BIT, drawn as a horizontal run"
+        );
+        // PLACE: the UART marks sit in the outer thirds, the CAN one straddles
+        // the middle.
+        let third = r.width() / 3.0;
+        for a in &uart.accent {
+            let x = a[0].x;
+            assert!(
+                x < r.left() + third || x > r.right() - third,
+                "a UART mark at {x} is not near an end"
+            );
+        }
+        let (lo, hi) = (can.accent[0][0].x, can.accent[0][1].x);
+        assert!(
+            lo > r.left() + third * 0.5 && hi < r.right() - third * 0.5,
+            "the CAN mark runs {lo}..{hi}, which should be around the middle"
+        );
+    }
+
+    /// LPUART draws the USART picture, exactly.
+    ///
+    /// The pad carries a UART frame; the peripheral's real difference has no
+    /// waveform at all. Two drawings here would be a difference the wire does
+    /// not have.
+    #[test]
+    fn lpuart_and_sai_borrow_their_siblings_picture() {
+        let r = sizes()[0];
+        for (a, b) in [
+            (
+                ModuleKind::GenericInterfaceUsart,
+                ModuleKind::GenericInterfaceLpuart,
+            ),
+            (
+                ModuleKind::GenericInterfaceI2s,
+                ModuleKind::GenericInterfaceSai,
+            ),
+        ] {
+            let (x, y) = (
+                legend_of(a, r).expect("has a legend"),
+                legend_of(b, r).expect("has a legend"),
+            );
+            assert_eq!(x.signal, y.signal, "{a:?} and {b:?} draw the same signal");
+            assert_eq!(x.accent, y.accent, "{a:?} and {b:?} mark the same thing");
         }
     }
 

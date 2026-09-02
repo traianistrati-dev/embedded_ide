@@ -358,6 +358,8 @@ pub const ALL_DOCS: &[(&str, &str)] = &[
     ("LEGEND_I2C", LEGEND_I2C),
     ("LEGEND_I2S", LEGEND_I2S),
     ("LEGEND_MCPWM", LEGEND_MCPWM),
+    ("LEGEND_UART", LEGEND_UART),
+    ("LEGEND_CAN", LEGEND_CAN),
 ];
 
 /// Every row the panel can draw, per module kind.
@@ -1686,6 +1688,8 @@ pub fn legend_hover(kind: crate::panels::mcu_module::modules::ModuleKind) -> &'s
         K::GenericInterfaceI2c => LEGEND_I2C,
         K::GenericInterfaceI2s | K::GenericInterfaceSai => LEGEND_I2S,
         K::GenericInterfaceMcpwm => LEGEND_MCPWM,
+        K::GenericInterfaceUsart | K::GenericInterfaceLpuart => LEGEND_UART,
+        K::GenericInterfaceCan => LEGEND_CAN,
         _ => "",
     }
 }
@@ -1705,5 +1709,9 @@ pub const LEGEND_SPI: &str = "A clock and data that moves only on its edges. The
 pub const LEGEND_I2C: &str = "The two conditions that frame every transfer: SDA falling while SCL is high starts one, SDA rising while SCL is high ends it. They are the only moments SDA may move with the clock high, which is why they can be the delimiters. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
 
 pub const LEGEND_I2S: &str = "A bit clock, and the word select that runs far slower than it - one edge per sample. The rate difference is the point; SAI puts the same three signals on the wire. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_UART: &str = "One asynchronous frame: idle high, a start bit down, data, a stop bit back up. There is no clock line - those two edges are all the receiver has to find the byte with, which is why they are marked. LPUART puts the same frame on the wire. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_CAN: &str = "Recessive at rest, a dominant start, then the ACK slot - the one bit the sender leaves recessive and every listening node pulls down. It is the only thing on this wire that is not the sender's. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
 
 pub const LEGEND_MCPWM: &str = "A complementary pair, and the dead time between them: for that window BOTH outputs are off, which is what stops a bridge shooting through. Drawn far wider than a real one, which would be invisible here. An illustration of the peripheral - not this module's own setting, which is in the rows below.";

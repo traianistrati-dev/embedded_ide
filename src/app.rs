@@ -2645,9 +2645,37 @@ impl AppIde {
     /// Pins that resolve to a DIFFERENT file than the first hit are dropped: the
     /// editor shows one file, and a band the user can't see is worse than one
     /// missing line. In practice every pin of a module binds in main.rs anyway.
-    fn goto_pins_in_code(&mut self, pins: &[usize], now: f64) {
-        let hits: Vec<(ProjectFileId, usize)> =
+    /// Does `line` CREATE the binding `name` (`let name =` / `let mut name =`)?
+    ///
+    /// Not `line.contains(name)`: `_pwm0` is a prefix of `_pwm0_power_led`, and
+    /// the handle is mentioned again wherever it is used, so a substring test
+    /// would light the wrong line - or several.
+    fn line_binds(line: &str, name: &str) -> bool {
+        let t = line.trim_start();
+        let Some(rest) = t.strip_prefix("let ") else {
+            return false;
+        };
+        let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+        rest.strip_prefix(name)
+            .is_some_and(|after| after.trim_start().starts_with('='))
+    }
+
+    fn goto_pins_in_code(&mut self, pins: &[usize], handles: &[String], now: f64) {
+        let mut hits: Vec<(ProjectFileId, usize)> =
             pins.iter().filter_map(|n| self.locate_pin(*n)).collect();
+        // The module's own binding, looked up by NAME in the generated main.rs.
+        // Anchored on `let`, so a later USE of the handle - passed to another
+        // call, read in the user's code below the markers - cannot be mistaken
+        // for the line that creates it.
+        for h in handles {
+            if let Some(line) = self
+                .generated_code
+                .lines()
+                .position(|l| Self::line_binds(l, h))
+            {
+                hits.push((ProjectFileId::MainRs, line + 1));
+            }
+        }
         let Some(&(file, _)) = hits.first() else {
             return;
         };
@@ -3068,10 +3096,17 @@ impl AppIde {
         // MCU and resolved here, against freshly generated sources.
         // A module click resolves to the pins it wires, so both requests end up
         // as the same "light these pins up" call.
+        // A module click resolves to two different things in the code, and it
+        // needs BOTH: the pins it is wired to, and the handle the module itself
+        // binds. The handle has no pin, so the pin search can never find it -
+        // which left the one line naming the module (`let mut _pwm0_power_led =
+        // …`) unlit while its wiring lines pulsed around it.
+        let mut goto_handles: Vec<String> = Vec::new();
         let goto_pins: Vec<usize> = match &mut self.mcu {
             Some(m) => {
                 let pin = m.pin_goto.take();
                 let module = m.module_goto.take();
+                let native_forced = m.is_native();
                 match (pin, module) {
                     (Some(n), _) => vec![n],
                     (None, Some(id)) => m
@@ -3079,6 +3114,11 @@ impl AppIde {
                         .iter()
                         .find(|md| md.id == id)
                         .map(|md| {
+                            goto_handles =
+                                crate::panels::mcu_module::mcu::gui::modules::handle_names(
+                                    md,
+                                    native_forced,
+                                );
                             let mut v: Vec<usize> =
                                 md.connections.iter().map(|c| c.mcu_pin).collect();
                             v.sort_unstable();
@@ -3091,9 +3131,9 @@ impl AppIde {
             }
             None => Vec::new(),
         };
-        if !goto_pins.is_empty() {
+        if !goto_pins.is_empty() || !goto_handles.is_empty() {
             let now = ui.input(|i| i.time);
-            self.goto_pins_in_code(&goto_pins, now);
+            self.goto_pins_in_code(&goto_pins, &goto_handles, now);
         }
 
         // Tick flash counters down
@@ -4807,5 +4847,61 @@ mod rename_apply_tests {
         let n = apply_edits_to_buffer(&mut buf, &refs, &[]);
         assert_eq!(n, 1);
         assert_eq!(buf, "hi world");
+    }
+}
+
+#[cfg(test)]
+mod module_handle_highlight {
+    use super::AppIde;
+
+    /// The line the user pointed at: the module's own binding.
+    #[test]
+    fn it_finds_the_line_that_creates_the_handle() {
+        let line = "    let mut _pwm0_power_led = pins::configs::pwm0::init(&ledc, &t, g);";
+        assert!(AppIde::line_binds(line, "_pwm0_power_led"));
+        // …and without `mut`, which most handles are.
+        assert!(AppIde::line_binds(
+            "let _spi1 = configs::spi1::init(p);",
+            "_spi1"
+        ));
+    }
+
+    /// A PREFIX must not match.
+    ///
+    /// `_pwm0` is a prefix of `_pwm0_power_led`; a `contains` test would light
+    /// the labelled module's line when an unlabelled one was clicked.
+    #[test]
+    fn a_prefix_is_not_the_binding() {
+        let line = "    let mut _pwm0_power_led = configs::pwm0::init(&ledc);";
+        assert!(!AppIde::line_binds(line, "_pwm0"));
+    }
+
+    /// A USE of the handle is not its creation.
+    ///
+    /// The handle appears again wherever the user's own code touches it, below
+    /// the generated markers. Lighting that line would point at the wrong half
+    /// of the file.
+    #[test]
+    fn a_later_use_is_not_the_binding() {
+        for line in [
+            "    _pwm0_power_led.set_duty(50);",
+            "    let d = _pwm0_power_led.duty();",
+            "    foo(&_pwm0_power_led);",
+        ] {
+            assert!(!AppIde::line_binds(line, "_pwm0_power_led"), "{line}");
+        }
+    }
+
+    /// `let` must be the statement, not a word inside one.
+    #[test]
+    fn only_a_real_let_counts() {
+        assert!(!AppIde::line_binds(
+            "// let _pwm0_power_led = …",
+            "_pwm0_power_led"
+        ));
+        assert!(!AppIde::line_binds(
+            "    outlet _pwm0_power_led = 1;",
+            "_pwm0_power_led"
+        ));
     }
 }
