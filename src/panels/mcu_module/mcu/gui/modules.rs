@@ -1035,6 +1035,100 @@ fn handle_caption_pos(m: &VirtualModule, rect: egui::Rect) -> egui::Pos2 {
     }
 }
 
+/// The three duty levels the little waveform legend draws, low to high.
+///
+/// A LEGEND, not a reading of this module: it says what the peripheral does -
+/// a wider pulse holds the output high for longer, and the average the load
+/// actually sees follows it up - and it says the same thing whatever the
+/// module is set to. The module's own duty is a number in the rows below, and
+/// with several channels there is no single one to draw.
+const PWM_LEGEND_DUTIES: [f32; 3] = [0.2, 0.5, 0.8];
+
+/// Pulses drawn per level. Three is enough to read as "a repeating square
+/// wave" and short enough to sit in a corner.
+const PWM_LEGEND_PULSES: usize = 3;
+
+/// Size of the legend. Wide enough for nine pulses to stay distinguishable at
+/// this height, small enough not to push the first config row down.
+const PWM_LEGEND_SIZE: egui::Vec2 = egui::vec2(150.0, 38.0);
+
+/// Where the legend goes inside the strip reserved for it: hard right.
+fn pwm_legend_rect(strip: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(strip.right() - PWM_LEGEND_SIZE.x, strip.top()),
+        PWM_LEGEND_SIZE,
+    )
+}
+
+/// The square wave, as one polyline: nine pulses whose width grows in three
+/// steps.
+///
+/// Built as a path rather than as filled bars because that is what the shape
+/// IS - one line that keeps stepping up and down, which is the point being
+/// made. Returns the baseline-relative points so the test can read them
+/// without a painter.
+fn pwm_legend_wave(r: egui::Rect) -> Vec<egui::Pos2> {
+    let n = PWM_LEGEND_DUTIES.len() * PWM_LEGEND_PULSES;
+    let slot = r.width() / n as f32;
+    let (lo, hi) = (r.bottom(), r.top() + 2.0);
+    let mut pts = Vec::with_capacity(n * 4 + 2);
+    pts.push(egui::pos2(r.left(), lo));
+    for i in 0..n {
+        let duty = PWM_LEGEND_DUTIES[i / PWM_LEGEND_PULSES];
+        let x0 = r.left() + i as f32 * slot;
+        let x1 = x0 + slot * duty;
+        pts.push(egui::pos2(x0, hi));
+        pts.push(egui::pos2(x1, hi));
+        pts.push(egui::pos2(x1, lo));
+    }
+    pts.push(egui::pos2(r.right(), lo));
+    pts
+}
+
+/// The average the load sees: flat across each level, ramping between them.
+///
+/// The red line in the picture, and the reason the legend is worth drawing at
+/// all - the square wave alone does not say what a duty cycle is FOR.
+fn pwm_legend_average(r: egui::Rect) -> Vec<egui::Pos2> {
+    let span = r.height() - 6.0;
+    let y = |d: f32| r.bottom() - 3.0 - d * span;
+    let group = r.width() / PWM_LEGEND_DUTIES.len() as f32;
+    // The ramp is drawn inside the group it climbs INTO, so each level is flat
+    // for most of its own pulses - as it is on a real filter.
+    let ramp = group * 0.35;
+    let mut pts = vec![egui::pos2(r.left(), y(PWM_LEGEND_DUTIES[0]))];
+    for (i, d) in PWM_LEGEND_DUTIES.iter().enumerate() {
+        let x0 = r.left() + i as f32 * group;
+        if i > 0 {
+            pts.push(egui::pos2(x0 + ramp, y(*d)));
+        }
+        pts.push(egui::pos2(x0 + group, y(*d)));
+    }
+    pts
+}
+
+/// Draw the legend at the top right of a PWM module's config.
+fn pwm_legend(ui: &mut egui::Ui) {
+    let (strip, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), PWM_LEGEND_SIZE.y),
+        egui::Sense::hover(),
+    );
+    let r = pwm_legend_rect(strip);
+    let p = ui.painter().with_clip_rect(strip);
+    p.line(
+        pwm_legend_wave(r),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(165)),
+    );
+    p.line(
+        pwm_legend_average(r),
+        egui::Stroke::new(1.6_f32, egui::Color32::from_rgb(205, 85, 70)),
+    );
+    ui.interact(r, ui.id().with("pwm_legend"), egui::Sense::hover())
+        .on_hover_text(
+            "What duty cycle does: the wider the pulse, the longer the output stays high, and the higher the average the load sees. An illustration of the peripheral - not this module's own setting, which is in the rows below.",
+        );
+}
+
 /// Font multiplier for a module box's texts: 1 normally, `SELECTED_TEXT_SCALE`
 /// while the box is selected. Shared by the box painter and the (separate)
 /// mutable pass that puts the rename fields, so the two never drift apart.
@@ -2427,6 +2521,13 @@ pub fn module_config_ui(
         },
     );
     out.elsewhere("Data models", docs::SHARED_DATA_MODELS);
+
+    // A PWM module gets a small picture of what it makes, top right - see
+    // `pwm_legend`. Outside the grid on purpose: inside it the drawing would be
+    // a cell, and a cell is either the label column or the control column.
+    if matches!(m.config, ModuleConfig::Timer(_)) {
+        pwm_legend(ui);
+    }
 
     egui::Grid::new("module_cfg")
         .num_columns(2)
@@ -7010,5 +7111,100 @@ mod the_box_shows_one_caption {
         let one = module(ModuleKind::Custom, vec![1]);
         let three = module(ModuleKind::Custom, vec![1, 2, 3]);
         assert!((box_h(&three) - box_h(&one) - 2.0 * CUSTOM_ROW_H).abs() < f32::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod the_pwm_legend_draws_what_it_claims {
+    use super::{
+        PWM_LEGEND_DUTIES, PWM_LEGEND_PULSES, PWM_LEGEND_SIZE, pwm_legend_average, pwm_legend_rect,
+        pwm_legend_wave,
+    };
+    use eframe::egui;
+
+    fn r() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), PWM_LEGEND_SIZE)
+    }
+
+    /// Nine pulses - three per level - and every one of them inside the box.
+    #[test]
+    fn there_are_three_pulses_per_level_and_they_stay_in_the_box() {
+        let rect = r();
+        let pts = pwm_legend_wave(rect);
+        let n = PWM_LEGEND_DUTIES.len() * PWM_LEGEND_PULSES;
+        assert_eq!(n, 9, "three levels of three");
+        // One rising edge, one top, one falling edge per pulse, plus the two
+        // baseline ends.
+        assert_eq!(pts.len(), n * 3 + 2);
+        for p in &pts {
+            assert!(rect.contains(*p), "{p:?} escaped {rect:?}");
+        }
+        assert!(
+            (pts[0].x - rect.left()).abs() < f32::EPSILON
+                && (pts[pts.len() - 1].x - rect.right()).abs() < f32::EPSILON,
+            "the wave spans the whole box"
+        );
+    }
+
+    /// The pulses get WIDER in three steps - which is the whole statement the
+    /// picture makes.
+    #[test]
+    fn each_level_holds_the_output_high_for_longer() {
+        let rect = r();
+        let pts = pwm_legend_wave(rect);
+        // Every pulse's high span, in order: points 1.. come in threes,
+        // (rise, top, fall).
+        let widths: Vec<f32> = (0..PWM_LEGEND_DUTIES.len() * PWM_LEGEND_PULSES)
+            .map(|i| pts[1 + i * 3 + 1].x - pts[1 + i * 3].x)
+            .collect();
+        for g in 0..PWM_LEGEND_DUTIES.len() {
+            let w = &widths[g * PWM_LEGEND_PULSES..(g + 1) * PWM_LEGEND_PULSES];
+            for x in w {
+                assert!(
+                    (x - w[0]).abs() < 0.01,
+                    "level {g}: its three pulses are equal, got {w:?}"
+                );
+            }
+            if g > 0 {
+                let prev = widths[(g - 1) * PWM_LEGEND_PULSES];
+                assert!(w[0] > prev, "level {g} is wider than {}: {w:?}", g - 1);
+            }
+        }
+    }
+
+    /// The average line only ever climbs, and never leaves the box.
+    #[test]
+    fn the_average_rises_with_the_duty() {
+        let rect = r();
+        let pts = pwm_legend_average(rect);
+        for w in pts.windows(2) {
+            // Screen y grows DOWNWARD, so rising means non-increasing y.
+            assert!(w[1].y <= w[0].y + f32::EPSILON, "never dips: {pts:?}");
+            assert!(w[1].x >= w[0].x, "and never goes backwards");
+        }
+        assert!(pts.last().unwrap().y < pts[0].y, "it does actually rise");
+        for p in &pts {
+            assert!(rect.contains(*p), "{p:?} escaped {rect:?}");
+        }
+    }
+
+    /// It sits hard right in whatever strip it is given - "top right" of the
+    /// config, whatever the panel is currently wide.
+    #[test]
+    fn it_is_right_aligned_in_the_strip() {
+        for w in [200.0_f32, 420.0, 900.0] {
+            let strip =
+                egui::Rect::from_min_size(egui::pos2(7.0, 3.0), egui::vec2(w, PWM_LEGEND_SIZE.y));
+            let got = pwm_legend_rect(strip);
+            assert!(
+                (got.right() - strip.right()).abs() < f32::EPSILON,
+                "flush right at {w}"
+            );
+            assert!(
+                (got.top() - strip.top()).abs() < f32::EPSILON,
+                "and at the top"
+            );
+            assert_eq!(got.size(), PWM_LEGEND_SIZE);
+        }
     }
 }
