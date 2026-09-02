@@ -696,14 +696,15 @@ fn row_spans(display_code: &str, start: usize, end: usize) -> Vec<(usize, usize)
     out
 }
 
-/// Paint the pulsing highlight behind every unused generic parameter in view,
-/// on top of the fade the highlighter already applied.
+/// Paint the pulsing highlight behind every span in `ranges`, on top of the fade
+/// the highlighter already applied.
 ///
-/// Deliberately limited to generic parameters: the same dead-range list also
+/// The caller decides what pulses, and deliberately keeps it to SHORT spans:
+/// unused generic parameters and unused imports. The same dead-range list also
 /// fades whole unused fns and structs, and pulsing a 20-line block would be
-/// unbearable. A parameter is one short identifier — exactly the size where a
-/// blink helps instead of shouting.
-pub(super) fn show_unused_generics_overlay(
+/// unbearable. A parameter or an import name is one short identifier — exactly
+/// the size where a blink helps instead of shouting.
+pub(super) fn show_unused_pulse_overlay(
     ui: &egui::Ui,
     galley_pos: egui::Pos2,
     clip: egui::Rect,

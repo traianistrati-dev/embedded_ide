@@ -924,10 +924,21 @@ impl AppIde {
             &displayed_file,
             &self.project_tree.user_src_files,
         );
+        // Unused imports, computed ONCE and handed to both the fade below and
+        // the pulse further down, so the two can never disagree about what is
+        // unused. rust-analyzer does not report this lint natively — it arrives
+        // through flycheck — so these come from the last Cargo Check / Clippy
+        // run, guarded on the file's text still matching what was compiled.
+        let unused_imports: Vec<(usize, usize)> = match &usages_rel_path {
+            Some(rel) if is_rust_file => self.unused_import_spans(rel, &display_code),
+            _ => Vec::new(),
+        };
         let dead_ranges: Vec<(usize, usize)> = match &usages_rel_path {
             Some(rel) if is_rust_file => {
                 self.tick_usages(rel, &display_code);
-                self.usages_dead_ranges(rel, &display_code)
+                let mut r = self.usages_dead_ranges(rel, &display_code);
+                r.extend(unused_imports.iter().copied());
+                r
             }
             _ => Vec::new(),
         };
@@ -1279,16 +1290,21 @@ impl AppIde {
                 ui,
                 copy_requested,
             );
-            // Unused generic parameters pulse a translucent white highlight on
-            // top of their fade. Drawn before the "N refs" pills so a pill can
-            // never end up under the wash.
-            generics::show_unused_generics_overlay(
+            // Unused generic parameters AND unused imports pulse a translucent
+            // white highlight on top of their fade. Drawn before the "N refs"
+            // pills so a pill can never end up under the wash.
+            //
+            // One call, one list: two overlays would each read the clock
+            // themselves and the phases would only agree by luck.
+            let mut pulse: Vec<(usize, usize)> = self.generic_pulse_ranges(&display_code).to_vec();
+            pulse.extend(unused_imports.iter().copied());
+            generics::show_unused_pulse_overlay(
                 ui,
                 editor_resp.galley_pos,
                 editor_clip,
                 &editor_resp.galley,
                 &display_code,
-                self.generic_pulse_ranges(&display_code),
+                &pulse,
             );
             // …and the underlined ones explain themselves on hover.
             generics::show_impl_only_tooltips(

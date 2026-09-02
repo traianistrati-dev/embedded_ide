@@ -205,6 +205,97 @@ fn unused_variable_range(
     Some((start, end))
 }
 
+/// Is `c` part of a Rust identifier? Used for the whole-word test below, so
+/// looking for `Read` never matches inside `ReadExactError`.
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Every WHOLE-WORD occurrence of `needle` inside `chars[from..to)`.
+///
+/// Whole-word on both sides, which is the whole point: `use a::{Read,
+/// ReadExactError, Write};` with `Read` unused must land on `Read`, not on the
+/// first four letters of its neighbour.
+fn word_positions(chars: &[char], needle: &[char], from: usize, to: usize) -> Vec<usize> {
+    let hi = to.min(chars.len());
+    if needle.is_empty() || hi < needle.len() {
+        return Vec::new();
+    }
+    (from..=(hi - needle.len()))
+        .filter(|&i| {
+            chars[i..i + needle.len()] == *needle
+                && (i == 0 || !is_ident_char(chars[i - 1]))
+                && chars
+                    .get(i + needle.len())
+                    .is_none_or(|c| !is_ident_char(*c))
+        })
+        .collect()
+}
+
+/// Where the name `needle` sits, for a diagnostic that pointed at `line_1`.
+///
+/// Two passes, both self-verifying:
+/// 1. **On the reported line.** rustc points at the item for a whole unused
+///    `use`, and at the name itself for one inside a brace list — either way
+///    the name is on that line, so this covers both.
+/// 2. **A UNIQUE occurrence anywhere in the file**, for a brace list broken
+///    over several lines: the diagnostic's primary span is then the `use` on
+///    the first line while the name sits three lines down. Uniqueness is what
+///    makes it safe, and it is nearly always true for exactly the reason the
+///    lint fired — a name that is unused occurs once, in the import that
+///    introduced it. Two occurrences (a mention in a comment, say) and this
+///    gives up rather than guess.
+fn locate_import_name(
+    display_code: &str,
+    chars: &[char],
+    needle: &[char],
+    line_1: u32,
+) -> Option<usize> {
+    let line_start = lsp_pos_to_char_idx(display_code, line_1, 1);
+    let line_end = lsp_line_end_char_idx(display_code, line_1);
+    if let Some(&i) = word_positions(chars, needle, line_start, line_end).first() {
+        return Some(i);
+    }
+    let all = word_positions(chars, needle, 0, chars.len());
+    (all.len() == 1).then(|| all[0])
+}
+
+/// The spans to fade and pulse for one `unused_imports` diagnostic, verified
+/// against the CURRENT text.
+///
+/// Three things differ from [`unused_variable_range`], and each one is a real
+/// shape rustc emits:
+/// * **plural** — `unused imports: \`A\`, \`B\`` puts several names in ONE
+///   diagnostic, so every backticked piece counts, not just the first;
+/// * **the name is a PATH** for a whole unused import
+///   (``unused import: `embedded_io_async::Write` ``) and a bare identifier for
+///   one inside braces (``unused import: `ReadExactError` ``) — searching for
+///   the backticked text literally handles both without telling them apart;
+/// * **the reported column need not point at the name** — for a whole unused
+///   `use` the primary span starts at `use`, so anchoring on the column the way
+///   the variable lint does would find nothing.
+///
+/// Empty when nothing verifies, which is the same silent-stop behaviour the
+/// variable fade has: a stale Build/Clippy result stops applying rather than
+/// marking the wrong span.
+fn unused_import_ranges(d: &crate::build::Diagnostic, display_code: &str) -> Vec<(usize, usize)> {
+    let Some(line) = d.line else {
+        return Vec::new();
+    };
+    let chars: Vec<char> = display_code.chars().collect();
+    d.message
+        .split('`')
+        .enumerate()
+        // Odd pieces are the ones BETWEEN a pair of backticks.
+        .filter(|(i, part)| i % 2 == 1 && !part.is_empty())
+        .filter_map(|(_, name)| {
+            let needle: Vec<char> = name.chars().collect();
+            locate_import_name(display_code, &chars, &needle, line)
+                .map(|start| (start, start + needle.len()))
+        })
+        .collect()
+}
+
 impl AppIde {
     /// Snapshot every `.rs` file's CURRENT content into `build_text_snapshot`
     /// (`"src/main.rs"` / `"src/{rel}"` → text) — call right alongside
@@ -223,6 +314,43 @@ impl AppIde {
             self.build_text_snapshot
                 .insert(rel.clone(), content.clone());
         }
+    }
+
+    /// Char-index spans of the unused IMPORTS in the displayed file — faded like
+    /// any other unused thing, and pulsed like an unused generic parameter.
+    ///
+    /// Same source and same staleness guard as the `unused_variables` half of
+    /// [`usages_dead_ranges`](Self::usages_dead_ranges): rust-analyzer does not
+    /// report this lint natively (it arrives through flycheck), so it comes from
+    /// the last Cargo Check / Clippy run and is used ONLY while the file's live
+    /// text still matches EXACTLY what was compiled.
+    ///
+    /// Computed once per frame by the caller and handed to BOTH the fade and the
+    /// pulse, so the two can never disagree about what is unused.
+    pub(super) fn unused_import_spans(
+        &self,
+        rel_path: &str,
+        display_code: &str,
+    ) -> Vec<(usize, usize)> {
+        if self.build_text_snapshot.get(rel_path).map(String::as_str) != Some(display_code) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for state in [&self.build_state, &self.clippy_state] {
+            let crate::build::BuildState::Done(result) = &*state.lock().unwrap() else {
+                continue;
+            };
+            for d in &result.diagnostics {
+                if d.file.as_deref() == Some(rel_path)
+                    && d.code.as_deref() == Some("unused_imports")
+                {
+                    out.extend(unused_import_ranges(d, display_code));
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// Advance the usages pipeline for the displayed `.rs` file: reset on a
@@ -655,7 +783,7 @@ impl AppIde {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_externally_invoked, unused_variable_range};
+    use super::{is_externally_invoked, unused_import_ranges, unused_variable_range};
 
     fn diag(line: u32, col: u32, message: &str) -> crate::build::Diagnostic {
         crate::build::Diagnostic {
@@ -669,6 +797,110 @@ mod tests {
             fixes: Vec::new(),
             rename: None,
         }
+    }
+
+    // ── unused imports ───────────────────────────────────────────────────────
+
+    fn imp(line: u32, col: u32, message: &str) -> crate::build::Diagnostic {
+        crate::build::Diagnostic {
+            level: "warning".into(),
+            message: message.into(),
+            rendered: String::new(),
+            file: Some("src/main.rs".into()),
+            line: Some(line),
+            col: Some(col),
+            code: Some("unused_imports".into()),
+            fixes: Vec::new(),
+            rename: None,
+        }
+    }
+
+    fn spans(text: &str, d: &crate::build::Diagnostic) -> Vec<String> {
+        unused_import_ranges(d, text)
+            .into_iter()
+            .map(|(s, e)| text.chars().skip(s).take(e - s).collect())
+            .collect()
+    }
+
+    /// The case from the report: one name inside a brace list. rustc points its
+    /// primary span at that name.
+    #[test]
+    fn one_name_inside_a_brace_list() {
+        let text = "use embedded_io_async::{Read, ReadExactError, Write};\n";
+        let d = imp(1, 31, "unused import: `ReadExactError`");
+        assert_eq!(spans(text, &d), ["ReadExactError"]);
+    }
+
+    /// `Read` must not land on the first four letters of `ReadExactError`.
+    #[test]
+    fn a_name_that_prefixes_its_neighbour_lands_on_itself() {
+        let text = "use embedded_io_async::{Read, ReadExactError, Write};\n";
+        let d = imp(1, 25, "unused import: `Read`");
+        let got = unused_import_ranges(&d, text);
+        assert_eq!(got.len(), 1, "{got:?}");
+        let (s, e) = got[0];
+        assert_eq!(text.chars().skip(s).take(e - s).collect::<String>(), "Read");
+        // …and it is the standalone one, not the prefix of the longer name.
+        assert_eq!(s, text.find("Read, ").expect("the standalone one"));
+    }
+
+    /// A whole unused `use`: the backticked text is the PATH, and rustc's
+    /// column points at `use`, not at the name.
+    #[test]
+    fn a_whole_unused_use_is_found_from_its_path() {
+        let text = "use core::fmt::Write;\nfn main() {}\n";
+        let d = imp(1, 1, "unused import: `core::fmt::Write`");
+        assert_eq!(spans(text, &d), ["core::fmt::Write"]);
+    }
+
+    /// Plural: several names in ONE diagnostic.
+    #[test]
+    fn every_name_in_a_plural_message_counts() {
+        let text = "use a::{Read, Write, Seek};\n";
+        let d = imp(1, 9, "unused imports: `Read`, `Seek`");
+        assert_eq!(spans(text, &d), ["Read", "Seek"]);
+    }
+
+    /// A brace list broken over several lines: the primary span is the `use` on
+    /// line 1 while the name sits further down. The unique-occurrence fallback
+    /// is what finds it — and an unused name occurs exactly once, in the import
+    /// that introduced it.
+    #[test]
+    fn a_multiline_brace_list_falls_back_to_the_unique_occurrence() {
+        let text = "use a::{\n    Read,\n    Write,\n};\nfn main() { let _ = Read; }\n";
+        // `Write` appears once (only in the import) -> found.
+        let d = imp(1, 1, "unused import: `Write`");
+        assert_eq!(spans(text, &d), ["Write"]);
+    }
+
+    /// Two occurrences and the fallback declines rather than guessing which.
+    #[test]
+    fn the_fallback_gives_up_when_the_name_is_not_unique() {
+        let text = "use a::{\n    Write,\n};\n// Write is mentioned here too\n";
+        let d = imp(1, 1, "unused import: `Write`");
+        assert!(unused_import_ranges(&d, text).is_empty());
+    }
+
+    /// A Build/Clippy result gone stale after an edit must stop applying, not
+    /// mark the wrong span — the same silent-stop the variable fade has.
+    #[test]
+    fn a_name_no_longer_in_the_file_marks_nothing() {
+        let text = "use a::{Read, Write};\n";
+        let d = imp(1, 15, "unused import: `Seek`");
+        assert!(unused_import_ranges(&d, text).is_empty());
+    }
+
+    #[test]
+    fn a_message_without_backticks_marks_nothing() {
+        let text = "use a::Read;\n";
+        assert!(unused_import_ranges(&imp(1, 1, "unused import"), text).is_empty());
+    }
+
+    #[test]
+    fn a_diagnostic_without_a_line_marks_nothing() {
+        let mut d = imp(1, 1, "unused import: `Read`");
+        d.line = None;
+        assert!(unused_import_ranges(&d, "use a::Read;\n").is_empty());
     }
 
     #[test]
