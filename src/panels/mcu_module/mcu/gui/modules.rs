@@ -1019,20 +1019,7 @@ fn draw_box(
     // `PWM0` happens to be short - but `LPUART1` and `SDMMC1` are not, and a
     // legend pinned to the corner would print through them. When there is no
     // room the box simply goes without; the config card still carries it.
-    // Measured at the SELECTED size even when the box is not selected: the
-    // decision has to be the same either way, or the picture appears and
-    // disappears as the user clicks around.
-    let title_w = painter
-        .layout_no_wrap(
-            module_base_name(m).to_owned(),
-            egui::FontId::proportional(
-                TITLE_SIZE * crate::panels::mcu_module::pins::gui::draw::SELECTED_TEXT_SCALE,
-            ),
-            egui::Color32::PLACEHOLDER,
-        )
-        .rect
-        .width();
-    if let Some(r) = box_legend_rect(rect, side, title_w)
+    if let Some(r) = box_legend_rect(rect)
         && let Some(l) = legend_of(m.kind, r)
     {
         let grey = if connected {
@@ -1438,13 +1425,25 @@ fn rmt_legend_shape(r: egui::Rect) -> Legend {
 /// separates this from SPI without reading any detail: a UART picture has no
 /// second row, because the peripheral has no clock pin.
 fn uart_legend_shape(r: egui::Rect) -> Legend {
-    // Idle, start, six data bits, stop, idle.
+    // A WHOLE frame, in the order a scope shows it: idle high, one start bit
+    // down, eight data bits, one stop bit back up, idle again. Eight and not
+    // six - the count is the thing everybody knows about a UART, and a picture
+    // that showed a different number would be teaching a frame nobody sends.
+    //
+    // The last data bit is low so the stop bit is a real RISING edge. With it
+    // high the line would already be where the stop bit puts it, and the mark
+    // would be a red tick standing on a flat run - the same spurious-edge
+    // artefact that had to be taken out of the I2C picture.
     let bits = [
-        true, false, true, true, false, true, false, false, true, true,
+        true,  // idle
+        false, // start
+        false, true, false, false, false, true, false, false, // eight data bits
+        true,  // stop
+        true,  // idle again
     ];
     let slot = r.width() / bits.len() as f32;
     let start_x = r.left() + slot;
-    let stop_x = r.left() + slot * 8.0;
+    let stop_x = r.left() + slot * 10.0;
     Legend::new()
         .signal(levels(r, &bits))
         .accent(vec![
@@ -1737,52 +1736,35 @@ fn pwm_average(r: egui::Rect) -> Vec<egui::Pos2> {
 /// which is what a module base name is (`PWM0`, `TIM3`).
 const BOX_LEGEND_SIZE: egui::Vec2 = egui::vec2(52.0, 17.0);
 
-/// Where it sits inside a module box: a corner the silhouette does not cut.
+/// How far below the box's top the legend sits: under the three text rows.
 ///
-/// Top right wherever that is available - which is the common case, a box
-/// hanging below the chip. But [`silhouette`] bevels the corners of the BACK
-/// edge, the one facing away from the chip, and a `Driver` box (which is what a
-/// PWM module is) has BOTH of them cut, 35 px deep. Pinning the legend to the
-/// top right would put it outside the outline on every module sitting above the
-/// chip, and outside on the right for one sitting beside it.
+/// The title is at 13, the summary at 30 and the variable name at 47, so 56
+/// clears the last of them with a little air.
+const BOX_LEGEND_TOP: f32 = 56.0;
+
+/// Where it sits inside a module box: centred, under the three text rows.
 ///
-/// So the corner follows the side: hug the edge that FACES the chip, which is
-/// never cut, and prefer the right of it.
+/// A CORNER was the first answer and it was the wrong one twice over. The
+/// silhouette bevels the corners of the edge facing away from the chip - both
+/// of them on a `Driver` box, 35 px deep - so the corner had to follow the
+/// side; and the title is centred at the top, so a wide name like `USART1` or
+/// `MCPWM0` collided with the top-right one and the picture was dropped
+/// altogether. Boxes whose names happened to be short kept their thumbnail and
+/// the rest silently did not.
 ///
-/// Scaled with the box's texts, so a selected module's legend grows with its
-/// title instead of sliding out of proportion.
-fn box_legend_rect(
-    rect: egui::Rect,
-    side: Side,
-    // Width of the title at its WIDEST - the size it takes when the box is
-    // selected. Measured at that size whatever the box is doing now, so the
-    // answer cannot change when the user clicks: a thumbnail that vanished on
-    // selection and came back on deselection made the box flicker between two
-    // layouts on every click.
-    title_w_selected: f32,
-) -> Option<egui::Rect> {
+/// Under the texts there is neither problem: the middle of a box is never
+/// bevelled on any of the five silhouettes, and nothing else is drawn there
+/// since the name row moved to the panel. It also reads better - the box is one
+/// centred column, and the picture is the last thing in it.
+fn box_legend_rect(rect: egui::Rect) -> Option<egui::Rect> {
     // NOT scaled with the box texts. The box itself does not grow when
-    // selected, so a legend that did would push itself into the title - which
-    // is what made `PWM0` lose its picture the moment it was clicked.
+    // selected, so a legend that did would move under a title that also grew.
     let size = BOX_LEGEND_SIZE;
-    let (x, y) = match side {
-        // Box below the chip: its top edge faces up, and is square.
-        Side::Bottom => (rect.right() - 8.0 - size.x, rect.top() + 6.0),
-        // Box above: the cut corners are the top ones.
-        Side::Top => (rect.right() - 8.0 - size.x, rect.bottom() - 6.0 - size.y),
-        // Box to the right of the chip: its right-hand corners are cut, so the
-        // legend goes left.
-        Side::Right => (rect.left() + 8.0, rect.top() + 6.0),
-        Side::Left => (rect.right() - 8.0 - size.x, rect.top() + 6.0),
-    };
-    let out = egui::Rect::from_min_size(egui::pos2(x, y), size);
-    // Only the corners level with the title can clash; the bottom ones sit
-    // below it. 2 px of air, so the two do not touch either.
-    let title = egui::Rect::from_center_size(
-        egui::pos2(rect.center().x, rect.top() + 13.0),
-        egui::vec2(title_w_selected + 4.0, 20.0),
+    let out = egui::Rect::from_min_size(
+        egui::pos2(rect.center().x - size.x / 2.0, rect.top() + BOX_LEGEND_TOP),
+        size,
     );
-    (!out.intersects(title)).then_some(out)
+    (rect.bottom() - out.bottom() >= 4.0).then_some(out)
 }
 
 /// Draw a module's signal legend at the top right of its config card.
@@ -8026,12 +8008,14 @@ mod the_signal_legends {
                 let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, h));
                 for side in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
                     for scale in [1.0_f32, 1.15] {
-                        // A short title, so placement is not refused for the
-                        // wrong reason; the collision case has its own test.
                         let _ = scale;
-                        let Some(r) = box_legend_rect(rect, side, 26.0) else {
-                            continue;
-                        };
+                        // `expect`, not `continue`: a kind that quietly stopped
+                        // being placed would skip every assertion below and the
+                        // test would still pass - which is exactly how USART1
+                        // came to have no picture at all without anything
+                        // saying so.
+                        let r = box_legend_rect(rect)
+                            .unwrap_or_else(|| panic!("{kind:?} at h={h} gets a legend"));
                         let poly = silhouette(rect, shape, side);
                         let l = legend_of(kind, r).expect("has a legend");
                         for row in l.signal.iter().chain(l.accent.iter()) {
@@ -8048,42 +8032,34 @@ mod the_signal_legends {
         }
     }
 
-    /// A title too wide to share the corner takes it: the name beats the
-    /// picture, and the config card still carries one.
+    /// The picture sits UNDER the box's texts, clear of all three of them, and
+    /// inside the box.
     ///
-    /// `PWM0` is short and never surfaced this; `LPUART1` and `SDMMC1` are not.
+    /// It used to take the top-right corner, and that was wrong twice: the
+    /// silhouette bevels that corner on any box sitting above the chip, and the
+    /// centred title collided with it for any name longer than about five
+    /// characters - so `USART1`, `LPUART1` and `MCPWM0` silently had no picture
+    /// at all while `PWM0` did.
     #[test]
-    fn a_long_title_keeps_the_corner() {
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, 98.0));
-        assert!(
-            box_legend_rect(rect, Side::Bottom, 26.0).is_some(),
-            "a short name leaves room"
-        );
-        assert!(
-            box_legend_rect(rect, Side::Bottom, 90.0).is_none(),
-            "a wide one does not"
-        );
-        // Below the title, the corner is free whatever the name.
-        assert!(
-            box_legend_rect(rect, Side::Top, 90.0).is_some(),
-            "the bottom corner never clashes with a title at the top"
-        );
-        // A short name that fits keeps its picture at BOTH text sizes - the
-        // decision does not move when the box is selected, or the thumbnail
-        // would blink on every click.
-        for w in [26.0_f32, 38.2, 44.0] {
-            assert_eq!(
-                box_legend_rect(rect, Side::Bottom, w).is_some(),
-                box_legend_rect(rect, Side::Bottom, w).is_some(),
-                "the answer for a title of {w} does not depend on anything but the title"
+    fn the_box_legend_sits_below_the_texts() {
+        for h in [78.0_f32, 98.0, 130.0] {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, h));
+            let r = box_legend_rect(rect).expect("every box height has room");
+            // Clear of the variable-name row, which is drawn at top + 47.
+            assert!(
+                r.top() > rect.top() + 50.0,
+                "h={h}: below the last text row"
+            );
+            assert!(r.bottom() < rect.bottom(), "h={h}: inside the box");
+            // Centred, like the three rows above it.
+            assert!(
+                (r.center().x - rect.center().x).abs() < 0.01,
+                "h={h}: on the same centre line as the texts"
             );
         }
-        // `PWM0` at the SELECTED size is 44 px wide; it must still fit, because
-        // that is the case that used to vanish the moment it was clicked.
-        assert!(
-            box_legend_rect(rect, Side::Bottom, 44.0).is_some(),
-            "a four-character name keeps its picture even at the selected size"
-        );
+        // A box too short for it goes without rather than overflowing.
+        let squat = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, 60.0));
+        assert!(box_legend_rect(squat).is_none());
     }
 
     /// Every picture has its sentence, and the kinds without a picture have
