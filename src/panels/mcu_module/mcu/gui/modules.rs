@@ -1217,6 +1217,25 @@ fn legend_of(kind: ModuleKind, r: egui::Rect) -> Option<Legend> {
         K::GenericInterfaceUsart | K::GenericInterfaceLpuart => uart_legend_shape(r),
         K::GenericInterfaceCan => can_legend_shape(r),
         K::GenericInterfaceRmt => rmt_legend_shape(r),
+        // The five external-memory ports and SDMMC. One drawing for all of
+        // them, and that is the honest answer rather than a shortcut: what
+        // separates them is how many data lanes they carry, the bus notation
+        // below deliberately does not claim a number, and the count is the
+        // WIRING anyway - the same module is one, four or eight lanes wide at
+        // different moments.
+        K::GenericInterfaceQspi
+        | K::GenericInterfaceOspi
+        | K::GenericInterfaceXspi
+        | K::GenericInterfaceHspi
+        | K::GenericInterfaceSdmmc => memory_legend_shape(r),
+        // Both directions of the parallel port share a drawing for the same
+        // reason LPUART shares USART's: what goes on the wire is identical, and
+        // direction is not something a waveform shows. An earlier pass refused
+        // them on the grounds that one picture would claim the two kinds are
+        // the same peripheral - which was inconsistent with LPUART and SAI,
+        // where exactly that trade was already made and is right.
+        K::GenericInterfaceParlIo | K::GenericInterfaceParlIoRx => parallel_legend_shape(r),
+        K::GenericInterfaceLcdCam | K::GenericInterfaceCamera => lcd_cam_legend_shape(r),
         _ => return None,
     })
 }
@@ -1415,6 +1434,108 @@ fn rmt_legend_shape(r: egui::Rect) -> Legend {
         egui::pos2(idle_x, r.bottom()),
         egui::pos2(r.right(), r.bottom()),
     ])
+}
+
+/// A parallel bus, in the notation that exists precisely so a picture does not
+/// have to say how wide it is.
+///
+/// Two lines that meet at the middle between windows and part to the rails
+/// inside one - the elongated hexagons every timing diagram draws a bus with.
+/// It says "several lines, carrying a value" and claims no lane count, which is
+/// what makes it usable for ports whose width is the wiring rather than a
+/// setting.
+///
+/// Returns the two lines as separate polylines, because they cross: joined,
+/// the stroke would run back along itself between windows.
+fn bus_envelope(row: egui::Rect, windows: usize, gap: f32) -> (Vec<egui::Pos2>, Vec<egui::Pos2>) {
+    let w = row.width() / windows as f32;
+    let mid = row.center().y;
+    let (mut hi, mut lo) = (Vec::new(), Vec::new());
+    for i in 0..windows {
+        let x0 = row.left() + i as f32 * w;
+        let x1 = x0 + w;
+        hi.push(egui::pos2(x0, mid));
+        hi.push(egui::pos2(x0 + gap, row.top()));
+        hi.push(egui::pos2(x1 - gap, row.top()));
+        hi.push(egui::pos2(x1, mid));
+        lo.push(egui::pos2(x0, mid));
+        lo.push(egui::pos2(x0 + gap, row.bottom()));
+        lo.push(egui::pos2(x1 - gap, row.bottom()));
+        lo.push(egui::pos2(x1, mid));
+    }
+    (hi, lo)
+}
+
+/// QSPI, OSPI, XSPI, HSPI, SDMMC: a clock and a bus that turns around.
+///
+/// The bus being BIDIRECTIONAL is what separates a memory port from a plain
+/// parallel one: the same lines carry the command out and the data back, and
+/// the gap where nobody drives them is the accent. True of all five, including
+/// SDMMC, whose CMD and DAT lines both turn.
+fn memory_legend_shape(r: egui::Rect) -> Legend {
+    let rows = legend_rows(r, 2);
+    let gap = rows[1].width() * 0.03;
+    // Three windows with the middle one absent: out, turnaround, back.
+    let (hi, lo) = bus_envelope(rows[1], 3, gap);
+    let per = hi.len() / 3;
+    let keep = |v: &Vec<egui::Pos2>, i: usize| v[i * per..(i + 1) * per].to_vec();
+    let mid_y = rows[1].center().y;
+    let (t0, t1) = (
+        rows[1].left() + rows[1].width() / 3.0,
+        rows[1].left() + rows[1].width() * 2.0 / 3.0,
+    );
+    Legend::new()
+        .signal(clock(rows[0], 6))
+        .signal(keep(&hi, 0))
+        .signal(keep(&lo, 0))
+        .signal(keep(&hi, 2))
+        .signal(keep(&lo, 2))
+        .accent(vec![egui::pos2(t0, mid_y), egui::pos2(t1, mid_y)])
+}
+
+/// PARL_IO, in either direction: a clock and a bus, every window valid.
+///
+/// No turnaround - a parallel port drives one way for as long as it runs, which
+/// is the difference from a memory port and the only one this size can hold.
+/// The accent is the clock edge the bus is latched on, because that is what the
+/// peripheral is: bits made to move together on an edge.
+fn parallel_legend_shape(r: egui::Rect) -> Legend {
+    let rows = legend_rows(r, 2);
+    let gap = rows[1].width() * 0.03;
+    let (hi, lo) = bus_envelope(rows[1], 4, gap);
+    let x = rows[0].left() + rows[0].width() / 4.0;
+    Legend::new()
+        .signal(clock(rows[0], 4))
+        .signal(hi)
+        .signal(lo)
+        .accent(vec![
+            egui::pos2(x, rows[0].bottom()),
+            egui::pos2(x, rows[0].top()),
+        ])
+}
+
+/// LCD_CAM and Camera: a pixel bus, and the sync that frames it.
+///
+/// The one thing true of all three modes this peripheral wears - an i8080 panel
+/// strobed by WR, an RGB panel on a free-running pixel clock, and a DVP camera
+/// whose SENSOR drives the clock - is that a clocked parallel bus is framed by
+/// a sync line. That sync is the accent; the mode is not drawn, because a
+/// legend is not a reading of the module.
+fn lcd_cam_legend_shape(r: egui::Rect) -> Legend {
+    let rows = legend_rows(r, 2);
+    let gap = rows[1].width() * 0.03;
+    let (hi, lo) = bus_envelope(rows[1], 4, gap);
+    // The sync pulse: low across the first quarter, then high for the data.
+    let sync_x = rows[0].left() + rows[0].width() / 4.0;
+    Legend::new()
+        .signal(clock(rows[0], 6))
+        .signal(hi)
+        .signal(lo)
+        .accent(vec![
+            egui::pos2(rows[0].left(), rows[0].bottom()),
+            egui::pos2(sync_x, rows[0].bottom()),
+            egui::pos2(sync_x, rows[0].top()),
+        ])
 }
 
 /// USART and LPUART: one asynchronous frame.
@@ -7795,7 +7916,16 @@ mod the_signal_legends {
 
     /// The kinds that get a picture. Ten others deliberately do not - see
     /// `legend_of` for the three reasons.
-    const WITH: [ModuleKind; 14] = [
+    const WITH: [ModuleKind; 23] = [
+        ModuleKind::GenericInterfaceQspi,
+        ModuleKind::GenericInterfaceOspi,
+        ModuleKind::GenericInterfaceXspi,
+        ModuleKind::GenericInterfaceHspi,
+        ModuleKind::GenericInterfaceSdmmc,
+        ModuleKind::GenericInterfaceParlIo,
+        ModuleKind::GenericInterfaceParlIoRx,
+        ModuleKind::GenericInterfaceLcdCam,
+        ModuleKind::GenericInterfaceCamera,
         ModuleKind::GenericInterfaceRmt,
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
@@ -7812,7 +7942,12 @@ mod the_signal_legends {
         ModuleKind::GenericInterfaceMcpwm,
     ];
 
-    /// Everything except the two that are deliberately not logic levels.
+    /// The pictures that are pure logic levels.
+    ///
+    /// Touch and DAC are exempt because they are not levels at all. The nine
+    /// bus kinds are exempt for a different reason: their CLOCK row is square,
+    /// but the bus row is the hexagon notation, whose crossings are diagonal on
+    /// purpose - that is what says "a value, not a level".
     const SQUARE: [ModuleKind; 12] = [
         ModuleKind::GenericInterfaceRmt,
         ModuleKind::GenericInterfaceUsart,
@@ -7829,7 +7964,10 @@ mod the_signal_legends {
     ];
 
     /// The pictures built from two rows.
-    const TWO_ROW: [ModuleKind; 7] = [
+    const TWO_ROW: [ModuleKind; 10] = [
+        ModuleKind::GenericInterfaceQspi,
+        ModuleKind::GenericInterfaceParlIo,
+        ModuleKind::GenericInterfaceLcdCam,
         ModuleKind::GenericInterfaceUsb,
         ModuleKind::GenericInterfacePcnt,
         ModuleKind::GenericInterfaceSpi,
@@ -7895,17 +8033,24 @@ mod the_signal_legends {
         ]
     }
 
-    /// Exactly the kinds that have something true to draw, and no others.
+    /// Every kind but one has something true to draw.
     ///
-    /// The refusals are the analysis, not an omission: five memory ports differ
-    /// only by a lane count 17 px cannot hold, two parallel ports differ only
-    /// by a direction no waveform shows, and two more carry three unrelated
-    /// waveform families behind one `mode`.
+    /// Custom is the only refusal left, and it is the only one that was never
+    /// arguable: a user-made module has no protocol to legend - it is whatever
+    /// pins were put on it.
+    ///
+    /// The nine bus kinds were refused once, on the grounds that a picture
+    /// cannot show a lane count or a direction. Both are true and neither is a
+    /// reason for nothing: the bus notation says "several lines carrying a
+    /// value" WITHOUT claiming a number, which is exactly the case it exists
+    /// for, and sharing one drawing between two directions is the same trade
+    /// already made for LPUART and SAI.
     #[test]
-    fn only_the_kinds_with_something_true_to_draw() {
+    fn only_a_custom_module_has_nothing_to_draw() {
         for kind in ModuleKind::ALL {
             let has = legend_of(kind, sizes()[0]).is_some();
             assert_eq!(has, WITH.contains(&kind), "{kind:?}");
+            assert_eq!(has, !kind.is_custom(), "{kind:?}: only Custom goes without");
         }
     }
 
@@ -8374,6 +8519,121 @@ mod the_signal_legends {
                 }
             }
         }
+    }
+
+    /// The bus notation claims no lane count.
+    ///
+    /// That is the whole reason it can serve ports whose width is the wiring:
+    /// an envelope says "a value, several bits wide" without saying how many.
+    /// The property that guarantees it is that the envelope only ever uses
+    /// THREE levels - the two rails and the middle they cross at. A drawing
+    /// with a level in between would be a separate lane, and would start being
+    /// wrong for every module wired differently from it.
+    #[test]
+    fn the_bus_notation_says_a_value_not_a_width() {
+        let r = sizes()[0];
+        for kind in [
+            ModuleKind::GenericInterfaceQspi,
+            ModuleKind::GenericInterfaceParlIo,
+            ModuleKind::GenericInterfaceLcdCam,
+        ] {
+            let l = legend_of(kind, r).expect("has a legend");
+            let bus = super::legend_rows(r, 2)[1];
+            let rails = [bus.top(), bus.center().y, bus.bottom()];
+            let envelope: Vec<&Vec<egui::Pos2>> = l
+                .signal
+                .iter()
+                .filter(|row| row.iter().all(|p| p.y >= bus.top() - 0.01))
+                .collect();
+            assert!(
+                envelope.len() >= 2 && envelope.len() % 2 == 0,
+                "{kind:?}: the envelope comes in mirrored pairs, got {}",
+                envelope.len()
+            );
+            for row in &envelope {
+                for p in row.iter() {
+                    assert!(
+                        rails.iter().any(|y| (p.y - y).abs() < 0.01),
+                        "{kind:?}: {p:?} is neither a rail nor the middle - that would be a lane"
+                    );
+                }
+                assert!(
+                    row.iter().any(|p| (p.y - rails[1]).abs() < 0.01),
+                    "{kind:?}: every envelope line crosses at the middle"
+                );
+            }
+        }
+    }
+
+    /// The three bus families are told apart by what the bus DOES, not by how
+    /// wide it is drawn.
+    #[test]
+    fn the_three_bus_families_differ_in_the_accent() {
+        let r = sizes()[0];
+        let rows = super::legend_rows(r, 2);
+        let mem = legend_of(ModuleKind::GenericInterfaceQspi, r).expect("has a legend");
+        let par = legend_of(ModuleKind::GenericInterfaceParlIo, r).expect("has a legend");
+        let lcd = legend_of(ModuleKind::GenericInterfaceLcdCam, r).expect("has a legend");
+
+        // A memory port's bus turns around: its accent is a horizontal run on
+        // the bus row's mid line.
+        let a = &mem.accent[0];
+        assert!(
+            a.iter().all(|p| (p.y - rows[1].center().y).abs() < 0.01),
+            "the turnaround sits on the bus, flat: {a:?}"
+        );
+        assert!(
+            a[1].x > a[0].x,
+            "and it has width - it is a gap, not an edge"
+        );
+
+        // A parallel port latches on an edge: a vertical tick on the clock.
+        let b = &par.accent[0];
+        assert!(
+            (b[0].x - b[1].x).abs() < 0.01,
+            "the latch is an edge, drawn vertical: {b:?}"
+        );
+
+        // LCD/CAM is framed by a sync: an L, low then up.
+        let c = &lcd.accent[0];
+        assert_eq!(c.len(), 3, "the sync is a pulse, not a tick: {c:?}");
+        assert!(c[2].y < c[0].y, "and it ends high");
+
+        // ...and no two of the three are the same shape.
+        assert_ne!(mem.accent, par.accent);
+        assert_ne!(par.accent, lcd.accent);
+        assert_ne!(mem.accent, lcd.accent);
+    }
+
+    /// The five memory ports share one drawing, and so do the two parallel
+    /// directions - deliberately, and identically.
+    #[test]
+    fn the_bus_families_are_internally_identical() {
+        let r = sizes()[0];
+        let same = |a: ModuleKind, b: ModuleKind| {
+            let (x, y) = (
+                legend_of(a, r).expect("has a legend"),
+                legend_of(b, r).expect("has a legend"),
+            );
+            assert_eq!(x.signal, y.signal, "{a:?} and {b:?} draw the same signal");
+            assert_eq!(x.accent, y.accent, "{a:?} and {b:?} mark the same thing");
+        };
+        for k in [
+            ModuleKind::GenericInterfaceOspi,
+            ModuleKind::GenericInterfaceXspi,
+            ModuleKind::GenericInterfaceHspi,
+            ModuleKind::GenericInterfaceSdmmc,
+        ] {
+            same(ModuleKind::GenericInterfaceQspi, k);
+        }
+        same(
+            ModuleKind::GenericInterfaceParlIo,
+            ModuleKind::GenericInterfaceParlIoRx,
+        );
+        same(
+            ModuleKind::GenericInterfaceLcdCam,
+            ModuleKind::GenericInterfaceCamera,
+        );
     }
 
     /// Two colours, and the same two everywhere.
