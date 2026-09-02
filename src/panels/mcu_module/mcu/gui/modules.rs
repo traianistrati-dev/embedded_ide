@@ -25,6 +25,23 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// The two lines under a module's title: its config summary and the variable
+/// name it binds.
+///
+/// One colour for both. They were two slightly different greys (150,150,160 and
+/// 140,140,150) - a distinction too small to read as meaning, which only made
+/// the lower line look faded rather than deliberate.
+const SUB_COLOUR: egui::Color32 = egui::Color32::from_rgb(220, 220, 220);
+/// Sizes of those two lines. They keep their 10:9 ratio to each other, so the
+/// summary still leads and the variable name still follows.
+///
+/// At this size the three rows nearly fill the space above the box's midline:
+/// with the title at 13 they leave about 3px of air, and roughly 1px when the
+/// box is SELECTED and every text grows by `SELECTED_TEXT_SCALE`. There is room
+/// below (the lowest sits at ~54 of 98) if they ever need to breathe.
+const SUB_SIZE: f32 = 15.0;
+const HANDLE_SIZE: f32 = 13.5;
+
 const BOX_W: f32 = 170.0;
 /// Tall enough for the name, the config summary, and the rename field at the
 /// bottom.
@@ -1037,8 +1054,8 @@ fn draw_box(
         rect.center_top() + egui::vec2(0.0, 30.0),
         egui::Align2::CENTER_CENTER,
         summary,
-        egui::FontId::proportional(10.0 * scale),
-        egui::Color32::from_rgb(150, 150, 160),
+        egui::FontId::proportional(SUB_SIZE * scale),
+        SUB_COLOUR,
     );
     // The resulting variable name(s), and ONLY those.
     //
@@ -1056,8 +1073,8 @@ fn draw_box(
         handle_caption_pos(m, rect),
         egui::Align2::CENTER_CENTER,
         handle_preview(m, native_forced),
-        egui::FontId::proportional(9.0 * scale),
-        egui::Color32::from_rgb(140, 140, 150),
+        egui::FontId::proportional(HANDLE_SIZE * scale),
+        SUB_COLOUR,
     );
 }
 
@@ -1207,6 +1224,7 @@ fn legend_of(kind: ModuleKind, r: egui::Rect) -> Option<Legend> {
         // option.
         K::GenericInterfaceUsart | K::GenericInterfaceLpuart => uart_legend_shape(r),
         K::GenericInterfaceCan => can_legend_shape(r),
+        K::GenericInterfaceRmt => rmt_legend_shape(r),
         _ => return None,
     })
 }
@@ -1363,6 +1381,48 @@ fn paint_legend(painter: &egui::Painter, l: &Legend, grey: egui::Color32) {
     for row in &l.accent {
         painter.line(row.clone(), egui::Stroke::new(LEGEND_STROKE, LEGEND_ACCENT));
     }
+}
+
+/// How much of the legend the RMT train occupies before it stops.
+///
+/// The rest is the idle tail, and the tail is the whole separator from PWM -
+/// see [`rmt_legend_shape`]. A third is enough to read as "and then nothing"
+/// at 52 px.
+const RMT_TRAIN: f32 = 2.0 / 3.0;
+
+/// RMT: a train of arbitrary timings that ENDS.
+///
+/// Not "pulses of unequal width" - the PWM legend already draws three different
+/// widths, so nobody would read that as the difference. What no PWM ever does
+/// is STOP: a PWM output runs until you turn it off, and its legend carries an
+/// average line across the full width. An RMT sends a finite list of durations
+/// and then rests, which is why the picture is a burst in the first two thirds
+/// and a flat tail in the last one, with the tail as the accent.
+///
+/// Both the high AND the low runs vary, which a PWM's cannot: a PWM's period is
+/// fixed and only the duty moves inside it.
+fn rmt_legend_shape(r: egui::Rect) -> Legend {
+    // Alternating high/low runs, starting high. Deliberately without a repeat.
+    let runs = [3.0_f32, 2.0, 1.0, 4.0, 5.0, 1.0, 2.0, 3.0, 1.0, 2.0];
+    let total: f32 = runs.iter().sum();
+    let train_w = r.width() * RMT_TRAIN;
+    let idle_x = r.left() + train_w;
+    let mut pts = vec![egui::pos2(r.left(), r.bottom())];
+    let mut x = r.left();
+    for (i, run) in runs.iter().enumerate() {
+        let y = if i % 2 == 0 { r.top() } else { r.bottom() };
+        pts.push(egui::pos2(x, y));
+        x += run / total * train_w;
+        pts.push(egui::pos2(x, y));
+    }
+    // ...and then it rests. The level it rests at is a setting, so the picture
+    // says only THAT it rests, by running flat along the baseline.
+    pts.push(egui::pos2(idle_x, r.bottom()));
+    pts.push(egui::pos2(r.right(), r.bottom()));
+    Legend::new().signal(square_edges(pts)).accent(vec![
+        egui::pos2(idle_x, r.bottom()),
+        egui::pos2(r.right(), r.bottom()),
+    ])
 }
 
 /// USART and LPUART: one asynchronous frame.
@@ -7730,7 +7790,8 @@ mod the_signal_legends {
 
     /// The kinds that get a picture. Ten others deliberately do not - see
     /// `legend_of` for the three reasons.
-    const WITH: [ModuleKind; 13] = [
+    const WITH: [ModuleKind; 14] = [
+        ModuleKind::GenericInterfaceRmt,
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceCan,
@@ -7747,7 +7808,8 @@ mod the_signal_legends {
     ];
 
     /// Everything except the two that are deliberately not logic levels.
-    const SQUARE: [ModuleKind; 11] = [
+    const SQUARE: [ModuleKind; 12] = [
+        ModuleKind::GenericInterfaceRmt,
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceCan,
@@ -8187,6 +8249,63 @@ mod the_signal_legends {
             assert_eq!(x.signal, y.signal, "{a:?} and {b:?} draw the same signal");
             assert_eq!(x.accent, y.accent, "{a:?} and {b:?} mark the same thing");
         }
+    }
+
+    /// RMT and PWM must not read as the same thing either.
+    ///
+    /// They share the Driver silhouette and both are one row of square pulses.
+    /// "Unequal widths" is NOT the separator - the PWM legend varies its duty
+    /// in three steps already, so anyone reading that would find both pictures
+    /// alike. The separator is that an RMT train STOPS: its pulses end before
+    /// the right edge and it rests, while a PWM runs to the edge and carries an
+    /// average line the whole way.
+    #[test]
+    fn the_rmt_train_stops_and_the_pwm_one_does_not() {
+        let r = sizes()[0];
+        let rmt = legend_of(ModuleKind::GenericInterfaceRmt, r).expect("has a legend");
+        let pwm = legend_of(ModuleKind::GenericInterfaceTimer, r).expect("has a legend");
+
+        // Where each row last leaves the baseline.
+        let last_high = |row: &Vec<egui::Pos2>| {
+            row.iter()
+                .filter(|p| (p.y - r.top()).abs() < 0.01)
+                .map(|p| p.x)
+                .fold(r.left(), f32::max)
+        };
+        let rmt_end = last_high(&rmt.signal[0]);
+        let pwm_end = last_high(&pwm.signal[0]);
+        assert!(
+            rmt_end < r.left() + r.width() * 0.7,
+            "the RMT train ends at {rmt_end}, well before the edge"
+        );
+        assert!(
+            pwm_end > r.left() + r.width() * 0.85,
+            "the PWM train runs to the edge, got {pwm_end}"
+        );
+
+        // And the accents differ in kind: PWM's spans the width and climbs,
+        // RMT's is a flat tail confined to the end.
+        let span = |row: &Vec<egui::Pos2>| {
+            let xs: Vec<f32> = row.iter().map(|p| p.x).collect();
+            xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                - xs.iter().copied().fold(f32::INFINITY, f32::min)
+        };
+        let climbs = |row: &Vec<egui::Pos2>| {
+            let ys: Vec<f32> = row.iter().map(|p| p.y).collect();
+            ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                - ys.iter().copied().fold(f32::INFINITY, f32::min)
+                > 1.0
+        };
+        assert!(
+            span(&pwm.accent[0]) > r.width() * 0.9,
+            "the PWM average spans it"
+        );
+        assert!(climbs(&pwm.accent[0]), "and it rises");
+        assert!(
+            span(&rmt.accent[0]) < r.width() * 0.5,
+            "the RMT tail does not"
+        );
+        assert!(!climbs(&rmt.accent[0]), "and it is flat");
     }
 
     /// Two colours, and the same two everywhere.

@@ -360,6 +360,7 @@ pub const ALL_DOCS: &[(&str, &str)] = &[
     ("LEGEND_MCPWM", LEGEND_MCPWM),
     ("LEGEND_UART", LEGEND_UART),
     ("LEGEND_CAN", LEGEND_CAN),
+    ("LEGEND_RMT", LEGEND_RMT),
 ];
 
 /// Every row the panel can draw, per module kind.
@@ -1690,6 +1691,7 @@ pub fn legend_hover(kind: crate::panels::mcu_module::modules::ModuleKind) -> &'s
         K::GenericInterfaceMcpwm => LEGEND_MCPWM,
         K::GenericInterfaceUsart | K::GenericInterfaceLpuart => LEGEND_UART,
         K::GenericInterfaceCan => LEGEND_CAN,
+        K::GenericInterfaceRmt => LEGEND_RMT,
         _ => "",
     }
 }
@@ -1711,6 +1713,8 @@ pub const LEGEND_I2C: &str = "The two conditions that frame every transfer: SDA 
 pub const LEGEND_I2S: &str = "A bit clock, and the word select that runs far slower than it - one edge per sample. The rate difference is the point; SAI puts the same three signals on the wire. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
 
 pub const LEGEND_UART: &str = "One asynchronous frame: idle high, a start bit down, data, a stop bit back up. There is no clock line - those two edges are all the receiver has to find the byte with, which is why they are marked. LPUART puts the same frame on the wire. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_RMT: &str = "A list of durations sent out and then done: the high and low runs are whatever you put in them, and the train ENDS - which is what a PWM never does. The level it rests at afterwards is yours to pick. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
 
 pub const LEGEND_CAN: &str = "Recessive at rest, a dominant start, then the ACK slot - the one bit the sender leaves recessive and every listening node pulls down. It is the only thing on this wire that is not the sender's. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
 
