@@ -869,14 +869,6 @@ pub fn custom_struct_name(m: &VirtualModule) -> String {
         .collect()
 }
 
-/// The rename-field rect at the bottom of a module box (edited in a later pass).
-fn label_field_rect(box_rect: egui::Rect) -> egui::Rect {
-    egui::Rect::from_min_max(
-        egui::pos2(box_rect.left() + 10.0, box_rect.bottom() - 24.0),
-        egui::pos2(box_rect.right() - 10.0, box_rect.bottom() - 6.0),
-    )
-}
-
 /// `base` moved `t` of the way towards `towards`.
 ///
 /// Not `Color32::lerp` — egui has none — and deliberately not blending the
@@ -1004,36 +996,42 @@ fn draw_box(
         egui::FontId::proportional(10.0 * scale),
         egui::Color32::from_rgb(150, 150, 160),
     );
-    // The resulting variable name(s). Clipped to the box so a long label
-    // cannot overflow the border.
+    // The resulting variable name(s), and ONLY those.
+    //
+    // The box used to carry the user's own name for the module on a second
+    // line below this one. It was the same string twice: the label is already
+    // inside the variable name (`_pwm0_power_led` IS "power led"), so the row
+    // repeated it in prose and cost the box a line to do it. The name is edited
+    // and read in the module's `Name:` row in the Virtual-modules panel, which
+    // has the room for it.
+    //
+    // Centred with the title and the summary, so the box reads as one column
+    // rather than two things stacked left and centre. Clipped to the box, so a
+    // long label cannot spill over the border.
     painter.with_clip_rect(rect).text(
-        egui::pos2(rect.left() + 10.0, rect.bottom() - 26.0),
-        egui::Align2::LEFT_BOTTOM,
+        handle_caption_pos(m, rect),
+        egui::Align2::CENTER_CENTER,
         handle_preview(m, native_forced),
         egui::FontId::proportional(9.0 * scale),
         egui::Color32::from_rgb(140, 140, 150),
     );
-    // The user's name for the module, SHOWN and not edited.
-    //
-    // It used to be a `TextEdit` put over this rect in a second, mutable pass
-    // over the same boxes. Two editors for one string is one too many: the
-    // module's `Name:` row in the Virtual-modules panel is the one that has
-    // room for it, sits beside everything else the module owns, and cannot be
-    // hit by accident while dragging a box around the canvas.
-    //
-    // Empty draws nothing rather than a placeholder: an empty box row is quiet,
-    // and a hint reading "name" in a field nobody can type into would be a
-    // control that lies about itself.
-    let name = m.config.custom_label();
-    if !name.is_empty() {
-        let field = label_field_rect(rect);
-        painter.with_clip_rect(rect).text(
-            egui::pos2(field.left(), field.center().y),
-            egui::Align2::LEFT_CENTER,
-            name,
-            egui::FontId::proportional(10.0 * scale),
-            egui::Color32::from_rgb(190, 195, 210),
-        );
+}
+
+/// Where a box's variable-name caption sits.
+///
+/// Under the summary for every ordinary module - which is where the eye goes
+/// after the title, and the box's lower half is empty now that the name row is
+/// gone.
+///
+/// A CUSTOM module is the exception: its pin rows start at `top + 44`
+/// ([`custom_pin_row`]) and grow the box downwards, so the same offset would
+/// print the caption straight through the first of them. There it stays at the
+/// bottom, below the rows.
+fn handle_caption_pos(m: &VirtualModule, rect: egui::Rect) -> egui::Pos2 {
+    if m.kind.is_custom() {
+        egui::pos2(rect.center().x, rect.bottom() - 14.0)
+    } else {
+        rect.center_top() + egui::vec2(0.0, 47.0)
     }
 }
 
@@ -6927,5 +6925,90 @@ mod the_move_picker_respects_the_silicon {
         // asserted only that the GROUP guard did not fire.
         assert!(!super::f1_moves_as_a_group("stm32f1", 1));
         let _ = free_pads_for(&want, c.mcu_pin, &pin_funcs, &current, "stm32f1", 1);
+    }
+}
+
+#[cfg(test)]
+mod the_box_shows_one_caption {
+    use super::{BOX_H, CUSTOM_ROW_H, box_h, custom_pin_row, handle_caption_pos};
+    use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind, VirtualModule};
+    use eframe::egui;
+
+    fn module(kind: ModuleKind, pins: Vec<usize>) -> VirtualModule {
+        let mut config = kind.default_config(1);
+        if let ModuleConfig::Custom(c) = &mut config {
+            c.pins = pins;
+        }
+        VirtualModule {
+            id: "m1".to_owned(),
+            kind,
+            name: kind.short().to_owned(),
+            pos: (0.0, 0.0),
+            config,
+            connections: Vec::new(),
+        }
+    }
+
+    fn rect_for(m: &VirtualModule) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(120.0, box_h(m)))
+    }
+
+    /// The caption is centred on the box, like the title and the summary above
+    /// it - the box reads as one column now that the name row is gone.
+    #[test]
+    fn the_caption_is_centred_on_every_kind() {
+        for kind in ModuleKind::ALL {
+            let m = module(kind, vec![1, 2]);
+            let rect = rect_for(&m);
+            let pos = handle_caption_pos(&m, rect);
+            assert!(
+                (pos.x - rect.center().x).abs() < f32::EPSILON,
+                "{kind:?}: centred horizontally"
+            );
+            assert!(
+                rect.y_range().contains(pos.y),
+                "{kind:?}: inside the box, got {} in {:?}",
+                pos.y,
+                rect.y_range()
+            );
+        }
+    }
+
+    /// On an ordinary module it sits under the summary, in the space the name
+    /// row used to take.
+    #[test]
+    fn an_ordinary_module_puts_it_under_the_summary() {
+        let m = module(ModuleKind::GenericInterfaceUsart, Vec::new());
+        let rect = rect_for(&m);
+        let y = handle_caption_pos(&m, rect).y;
+        // The summary is painted at `center_top + 30`.
+        assert!(y > rect.top() + 30.0, "below the summary: {y}");
+        assert!(
+            y < rect.top() + BOX_H * 0.75,
+            "and not down at the floor: {y}"
+        );
+    }
+
+    /// A Custom module is the exception: its pin rows own the middle of the
+    /// box, so the caption stays at the bottom. The same offset would print it
+    /// straight through the first row.
+    #[test]
+    fn a_custom_module_keeps_it_below_the_pin_rows() {
+        for n in 1..4usize {
+            let m = module(ModuleKind::Custom, (1..=n).collect());
+            let rect = rect_for(&m);
+            let y = handle_caption_pos(&m, rect).y;
+            let last_row = custom_pin_row(rect, n - 1);
+            assert!(
+                y > last_row.bottom(),
+                "{n} pins: caption at {y} must clear the last row at {}",
+                last_row.bottom()
+            );
+            assert!(y < rect.bottom(), "{n} pins: still inside the box");
+        }
+        // ...and the rows really do grow the box, so the case is not vacuous.
+        let one = module(ModuleKind::Custom, vec![1]);
+        let three = module(ModuleKind::Custom, vec![1, 2, 3]);
+        assert!((box_h(&three) - box_h(&one) - 2.0 * CUSTOM_ROW_H).abs() < f32::EPSILON);
     }
 }

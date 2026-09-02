@@ -49,12 +49,22 @@ impl PinFunction {
             | PinFunction::CamMclk => egui::Color32::from_rgb(185, 125, 190),
             // PARL_IO is a bus, so it sits with the buses — a slate blue
             // distinct from SPI's teal, since a pad can rarely be both.
-            PinFunction::ParlData { .. }
-            | PinFunction::ParlClk
-            | PinFunction::ParlValid
-            | PinFunction::ParlRxData { .. }
-            | PinFunction::ParlRxClk
-            | PinFunction::ParlRxValid => egui::Color32::from_rgb(110, 130, 190),
+            PinFunction::ParlData { .. } | PinFunction::ParlClk | PinFunction::ParlValid => {
+                egui::Color32::from_rgb(110, 130, 190)
+            }
+            // The RECEIVING half is a separate module on its own pads, running
+            // alongside the sending one — so it gets a neighbouring indigo, the
+            // same way the camera half of LCD_CAM gets a neighbouring violet
+            // above. It shared the slate blue until now, which made the two
+            // halves of a board that wires both indistinguishable: same colour,
+            // same box, separated only by " RX" in the title.
+            //
+            // Indigo and not another slate: the blues here are crowded — the
+            // sending half is only 25 from I2S — so this one is placed where
+            // there is room, 44 from its own half and 51 from anything else.
+            PinFunction::ParlRxData { .. } | PinFunction::ParlRxClk | PinFunction::ParlRxValid => {
+                egui::Color32::from_rgb(100, 90, 205)
+            }
             // MCPWM shares the PWM orange: it IS pwm, and a reader looking
             // for "which pins can switch something" wants the two together.
             PinFunction::McpwmA { .. } | PinFunction::McpwmB { .. } => {
@@ -185,6 +195,45 @@ impl PinFunction {
 #[cfg(test)]
 mod is_bus_tests {
     use super::PinFunction;
+
+    /// The two halves of a two-part peripheral never share a colour.
+    ///
+    /// PARL_IO and its receiving half did, and LCD_CAM and its camera half
+    /// nearly do. These are the pairs a board can wire BOTH of, at once, on one
+    /// canvas: same peripheral, separate modules, separate pads. Sharing a
+    /// colour there is not a shade too close - it is the same box twice, told
+    /// apart only by two letters in the title at three pixels.
+    ///
+    /// Deliberately not "every function has its own colour": an I2C's SCL and
+    /// SDA share one on purpose, and MCPWM borrows PWM's orange because it IS
+    /// pwm. Only the halves are asserted.
+    #[test]
+    fn the_halves_of_a_peripheral_are_told_apart() {
+        let halves = [
+            (
+                "PARL_IO",
+                PinFunction::ParlData { lane: 0 },
+                PinFunction::ParlRxData { lane: 0 },
+            ),
+            (
+                "LCD_CAM",
+                PinFunction::LcdCamData { lane: 0 },
+                PinFunction::CamData { lane: 0 },
+            ),
+        ];
+        for (name, tx, rx) in halves {
+            let (a, b) = (tx.color(), rx.color());
+            assert_ne!(a, b, "{name}: both halves are the same colour");
+            let d = |x: u8, y: u8| (f32::from(x) - f32::from(y)).powi(2);
+            let dist = (d(a.r(), b.r()) + d(a.g(), b.g()) + d(a.b(), b.b())).sqrt();
+            // Far enough to read as two things at a glance. The LCD_CAM pair
+            // sits at 36, which is the precedent this number comes from.
+            assert!(
+                dist >= 30.0,
+                "{name}: the halves are only {dist:.0} apart - too close to tell"
+            );
+        }
+    }
 
     #[test]
     fn communication_buses_are_buses() {
