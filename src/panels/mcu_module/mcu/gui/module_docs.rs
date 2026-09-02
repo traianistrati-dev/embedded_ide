@@ -349,6 +349,11 @@ pub const ALL_DOCS: &[(&str, &str)] = &[
     ("USART_LINE_ABSENT", USART_LINE_ABSENT),
     ("USART_FLOW", USART_FLOW),
     ("USART_HALF_DUPLEX_READBACK", USART_HALF_DUPLEX_READBACK),
+    ("LEGEND_PWM", LEGEND_PWM),
+    ("LEGEND_USB", LEGEND_USB),
+    ("LEGEND_TOUCH", LEGEND_TOUCH),
+    ("LEGEND_DAC", LEGEND_DAC),
+    ("LEGEND_PCNT", LEGEND_PCNT),
 ];
 
 /// Every row the panel can draw, per module kind.
@@ -1658,3 +1663,31 @@ mod tests {
         assert!(!out.is_empty());
     }
 }
+
+/// The hover for a module's signal legend.
+///
+/// One sentence per picture, and every one of them ends with the same clause:
+/// the same misreading - "this is my module's setting" - is available for all
+/// of them, and the PWM one already had to say so. Named consts rather than
+/// inline literals so the run-of-spaces guard in this file walks them too.
+pub fn legend_hover(kind: crate::panels::mcu_module::modules::ModuleKind) -> &'static str {
+    use crate::panels::mcu_module::modules::ModuleKind as K;
+    match kind {
+        K::GenericInterfaceTimer => LEGEND_PWM,
+        K::GenericInterfaceUsb => LEGEND_USB,
+        K::GenericInterfaceTouch => LEGEND_TOUCH,
+        K::GenericInterfaceDac => LEGEND_DAC,
+        K::GenericInterfacePcnt => LEGEND_PCNT,
+        _ => "",
+    }
+}
+
+pub const LEGEND_PWM: &str = "What duty cycle does: the wider the pulse, the longer the output stays high, and the higher the average the load sees. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_USB: &str = "A differential pair: the two lines are mirrors of each other, except at the end of a packet where BOTH go low. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_TOUCH: &str = "A capacitance reading. A finger adds capacitance, so the count falls - and crossing the threshold is what counts as a touch. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_DAC: &str = "The code you write, and the level the pad holds. Drawn as a staircase because a DAC has a finite number of steps to reach for. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_PCNT: &str = "Edges in, a count out: the counter steps once per edge and holds between them. An illustration of the peripheral - not this module's own setting, which is in the rows below.";

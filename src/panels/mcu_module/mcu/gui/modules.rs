@@ -980,18 +980,31 @@ fn draw_box(
     // same shape the config panel draws, at a size that fits beside the title.
     // Only this kind: every other module's output is a bus, and a bus has no
     // one waveform to draw.
-    if matches!(m.config, ModuleConfig::Timer(_)) {
-        let r = box_legend_rect(rect, side, scale);
-        let wave = if connected {
-            color
+    // Keyed on the KIND, not on the config: Camera and LCD_CAM share one config
+    // variant, and so do PARL_IO and PARL RX, so a `matches!(m.config, ..)` gate
+    // would silently give one kind its sibling's picture.
+    //
+    // The title is measured rather than assumed. It is centred on the box, and
+    // `PWM0` happens to be short - but `LPUART1` and `SDMMC1` are not, and a
+    // legend pinned to the corner would print through them. When there is no
+    // room the box simply goes without; the config card still carries it.
+    let title_w = painter
+        .layout_no_wrap(
+            module_base_name(m).to_owned(),
+            egui::FontId::proportional(TITLE_SIZE * scale),
+            egui::Color32::PLACEHOLDER,
+        )
+        .rect
+        .width();
+    if let Some(r) = box_legend_rect(rect, side, scale, title_w)
+        && let Some(l) = legend_of(m.kind, r)
+    {
+        let grey = if connected {
+            LEGEND_GREY
         } else {
-            egui::Color32::from_rgb(150, 130, 130)
+            LEGEND_GREY_OFF
         };
-        painter.line(pwm_legend_wave(r), egui::Stroke::new(1.0_f32, wave));
-        painter.line(
-            pwm_legend_average(r),
-            egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(205, 85, 70)),
-        );
+        paint_legend(&painter.with_clip_rect(rect), &l, grey, 1.0);
     }
     let title_size = TITLE_SIZE * scale;
     painter.text(
@@ -1052,6 +1065,270 @@ fn handle_caption_pos(m: &VirtualModule, rect: egui::Rect) -> egui::Pos2 {
     }
 }
 
+/// One module kind's signal legend: what the peripheral puts on the wire.
+///
+/// Two colour groups and nothing else. `signal` is the waveform itself, drawn
+/// in the same grey wherever it appears; `accent` is the ONE thing the picture
+/// exists to point at - the average a PWM holds, the threshold a touch pad
+/// crosses, the count an edge counter keeps. A third colour would stop the set
+/// reading as one vocabulary, and using the module's own colour was already
+/// tried and reverted.
+///
+/// Each row is its OWN polyline. Joining two rows into one vector strokes a
+/// spurious vertical connector between them, which is the two-row version of
+/// the bug that turned the first PWM wave into sawteeth.
+struct Legend {
+    signal: Vec<Vec<egui::Pos2>>,
+    accent: Vec<Vec<egui::Pos2>>,
+}
+
+impl Legend {
+    fn new() -> Self {
+        Self {
+            signal: Vec::new(),
+            accent: Vec::new(),
+        }
+    }
+    fn signal(mut self, row: Vec<egui::Pos2>) -> Self {
+        self.signal.push(row);
+        self
+    }
+    fn accent(mut self, row: Vec<egui::Pos2>) -> Self {
+        self.accent.push(row);
+        self
+    }
+}
+
+/// Split `r` into `n` rows, each with a little air around it.
+///
+/// Two rows is the ceiling the box copy can carry: at 17 px a 1 px stroke needs
+/// roughly a 4 px pitch to read as a line of its own, so three rows are already
+/// at the edge and four are not drawable. That budget is why no clock-plus-lanes
+/// picture is in the set - it is also the honest reason QSPI and its four
+/// siblings get none.
+fn legend_rows(r: egui::Rect, n: usize) -> Vec<egui::Rect> {
+    let gap = 3.0;
+    let h = (r.height() - gap * (n as f32 - 1.0)) / n as f32;
+    (0..n)
+        .map(|i| {
+            egui::Rect::from_min_size(
+                egui::pos2(r.left(), r.top() + i as f32 * (h + gap)),
+                egui::vec2(r.width(), h),
+            )
+        })
+        .collect()
+}
+
+/// A square wave across `r` from a list of `(high fraction of the slot)` duties,
+/// one slot per entry.
+///
+/// FOUR points per pulse: baseline, rise, top, fall. Dropping the one that
+/// returns to the baseline before the next rising edge leaves the polyline
+/// climbing diagonally out of each pulse, and the picture comes out as a row of
+/// sawteeth - a different signal.
+fn square_wave(r: egui::Rect, duties: &[f32]) -> Vec<egui::Pos2> {
+    let slot = r.width() / duties.len() as f32;
+    let (lo, hi) = (r.bottom(), r.top());
+    let mut pts = Vec::with_capacity(duties.len() * 4 + 1);
+    for (i, d) in duties.iter().enumerate() {
+        let x0 = r.left() + i as f32 * slot;
+        let x1 = x0 + slot * d;
+        pts.push(egui::pos2(x0, lo));
+        pts.push(egui::pos2(x0, hi));
+        pts.push(egui::pos2(x1, hi));
+        pts.push(egui::pos2(x1, lo));
+    }
+    pts.push(egui::pos2(r.right(), lo));
+    pts
+}
+
+/// `n` evenly spaced 50 % pulses - a plain clock.
+fn clock(r: egui::Rect, n: usize) -> Vec<egui::Pos2> {
+    square_wave(r, &vec![0.5; n])
+}
+
+/// The signal legend for `kind`, or `None` where a picture would say nothing
+/// true.
+///
+/// Ten kinds get nothing, for three reasons that are worth keeping written
+/// down, because each looks like an omission and is not:
+///
+/// * QSPI, OSPI, XSPI, HSPI and SDMMC differ from each other ONLY in how many
+///   data lanes they carry, and the row budget above holds three at best - so
+///   all five would draw the same picture. Worse, the lane count is the WIRING,
+///   not a setting: the same module is one, four or eight lanes wide at
+///   different moments, and any drawn count is wrong at some of them.
+/// * PARL_IO and PARL RX differ only in DIRECTION, which no waveform shows. One
+///   drawing on both boxes would assert they are the same peripheral - the
+///   exact claim the two kinds exist to deny.
+/// * LCD_CAM and Camera each carry three unrelated waveform families behind one
+///   `mode` (an i8080 strobe, a free-running RGB pixel clock, a camera whose
+///   SENSOR drives the clock). One static picture would be wrong in two cases
+///   out of three, and keying it to `mode` would break the rule that a legend
+///   is not a reading of this module.
+///
+/// Custom has no protocol at all.
+fn legend_of(kind: ModuleKind, r: egui::Rect) -> Option<Legend> {
+    use ModuleKind as K;
+    Some(match kind {
+        K::GenericInterfaceTimer => pwm_legend_shape(r),
+        K::GenericInterfaceUsb => usb_legend_shape(r),
+        K::GenericInterfaceTouch => touch_legend_shape(r),
+        K::GenericInterfaceDac => dac_legend_shape(r),
+        K::GenericInterfacePcnt => pcnt_legend_shape(r),
+        _ => return None,
+    })
+}
+
+/// PWM: nine pulses widening in three steps, with the average they hold.
+fn pwm_legend_shape(r: egui::Rect) -> Legend {
+    let duties: Vec<f32> = PWM_LEGEND_DUTIES
+        .iter()
+        .flat_map(|d| std::iter::repeat_n(*d, PWM_LEGEND_PULSES))
+        .collect();
+    Legend::new()
+        .signal(square_wave(r, &duties))
+        .accent(pwm_average(r))
+}
+
+/// USB: a differential pair, and the one place it stops being one.
+///
+/// Two rows that mirror each other exactly, plus a short stretch where BOTH sit
+/// low - SE0, the end-of-packet state. That stretch is what makes the drawing
+/// say "differential" rather than just "two lines", and it is honest here
+/// because this module's pads ARE the pair (unlike CAN's, which are the
+/// controller-side TX/RX).
+fn usb_legend_shape(r: egui::Rect) -> Legend {
+    let rows = legend_rows(r, 2);
+    // Six slots; the last two are the packet's end, where both lines idle low.
+    let bits = [true, false, true, true, false, false];
+    let line = |row: egui::Rect, invert: bool| {
+        let slot = row.width() / bits.len() as f32;
+        let mut pts = Vec::new();
+        for (i, b) in bits.iter().enumerate() {
+            let se0 = i >= 4;
+            let high = if se0 { false } else { *b != invert };
+            let y = if high { row.top() } else { row.bottom() };
+            let x0 = row.left() + i as f32 * slot;
+            pts.push(egui::pos2(x0, y));
+            pts.push(egui::pos2(x0 + slot, y));
+        }
+        square_edges(pts)
+    };
+    let se0_x = r.left() + r.width() * 4.0 / bits.len() as f32;
+    Legend::new()
+        .signal(line(rows[0], false))
+        .signal(line(rows[1], true))
+        .accent(vec![
+            egui::pos2(se0_x, rows[0].bottom()),
+            egui::pos2(r.right(), rows[0].bottom()),
+        ])
+        .accent(vec![
+            egui::pos2(se0_x, rows[1].bottom()),
+            egui::pos2(r.right(), rows[1].bottom()),
+        ])
+}
+
+/// Insert the vertical connectors a level-per-slot list implies.
+///
+/// The points come in pairs (slot start, slot end) at one level; between two
+/// slots at different levels the line has to go straight up or down, or the
+/// stroke cuts the corner and the square wave becomes a ramp.
+fn square_edges(pts: Vec<egui::Pos2>) -> Vec<egui::Pos2> {
+    let mut out = Vec::with_capacity(pts.len() + pts.len() / 2);
+    for (i, p) in pts.iter().enumerate() {
+        if i > 0 && (p.y - pts[i - 1].y).abs() > f32::EPSILON && (p.x - pts[i - 1].x).abs() < 0.01 {
+            // already a vertical move
+        } else if i > 0 && (p.y - pts[i - 1].y).abs() > f32::EPSILON {
+            out.push(egui::pos2(pts[i - 1].x, p.y));
+        }
+        out.push(*p);
+    }
+    out
+}
+
+/// Touch: a capacitance reading dipping past its threshold.
+///
+/// The only picture in the set that is not a logic level, which is why it can
+/// never be mistaken for a neighbour. The dip direction is the real one: a
+/// finger ADDS capacitance, the count falls.
+fn touch_legend_shape(r: egui::Rect) -> Legend {
+    let base = r.top() + r.height() * 0.25;
+    let floor = r.bottom();
+    let (a, b) = (r.left() + r.width() * 0.3, r.left() + r.width() * 0.7);
+    Legend::new()
+        .signal(vec![
+            egui::pos2(r.left(), base),
+            egui::pos2(a, base),
+            egui::pos2(a + r.width() * 0.08, floor),
+            egui::pos2(b - r.width() * 0.08, floor),
+            egui::pos2(b, base),
+            egui::pos2(r.right(), base),
+        ])
+        .accent(vec![
+            egui::pos2(r.left(), r.center().y),
+            egui::pos2(r.right(), r.center().y),
+        ])
+}
+
+/// DAC: the code it is given, and the level the pad holds.
+///
+/// A staircase rather than a clean ramp, because quantisation is what a DAC IS.
+fn dac_legend_shape(r: egui::Rect) -> Legend {
+    let steps = [0.15_f32, 0.45, 0.75, 1.0, 0.75, 0.45];
+    let y = |v: f32| r.bottom() - v * (r.height() - 1.0);
+    let slot = r.width() / steps.len() as f32;
+    let mut stair = Vec::new();
+    let mut smooth = Vec::new();
+    for (i, v) in steps.iter().enumerate() {
+        let x0 = r.left() + i as f32 * slot;
+        stair.push(egui::pos2(x0, y(*v)));
+        stair.push(egui::pos2(x0 + slot, y(*v)));
+        smooth.push(egui::pos2(x0 + slot * 0.5, y(*v)));
+    }
+    Legend::new().signal(square_edges(stair)).accent(smooth)
+}
+
+/// PCNT: equal edges, and the count they keep.
+///
+/// The staircase only ever climbs, and it is the only monotone line in the
+/// vocabulary - nothing else counts.
+fn pcnt_legend_shape(r: egui::Rect) -> Legend {
+    let rows = legend_rows(r, 2);
+    let n = 5;
+    let wave = clock(rows[1], n);
+    let slot = rows[0].width() / n as f32;
+    let mut count = vec![egui::pos2(rows[0].left(), rows[0].bottom())];
+    for i in 0..n {
+        let x = rows[0].left() + i as f32 * slot;
+        let y = rows[0].bottom() - (i as f32 + 1.0) / n as f32 * rows[0].height();
+        count.push(egui::pos2(x, y));
+        count.push(egui::pos2(x + slot, y));
+    }
+    Legend::new().signal(wave).accent(square_edges(count))
+}
+
+/// The one grey every legend's signal is drawn in, connected and not.
+///
+/// Two colours across the whole set, and no more: a third would stop them
+/// reading as one vocabulary. The module's own colour was tried here and
+/// reverted - it made one drawing look like two different things depending on
+/// where you met it.
+const LEGEND_GREY: egui::Color32 = egui::Color32::from_gray(165);
+const LEGEND_GREY_OFF: egui::Color32 = egui::Color32::from_gray(120);
+/// The accent: the one thing each picture exists to point at.
+const LEGEND_ACCENT: egui::Color32 = egui::Color32::from_rgb(205, 85, 70);
+
+/// Paint a legend into `r`.
+fn paint_legend(painter: &egui::Painter, l: &Legend, grey: egui::Color32, w: f32) {
+    for row in &l.signal {
+        painter.line(row.clone(), egui::Stroke::new(w, grey));
+    }
+    for row in &l.accent {
+        painter.line(row.clone(), egui::Stroke::new(w * 1.2, LEGEND_ACCENT));
+    }
+}
+
 /// The three duty levels the little waveform legend draws, low to high.
 ///
 /// A LEGEND, not a reading of this module: it says what the peripheral does -
@@ -1077,36 +1354,11 @@ fn pwm_legend_rect(strip: egui::Rect) -> egui::Rect {
     )
 }
 
-/// The square wave, as one polyline: nine pulses whose width grows in three
-/// steps.
-///
-/// Built as a path rather than as filled bars because that is what the shape
-/// IS - one line that keeps stepping up and down, which is the point being
-/// made. Returns the baseline-relative points so the test can read them
-/// without a painter.
-fn pwm_legend_wave(r: egui::Rect) -> Vec<egui::Pos2> {
-    let n = PWM_LEGEND_DUTIES.len() * PWM_LEGEND_PULSES;
-    let slot = r.width() / n as f32;
-    let (lo, hi) = (r.bottom(), r.top() + 2.0);
-    let mut pts = Vec::with_capacity(n * 4 + 2);
-    pts.push(egui::pos2(r.left(), lo));
-    for i in 0..n {
-        let duty = PWM_LEGEND_DUTIES[i / PWM_LEGEND_PULSES];
-        let x0 = r.left() + i as f32 * slot;
-        let x1 = x0 + slot * duty;
-        pts.push(egui::pos2(x0, hi));
-        pts.push(egui::pos2(x1, hi));
-        pts.push(egui::pos2(x1, lo));
-    }
-    pts.push(egui::pos2(r.right(), lo));
-    pts
-}
-
 /// The average the load sees: flat across each level, ramping between them.
 ///
 /// The red line in the picture, and the reason the legend is worth drawing at
 /// all - the square wave alone does not say what a duty cycle is FOR.
-fn pwm_legend_average(r: egui::Rect) -> Vec<egui::Pos2> {
+fn pwm_average(r: egui::Rect) -> Vec<egui::Pos2> {
     let span = r.height() - 6.0;
     let y = |d: f32| r.bottom() - 3.0 - d * span;
     let group = r.width() / PWM_LEGEND_DUTIES.len() as f32;
@@ -1145,7 +1397,14 @@ const BOX_LEGEND_SIZE: egui::Vec2 = egui::vec2(52.0, 17.0);
 ///
 /// Scaled with the box's texts, so a selected module's legend grows with its
 /// title instead of sliding out of proportion.
-fn box_legend_rect(rect: egui::Rect, side: Side, scale: f32) -> egui::Rect {
+fn box_legend_rect(
+    rect: egui::Rect,
+    side: Side,
+    scale: f32,
+    // Width of the title, which is drawn CENTRED at the top of the box. `None`
+    // when the two would collide - the picture is worth less than the name.
+    title_w: f32,
+) -> Option<egui::Rect> {
     let size = BOX_LEGEND_SIZE * scale;
     let (x, y) = match side {
         // Box below the chip: its top edge faces up, and is square.
@@ -1157,29 +1416,36 @@ fn box_legend_rect(rect: egui::Rect, side: Side, scale: f32) -> egui::Rect {
         Side::Right => (rect.left() + 8.0, rect.top() + 6.0),
         Side::Left => (rect.right() - 8.0 - size.x, rect.top() + 6.0),
     };
-    egui::Rect::from_min_size(egui::pos2(x, y), size)
+    let out = egui::Rect::from_min_size(egui::pos2(x, y), size);
+    // Only the corners level with the title can clash; the bottom ones sit
+    // below it. 3 px of air, so the two do not touch either.
+    let title = egui::Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.top() + 13.0),
+        egui::vec2(title_w + 6.0, 20.0),
+    );
+    (!out.intersects(title)).then_some(out)
 }
 
-/// Draw the legend at the top right of a PWM module's config.
-fn pwm_legend(ui: &mut egui::Ui) {
+/// Draw a module's signal legend at the top right of its config card.
+///
+/// Nothing at all for the kinds `legend_of` refuses - and no reserved strip
+/// either, so a card without a picture does not carry a blank band where one
+/// would have been.
+fn signal_legend(ui: &mut egui::Ui, kind: ModuleKind) {
+    let probe = egui::Rect::from_min_size(egui::Pos2::ZERO, PWM_LEGEND_SIZE);
+    if legend_of(kind, probe).is_none() {
+        return;
+    }
     let (strip, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), PWM_LEGEND_SIZE.y),
         egui::Sense::hover(),
     );
     let r = pwm_legend_rect(strip);
-    let p = ui.painter().with_clip_rect(strip);
-    p.line(
-        pwm_legend_wave(r),
-        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(165)),
-    );
-    p.line(
-        pwm_legend_average(r),
-        egui::Stroke::new(1.6_f32, egui::Color32::from_rgb(205, 85, 70)),
-    );
-    ui.interact(r, ui.id().with("pwm_legend"), egui::Sense::hover())
-        .on_hover_text(
-            "What duty cycle does: the wider the pulse, the longer the output stays high, and the higher the average the load sees. An illustration of the peripheral - not this module's own setting, which is in the rows below.",
-        );
+    if let Some(l) = legend_of(kind, r) {
+        paint_legend(&ui.painter().with_clip_rect(strip), &l, LEGEND_GREY, 1.0);
+    }
+    ui.interact(r, ui.id().with("signal_legend"), egui::Sense::hover())
+        .on_hover_text(docs::legend_hover(kind));
 }
 
 /// Font multiplier for a module box's texts: 1 normally, `SELECTED_TEXT_SCALE`
@@ -2575,12 +2841,10 @@ pub fn module_config_ui(
     );
     out.elsewhere("Data models", docs::SHARED_DATA_MODELS);
 
-    // A PWM module gets a small picture of what it makes, top right - see
-    // `pwm_legend`. Outside the grid on purpose: inside it the drawing would be
-    // a cell, and a cell is either the label column or the control column.
-    if matches!(m.config, ModuleConfig::Timer(_)) {
-        pwm_legend(ui);
-    }
+    // A picture of what this peripheral puts on the wire, top right - see
+    // `signal_legend`. Outside the grid on purpose: inside it the drawing would
+    // be a cell, and a cell is either the label column or the control column.
+    signal_legend(ui, m_kind);
 
     egui::Grid::new("module_cfg")
         .num_columns(2)
@@ -7168,177 +7432,219 @@ mod the_box_shows_one_caption {
 }
 
 #[cfg(test)]
-mod the_pwm_legend_draws_what_it_claims {
+mod the_signal_legends {
     use super::{
-        PWM_LEGEND_DUTIES, PWM_LEGEND_PULSES, PWM_LEGEND_SIZE, pwm_legend_average, pwm_legend_rect,
-        pwm_legend_wave,
-    };
-    use eframe::egui;
-
-    fn r() -> egui::Rect {
-        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), PWM_LEGEND_SIZE)
-    }
-
-    /// Nine pulses - three per level - and every one of them inside the box.
-    #[test]
-    fn there_are_three_pulses_per_level_and_they_stay_in_the_box() {
-        let rect = r();
-        let pts = pwm_legend_wave(rect);
-        let n = PWM_LEGEND_DUTIES.len() * PWM_LEGEND_PULSES;
-        assert_eq!(n, 9, "three levels of three");
-        // One rising edge, one top, one falling edge per pulse, plus the two
-        // baseline ends.
-        assert_eq!(pts.len(), n * 3 + 2);
-        for p in &pts {
-            assert!(rect.contains(*p), "{p:?} escaped {rect:?}");
-        }
-        assert!(
-            (pts[0].x - rect.left()).abs() < f32::EPSILON
-                && (pts[pts.len() - 1].x - rect.right()).abs() < f32::EPSILON,
-            "the wave spans the whole box"
-        );
-    }
-
-    /// The pulses get WIDER in three steps - which is the whole statement the
-    /// picture makes.
-    #[test]
-    fn each_level_holds_the_output_high_for_longer() {
-        let rect = r();
-        let pts = pwm_legend_wave(rect);
-        // Every pulse's high span, in order: points 1.. come in threes,
-        // (rise, top, fall).
-        let widths: Vec<f32> = (0..PWM_LEGEND_DUTIES.len() * PWM_LEGEND_PULSES)
-            .map(|i| pts[1 + i * 3 + 1].x - pts[1 + i * 3].x)
-            .collect();
-        for g in 0..PWM_LEGEND_DUTIES.len() {
-            let w = &widths[g * PWM_LEGEND_PULSES..(g + 1) * PWM_LEGEND_PULSES];
-            for x in w {
-                assert!(
-                    (x - w[0]).abs() < 0.01,
-                    "level {g}: its three pulses are equal, got {w:?}"
-                );
-            }
-            if g > 0 {
-                let prev = widths[(g - 1) * PWM_LEGEND_PULSES];
-                assert!(w[0] > prev, "level {g} is wider than {}: {w:?}", g - 1);
-            }
-        }
-    }
-
-    /// The average line only ever climbs, and never leaves the box.
-    #[test]
-    fn the_average_rises_with_the_duty() {
-        let rect = r();
-        let pts = pwm_legend_average(rect);
-        for w in pts.windows(2) {
-            // Screen y grows DOWNWARD, so rising means non-increasing y.
-            assert!(w[1].y <= w[0].y + f32::EPSILON, "never dips: {pts:?}");
-            assert!(w[1].x >= w[0].x, "and never goes backwards");
-        }
-        assert!(pts.last().unwrap().y < pts[0].y, "it does actually rise");
-        for p in &pts {
-            assert!(rect.contains(*p), "{p:?} escaped {rect:?}");
-        }
-    }
-
-    /// It sits hard right in whatever strip it is given - "top right" of the
-    /// config, whatever the panel is currently wide.
-    #[test]
-    fn it_is_right_aligned_in_the_strip() {
-        for w in [200.0_f32, 420.0, 900.0] {
-            let strip =
-                egui::Rect::from_min_size(egui::pos2(7.0, 3.0), egui::vec2(w, PWM_LEGEND_SIZE.y));
-            let got = pwm_legend_rect(strip);
-            assert!(
-                (got.right() - strip.right()).abs() < f32::EPSILON,
-                "flush right at {w}"
-            );
-            assert!(
-                (got.top() - strip.top()).abs() < f32::EPSILON,
-                "and at the top"
-            );
-            assert_eq!(got.size(), PWM_LEGEND_SIZE);
-        }
-    }
-}
-
-#[cfg(test)]
-mod the_box_legend_stays_inside_the_silhouette {
-    use super::{
-        BOX_W, BoxShape, Side, box_legend_rect, pwm_legend_average, pwm_legend_wave, silhouette,
+        BOX_LEGEND_SIZE, BOX_W, BoxShape, LEGEND_ACCENT, LEGEND_GREY, LEGEND_GREY_OFF,
+        PWM_LEGEND_SIZE, Side, box_legend_rect, docs, legend_of, silhouette,
     };
     use crate::panels::mcu_module::modules::ModuleKind;
     use eframe::egui;
 
-    /// Winding-number test: is `p` inside the closed polygon?
-    fn inside(poly: &[egui::Pos2], p: egui::Pos2) -> bool {
-        let mut wind = 0i32;
-        for i in 0..poly.len() {
-            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
-            let cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
-            if a.y <= p.y {
-                if b.y > p.y && cross > 0.0 {
-                    wind += 1;
-                }
-            } else if b.y <= p.y && cross < 0.0 {
-                wind -= 1;
-            }
-        }
-        wind != 0
+    /// The kinds that get a picture. Ten others deliberately do not - see
+    /// `legend_of` for the three reasons.
+    const WITH: [ModuleKind; 5] = [
+        ModuleKind::GenericInterfaceTimer,
+        ModuleKind::GenericInterfaceUsb,
+        ModuleKind::GenericInterfaceTouch,
+        ModuleKind::GenericInterfaceDac,
+        ModuleKind::GenericInterfacePcnt,
+    ];
+
+    fn sizes() -> [egui::Rect; 2] {
+        [
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), PWM_LEGEND_SIZE),
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), BOX_LEGEND_SIZE),
+        ]
     }
 
-    /// The silhouette bevels the corners of the edge facing AWAY from the chip,
-    /// and a PWM module's shape has both of them cut 35 px deep. A legend
-    /// pinned to one corner would hang outside the outline on half the sides of
-    /// the chip - which is exactly what a picture drawn over a beveled corner
-    /// looks like.
+    /// Exactly the kinds that have something true to draw, and no others.
+    ///
+    /// The refusals are the analysis, not an omission: five memory ports differ
+    /// only by a lane count 17 px cannot hold, two parallel ports differ only
+    /// by a direction no waveform shows, and two more carry three unrelated
+    /// waveform families behind one `mode`.
     #[test]
-    fn every_side_puts_it_somewhere_the_outline_covers() {
-        let shape = BoxShape::of(ModuleKind::GenericInterfaceTimer);
-        for h in [78.0_f32, 98.0, 130.0] {
-            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, h));
-            for side in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
-                for scale in [1.0_f32, 1.15] {
-                    let poly = silhouette(rect, shape, side);
-                    let r = box_legend_rect(rect, side, scale);
-                    for corner in [
-                        r.left_top(),
-                        r.right_top(),
-                        r.left_bottom(),
-                        r.right_bottom(),
-                    ] {
-                        assert!(
-                            inside(&poly, corner),
-                            "h={h} {side:?} scale={scale}: {corner:?} is outside the box outline"
-                        );
-                    }
-                    // ...and the drawing itself, not only its bounding box.
-                    for p in pwm_legend_wave(r)
-                        .iter()
-                        .chain(pwm_legend_average(r).iter())
-                    {
-                        assert!(
-                            inside(&poly, *p),
-                            "h={h} {side:?}: a stroke point {p:?} escaped the outline"
-                        );
+    fn only_the_kinds_with_something_true_to_draw() {
+        for kind in ModuleKind::ALL {
+            let has = legend_of(kind, sizes()[0]).is_some();
+            assert_eq!(has, WITH.contains(&kind), "{kind:?}");
+        }
+    }
+
+    /// Nothing escapes the rect it was given, at either size.
+    #[test]
+    fn every_stroke_stays_in_its_box() {
+        for kind in WITH {
+            for r in sizes() {
+                let l = legend_of(kind, r).expect("has a legend");
+                for row in l.signal.iter().chain(l.accent.iter()) {
+                    assert!(row.len() >= 2, "{kind:?}: a row with nothing in it");
+                    for p in row {
+                        assert!(r.expand(0.51).contains(*p), "{kind:?}: {p:?} escaped {r:?}");
                     }
                 }
             }
         }
     }
 
-    /// It clears the title, which is centred at the top of the box.
+    /// A logic-level picture has no diagonals.
+    ///
+    /// Touch and DAC are exempt BY DESIGN - a capacitance trace and a smoothed
+    /// DAC output are the two pictures in the set that are not logic levels,
+    /// which is exactly why they cannot be mistaken for a neighbour.
     #[test]
-    fn it_does_not_sit_on_the_title() {
+    fn the_square_waves_are_square() {
+        for kind in [
+            ModuleKind::GenericInterfaceTimer,
+            ModuleKind::GenericInterfaceUsb,
+            ModuleKind::GenericInterfacePcnt,
+        ] {
+            let r = sizes()[0];
+            let l = legend_of(kind, r).expect("has a legend");
+            for row in &l.signal {
+                for p in row.windows(2) {
+                    let (dx, dy) = ((p[1].x - p[0].x).abs(), (p[1].y - p[0].y).abs());
+                    assert!(
+                        dx < 0.01 || dy < 0.01,
+                        "{kind:?}: diagonal {:?} -> {:?} in a square wave",
+                        p[0],
+                        p[1]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Two-row pictures really are two rows, and the rows never touch.
+    ///
+    /// Joining them into one polyline would stroke a vertical connector between
+    /// them - the two-row form of the sawtooth bug.
+    #[test]
+    fn two_row_pictures_keep_their_rows_apart() {
+        for kind in [
+            ModuleKind::GenericInterfaceUsb,
+            ModuleKind::GenericInterfacePcnt,
+        ] {
+            let r = sizes()[0];
+            let l = legend_of(kind, r).expect("has a legend");
+            let rows: Vec<(f32, f32)> = l
+                .signal
+                .iter()
+                .chain(l.accent.iter())
+                .map(|row| {
+                    let ys: Vec<f32> = row.iter().map(|p| p.y).collect();
+                    (
+                        ys.iter().copied().fold(f32::INFINITY, f32::min),
+                        ys.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+                    )
+                })
+                .collect();
+            assert!(rows.len() >= 2, "{kind:?}: more than one row");
+            let top = rows.iter().filter(|(_, hi)| *hi < r.center().y).count();
+            let bottom = rows.iter().filter(|(lo, _)| *lo > r.center().y).count();
+            assert!(
+                top > 0 && bottom > 0,
+                "{kind:?}: one row above the middle and one below, got {rows:?}"
+            );
+        }
+    }
+
+    /// On the canvas box, every picture stays inside its module OWN silhouette
+    /// - which bevels different corners per shape and per side.
+    ///
+    /// The old version of this fixed the Driver keystone and varied only the
+    /// side. Four other silhouettes now carry legends.
+    #[test]
+    fn every_kind_fits_the_outline_of_its_own_box() {
+        fn inside(poly: &[egui::Pos2], p: egui::Pos2) -> bool {
+            let mut wind = 0i32;
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                let cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+                if a.y <= p.y {
+                    if b.y > p.y && cross > 0.0 {
+                        wind += 1;
+                    }
+                } else if b.y <= p.y && cross < 0.0 {
+                    wind -= 1;
+                }
+            }
+            wind != 0
+        }
+        for kind in WITH {
+            let shape = BoxShape::of(kind);
+            for h in [78.0_f32, 98.0, 130.0] {
+                let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, h));
+                for side in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
+                    for scale in [1.0_f32, 1.15] {
+                        // A short title, so placement is not refused for the
+                        // wrong reason; the collision case has its own test.
+                        let Some(r) = box_legend_rect(rect, side, scale, 26.0) else {
+                            continue;
+                        };
+                        let poly = silhouette(rect, shape, side);
+                        let l = legend_of(kind, r).expect("has a legend");
+                        for row in l.signal.iter().chain(l.accent.iter()) {
+                            for p in row {
+                                assert!(
+                                    inside(&poly, *p),
+                                    "{kind:?} h={h} {side:?} scale={scale}: {p:?} outside the outline"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A title too wide to share the corner takes it: the name beats the
+    /// picture, and the config card still carries one.
+    ///
+    /// `PWM0` is short and never surfaced this; `LPUART1` and `SDMMC1` are not.
+    #[test]
+    fn a_long_title_keeps_the_corner() {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, 98.0));
-        let r = box_legend_rect(rect, Side::Bottom, 1.15);
-        // The title is drawn CENTER_CENTER on the box's mid-line; anything
-        // starting right of centre leaves it the room it had.
         assert!(
-            r.left() > rect.center().x,
-            "legend starts at {} , box centre is {}",
-            r.left(),
-            rect.center().x
+            box_legend_rect(rect, Side::Bottom, 1.15, 26.0).is_some(),
+            "a short name leaves room"
         );
+        assert!(
+            box_legend_rect(rect, Side::Bottom, 1.15, 90.0).is_none(),
+            "a wide one does not"
+        );
+        // Below the title, the corner is free whatever the name.
+        assert!(
+            box_legend_rect(rect, Side::Top, 1.15, 90.0).is_some(),
+            "the bottom corner never clashes with a title at the top"
+        );
+    }
+
+    /// Every picture has its sentence, and the kinds without a picture have
+    /// none.
+    #[test]
+    fn each_picture_says_what_it_means() {
+        for kind in ModuleKind::ALL {
+            let hover = docs::legend_hover(kind);
+            assert_eq!(
+                !hover.is_empty(),
+                WITH.contains(&kind),
+                "{kind:?}: hover follows the picture"
+            );
+            if !hover.is_empty() {
+                assert!(
+                    hover.ends_with("which is in the rows below."),
+                    "{kind:?}: every one repeats the same warning, because the same misreading is available for all of them"
+                );
+            }
+        }
+    }
+
+    /// Two colours, and the same two everywhere.
+    #[test]
+    fn the_palette_is_exactly_two_colours() {
+        assert_ne!(LEGEND_GREY, LEGEND_ACCENT);
+        assert_ne!(LEGEND_GREY_OFF, LEGEND_ACCENT);
+        assert_ne!(LEGEND_GREY, LEGEND_GREY_OFF);
     }
 }
