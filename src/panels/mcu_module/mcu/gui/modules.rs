@@ -91,6 +91,17 @@ pub enum BoxShape {
 }
 
 impl BoxShape {
+    /// Whether this silhouette is a plain rectangle - no bevelled corner on
+    /// any side.
+    ///
+    /// Paired with the `depth` match in [`silhouette`]: these are exactly the
+    /// shapes whose depth is zero, and `a_square_shape_is_the_one_with_four_
+    /// corners` holds the two together. A square box has all four corners to
+    /// spend, which is why its legend can take one.
+    pub fn is_square(self) -> bool {
+        matches!(self, Self::Serial | Self::Custom)
+    }
+
     pub fn of(kind: ModuleKind) -> Self {
         use ModuleKind as K;
         match kind {
@@ -1019,7 +1030,7 @@ fn draw_box(
     // `PWM0` happens to be short - but `LPUART1` and `SDMMC1` are not, and a
     // legend pinned to the corner would print through them. When there is no
     // room the box simply goes without; the config card still carries it.
-    if let Some(r) = box_legend_rect(rect)
+    if let Some(r) = box_legend_rect(rect, shape)
         && let Some(l) = legend_of(m.kind, r)
     {
         let grey = if connected {
@@ -1877,15 +1888,36 @@ const BOX_LEGEND_TOP: f32 = 56.0;
 /// bevelled on any of the five silhouettes, and nothing else is drawn there
 /// since the name row moved to the panel. It also reads better - the box is one
 /// centred column, and the picture is the last thing in it.
-fn box_legend_rect(rect: egui::Rect) -> Option<egui::Rect> {
+fn box_legend_rect(rect: egui::Rect, shape: BoxShape) -> Option<egui::Rect> {
     // NOT scaled with the box texts. The box itself does not grow when
     // selected, so a legend that did would move under a title that also grew.
     let size = BOX_LEGEND_SIZE;
-    let out = egui::Rect::from_min_size(
-        egui::pos2(rect.center().x - size.x / 2.0, rect.top() + BOX_LEGEND_TOP),
-        size,
-    );
-    (rect.bottom() - out.bottom() >= 4.0).then_some(out)
+    let out = if shape.is_square() {
+        // A plain rectangle keeps all four corners, so the picture takes the
+        // far one - out of the way of the three centred text rows entirely,
+        // and in the empty quarter of the box.
+        egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 10.0 - size.x, rect.bottom() - 8.0 - size.y),
+            size,
+        )
+    } else {
+        // Every other silhouette bevels the corners of the edge facing away
+        // from the chip - both of them on a keystone, 35 px deep - and which
+        // two depends on the side the box sits on. The middle is never cut on
+        // any of them, so a shape with corners to lose keeps the picture
+        // centred under its texts.
+        egui::Rect::from_min_size(
+            egui::pos2(rect.center().x - size.x / 2.0, rect.top() + BOX_LEGEND_TOP),
+            size,
+        )
+    };
+    // Two conditions, and the second is the one that matters on a short box:
+    // inside the outline, AND never riding up into the three text rows. A
+    // corner is free of the TEXTS only while the box is tall enough to have a
+    // corner left below them.
+    let fits =
+        rect.contains_rect(out.expand(4.0)) && out.top() >= rect.top() + BOX_LEGEND_TOP - 4.0;
+    fits.then_some(out)
 }
 
 /// Draw a module's signal legend at the top right of its config card.
@@ -8159,7 +8191,7 @@ mod the_signal_legends {
                         // test would still pass - which is exactly how USART1
                         // came to have no picture at all without anything
                         // saying so.
-                        let r = box_legend_rect(rect)
+                        let r = box_legend_rect(rect, shape)
                             .unwrap_or_else(|| panic!("{kind:?} at h={h} gets a legend"));
                         let poly = silhouette(rect, shape, side);
                         let l = legend_of(kind, r).expect("has a legend");
@@ -8177,34 +8209,81 @@ mod the_signal_legends {
         }
     }
 
-    /// The picture sits UNDER the box's texts, clear of all three of them, and
-    /// inside the box.
+    /// Where the picture sits, per silhouette.
     ///
-    /// It used to take the top-right corner, and that was wrong twice: the
-    /// silhouette bevels that corner on any box sitting above the chip, and the
-    /// centred title collided with it for any name longer than about five
-    /// characters - so `USART1`, `LPUART1` and `MCPWM0` silently had no picture
-    /// at all while `PWM0` did.
+    /// A plain rectangle - the shape USART, SPI, I2C, I2S and SAI wear - keeps
+    /// all four corners, so the picture takes the far one and leaves the three
+    /// centred text rows alone. Every other silhouette bevels the corners of
+    /// the edge facing away from the chip, and which two depends on the side
+    /// the box sits on, so there the picture stays centred under the texts
+    /// where nothing is ever cut.
+    ///
+    /// It used to take the TOP-right corner on every shape, and that was wrong
+    /// twice over: outside the outline on any bevelled box, and colliding with
+    /// the centred title for any name longer than about five characters - so
+    /// `USART1`, `LPUART1` and `MCPWM0` silently had no picture while `PWM0`
+    /// did.
     #[test]
-    fn the_box_legend_sits_below_the_texts() {
+    fn the_box_legend_takes_a_corner_only_where_there_is_one() {
         for h in [78.0_f32, 98.0, 130.0] {
             let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, h));
-            let r = box_legend_rect(rect).expect("every box height has room");
-            // Clear of the variable-name row, which is drawn at top + 47.
+
+            let square = box_legend_rect(rect, BoxShape::Serial).expect("a rectangle has room");
             assert!(
-                r.top() > rect.top() + 50.0,
-                "h={h}: below the last text row"
+                square.right() > rect.center().x && square.bottom() > rect.center().y,
+                "h={h}: a square box puts it in the far corner, got {square:?}"
             );
-            assert!(r.bottom() < rect.bottom(), "h={h}: inside the box");
-            // Centred, like the three rows above it.
+
+            let keystone = box_legend_rect(rect, BoxShape::Driver).expect("a keystone has room");
             assert!(
-                (r.center().x - rect.center().x).abs() < 0.01,
-                "h={h}: on the same centre line as the texts"
+                (keystone.center().x - rect.center().x).abs() < 0.01,
+                "h={h}: a bevelled box keeps it centred"
             );
+            assert!(
+                keystone.top() > rect.top() + 50.0,
+                "h={h}: and below the last text row"
+            );
+
+            for r in [square, keystone] {
+                assert!(rect.contains_rect(r), "h={h}: inside the box");
+            }
         }
         // A box too short for it goes without rather than overflowing.
         let squat = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, 60.0));
-        assert!(box_legend_rect(squat).is_none());
+        for shape in [BoxShape::Serial, BoxShape::Driver] {
+            assert!(
+                box_legend_rect(squat, shape).is_none(),
+                "{shape:?}: a box with no room below its texts goes without"
+            );
+        }
+    }
+
+    /// `is_square` and the silhouette agree about which shapes have corners.
+    ///
+    /// They are two statements of one fact - the `depth` match inside
+    /// `silhouette` and the list in `is_square` - and the placement above trusts
+    /// the second to predict the first.
+    #[test]
+    fn a_square_shape_is_the_one_with_four_corners() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, 98.0));
+        for shape in [
+            BoxShape::Serial,
+            BoxShape::Custom,
+            BoxShape::Memory,
+            BoxShape::Parallel,
+            BoxShape::Driver,
+            BoxShape::OffBoard,
+        ] {
+            for side in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
+                let corners = silhouette(rect, shape, side).len();
+                assert_eq!(
+                    shape.is_square(),
+                    corners == 4,
+                    "{shape:?} on {side:?}: is_square says {}, the outline has {corners} points",
+                    shape.is_square()
+                );
+            }
+        }
     }
 
     /// Every picture has its sentence, and the kinds without a picture have
