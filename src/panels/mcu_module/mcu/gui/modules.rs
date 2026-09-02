@@ -742,9 +742,6 @@ pub fn module_title(m: &VirtualModule) -> String {
     }
 }
 
-/// Live preview of the generated handle variable name(s), with the user's
-/// label appended — the module analogue of the pin's `pc13_out_board_led`
-/// caption. SPI/I2C have one handle; USART has two (`_txN` / `_rxN`).
 /// The binding name(s) this module generates, as a list.
 ///
 /// [`handle_preview`] renders them for the box, where one string is what a
@@ -759,6 +756,9 @@ pub(crate) fn handle_names(m: &VirtualModule, native_forced: bool) -> Vec<String
         .collect()
 }
 
+/// Live preview of the generated handle variable name(s), with the user's
+/// label appended — the module analogue of the pin's `pc13_out_board_led`
+/// caption. SPI/I2C have one handle; USART has two (`_txN` / `_rxN`).
 fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
     let n = m.instance();
     let lbl = sanitize_label(m.config.custom_label());
@@ -1019,15 +1019,20 @@ fn draw_box(
     // `PWM0` happens to be short - but `LPUART1` and `SDMMC1` are not, and a
     // legend pinned to the corner would print through them. When there is no
     // room the box simply goes without; the config card still carries it.
+    // Measured at the SELECTED size even when the box is not selected: the
+    // decision has to be the same either way, or the picture appears and
+    // disappears as the user clicks around.
     let title_w = painter
         .layout_no_wrap(
             module_base_name(m).to_owned(),
-            egui::FontId::proportional(TITLE_SIZE * scale),
+            egui::FontId::proportional(
+                TITLE_SIZE * crate::panels::mcu_module::pins::gui::draw::SELECTED_TEXT_SCALE,
+            ),
             egui::Color32::PLACEHOLDER,
         )
         .rect
         .width();
-    if let Some(r) = box_legend_rect(rect, side, scale, title_w)
+    if let Some(r) = box_legend_rect(rect, side, title_w)
         && let Some(l) = legend_of(m.kind, r)
     {
         let grey = if connected {
@@ -1546,7 +1551,12 @@ fn i2c_legend_shape(r: egui::Rect) -> Legend {
         egui::pos2(b, rows[0].bottom()),
     );
     let mut scl = vec![egui::pos2(rows[0].left(), rows[0].top())];
-    scl.extend(clock(burst, 4));
+    // `.skip(1)`: `square_wave` opens on the BASELINE, and appending that to a
+    // run that is already high made `square_edges` draw down and straight back
+    // up at the same x - a full-height tick inside the flat shoulder, reading
+    // as a clock edge exactly where the picture is claiming there is none. The
+    // burst starts with SCL falling, which is the second point.
+    scl.extend(clock(burst, 4).into_iter().skip(1));
     // `square_wave` ends on the baseline, and SCL has to be HIGH again for the
     // STOP to be one - so it rises at the end of the burst, not at the far edge
     // of the box.
@@ -1744,12 +1754,17 @@ const BOX_LEGEND_SIZE: egui::Vec2 = egui::vec2(52.0, 17.0);
 fn box_legend_rect(
     rect: egui::Rect,
     side: Side,
-    scale: f32,
-    // Width of the title, which is drawn CENTRED at the top of the box. `None`
-    // when the two would collide - the picture is worth less than the name.
-    title_w: f32,
+    // Width of the title at its WIDEST - the size it takes when the box is
+    // selected. Measured at that size whatever the box is doing now, so the
+    // answer cannot change when the user clicks: a thumbnail that vanished on
+    // selection and came back on deselection made the box flicker between two
+    // layouts on every click.
+    title_w_selected: f32,
 ) -> Option<egui::Rect> {
-    let size = BOX_LEGEND_SIZE * scale;
+    // NOT scaled with the box texts. The box itself does not grow when
+    // selected, so a legend that did would push itself into the title - which
+    // is what made `PWM0` lose its picture the moment it was clicked.
+    let size = BOX_LEGEND_SIZE;
     let (x, y) = match side {
         // Box below the chip: its top edge faces up, and is square.
         Side::Bottom => (rect.right() - 8.0 - size.x, rect.top() + 6.0),
@@ -1762,10 +1777,10 @@ fn box_legend_rect(
     };
     let out = egui::Rect::from_min_size(egui::pos2(x, y), size);
     // Only the corners level with the title can clash; the bottom ones sit
-    // below it. 3 px of air, so the two do not touch either.
+    // below it. 2 px of air, so the two do not touch either.
     let title = egui::Rect::from_center_size(
         egui::pos2(rect.center().x, rect.top() + 13.0),
-        egui::vec2(title_w + 6.0, 20.0),
+        egui::vec2(title_w_selected + 4.0, 20.0),
     );
     (!out.intersects(title)).then_some(out)
 }
@@ -1778,6 +1793,14 @@ fn box_legend_rect(
 fn signal_legend(ui: &mut egui::Ui, kind: ModuleKind) {
     let probe = egui::Rect::from_min_size(egui::Pos2::ZERO, PWM_LEGEND_SIZE);
     if legend_of(kind, probe).is_none() {
+        return;
+    }
+    // The picture is right-aligned in the strip, so a column narrower than it
+    // does not shrink it - it slices the LEFT off, which is where the start
+    // bit, the START condition and the first pulses live. Nothing at all is
+    // better than a picture with its subject cut away; the panel can be
+    // dragged wider, and the box on the canvas still carries one.
+    if ui.available_width() < PWM_LEGEND_SIZE.x + LEGEND_STROKE {
         return;
     }
     // A stroke taller than the picture, so the lines drawn on its top and
@@ -8005,7 +8028,8 @@ mod the_signal_legends {
                     for scale in [1.0_f32, 1.15] {
                         // A short title, so placement is not refused for the
                         // wrong reason; the collision case has its own test.
-                        let Some(r) = box_legend_rect(rect, side, scale, 26.0) else {
+                        let _ = scale;
+                        let Some(r) = box_legend_rect(rect, side, 26.0) else {
                             continue;
                         };
                         let poly = silhouette(rect, shape, side);
@@ -8032,17 +8056,33 @@ mod the_signal_legends {
     fn a_long_title_keeps_the_corner() {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(BOX_W, 98.0));
         assert!(
-            box_legend_rect(rect, Side::Bottom, 1.15, 26.0).is_some(),
+            box_legend_rect(rect, Side::Bottom, 26.0).is_some(),
             "a short name leaves room"
         );
         assert!(
-            box_legend_rect(rect, Side::Bottom, 1.15, 90.0).is_none(),
+            box_legend_rect(rect, Side::Bottom, 90.0).is_none(),
             "a wide one does not"
         );
         // Below the title, the corner is free whatever the name.
         assert!(
-            box_legend_rect(rect, Side::Top, 1.15, 90.0).is_some(),
+            box_legend_rect(rect, Side::Top, 90.0).is_some(),
             "the bottom corner never clashes with a title at the top"
+        );
+        // A short name that fits keeps its picture at BOTH text sizes - the
+        // decision does not move when the box is selected, or the thumbnail
+        // would blink on every click.
+        for w in [26.0_f32, 38.2, 44.0] {
+            assert_eq!(
+                box_legend_rect(rect, Side::Bottom, w).is_some(),
+                box_legend_rect(rect, Side::Bottom, w).is_some(),
+                "the answer for a title of {w} does not depend on anything but the title"
+            );
+        }
+        // `PWM0` at the SELECTED size is 44 px wide; it must still fit, because
+        // that is the case that used to vanish the moment it was clicked.
+        assert!(
+            box_legend_rect(rect, Side::Bottom, 44.0).is_some(),
+            "a four-character name keeps its picture even at the selected size"
         );
     }
 
@@ -8089,7 +8129,13 @@ mod the_signal_legends {
             }
             y
         };
-        let shoulder = r.width() / 12.0;
+        // The WHOLE shoulder, up to and including where the burst begins.
+        // Half of it missed a full-height tick sitting exactly on that
+        // junction: `square_wave` opens on the baseline, so appending it to a
+        // run that was already high drew an edge where the picture claims
+        // there is none - and the shoulder is the one thing separating this
+        // from SPI.
+        let shoulder = r.width() / 6.0;
         let i2c = clock_of(ModuleKind::GenericInterfaceI2c);
         let spi = clock_of(ModuleKind::GenericInterfaceSpi);
         let rows = super::legend_rows(r, 2);
@@ -8105,18 +8151,28 @@ mod the_signal_legends {
         let edges_in_shoulder = i2c
             .windows(2)
             .filter(|p| (p[0].x - p[1].x).abs() < 0.01)
-            .filter(|p| p[0].x < r.left() + shoulder || p[0].x > r.right() - shoulder)
+            // The INTERIOR of each shoulder. The junctions themselves carry
+            // the burst's own first and last edge, which belong there - the
+            // artefact this pair of tests guards against is a spike, and
+            // `no_picture_doubles_back_on_itself` is what catches that.
+            .filter(|p| {
+                (p[0].x > r.left() + 0.01 && p[0].x < r.left() + shoulder - 0.01)
+                    || (p[0].x > r.right() - shoulder + 0.01 && p[0].x < r.right() - 0.01)
+            })
             .count();
         assert_eq!(
             edges_in_shoulder, 0,
-            "I2C SCL does not toggle in its shoulders"
+            "I2C SCL holds its level across both shoulders"
         );
 
         // SPI: the clock is already toggling inside the same margins.
         let spi_edges_in_shoulder = spi
             .windows(2)
             .filter(|p| (p[0].x - p[1].x).abs() < 0.01)
-            .filter(|p| p[0].x < r.left() + shoulder || p[0].x > r.right() - shoulder)
+            .filter(|p| {
+                (p[0].x > r.left() + 0.01 && p[0].x < r.left() + shoulder - 0.01)
+                    || (p[0].x > r.right() - shoulder + 0.01 && p[0].x < r.right() - 0.01)
+            })
             .count();
         assert!(
             spi_edges_in_shoulder > 0,
@@ -8306,6 +8362,42 @@ mod the_signal_legends {
             "the RMT tail does not"
         );
         assert!(!climbs(&rmt.accent[0]), "and it is flat");
+    }
+
+    /// No picture doubles back on itself.
+    ///
+    /// A run that goes to a level and returns at the SAME x is a zero-width
+    /// spike: rendered, a full-height hairline standing in the middle of a flat
+    /// stretch, which on a logic drawing reads as an edge. I2C had one exactly
+    /// where its shoulder meets its clock burst - the one feature that
+    /// separates that picture from SPI - because `square_wave` opens on the
+    /// baseline and it was appended to a run that was already high.
+    ///
+    /// Checked over every picture rather than that one, because the helper that
+    /// produced it is shared.
+    #[test]
+    fn no_picture_doubles_back_on_itself() {
+        for kind in WITH {
+            for r in sizes() {
+                let l = legend_of(kind, r).expect("has a legend");
+                for row in l.signal.iter().chain(l.accent.iter()) {
+                    for w in row.windows(3) {
+                        let same_x =
+                            (w[0].x - w[1].x).abs() < 0.01 && (w[1].x - w[2].x).abs() < 0.01;
+                        let returns =
+                            (w[0].y - w[2].y).abs() < 0.01 && (w[0].y - w[1].y).abs() > 0.01;
+                        assert!(
+                            !(same_x && returns),
+                            "{kind:?}: a spike at x={} - {:?} -> {:?} -> {:?}",
+                            w[0].x,
+                            w[0],
+                            w[1],
+                            w[2]
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Two colours, and the same two everywhere.
