@@ -1176,6 +1176,16 @@ fn legend_of(kind: ModuleKind, r: egui::Rect) -> Option<Legend> {
         K::GenericInterfaceTouch => touch_legend_shape(r),
         K::GenericInterfaceDac => dac_legend_shape(r),
         K::GenericInterfacePcnt => pcnt_legend_shape(r),
+        K::GenericInterfaceSpi => spi_legend_shape(r),
+        K::GenericInterfaceI2c => i2c_legend_shape(r),
+        // SAI draws the I2S picture, and that is the honest answer rather than
+        // a shortcut: the signals ARE the same bit-clock / frame-sync / data
+        // triple, and SAI's one real difference - a frame split into up to
+        // sixteen TDM slots instead of a stereo pair - is not exclusive to it,
+        // because I2S can be set to PCM short sync and wear the same shape.
+        // Inventing a difference here would be the misleading option.
+        K::GenericInterfaceI2s | K::GenericInterfaceSai => i2s_legend_shape(r),
+        K::GenericInterfaceMcpwm => mcpwm_legend_shape(r),
         _ => return None,
     })
 }
@@ -1327,6 +1337,146 @@ fn paint_legend(painter: &egui::Painter, l: &Legend, grey: egui::Color32, w: f32
     for row in &l.accent {
         painter.line(row.clone(), egui::Stroke::new(w * 1.2, LEGEND_ACCENT));
     }
+}
+
+/// A row's level per slot, turned into a square wave with its vertical edges.
+fn levels(row: egui::Rect, hi_lo: &[bool]) -> Vec<egui::Pos2> {
+    let slot = row.width() / hi_lo.len() as f32;
+    let mut pts = Vec::new();
+    for (i, high) in hi_lo.iter().enumerate() {
+        let y = if *high { row.top() } else { row.bottom() };
+        let x0 = row.left() + i as f32 * slot;
+        pts.push(egui::pos2(x0, y));
+        pts.push(egui::pos2(x0 + slot, y));
+    }
+    square_edges(pts)
+}
+
+/// SPI: a clock, and data that only ever moves on its edges.
+///
+/// The clock runs edge to edge - which is the ONE thing separating this picture
+/// from I2C's at 52 px, where SCL has flat high shoulders because START and
+/// STOP happen while it is high. CPOL/CPHA are deliberately not drawn: they are
+/// a per-module setting, and at this width a half-period shift is under three
+/// pixels anyway.
+fn spi_legend_shape(r: egui::Rect) -> Legend {
+    let rows = legend_rows(r, 2);
+    let n = 5;
+    // Data holds through each clock period and changes only between them.
+    let bits = [true, false, true, true, false];
+    let slot = rows[0].width() / n as f32;
+    // The edge that samples, marked on the clock row.
+    let x = rows[0].left() + slot * 2.0;
+    Legend::new()
+        .signal(clock(rows[0], n))
+        .signal(levels(rows[1], &bits))
+        .accent(vec![
+            egui::pos2(x, rows[0].bottom()),
+            egui::pos2(x, rows[0].top()),
+        ])
+}
+
+/// I2C: the two conditions that frame every transfer.
+///
+/// SDA falling while SCL is high is START, SDA rising while SCL is high is
+/// STOP, and they are the only two moments in the protocol where SDA may move
+/// at all with the clock high - which is exactly why they can serve as
+/// delimiters. The eight data bits and the ACK cannot be read at this size and
+/// are not attempted; the shoulders are.
+fn i2c_legend_shape(r: egui::Rect) -> Legend {
+    let rows = legend_rows(r, 2);
+    let (a, b) = (r.left() + r.width() / 6.0, r.right() - r.width() / 6.0);
+    let burst = egui::Rect::from_min_max(egui::pos2(a, rows[0].top()), rows[0].max);
+    let burst = egui::Rect::from_min_max(burst.min, egui::pos2(b, rows[0].bottom()));
+    // SCL: flat high, a burst, flat high again.
+    let mut scl = vec![egui::pos2(rows[0].left(), rows[0].top())];
+    scl.extend(clock(burst, 4));
+    scl.push(egui::pos2(rows[0].right(), rows[0].top()));
+    // SDA: high, down at START, bits, up at STOP, high.
+    let sda = &rows[1];
+    let bits = [false, true, false, true];
+    let bit_w = (b - a) / bits.len() as f32;
+    let mut d = vec![
+        egui::pos2(sda.left(), sda.top()),
+        egui::pos2(a, sda.top()),
+        egui::pos2(a, sda.bottom()),
+    ];
+    for (i, high) in bits.iter().enumerate() {
+        let y = if *high { sda.top() } else { sda.bottom() };
+        let x0 = a + i as f32 * bit_w;
+        d.push(egui::pos2(x0, y));
+        d.push(egui::pos2(x0 + bit_w, y));
+    }
+    d.push(egui::pos2(b, sda.top()));
+    d.push(egui::pos2(sda.right(), sda.top()));
+    Legend::new()
+        .signal(square_edges(scl))
+        .signal(square_edges(d))
+        .accent(vec![egui::pos2(a, sda.top()), egui::pos2(a, sda.bottom())])
+        .accent(vec![egui::pos2(b, sda.bottom()), egui::pos2(b, sda.top())])
+}
+
+/// I2S and SAI: a bit clock, and the word select that is far slower than it.
+///
+/// The RATE RATIO is the identity, and it is what separates this from SPI,
+/// where both lines move at comparable rates. Drawn at roughly 8:1 rather than
+/// the real 32:1 of a 16-bit stereo frame, because 32 transitions do not fit
+/// in 52 px.
+fn i2s_legend_shape(r: egui::Rect) -> Legend {
+    let rows = legend_rows(r, 2);
+    let ws = square_wave(rows[1], &[0.5]);
+    Legend::new()
+        .signal(clock(rows[0], 8))
+        .signal(ws)
+        // The frame boundary: where the word changes, which is what WS is for.
+        .accent(vec![
+            egui::pos2(rows[1].center().x, rows[1].bottom()),
+            egui::pos2(rows[1].center().x, rows[1].top()),
+        ])
+}
+
+/// MCPWM: a complementary pair, and the gap that keeps them from overlapping.
+///
+/// The dead time is drawn as a caricature - a real one is a fraction of a
+/// percent of the period, and at this width that is invisible. It is the red
+/// mark because it is the whole reason the peripheral is not just two PWMs: for
+/// that window BOTH outputs are off, and a bridge that skips it shoots through.
+fn mcpwm_legend_shape(r: egui::Rect) -> Legend {
+    let rows = legend_rows(r, 2);
+    let cycles = 3;
+    let slot = r.width() / cycles as f32;
+    let (duty, dead) = (0.45_f32, 0.12_f32);
+    let mut hi = Vec::new();
+    let mut lo = Vec::new();
+    let mut gaps = Vec::new();
+    for i in 0..cycles {
+        let x0 = r.left() + i as f32 * slot;
+        let fall = x0 + slot * duty;
+        let rise = x0 + slot;
+        // Upper output: high for its duty, then low.
+        hi.push(egui::pos2(x0, rows[0].top()));
+        hi.push(egui::pos2(fall, rows[0].top()));
+        hi.push(egui::pos2(fall, rows[0].bottom()));
+        hi.push(egui::pos2(rise, rows[0].bottom()));
+        // Lower output: the complement, minus a dead window at each edge.
+        let on = fall + slot * dead;
+        let off = rise - slot * dead;
+        lo.push(egui::pos2(x0, rows[1].bottom()));
+        lo.push(egui::pos2(on, rows[1].bottom()));
+        lo.push(egui::pos2(on, rows[1].top()));
+        lo.push(egui::pos2(off, rows[1].top()));
+        lo.push(egui::pos2(off, rows[1].bottom()));
+        lo.push(egui::pos2(rise, rows[1].bottom()));
+        gaps.push(vec![
+            egui::pos2(fall, r.center().y),
+            egui::pos2(on, r.center().y),
+        ]);
+    }
+    let mut l = Legend::new().signal(hi).signal(lo);
+    for g in gaps {
+        l = l.accent(g);
+    }
+    l
 }
 
 /// The three duty levels the little waveform legend draws, low to high.
@@ -7442,12 +7592,40 @@ mod the_signal_legends {
 
     /// The kinds that get a picture. Ten others deliberately do not - see
     /// `legend_of` for the three reasons.
-    const WITH: [ModuleKind; 5] = [
+    const WITH: [ModuleKind; 10] = [
         ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceUsb,
         ModuleKind::GenericInterfaceTouch,
         ModuleKind::GenericInterfaceDac,
         ModuleKind::GenericInterfacePcnt,
+        ModuleKind::GenericInterfaceSpi,
+        ModuleKind::GenericInterfaceI2c,
+        ModuleKind::GenericInterfaceI2s,
+        ModuleKind::GenericInterfaceSai,
+        ModuleKind::GenericInterfaceMcpwm,
+    ];
+
+    /// Everything except the two that are deliberately not logic levels.
+    const SQUARE: [ModuleKind; 8] = [
+        ModuleKind::GenericInterfaceTimer,
+        ModuleKind::GenericInterfaceUsb,
+        ModuleKind::GenericInterfacePcnt,
+        ModuleKind::GenericInterfaceSpi,
+        ModuleKind::GenericInterfaceI2c,
+        ModuleKind::GenericInterfaceI2s,
+        ModuleKind::GenericInterfaceSai,
+        ModuleKind::GenericInterfaceMcpwm,
+    ];
+
+    /// The pictures built from two rows.
+    const TWO_ROW: [ModuleKind; 7] = [
+        ModuleKind::GenericInterfaceUsb,
+        ModuleKind::GenericInterfacePcnt,
+        ModuleKind::GenericInterfaceSpi,
+        ModuleKind::GenericInterfaceI2c,
+        ModuleKind::GenericInterfaceI2s,
+        ModuleKind::GenericInterfaceSai,
+        ModuleKind::GenericInterfaceMcpwm,
     ];
 
     fn sizes() -> [egui::Rect; 2] {
@@ -7494,11 +7672,7 @@ mod the_signal_legends {
     /// which is exactly why they cannot be mistaken for a neighbour.
     #[test]
     fn the_square_waves_are_square() {
-        for kind in [
-            ModuleKind::GenericInterfaceTimer,
-            ModuleKind::GenericInterfaceUsb,
-            ModuleKind::GenericInterfacePcnt,
-        ] {
+        for kind in SQUARE {
             let r = sizes()[0];
             let l = legend_of(kind, r).expect("has a legend");
             for row in &l.signal {
@@ -7521,10 +7695,7 @@ mod the_signal_legends {
     /// them - the two-row form of the sawtooth bug.
     #[test]
     fn two_row_pictures_keep_their_rows_apart() {
-        for kind in [
-            ModuleKind::GenericInterfaceUsb,
-            ModuleKind::GenericInterfacePcnt,
-        ] {
+        for kind in TWO_ROW {
             let r = sizes()[0];
             let l = legend_of(kind, r).expect("has a legend");
             let rows: Vec<(f32, f32)> = l

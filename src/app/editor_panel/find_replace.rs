@@ -16,7 +16,7 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 
 /// Which of the four search/replace modes the bar is in.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum FindMode {
     #[default]
     FindFile,
@@ -83,6 +83,17 @@ pub struct FindReplace {
 }
 
 impl FindReplace {
+    /// Can F3 / Shift+F3 step a match right now?
+    ///
+    /// Exactly the condition under which the Previous / Next buttons are drawn:
+    /// an open bar in a single-file find. Replace and project-wide search have
+    /// no match cursor to step, and a closed bar has nothing at all — the
+    /// caller checks this BEFORE consuming the key, so F3 stays available to
+    /// whatever else might want it rather than being silently swallowed.
+    pub(super) fn can_step(&self) -> bool {
+        self.open && !self.mode.is_replace() && !self.mode.is_project()
+    }
+
     /// Show occurrences a rename left behind, as a normal project-search result
     /// list the user can click through.
     ///
@@ -179,11 +190,17 @@ impl AppIde {
     /// `display_code` in place for in-file replace; project replace updates the
     /// underlying file buffers (and re-syncs `display_code` so the editor's
     /// write-back doesn't revert the current file).
+    /// `key_next` / `key_prev` are F3 / Shift+F3, consumed by the caller — the
+    /// only place that knows whether THIS editor owns the keyboard. They do
+    /// exactly what the Previous / Next buttons do, and the caller has already
+    /// checked [`FindReplace::can_step`] before taking the key.
     pub(super) fn show_find_replace_bar(
         &mut self,
         ui: &mut egui::Ui,
         display_code: &mut String,
         displayed_file: ProjectFileId,
+        key_next: bool,
+        key_prev: bool,
     ) {
         if !self.ed.find.open {
             self.ed.find.had_focus = false;
@@ -199,8 +216,8 @@ impl AppIde {
         self.ed.find.had_focus = false;
 
         let mode = self.ed.find.mode;
-        let mut do_next = false;
-        let mut do_prev = false;
+        let mut do_next = key_next;
+        let mut do_prev = key_prev;
         let mut do_search = false;
         let mut do_replace_all = false;
         let mut do_leftover_rename = false;
@@ -238,10 +255,18 @@ impl AppIde {
                 let enter = q.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
                 if !mode.is_replace() && !mode.is_project() {
-                    if ui.button(ph::ARROW_UP).on_hover_text("Previous").clicked() {
+                    if ui
+                        .button(ph::ARROW_UP)
+                        .on_hover_text("Previous (Shift+F3)")
+                        .clicked()
+                    {
                         do_prev = true;
                     }
-                    if ui.button(ph::ARROW_DOWN).on_hover_text("Next").clicked() {
+                    if ui
+                        .button(ph::ARROW_DOWN)
+                        .on_hover_text("Next (F3)")
+                        .clicked()
+                    {
                         do_next = true;
                     }
                 }
@@ -708,7 +733,42 @@ impl AppIde {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_of, match_starts};
+    use super::{FindMode, FindReplace, line_of, match_starts};
+
+    fn bar(open: bool, mode: FindMode) -> FindReplace {
+        FindReplace {
+            open,
+            mode,
+            ..FindReplace::default()
+        }
+    }
+
+    /// F3 steps a match, so it is only live where there IS a match cursor —
+    /// exactly where the Previous / Next buttons are drawn.
+    #[test]
+    fn f3_steps_only_in_an_open_single_file_find() {
+        assert!(bar(true, FindMode::FindFile).can_step());
+    }
+
+    /// A closed bar has nothing to step. The caller checks this BEFORE
+    /// consuming the key, so F3 is not silently swallowed when it can do
+    /// nothing.
+    #[test]
+    fn a_closed_bar_does_not_take_the_key() {
+        assert!(!bar(false, FindMode::FindFile).can_step());
+    }
+
+    /// Replace and project-wide search have no match cursor — and no buttons.
+    #[test]
+    fn the_modes_without_nav_buttons_do_not_take_the_key() {
+        for mode in [
+            FindMode::ReplaceFile,
+            FindMode::FindProject,
+            FindMode::ReplaceProject,
+        ] {
+            assert!(!bar(true, mode).can_step(), "{mode:?}");
+        }
+    }
 
     #[test]
     fn finds_non_overlapping_matches() {

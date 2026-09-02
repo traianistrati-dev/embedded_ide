@@ -867,7 +867,24 @@ impl AppIde {
 
         // Find / Replace bar, drawn above the editor when open. Renders
         // before the editor-height calc so the editor sizes below it.
-        self.show_find_replace_bar(ui, &mut display_code, displayed_file);
+        // F3 / Shift+F3 step the find bar's matches — the keyboard twins of its
+        // Previous / Next buttons.
+        //
+        // Consumed HERE, not inside the bar: this is where `editor_kbd_active`
+        // lives, and the `&&` short-circuit is what leaves the key intact for
+        // the OTHER editor when this one does not own the keyboard.
+        //
+        // Shift FIRST. `consume_key` is lenient about Shift (the same trap as
+        // Ctrl+Shift+/ vs Ctrl+/), so checking the plain key first would let it
+        // swallow the shifted press and Shift+F3 would step forwards.
+        let (mut find_prev, mut find_next) = (false, false);
+        if editor_kbd_active && self.ed.find.can_step() {
+            ui.input_mut(|i| {
+                find_prev = i.consume_key(egui::Modifiers::SHIFT, egui::Key::F3);
+                find_next = !find_prev && i.consume_key(egui::Modifiers::NONE, egui::Key::F3);
+            });
+        }
+        self.show_find_replace_bar(ui, &mut display_code, displayed_file, find_next, find_prev);
 
         // Size the editor to fill the height left over after the
         // (resizable) diagnostics panel, so dragging that panel's handle

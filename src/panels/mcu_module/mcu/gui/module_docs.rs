@@ -354,6 +354,10 @@ pub const ALL_DOCS: &[(&str, &str)] = &[
     ("LEGEND_TOUCH", LEGEND_TOUCH),
     ("LEGEND_DAC", LEGEND_DAC),
     ("LEGEND_PCNT", LEGEND_PCNT),
+    ("LEGEND_SPI", LEGEND_SPI),
+    ("LEGEND_I2C", LEGEND_I2C),
+    ("LEGEND_I2S", LEGEND_I2S),
+    ("LEGEND_MCPWM", LEGEND_MCPWM),
 ];
 
 /// Every row the panel can draw, per module kind.
@@ -1678,6 +1682,10 @@ pub fn legend_hover(kind: crate::panels::mcu_module::modules::ModuleKind) -> &'s
         K::GenericInterfaceTouch => LEGEND_TOUCH,
         K::GenericInterfaceDac => LEGEND_DAC,
         K::GenericInterfacePcnt => LEGEND_PCNT,
+        K::GenericInterfaceSpi => LEGEND_SPI,
+        K::GenericInterfaceI2c => LEGEND_I2C,
+        K::GenericInterfaceI2s | K::GenericInterfaceSai => LEGEND_I2S,
+        K::GenericInterfaceMcpwm => LEGEND_MCPWM,
         _ => "",
     }
 }
@@ -1691,3 +1699,11 @@ pub const LEGEND_TOUCH: &str = "A capacitance reading. A finger adds capacitance
 pub const LEGEND_DAC: &str = "The code you write, and the level the pad holds. Drawn as a staircase because a DAC has a finite number of steps to reach for. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
 
 pub const LEGEND_PCNT: &str = "Edges in, a count out: the counter steps once per edge and holds between them. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_SPI: &str = "A clock and data that moves only on its edges. The clock runs from end to end, which is what tells this picture apart from I2C. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_I2C: &str = "The two conditions that frame every transfer: SDA falling while SCL is high starts one, SDA rising while SCL is high ends it. They are the only moments SDA may move with the clock high, which is why they can be the delimiters. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_I2S: &str = "A bit clock, and the word select that runs far slower than it - one edge per sample. The rate difference is the point; SAI puts the same three signals on the wire. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
+
+pub const LEGEND_MCPWM: &str = "A complementary pair, and the dead time between them: for that window BOTH outputs are off, which is what stops a bridge shooting through. Drawn far wider than a real one, which would be invisible here. An illustration of the peripheral - not this module's own setting, which is in the rows below.";
