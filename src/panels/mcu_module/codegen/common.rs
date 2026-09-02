@@ -97,6 +97,19 @@ pub const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n 
 /// a program that looks like it hung for no reason, and nothing in the compiler
 /// output points at it.
 ///
+/// It also ENDS with an await, so the loop the IDE generates is already a legal
+/// cooperative loop rather than the exact mistake the comment above it warns
+/// about. Sixty seconds is a placeholder long enough to read as one — nothing
+/// paces itself at one minute — so it invites being changed instead of being
+/// mistaken for a considered value.
+///
+/// Written FULLY QUALIFIED (`embassy_time::Timer`, `embassy_time::Duration`)
+/// with no `use` line: the tail lives in the user's editable region, and an
+/// import in the invariant header is a second edit somewhere else that a later
+/// regeneration or a delete-this-line would leave dangling. `embassy-time` is on
+/// every async project — `ensure_async_deps` adds it for all three flavours —
+/// so the path always resolves.
+///
 /// `concat!` rather than a `\`-continued literal on purpose: rustfmt joins those
 /// and leaves a run of spaces inside the string (see the notes on
 /// `rustfmt-joins-continued-strings`), which would land in the user's file.
@@ -108,6 +121,8 @@ pub const ASYNC_USER_TAIL: &str = concat!(
     "        */\n",
     "\n",
     "        // Your main loop code here.\n",
+    "\n",
+    "        embassy_time::Timer::after(embassy_time::Duration::from_millis(60000)).await;\n",
     "    }\n",
     "}\n",
 );
@@ -1103,6 +1118,31 @@ mod async_tail_tests {
     }
 
     /// Both tails must still close `fn main` — they are the only thing that does.
+    /// The comment warns that a loop with no await starves every other task —
+    /// so the loop it opens must not BE that loop. It ends with one.
+    #[test]
+    fn the_async_tail_actually_awaits() {
+        assert!(ASYNC_USER_TAIL.contains(".await;"), "{ASYNC_USER_TAIL}");
+        // Fully qualified, so the tail needs no `use` line to compile. An import
+        // in the invariant header would be a second edit somewhere else that a
+        // regeneration — or deleting this line — would leave dangling.
+        assert!(ASYNC_USER_TAIL.contains("embassy_time::Timer::after"));
+        assert!(ASYNC_USER_TAIL.contains("embassy_time::Duration::from_millis"));
+        // Last statement in the loop, after the line the user writes on.
+        let seed = ASYNC_USER_TAIL.find("Your main loop").expect("the seed");
+        let wait = ASYNC_USER_TAIL.find(".await;").expect("the await");
+        let close = ASYNC_USER_TAIL.rfind("    }").expect("the closing brace");
+        assert!(seed < wait && wait < close, "{ASYNC_USER_TAIL}");
+    }
+
+    /// The blocking tail has no executor to yield to — an `.await` there would
+    /// not even compile.
+    #[test]
+    fn the_blocking_tail_does_not_await() {
+        assert!(!USER_TAIL.contains(".await"), "{USER_TAIL}");
+        assert!(!USER_TAIL.contains("embassy_time"), "{USER_TAIL}");
+    }
+
     #[test]
     fn both_tails_close_the_entry_fn() {
         for tail in [USER_TAIL, ASYNC_USER_TAIL] {

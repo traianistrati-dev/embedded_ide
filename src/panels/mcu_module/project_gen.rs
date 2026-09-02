@@ -2775,6 +2775,36 @@ fn f() {}
         assert!(!off.contains("portable-atomic"), "{off}");
     }
 
+    /// The generated async `loop` ENDS with `embassy_time::Timer::after(…)`, so
+    /// every async flavour must carry `embassy-time` — otherwise the IDE writes
+    /// a main.rs that does not compile the moment it is generated.
+    ///
+    /// Ties the two halves together on purpose: the tail lives in
+    /// `codegen::common` and the dependency in this file, and nothing else would
+    /// notice if one of them moved.
+    #[test]
+    fn every_async_flavour_carries_what_the_generated_loop_calls() {
+        use crate::panels::mcu_module::codegen::common::ASYNC_USER_TAIL;
+        assert!(
+            ASYNC_USER_TAIL.contains("embassy_time::"),
+            "the tail stopped calling embassy-time — drop this test with it"
+        );
+        let base = "[dependencies]\n";
+        for flavor in [
+            AsyncFlavor::Stm32,
+            AsyncFlavor::Rp,
+            AsyncFlavor::Esp("esp32c3"),
+        ] {
+            let out = ensure_async_deps(base, true, flavor, false, false, false, &[]);
+            assert!(
+                out.lines()
+                    .any(|l| l.trim_start().starts_with("embassy-time")),
+                "{flavor:?} generates a loop that calls embassy-time but does \
+                 not depend on it:\n{out}"
+            );
+        }
+    }
+
     #[test]
     fn ensure_async_deps_adds_removes_executor_time_and_driver() {
         // An embassy Cargo.toml (as generated for a non-F1 STM32 chip).
