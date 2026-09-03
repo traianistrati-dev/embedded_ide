@@ -542,6 +542,61 @@ pub(crate) const DEF_FONT_SIZE: f32 = 12.0;
 /// not worth holding for a snippet you are glancing at.
 const DEF_HIGHLIGHT_MAX_LINES: usize = 600;
 
+/// How far past the declaration line the opening brace is allowed to be. A
+/// signature does not run to thirty lines; anything further is not a signature.
+const MAX_SIGNATURE_LINES: usize = 30;
+
+/// The item's extent: from the line rust-analyzer pointed at, to the closing
+/// brace of the block that item opens.
+///
+/// The subtle part — and the bug this replaces — is that `fold::regions` reports
+/// a region's `head` as the line holding the opening `{`, and for a multi-line
+/// signature that is NOT the line the name is on:
+///
+/// ```text
+/// fn start_duty_fade(        <- rust-analyzer points HERE (`target`)
+///     &self,
+///     duration_ms: u16,
+/// ) -> Result<(), Error> {   <- the region's `head`
+/// ```
+///
+/// Requiring `head == target` therefore banded only the name's own line on every
+/// function whose parameters do not fit on one — which is most of the ones worth
+/// jumping to. So walk FORWARD from the declaration to the brace that opens it.
+///
+/// The walk has to stop at anything that ends the item WITHOUT a body, or a
+/// `const X: u8 = 1;` would happily adopt the body of the next function down.
+/// Three things end it: a `;` (`const X = 1;`, `struct Marker;`, `type A = B;`),
+/// a blank line, or a closing brace. A `where` clause survives all three, which
+/// is why the walk is written this way rather than as "the next line with a
+/// brace".
+fn item_extent(content: &str, target: usize) -> (usize, usize) {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return (target, target);
+    }
+    let regions = editor_panel::fold::regions(content);
+    let last = lines.len() - 1;
+    let stop = (target + MAX_SIGNATURE_LINES).min(last);
+    for probe in target..=stop {
+        // Several regions can share a head (`impl F { fn g() {} }`); the widest
+        // one is the item, the narrower ones are nested in it.
+        if let Some(end) = regions
+            .iter()
+            .filter(|r| r.head == probe)
+            .map(|r| r.end)
+            .max()
+        {
+            return (target, end.max(target));
+        }
+        let t = lines[probe].trim();
+        if t.ends_with(';') || (probe > target && (t.is_empty() || t.starts_with('}'))) {
+            break;
+        }
+    }
+    (target, target)
+}
+
 /// Is `c` part of a Rust identifier?
 fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -904,10 +959,7 @@ fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
     // whose HEAD is the definition line is exactly that item — a `fn`, a
     // `struct`, an `impl`, a `trait`. A one-line item opens nothing and stays
     // its own single line.
-    let extent = editor_panel::fold::regions(&content)
-        .into_iter()
-        .find(|r| r.head == target)
-        .map_or((target, target), |r| (r.head, r.end.max(target)));
+    let extent = item_extent(&content, target);
 
     let lines: Vec<&str> = content.lines().collect();
     let signature = lines
@@ -5109,6 +5161,55 @@ mod definition_view_tests {
     #[test]
     fn a_one_line_item_stays_one_line() {
         let src = "const X: u8 = 1;\nfn f() {}\n";
+        assert_eq!(view(src, 0).extent, (0, 0));
+    }
+
+    /// The reported case: a signature too wide for one line. rust-analyzer
+    /// points at `fn start_duty_fade(`, but the region's head is the
+    /// `) -> Result<…> {` further down — so requiring `head == target` banded
+    /// the name's line and nothing else.
+    #[test]
+    fn a_multi_line_signature_still_reaches_the_closing_brace() {
+        let src = "impl S {\n    fn start_duty_fade(\n        &self,\n                           start_duty_pct: u8,\n        duration_ms: u16,\n    ) -> Result<(),                    Error> {\n        let x = 1;\n        Ok(())\n    }\n}\n";
+        // Line 1 is `fn start_duty_fade(`; its body closes on line 8.
+        assert_eq!(view(src, 1).extent, (1, 8));
+    }
+
+    /// A `where` clause sits between the signature and the brace and must not
+    /// stop the walk — it ends with neither `;` nor a blank line.
+    #[test]
+    fn a_where_clause_does_not_break_the_walk() {
+        let src = "fn f<T>(x: T) -> u8\nwhere\n    T: Copy,\n{\n    1\n}\n";
+        assert_eq!(view(src, 0).extent, (0, 5));
+    }
+
+    /// The guard that keeps a bodyless item from adopting the next function's
+    /// body: the `;` ends the walk before it ever reaches `fn g`.
+    #[test]
+    fn a_bodyless_item_does_not_adopt_the_next_body() {
+        assert_eq!(
+            view("const X: u8 = 1;\nfn g() {\n    1\n}\n", 0).extent,
+            (0, 0)
+        );
+        assert_eq!(
+            view("struct Marker;\nfn g() {\n    1\n}\n", 0).extent,
+            (0, 0)
+        );
+    }
+
+    /// A multi-line item that STILL has no body — the `;` arrives late, and the
+    /// walk has to survive the lines before it without finding a brace.
+    #[test]
+    fn a_multi_line_type_alias_stays_its_own_lines() {
+        let src = "type Wide = Foo<\n    Bar,\n    Baz,\n>;\nfn g() {\n    1\n}\n";
+        assert_eq!(view(src, 0).extent, (0, 0));
+    }
+
+    /// A blank line between the declaration and the next brace means the item
+    /// ended — nothing legitimate puts one inside a signature.
+    #[test]
+    fn a_blank_line_ends_the_walk() {
+        let src = "static A: u8 = 0\n\nfn g() {\n    1\n}\n";
         assert_eq!(view(src, 0).extent, (0, 0));
     }
 
