@@ -716,7 +716,7 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
 
         // ── ESP32 GPIO / ADC per-pin bindings ────────────────────────────────
         //   let mut gpio2 = Output::new(peripherals.GPIO2, Level::Low); // GPIO Output
-        //   let gpio9 = Input::new(peripherals.GPIO9, Pull::None);       // GPIO Input
+        //   let gpio9 = Input::new(peripherals.GPIO9, InputConfig::default().with_pull(Pull::None)); // GPIO Input
         //   let mut gpio0_adc = adc1_config                              // ADC1  IN0
         //       .enable_pin(peripherals.GPIO0, Attenuation::_11dB);
         //

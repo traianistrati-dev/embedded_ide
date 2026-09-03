@@ -177,7 +177,7 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
             ui,
             ph::SCISSORS,
             "Extract selection into a function",
-            "Ctrl+Alt+Insert",
+            "Ctrl+Alt+M",
             EditorAction::ExtractFn,
         );
         item(

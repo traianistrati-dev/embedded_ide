@@ -22,6 +22,7 @@
 //!
 //!     // ── GPIO ──
 //!     let mut gpio2_out = Output::new(peripherals.GPIO2, Level::High, OutputConfig::default()); // GPIO Output
+//!     let gpio9_in = Input::new(peripherals.GPIO9, InputConfig::default().with_pull(Pull::Up)); // GPIO Input
 //!
 //! // <<< GENERATED END >>>
 //!     loop {
@@ -47,7 +48,7 @@ use super::modules::{
     SpiModuleConfig, TimerModuleConfig, TouchModuleConfig, UsartDirection, UsartModuleConfig,
     UsbModuleConfig,
 };
-use super::pins::logic::pin::{Edge, Pin};
+use super::pins::logic::pin::{Edge, GpioMode, Pin};
 use super::pins::logic::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -672,8 +673,22 @@ fn make_gen_section(
             } else {
                 ""
             };
+            // The pull is the ONE input setting esp-hal takes here, and it is
+            // written even when it is `None`. Implicit would be shorter, but
+            // `InputConfig::default()` alone reads as "nothing was asked for"
+            // when in fact the user did ask for a floating pin - and a floating
+            // ESP input is the setting most worth seeing spelled out, because
+            // it is the one that leaves the pad picking up noise.
+            //
+            // `GpioMode::for_input` and not `unwrap_or`: a mode stored while
+            // the pad was an OUTPUT is still on it - see that function.
+            let pull = match GpioMode::for_input(p.io_mode) {
+                GpioMode::PullUp => "Pull::Up",
+                GpioMode::PullDown => "Pull::Down",
+                _ => "Pull::None",
+            };
             body.push_str(&format!(
-                "    let {m}{var} = Input::new(peripherals.{gpio}, InputConfig::default()); // GPIO Input\n",
+                "    let {m}{var} = Input::new(peripherals.{gpio}, InputConfig::default().with_pull({pull})); // GPIO Input\n",
                 var = esp_binding(p),
                 gpio = p.name,
             ));
@@ -1077,11 +1092,11 @@ fn build_use_block(
     if has_input {
         gpio_types.insert("Input");
         gpio_types.insert("InputConfig");
-        // NOT `Pull`: the generated `Input::new` takes `InputConfig::default()`
-        // and never names a pull, so importing it earned every ESP project with
-        // an input an unused-import warning. It belongs here the day the
-        // generator emits `InputConfig::default().with_pull(..)`, and not before
-        // — an import is a claim that the code below uses it.
+        // `Pull` is imported because it is USED: every generated input now ends
+        // in `.with_pull(Pull::…)`, `Pull::None` included. It was deliberately
+        // absent while the generator wrote a bare `InputConfig::default()`, on
+        // the rule that an import is a claim about the code below it.
+        gpio_types.insert("Pull");
     }
     // An armed input listens for an `Event`, and the one handler every GPIO
     // shares is registered on `Io`.
@@ -2406,6 +2421,69 @@ mod tests {
             assert!(
                 code.contains(&format!("pin.{want}().await;")),
                 "{edge:?}: {code}"
+            );
+        }
+    }
+
+    /// Every input names its pull, `Pull::None` included, and the import
+    /// follows the code.
+    ///
+    /// Written out rather than left to `InputConfig::default()` because a bare
+    /// default reads as "nothing was asked for", when a floating ESP input is
+    /// exactly the choice worth seeing - it is the one that leaves the pad
+    /// picking up noise.
+    #[test]
+    fn an_input_carries_its_pull() {
+        for (mode, want) in [
+            (None, "Pull::None"),
+            (Some(GpioMode::Floating), "Pull::None"),
+            (Some(GpioMode::PullUp), "Pull::Up"),
+            (Some(GpioMode::PullDown), "Pull::Down"),
+        ] {
+            for rt in [EspRuntime::Blocking, EspRuntime::Async] {
+                let mut p = pwm_pin("GPIO0", PinFunction::GpioInput);
+                p.io_mode = mode;
+                let pins = [p];
+                let refs: Vec<&Pin> = pins.iter().collect();
+                let code = esp_main(&refs, rt);
+                assert!(
+                    code.contains(&format!("InputConfig::default().with_pull({want})")),
+                    "{mode:?} on {rt:?} did not emit {want}:
+{code}"
+                );
+                // The import is a claim about the code below it.
+                assert!(
+                    code.contains("Pull"),
+                    "no `Pull` imported:
+{code}"
+                );
+            }
+        }
+    }
+
+    /// A pull stored while the pad was an OUTPUT never reaches `with_pull`.
+    ///
+    /// `io_mode` outlives the direction it was picked for, so this IS
+    /// reachable: input, pick a pull, switch to output, switch back.
+    ///
+    /// Here the emitter's `_ =>` arm already covers it, and this test passes
+    /// against `unwrap_or(Floating)` too; it is not what proves `for_input`
+    /// earns its place. It pins the BEHAVIOUR, so that a future arm mapping
+    /// `PushPull` to something is caught. The F1, which defaulted instead of
+    /// matching, is where the same slip was a live bug - see
+    /// `stale_io_mode_tests` in `codegen/stm32.rs`.
+    #[test]
+    fn an_output_mode_left_on_an_input_is_dropped() {
+        for stale in [GpioMode::PushPull, GpioMode::OpenDrain] {
+            let mut p = pwm_pin("GPIO0", PinFunction::GpioInput);
+            p.io_mode = Some(stale);
+            let pins = [p];
+            let refs: Vec<&Pin> = pins.iter().collect();
+            let code = esp_main(&refs, EspRuntime::Blocking);
+            assert!(
+                code.contains("with_pull(Pull::None)"),
+                "{stale:?} leaked into an input:
+{code}"
             );
         }
     }

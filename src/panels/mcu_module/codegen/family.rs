@@ -226,11 +226,24 @@ impl FamilyBackend for Esp32Backend {
         is_esp(family)
     }
 
-    /// esp-hal configures pulls through `InputConfig`/`OutputConfig` builders,
-    /// which this backend does not emit yet — so it offers no choice rather than
-    /// listing modes it would silently ignore.
-    fn gpio_modes(&self, _func: &PinFunction) -> &'static [GpioMode] {
-        &[]
+    /// The three input pulls esp-hal's `InputConfig` carries, and push-pull
+    /// only for outputs.
+    ///
+    /// `OutputConfig` has THREE independent fields - `drive_mode`,
+    /// `drive_strength` and `pull` - which a flat [`GpioMode`] cannot express,
+    /// so open-drain is left out rather than half-answered. Same shape as
+    /// [`WbaBackend`], for a different reason.
+    ///
+    /// Offered on every pad: nothing in the chip data says which pads have pull
+    /// resistors, and esp-hal writes `fun_wpu`/`fun_wpd` unconditionally, so
+    /// blocking any pad here would be asserting a datasheet fact this code does
+    /// not have.
+    fn gpio_modes(&self, func: &PinFunction) -> &'static [GpioMode] {
+        match func {
+            PinFunction::GpioInput => &[GpioMode::Floating, GpioMode::PullUp, GpioMode::PullDown],
+            PinFunction::GpioOutput => &[GpioMode::PushPull],
+            _ => &[],
+        }
     }
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
@@ -543,10 +556,14 @@ impl FamilyBackend for AsyncEspBackend {
         "esp32c3-async" // label only — dispatch is via `backend_for_runtime`
     }
 
-    /// Same reason as [`Esp32Backend`]: the `InputConfig`/`OutputConfig`
-    /// builders that carry the pulls are not emitted yet.
-    fn gpio_modes(&self, _func: &PinFunction) -> &'static [GpioMode] {
-        &[]
+    /// The same three pulls as [`Esp32Backend`] - both runtimes emit the same
+    /// `Input::new(.., InputConfig::default().with_pull(..))` from one builder.
+    fn gpio_modes(&self, func: &PinFunction) -> &'static [GpioMode] {
+        match func {
+            PinFunction::GpioInput => &[GpioMode::Floating, GpioMode::PullUp, GpioMode::PullDown],
+            PinFunction::GpioOutput => &[GpioMode::PushPull],
+            _ => &[],
+        }
     }
 
     fn handles(&self, family: &str) -> bool {
@@ -4379,5 +4396,45 @@ mod tests {
             ApiStyle::Portable,
             "the F1 still chooses"
         );
+    }
+}
+
+#[cfg(test)]
+mod esp_gpio_mode_tests {
+    use super::{AsyncEspBackend, Esp32Backend, FamilyBackend, GpioMode, PinFunction};
+
+    /// Both ESP runtimes offer the three input pulls, and push-pull only.
+    ///
+    /// They offered NOTHING until the emitter learned to write
+    /// `InputConfig::default().with_pull(..)` - the house rule being that a
+    /// backend lists a mode only if it can generate it. This test is the other
+    /// half of that rule: now that it CAN, an empty list would be the UI
+    /// silently withdrawing a working choice.
+    ///
+    /// Outputs stay at push-pull because `OutputConfig` carries `drive_mode`,
+    /// `drive_strength` and `pull` as three independent fields, which a flat
+    /// `GpioMode` cannot express - the same shape `WbaBackend` has, for its own
+    /// reason.
+    #[test]
+    fn both_esp_runtimes_offer_the_three_pulls() {
+        let backends: [&dyn FamilyBackend; 2] = [&Esp32Backend, &AsyncEspBackend];
+        for b in backends {
+            let id = b.family_id();
+            assert_eq!(
+                b.gpio_modes(&PinFunction::GpioInput),
+                &[GpioMode::Floating, GpioMode::PullUp, GpioMode::PullDown],
+                "{id} does not offer the pulls it can now generate"
+            );
+            assert_eq!(
+                b.gpio_modes(&PinFunction::GpioOutput),
+                &[GpioMode::PushPull],
+                "{id} offers an output mode it cannot generate"
+            );
+            // A peripheral pad's mode belongs to the peripheral.
+            assert!(
+                b.gpio_modes(&PinFunction::UsartTx(1)).is_empty(),
+                "{id} offers a GPIO mode on a USART pad"
+            );
+        }
     }
 }

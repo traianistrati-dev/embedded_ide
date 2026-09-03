@@ -3011,12 +3011,17 @@ fn parse_pin(name: &str) -> Option<PinMeta> {
 /// peripheral, not by the user.
 fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) -> String {
     match func {
+        // `for_input` / `for_output` and not `unwrap_or`: a mode stored while
+        // the pad was the OTHER direction is still there, and `into_method`
+        // would turn it into a call for that other direction under a comment
+        // naming this one. The embassy backend has always matched variants for
+        // the same reason (see its `GpioInput` arm); this one defaulted.
         PinFunction::GpioInput => {
-            let m = mode.unwrap_or(GpioMode::Floating).into_method();
+            let m = GpioMode::for_input(mode).into_method();
             format!("{m}(&mut {pv}.{crx})")
         }
         PinFunction::GpioOutput => {
-            let m = mode.unwrap_or(GpioMode::PushPull).into_method();
+            let m = GpioMode::for_output(mode).into_method();
             format!("{m}(&mut {pv}.{crx})")
         }
         // Same call as an ADC channel: analog mode IS `into_analog`, it just
@@ -4413,5 +4418,69 @@ mod duty_handle_tests {
             "{file}"
         );
         assert!(file.contains("Channel::C1"), "{file}");
+    }
+}
+
+#[cfg(test)]
+mod stale_io_mode_tests {
+    use super::{GpioMode, PinFunction, into_expr};
+
+    /// The generated call always matches the comment beside it.
+    ///
+    /// `io_mode` OUTLIVES the function it was chosen for - `apply_pin_function`
+    /// sets `selected_function` and clears `custom_label`, and never touches the
+    /// mode - so this sequence, which is three clicks in the Pins tab,
+    ///
+    ///     GPIO input  ->  Pull-up  ->  GPIO output
+    ///
+    /// left `Some(PullUp)` on an output. `unwrap_or(PushPull)` kept it, and this
+    /// function emitted `into_pull_up_input(&mut gpioa.crl)` on the line the
+    /// generator comments `// GPIO Output`. It compiles; the pin is an input.
+    ///
+    /// Asserted on the DIRECTION rather than on one exact string, so a HAL
+    /// rename does not turn a real regression into a green run.
+    #[test]
+    fn a_mode_from_the_other_direction_never_crosses_over() {
+        let cases = [
+            // (function, the mode left behind by the OTHER direction)
+            (PinFunction::GpioOutput, GpioMode::PullUp, "_output"),
+            (PinFunction::GpioOutput, GpioMode::PullDown, "_output"),
+            (PinFunction::GpioOutput, GpioMode::Floating, "_output"),
+            (PinFunction::GpioInput, GpioMode::PushPull, "_input"),
+            (PinFunction::GpioInput, GpioMode::OpenDrain, "_input"),
+        ];
+        for (func, stale, want) in cases {
+            let e = into_expr(&func, Some(stale), "gpioa", "crl");
+            let call = e.split('(').next().unwrap_or_default();
+            assert!(
+                call.ends_with(want),
+                "{func:?} with a leftover {stale:?} generated `{e}`,                  which is not a {want} call"
+            );
+        }
+    }
+
+    /// A mode of the RIGHT direction still reaches the generated call, and no
+    /// mode at all still falls to the family default. The filter must not cost
+    /// the user the choice they did make.
+    #[test]
+    fn the_users_own_choice_still_reaches_the_code() {
+        let up = into_expr(
+            &PinFunction::GpioInput,
+            Some(GpioMode::PullUp),
+            "gpioa",
+            "crl",
+        );
+        assert!(up.starts_with("into_pull_up_input"), "{up}");
+        let od = into_expr(
+            &PinFunction::GpioOutput,
+            Some(GpioMode::OpenDrain),
+            "gpioa",
+            "crl",
+        );
+        assert!(od.starts_with("into_open_drain_output"), "{od}");
+        let none_in = into_expr(&PinFunction::GpioInput, None, "gpioa", "crl");
+        assert!(none_in.starts_with("into_floating_input"), "{none_in}");
+        let none_out = into_expr(&PinFunction::GpioOutput, None, "gpioa", "crl");
+        assert!(none_out.starts_with("into_push_pull_output"), "{none_out}");
     }
 }

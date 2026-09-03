@@ -1918,6 +1918,26 @@ mod emit_for_manual_compile {
                 None => println!("[{chip}] no free pad for {func:?} - skipped"),
             }
         }
+        // `EIDE_ESP_PULL=up|down|none` puts a pull on the GPIO input, which is
+        // the only way this matrix compiles `InputConfig::default().with_pull`
+        // against a real esp-hal - the enum variants are checked by the crate,
+        // not by us.
+        if let Ok(m) = std::env::var("EIDE_ESP_PULL") {
+            use crate::panels::mcu_module::pins::logic::pin::GpioMode;
+            let mode = match m.as_str() {
+                "down" => GpioMode::PullDown,
+                "none" => GpioMode::Floating,
+                _ => GpioMode::PullUp,
+            };
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.selected_function == PinFunction::GpioInput)
+                .map(|p| p.number);
+            match num.and_then(|n| mcu.find_pin_mut(n)) {
+                Some(p) => p.io_mode = Some(mode),
+                None => println!("[{chip}] no input pin to pull"),
+            }
+        }
         // `EIDE_ESP_IRQ=rising|falling|both` arms the GPIO input with an edge.
         // Only the Async runtime builds it — into a task that awaits the edge —
         // so this is where that compiles or does not.

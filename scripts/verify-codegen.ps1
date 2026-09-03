@@ -248,8 +248,23 @@ $ALL_CASES = @(
 
     # A different HAL and a different entry point, so a different set of ways to
     # be wrong: esp-hal bindings, and the esp-rtos scheduler on the async one.
-    @{ n = "ESP32-C3 blocking";            t = "emit_esp32c3_project";       e = @{ ESP_ASYNC_RUNTIME = "blocking" }; q = $true; fam = "esp" }
-    @{ n = "ESP32-C3 async (esp-rtos)";    t = "emit_esp32c3_project";       e = @{};                       q = $true; fam = "esp"; hk = $true }
+    # BOTH arms name EIDE_ESP_RUNTIME, which is what `emit_esp32c3_project`
+    # reads (codegen/embassy_common.rs). They used to set ESP_ASYNC_RUNTIME - a
+    # real knob, but one belonging to two OTHER tests in codegen/family.rs - so
+    # the harness saw neither, defaulted to blocking, and BOTH arms built the
+    # blocking project. The async row was green and had never compiled the
+    # esp-rtos path once; the hook subset below is that same row.
+    #
+    # The async arm now says so out loud instead of relying on a default, which
+    # is what let the mistake hide.
+    @{ n = "ESP32-C3 blocking";            t = "emit_esp32c3_project";       e = @{ EIDE_ESP_RUNTIME = "blocking" }; q = $true; fam = "esp" }
+    @{ n = "ESP32-C3 async (esp-rtos)";    t = "emit_esp32c3_project";       e = @{ EIDE_ESP_RUNTIME = "async" }; q = $true; fam = "esp"; hk = $true }
+    # The pull rides on the two runtimes that emit it. Two arms and not six:
+    # `Pull::Up` and `Pull::Down` differ from `Pull::None` only in the variant
+    # named, and the variants are checked by esp-hal - one of each per runtime
+    # proves the CALL compiles, which is all this matrix can say.
+    @{ n = "ESP32-C3 input Pull::Up";      t = "emit_esp32c3_project";       e = @{ EIDE_ESP_RUNTIME = "blocking"; EIDE_ESP_PULL = "up" }; q = $true; fam = "esp" }
+    @{ n = "ESP32-C3 async Pull::Down";    t = "emit_esp32c3_project";       e = @{ EIDE_ESP_RUNTIME = "async"; EIDE_ESP_PULL = "down" }; q = $true; fam = "esp" }
     # The harness wires ONE LEDC channel by default, so the two cases above only
     # ever reach the single-channel shape. Two channels is a different file: the
     # return type becomes a tuple, and the duty trait addresses it by POSITION,
@@ -342,9 +357,14 @@ $ALL_CASES = @(
 )
 
 # Every knob any case sets, so one case cannot leak into the next.
+# EIDE_ESP_RUNTIME, EIDE_ESP_IRQ and EIDE_ESP_CHIP were missing, so a case
+# that set one left it set for every case after it. ESP_ASYNC_RUNTIME stays:
+# `write_esp_dma_project` and `emit_esp_periph_project` in codegen/family.rs
+# read it, and a stale value there would pick the wrong runtime just as quietly.
 $KNOBS = @("EIDE_F1_DMA", "EIDE_SPI_TXONLY", "EIDE_USART_HALF", "EIDE_I2C_HALF",
            "EIDE_CAN_HALF", "EIDE_USB", "EIDE_F1_RUNTIME", "ESP_ASYNC_RUNTIME",
-           "EIDE_ESP_PWM")
+           "EIDE_ESP_PWM", "EIDE_ESP_RUNTIME", "EIDE_ESP_IRQ", "EIDE_ESP_CHIP",
+           "EIDE_ESP_PULL")
 
 if ($Hook.Count -gt 0) {
     $known = $ALL_CASES | ForEach-Object { $_.fam } | Sort-Object -Unique

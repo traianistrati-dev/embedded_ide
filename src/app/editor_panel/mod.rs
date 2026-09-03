@@ -16,6 +16,13 @@ use crate::panels::mcu_module::project_gen::ProjectFiles;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
+/// The key for "extract the selection into a function", with Ctrl+Alt.
+///
+/// A constant so the guard test below can name it: `egui-winit` REWRITES a few
+/// keystrokes into clipboard events before egui ever sees a key, and a shortcut
+/// that lands on one of those is silently dead. See `extract_fn_key_survives`.
+const EXTRACT_FN_KEY: egui::Key = egui::Key::M;
+
 pub(crate) mod add_dep;
 mod brace_block;
 mod breakpoint_gutter;
@@ -805,17 +812,23 @@ impl AppIde {
         // at the cursor. Consumed before the editor so it never inserts
         // a newline. Ignored while the code-action popup is already open
         // (its own Enter handling wins there).
-        // Ctrl+Alt+Insert — move the selected lines into a new function.
-        // Consumed here, before the editor, so `Insert` never reaches the text;
-        // gated on `editor_kbd_active` so the OTHER view's pass can claim it
-        // when this one does not own the keyboard.
+        // Ctrl+Alt+M — move the selected lines into a new function.
+        //
+        // NOT Ctrl+Alt+Insert, which cannot work on Windows in this stack: in
+        // `egui-winit`, `is_copy_command` matches `ctrl && Key::Insert` and does
+        // NOT look at alt, so the keystroke is turned into `Event::Copy` and
+        // `return`s before any `Event::Key` is pushed. No amount of code here
+        // recovers it — the key event never exists. (`Shift+Insert` goes the
+        // same way, to `Event::Paste`.) `M` is what IntelliJ binds Extract
+        // Method to anyway, and nothing rewrites it.
+        //
+        // Consumed here, before the editor, and gated on `editor_kbd_active` so
+        // the OTHER view's pass can claim it when this one does not own the
+        // keyboard.
         let mut extract_pressed = editor_kbd_active
             && !self.ed.extract.active
             && ui.input_mut(|i| {
-                i.consume_key(
-                    egui::Modifiers::CTRL | egui::Modifiers::ALT,
-                    egui::Key::Insert,
-                )
+                i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, EXTRACT_FN_KEY)
             });
 
         let ctrl_enter_pressed = editor_kbd_active
@@ -2172,4 +2185,32 @@ fn current_line(chars: &[char], idx: usize) -> String {
         .map(|p| idx + p)
         .unwrap_or(chars.len());
     chars[start..end].iter().collect()
+}
+
+#[cfg(test)]
+mod shortcut_guard {
+    use super::EXTRACT_FN_KEY;
+    use eframe::egui::Key;
+
+    /// Keys `egui-winit` REWRITES into a clipboard event before egui ever sees
+    /// an `Event::Key`, on Windows. The rewrite ignores `alt` entirely, so
+    /// adding it to the chord does not dodge them.
+    ///
+    /// From `egui-winit`'s `is_cut_command` / `is_copy_command` /
+    /// `is_paste_command`: with `ctrl`/`command` held, `X`, `C` and `V`; on
+    /// Windows also `Ctrl+Insert` (copy), `Shift+Insert` (paste) and
+    /// `Shift+Delete` (cut).
+    const REWRITTEN_WITH_CTRL: [Key; 4] = [Key::X, Key::C, Key::V, Key::Insert];
+
+    /// The bug this guards against was invisible: Ctrl+Alt+Insert produced no
+    /// key event at all, so the shortcut did nothing and nothing anywhere said
+    /// why. A dead shortcut looks exactly like a missing feature.
+    #[test]
+    fn extract_fn_key_survives_the_clipboard_rewrite() {
+        assert!(
+            !REWRITTEN_WITH_CTRL.contains(&EXTRACT_FN_KEY),
+            "{EXTRACT_FN_KEY:?} with Ctrl is rewritten into a clipboard event by \
+             egui-winit — the key event never reaches egui, so the shortcut is dead"
+        );
+    }
 }

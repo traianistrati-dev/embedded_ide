@@ -114,6 +114,34 @@ impl GpioMode {
     }
 
     /// The `stm32f1xx-hal` (and generally `into_*`) method this mode maps to.
+    /// Is this an INPUT mode - a pull, rather than a drive?
+    pub fn is_input(self) -> bool {
+        matches!(self, Self::Floating | Self::PullUp | Self::PullDown)
+    }
+
+    /// The input mode to generate, given whatever the pin has stored.
+    ///
+    /// # Why a stored mode cannot be trusted
+    ///
+    /// `io_mode` OUTLIVES the function it was chosen for: `apply_pin_function`
+    /// sets `selected_function` and clears `custom_label`, and never touches the
+    /// mode. So a pad set to GPIO input, given a pull-up, and then switched to
+    /// GPIO output still carries `Some(PullUp)`.
+    ///
+    /// Handing that to [`Self::into_method`] emits `into_pull_up_input` on a
+    /// line commented `// GPIO Output`. It compiles, and it silently makes the
+    /// pin an input - which is why the choice is filtered here rather than
+    /// defaulted with `unwrap_or`.
+    pub fn for_input(stored: Option<Self>) -> Self {
+        stored.filter(|m| m.is_input()).unwrap_or(Self::Floating)
+    }
+
+    /// The output mode to generate - see [`Self::for_input`] for why the stored
+    /// one is filtered rather than merely defaulted.
+    pub fn for_output(stored: Option<Self>) -> Self {
+        stored.filter(|m| !m.is_input()).unwrap_or(Self::PushPull)
+    }
+
     pub fn into_method(self) -> &'static str {
         match self {
             Self::Floating => "into_floating_input",
@@ -232,5 +260,59 @@ impl Pin {
 
     pub fn has_bus_function(&self) -> bool {
         self.available_functions.iter().any(PinFunction::is_bus)
+    }
+}
+
+#[cfg(test)]
+mod stale_mode_tests {
+    use super::GpioMode;
+
+    /// A mode chosen for one direction never generates a call for the other.
+    ///
+    /// `io_mode` outlives the function it was picked for - nothing clears it
+    /// when the pad changes direction - so the reachable sequence
+    ///
+    ///     GPIO input  ->  click Pull-up  ->  GPIO output
+    ///
+    /// left `Some(PullUp)` on an OUTPUT. `unwrap_or(PushPull)` kept it, and
+    /// `into_method` turned it into `into_pull_up_input(...)` on a line
+    /// commented `// GPIO Output`: it compiles, and the pin is silently an
+    /// input.
+    #[test]
+    fn a_mode_from_the_other_direction_is_dropped() {
+        for stale in [GpioMode::PushPull, GpioMode::OpenDrain] {
+            let m = GpioMode::for_input(Some(stale));
+            assert!(m.is_input(), "an input got {m:?}");
+            assert!(
+                m.into_method().ends_with("_input"),
+                "{stale:?} on an input generated {}",
+                m.into_method()
+            );
+        }
+        for stale in [GpioMode::Floating, GpioMode::PullUp, GpioMode::PullDown] {
+            let m = GpioMode::for_output(Some(stale));
+            assert!(!m.is_input(), "an output got {m:?}");
+            assert!(
+                m.into_method().ends_with("_output"),
+                "{stale:?} on an output generated {}",
+                m.into_method()
+            );
+        }
+    }
+
+    /// A mode of the RIGHT direction is honoured, and no mode at all falls to
+    /// the backend default - the two behaviours the filter must not break.
+    #[test]
+    fn a_matching_mode_survives_and_none_defaults() {
+        assert_eq!(
+            GpioMode::for_input(Some(GpioMode::PullDown)),
+            GpioMode::PullDown
+        );
+        assert_eq!(
+            GpioMode::for_output(Some(GpioMode::OpenDrain)),
+            GpioMode::OpenDrain
+        );
+        assert_eq!(GpioMode::for_input(None), GpioMode::Floating);
+        assert_eq!(GpioMode::for_output(None), GpioMode::PushPull);
     }
 }
