@@ -523,6 +523,14 @@ struct DefinitionView {
     /// the item is too large to be worth pre-colouring — the band still marks
     /// it, the rows just stay plain.
     rows: Vec<egui::text::LayoutJob>,
+    /// The identifier every occurrence of which is banded, set by
+    /// double-clicking one — the tab's answer to the editor's "select a word,
+    /// see all its uses".
+    ///
+    /// Lives HERE rather than on `AppIde` so it clears itself: a new F12 builds
+    /// a new view, and carrying the last file's word into the next one would
+    /// band whatever happened to share the name.
+    word: String,
 }
 
 /// The Definition tab's monospace size. Shared by the pre-colouring and the
@@ -533,6 +541,60 @@ pub(crate) const DEF_FONT_SIZE: f32 = 12.0;
 /// in a HAL crate can run to thousands of lines, and one `LayoutJob` per line is
 /// not worth holding for a snippet you are glancing at.
 const DEF_HIGHLIGHT_MAX_LINES: usize = 600;
+
+/// Is `c` part of a Rust identifier?
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The identifier covering char index `at` in `line`, or `""` when the click
+/// landed on whitespace or punctuation.
+///
+/// Same rule the editor's word highlight uses: one identifier token, and never
+/// one that starts with a digit — `1st` is not a name anyone is looking for.
+pub(crate) fn word_at(line: &str, at: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if at >= chars.len() || !is_ident_char(chars[at]) {
+        return String::new();
+    }
+    let mut lo = at;
+    while lo > 0 && is_ident_char(chars[lo - 1]) {
+        lo -= 1;
+    }
+    let mut hi = at;
+    while hi < chars.len() && is_ident_char(chars[hi]) {
+        hi += 1;
+    }
+    if chars[lo].is_ascii_digit() {
+        return String::new();
+    }
+    chars[lo..hi].iter().collect()
+}
+
+/// Char ranges of every WHOLE-WORD occurrence of `word` in `line`.
+///
+/// Whole-word on both sides, so highlighting `read` does not light up the first
+/// four letters of `read_exact` — the same rule, and the same reason, as the
+/// editor's highlight.
+pub(crate) fn word_ranges(line: &str, word: &str) -> Vec<(usize, usize)> {
+    if word.is_empty() {
+        return Vec::new();
+    }
+    let hay: Vec<char> = line.chars().collect();
+    let needle: Vec<char> = word.chars().collect();
+    let n = needle.len();
+    if hay.len() < n {
+        return Vec::new();
+    }
+    (0..=hay.len() - n)
+        .filter(|&i| {
+            hay[i..i + n] == needle[..]
+                && (i == 0 || !is_ident_char(hay[i - 1]))
+                && (i + n == hay.len() || !is_ident_char(hay[i + n]))
+        })
+        .map(|i| (i, i + n))
+        .collect()
+}
 
 /// Cut one `LayoutJob` into one job per LINE, so the tab can keep virtualising
 /// with `show_rows` while the colours come from tokenising the item as a WHOLE.
@@ -879,6 +941,7 @@ fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
         highlight: target, // the def line's index in the file (0-based)
         extent,
         rows,
+        word: String::new(),
     })
 }
 
@@ -5103,5 +5166,58 @@ mod definition_view_tests {
         let rows = split_job_by_lines(&job);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[1].text, " ");
+    }
+}
+
+#[cfg(test)]
+mod definition_word_tests {
+    use super::{word_at, word_ranges};
+
+    #[test]
+    fn a_double_click_picks_the_identifier_it_landed_in() {
+        let line = "    let read_exact = 1;";
+        // Anywhere inside the name gives the whole name.
+        assert_eq!(word_at(line, 8), "read_exact");
+        assert_eq!(word_at(line, 14), "read_exact");
+        assert_eq!(word_at(line, 17), "read_exact");
+    }
+
+    #[test]
+    fn a_click_off_a_name_picks_nothing() {
+        let line = "    let x = 1;";
+        assert_eq!(word_at(line, 0), ""); // whitespace
+        assert_eq!(word_at(line, 10), ""); // `=`
+        assert_eq!(word_at(line, 99), ""); // past the end
+    }
+
+    /// A number is not a name anyone is looking for.
+    #[test]
+    fn a_leading_digit_is_not_a_word() {
+        assert_eq!(word_at("let a = 1234;", 9), "");
+    }
+
+    /// The whole point of whole-word matching: `read` must not light up the
+    /// first four letters of `read_exact`.
+    #[test]
+    fn occurrences_are_whole_words() {
+        let line = "read(read_exact, x_read, read);";
+        assert_eq!(word_ranges(line, "read"), [(0, 4), (25, 29)]);
+    }
+
+    #[test]
+    fn a_word_that_is_not_there_bands_nothing() {
+        assert_eq!(word_ranges("let x = 1;", "y"), Vec::new());
+        assert_eq!(word_ranges("let x = 1;", ""), Vec::new());
+        // Needle longer than the line must not index out of bounds.
+        assert_eq!(word_ranges("ab", "abcdef"), Vec::new());
+    }
+
+    /// Char indices, not byte indices — the galley is addressed in chars, and a
+    /// multi-byte character before the match would shift every band right.
+    #[test]
+    fn ranges_are_in_chars_not_bytes() {
+        let line = "// ăăă\nx";
+        let line = line.lines().next().expect("first line");
+        assert_eq!(word_ranges(line, "ăăă"), [(3, 6)]);
     }
 }

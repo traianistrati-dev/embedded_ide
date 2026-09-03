@@ -3119,6 +3119,13 @@ impl AppIde {
             area = area.vertical_scroll_offset(off);
             self.def_scroll_pending = false;
         }
+        // The word whose every occurrence is banded, and the double-click that
+        // picks a new one. Collected here and applied AFTER the closure: `def`
+        // borrows `self.definition_view`, so the closure cannot write to it.
+        let word = def.word.clone();
+        let mut new_word: Option<String> = None;
+        let mut clear_word = false;
+
         area.show_rows(ui, row_h, lines.len(), |ui, range| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             for i in range {
@@ -3139,33 +3146,85 @@ impl AppIde {
                 // `DEF_HIGHLIGHT_MAX_LINES`); everything around it stays plain
                 // and DIM, which is what makes the item stand out — colouring
                 // the whole file would dilute exactly what should be loud.
-                let job = inside.then(|| def.rows.get(i - ext_lo)).flatten().map(|j| {
-                    let mut j = j.clone();
-                    for sec in &mut j.sections {
-                        sec.format.background = bg;
-                    }
-                    j
-                });
-                match job {
-                    Some(job) => {
-                        ui.add(egui::Label::new(job).selectable(true));
-                    }
-                    None => {
-                        let mut rt = egui::RichText::new(shown)
-                            .monospace()
-                            .size(crate::app::DEF_FONT_SIZE);
-                        if inside {
-                            rt = rt.strong().color(DEF_ITEM_FG).background_color(bg);
-                        } else {
-                            rt = rt.color(DEF_CONTEXT_FG);
+                let job = match inside.then(|| def.rows.get(i - ext_lo)).flatten() {
+                    Some(j) => {
+                        let mut j = j.clone();
+                        for sec in &mut j.sections {
+                            sec.format.background = bg;
                         }
-                        ui.add(egui::Label::new(rt).selectable(true));
+                        j
+                    }
+                    None => egui::text::LayoutJob::single_section(
+                        shown.to_owned(),
+                        egui::TextFormat {
+                            font_id: egui::FontId::monospace(crate::app::DEF_FONT_SIZE),
+                            color: if inside { DEF_ITEM_FG } else { DEF_CONTEXT_FG },
+                            background: bg,
+                            ..Default::default()
+                        },
+                    ),
+                };
+
+                // Laid out by hand rather than handed to `Label` as a job: the
+                // galley is needed twice more — to place the occurrence bands at
+                // real glyph positions, and to turn a double-click into the
+                // character it landed on. `Label` would keep it to itself.
+                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                let resp = ui.add(egui::Label::new(galley.clone()).selectable(true));
+
+                if !word.is_empty() {
+                    let painter = ui.painter();
+                    for (a, b) in crate::app::word_ranges(shown, &word) {
+                        let x0 = galley.pos_from_cursor(egui::text::CCursor::new(a)).min.x;
+                        let x1 = galley.pos_from_cursor(egui::text::CCursor::new(b)).min.x;
+                        if x1 > x0 {
+                            painter.rect_filled(
+                                egui::Rect::from_min_max(
+                                    egui::pos2(resp.rect.min.x + x0, resp.rect.min.y),
+                                    egui::pos2(resp.rect.min.x + x1, resp.rect.max.y),
+                                ),
+                                2.0,
+                                DEF_WORD_BG,
+                            );
+                        }
+                    }
+                }
+
+                // Double-click, because that is the gesture that selects a word
+                // in the editor too — egui's own label selection cannot be read
+                // back (`LabelSelectionState` exposes only `has_selection`), so
+                // the word is worked out from where the pointer landed.
+                if resp.double_clicked() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        let cur = galley.cursor_from_pos(p - resp.rect.min);
+                        let w = crate::app::word_at(shown, cur.index);
+                        if w.is_empty() {
+                            clear_word = true;
+                        } else {
+                            new_word = Some(w);
+                        }
                     }
                 }
             }
         });
+
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            clear_word = true;
+        }
+        if let Some(def) = self.definition_view.as_mut() {
+            if let Some(w) = new_word {
+                def.word = w;
+            } else if clear_word {
+                def.word.clear();
+            }
+        }
     }
 }
+
+/// Every occurrence of the double-clicked identifier. The SAME cyan at the same
+/// 20% opacity the editor's word highlight uses — it is the same idea, and two
+/// different colours for it would just be two things to learn.
+const DEF_WORD_BG: egui::Color32 = egui::Color32::from_rgba_unmultiplied_const(52, 232, 235, 51);
 
 /// Definition tab: the declaration line's background — the strongest tint, so
 /// the head of the item is where the eye lands first.
