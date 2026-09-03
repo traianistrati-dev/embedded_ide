@@ -40,7 +40,7 @@ mod duplicate_line;
 pub(crate) mod extract_fn;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
-mod fold;
+pub(super) mod fold;
 mod fold_ui;
 mod format;
 mod generics;

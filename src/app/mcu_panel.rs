@@ -3083,15 +3083,27 @@ impl AppIde {
                 .monospace()
                 .color(egui::Color32::from_rgb(150, 190, 240)),
         );
+        // What you opened, not just where it lives. The band below marks the
+        // same item, but you should not have to find the band to know.
+        if !def.signature.is_empty() {
+            ui.label(
+                egui::RichText::new(&def.signature)
+                    .size(11.0)
+                    .monospace()
+                    .strong()
+                    .color(DEF_ITEM_FG),
+            );
+        }
         ui.separator();
         let lines: Vec<&str> = def.code.lines().collect();
         let highlight = def.highlight;
+        let (ext_lo, ext_hi) = def.extent;
         // Height of one monospace-12 line (matches the rows below).
         let row_h = ui
             .painter()
             .layout_no_wrap(
                 "X".to_owned(),
-                egui::FontId::monospace(12.0),
+                egui::FontId::monospace(crate::app::DEF_FONT_SIZE),
                 egui::Color32::WHITE,
             )
             .size()
@@ -3111,28 +3123,62 @@ impl AppIde {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             for i in range {
                 let shown = if lines[i].is_empty() { " " } else { lines[i] };
-                if i == highlight {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(shown)
-                                .monospace()
-                                .size(12.0)
-                                .strong()
-                                .color(egui::Color32::from_rgb(255, 214, 90))
-                                .background_color(egui::Color32::from_rgb(64, 58, 30)),
-                        )
-                        .selectable(true),
-                    );
+                let inside = i >= ext_lo && i <= ext_hi;
+                // The whole ITEM carries a band, not just its first line: F12
+                // asks "where does this thing begin and end", and one coloured
+                // row cannot answer that. The declaration keeps a stronger tint
+                // so the head of the item is still the thing your eye lands on.
+                let bg = if i == highlight {
+                    DEF_HEAD_BG
+                } else if inside {
+                    DEF_BODY_BG
                 } else {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(shown).monospace().size(12.0))
-                            .selectable(true),
-                    );
+                    egui::Color32::TRANSPARENT
+                };
+                // Pre-coloured rows exist only for the item (see
+                // `DEF_HIGHLIGHT_MAX_LINES`); everything around it stays plain
+                // and DIM, which is what makes the item stand out — colouring
+                // the whole file would dilute exactly what should be loud.
+                let job = inside.then(|| def.rows.get(i - ext_lo)).flatten().map(|j| {
+                    let mut j = j.clone();
+                    for sec in &mut j.sections {
+                        sec.format.background = bg;
+                    }
+                    j
+                });
+                match job {
+                    Some(job) => {
+                        ui.add(egui::Label::new(job).selectable(true));
+                    }
+                    None => {
+                        let mut rt = egui::RichText::new(shown)
+                            .monospace()
+                            .size(crate::app::DEF_FONT_SIZE);
+                        if inside {
+                            rt = rt.strong().color(DEF_ITEM_FG).background_color(bg);
+                        } else {
+                            rt = rt.color(DEF_CONTEXT_FG);
+                        }
+                        ui.add(egui::Label::new(rt).selectable(true));
+                    }
                 }
             }
         });
     }
 }
+
+/// Definition tab: the declaration line's background — the strongest tint, so
+/// the head of the item is where the eye lands first.
+const DEF_HEAD_BG: egui::Color32 = egui::Color32::from_rgb(64, 58, 30);
+/// …the rest of the item's body, the same hue much quieter: enough to read the
+/// item's extent at a glance, not enough to fight the syntax colours on top.
+const DEF_BODY_BG: egui::Color32 = egui::Color32::from_rgb(44, 41, 26);
+/// Fallback foreground inside the item when it was too large to pre-colour.
+const DEF_ITEM_FG: egui::Color32 = egui::Color32::from_rgb(255, 214, 90);
+/// The surrounding file. Dimmed on purpose — the contrast has to come from BOTH
+/// directions, or a coloured item in a bright white file is no clearer than the
+/// single yellow line this replaced.
+const DEF_CONTEXT_FG: egui::Color32 = egui::Color32::from_rgb(132, 136, 146);
 
 /// A selectable "card" for the Runtime picker: a framed, clickable block with a
 /// bold title over a dimmed monospace subtitle. `selected` tints it with the

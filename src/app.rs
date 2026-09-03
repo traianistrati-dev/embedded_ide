@@ -10,7 +10,7 @@ use crate::panels::mcu_module::{project_gen, project_gen::ProjectFiles, registry
 use crate::project_tree::ProjectTreeState;
 use crate::required_tools;
 use eframe::egui;
-use egui_code_editor::Syntax;
+use egui_code_editor::{ColorTheme, Syntax};
 use notify::Watcher as _;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -505,11 +505,69 @@ pub(crate) struct LspAsker {
 struct DefinitionView {
     /// Header line, e.g. `src/pins/utils/i2c1.rs  (line 42)`.
     header: String,
+    /// The definition's own line, trimmed — the header's second row, so you can
+    /// see WHAT you opened without hunting for the band on screen.
+    signature: String,
     /// The code snippet around the definition.
     code: String,
-    /// 0-based index (within `code`'s lines) of the definition line, drawn
-    /// coloured so it stands out from the rest.
+    /// 0-based index (within `code`'s lines) of the definition line.
     highlight: usize,
+    /// Inclusive line range of the whole ITEM the definition opens — the `fn`,
+    /// `struct`, `impl` or `trait` body, not just its first line. A one-line
+    /// item (`const X: u8 = 1;`) is `(highlight, highlight)`.
+    ///
+    /// This is what answers the question F12 actually asks: not "which line"
+    /// but "where does the thing I jumped to begin and end".
+    extent: (usize, usize),
+    /// Syntax-highlighted rows for `extent`, indexed from `extent.0`. Empty when
+    /// the item is too large to be worth pre-colouring — the band still marks
+    /// it, the rows just stay plain.
+    rows: Vec<egui::text::LayoutJob>,
+}
+
+/// The Definition tab's monospace size. Shared by the pre-colouring and the
+/// rows it is drawn into, which have to agree or the two disagree on pitch.
+pub(crate) const DEF_FONT_SIZE: f32 = 12.0;
+
+/// Beyond this many lines an item is not pre-coloured. A macro-generated `impl`
+/// in a HAL crate can run to thousands of lines, and one `LayoutJob` per line is
+/// not worth holding for a snippet you are glancing at.
+const DEF_HIGHLIGHT_MAX_LINES: usize = 600;
+
+/// Cut one `LayoutJob` into one job per LINE, so the tab can keep virtualising
+/// with `show_rows` while the colours come from tokenising the item as a WHOLE.
+///
+/// Tokenising each visible row on its own would be cheaper and WRONG: a row
+/// inside a `/* … */` or a multi-line string would be coloured as if it were
+/// code. The item is tokenised once, from its own first line — a statement
+/// boundary, so nothing straddles the start — and only then split up.
+fn split_job_by_lines(job: &egui::text::LayoutJob) -> Vec<egui::text::LayoutJob> {
+    let mut out = Vec::new();
+    let mut line_start = 0usize;
+    for line in job.text.split('\n') {
+        let line_end = line_start + line.len();
+        let mut lj = egui::text::LayoutJob {
+            // An empty row would collapse to zero height and the rows below
+            // would slide up out of step with `show_rows`' own pitch.
+            text: if line.is_empty() { " " } else { line }.to_owned(),
+            ..Default::default()
+        };
+        lj.wrap.max_width = f32::INFINITY;
+        for s in &job.sections {
+            let a = s.byte_range.start.max(line_start);
+            let b = s.byte_range.end.min(line_end);
+            if a < b {
+                lj.sections.push(egui::text::LayoutSection {
+                    leading_space: 0.0,
+                    byte_range: (a - line_start)..(b - line_start),
+                    format: s.format.clone(),
+                });
+            }
+        }
+        out.push(lj);
+        line_start = line_end + 1; // past the '\n'
+    }
+    out
 }
 
 // ── Horizontal layout minimums ────────────────────────────────────────────────
@@ -777,10 +835,50 @@ fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
         return None;
     }
     let target = (loc.line as usize).min(line_count - 1);
+
+    // The item the definition line OPENS. `fold::regions` is the folding
+    // scanner: it already skips strings, char literals and nested block
+    // comments, so a brace inside a string cannot invent an extent. The region
+    // whose HEAD is the definition line is exactly that item — a `fn`, a
+    // `struct`, an `impl`, a `trait`. A one-line item opens nothing and stays
+    // its own single line.
+    let extent = editor_panel::fold::regions(&content)
+        .into_iter()
+        .find(|r| r.head == target)
+        .map_or((target, target), |r| (r.head, r.end.max(target)));
+
+    let lines: Vec<&str> = content.lines().collect();
+    let signature = lines
+        .get(target)
+        .map(|l| l.trim())
+        .unwrap_or_default()
+        .chars()
+        .take(120)
+        .collect();
+
+    // Pre-colour the item, once, here — not per frame and not per visible row.
+    let span = extent.1 - extent.0 + 1;
+    let rows = if span <= DEF_HIGHLIGHT_MAX_LINES {
+        let text = lines[extent.0..=extent.1.min(lines.len() - 1)].join("\n");
+        let job = crate::editor::gui::code_editor::rust_layout_job(
+            &text,
+            &ColorTheme::GRUVBOX,
+            DEF_FONT_SIZE,
+            &Syntax::rust(),
+            crate::editor::gui::code_editor::Marks::default(),
+        );
+        split_job_by_lines(&job)
+    } else {
+        Vec::new()
+    };
+
     Some(DefinitionView {
         header: format!("{}  (line {})", short_path(&loc.path), loc.line + 1),
+        signature,
         code: content,     // full file
         highlight: target, // the def line's index in the file (0-based)
+        extent,
+        rows,
     })
 }
 
@@ -4903,5 +5001,107 @@ mod module_handle_highlight {
             "    outlet _pwm0_power_led = 1;",
             "_pwm0_power_led"
         ));
+    }
+}
+
+#[cfg(test)]
+mod definition_view_tests {
+    use super::{DefinitionView, build_definition_view, split_job_by_lines};
+    use crate::lsp::DefinitionLoc;
+    use egui_code_editor::{ColorTheme, Syntax};
+
+    /// Build the view the way the F12 poll does, from a temp file.
+    fn view(src: &str, line: u32) -> DefinitionView {
+        let dir = std::env::temp_dir().join(format!("def_view_{line}_{}", src.len()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("probe.rs");
+        std::fs::write(&path, src).expect("write");
+        build_definition_view(&DefinitionLoc {
+            path: path.to_string_lossy().into_owned(),
+            line,
+            character: 0,
+        })
+        .expect("a view")
+    }
+
+    /// The whole function, not just its declaration line — that is the question
+    /// F12 actually asks.
+    #[test]
+    fn a_function_extends_to_its_closing_brace() {
+        let src = "fn a() {}\nfn b() {\n    let x = 1;\n    x\n}\nfn c() {}\n";
+        let v = view(src, 1); // 0-based: `fn b() {`
+        assert_eq!(v.extent, (1, 4));
+        assert!(v.signature.starts_with("fn b()"), "{}", v.signature);
+    }
+
+    #[test]
+    fn a_struct_and_an_impl_get_their_bodies_too() {
+        let src = "struct S {\n    a: u8,\n}\nimpl S {\n    fn f(&self) {}\n}\n";
+        assert_eq!(view(src, 0).extent, (0, 2));
+        assert_eq!(view(src, 3).extent, (3, 5));
+    }
+
+    /// An item that opens no block is its own single line — the old behaviour,
+    /// kept for exactly those.
+    #[test]
+    fn a_one_line_item_stays_one_line() {
+        let src = "const X: u8 = 1;\nfn f() {}\n";
+        assert_eq!(view(src, 0).extent, (0, 0));
+    }
+
+    /// The reason the item is tokenised as a WHOLE and only then split: a brace
+    /// inside a comment must not end the extent early, and the rows must still
+    /// line up one-to-one with the item's lines.
+    #[test]
+    fn a_brace_in_a_comment_does_not_cut_the_item_short() {
+        let src = "fn f() {\n    /* } not the end { */\n    let x = 1;\n}\nfn g() {}\n";
+        let v = view(src, 0);
+        assert_eq!(v.extent, (0, 3));
+        assert_eq!(v.rows.len(), 4, "one job per line of the item");
+    }
+
+    #[test]
+    fn a_definition_on_the_last_line_is_handled() {
+        let src = "fn a() {}\nfn b() {}";
+        let v = view(src, 1);
+        assert_eq!(v.extent, (1, 1));
+    }
+
+    // ── split_job_by_lines ───────────────────────────────────────────────────
+
+    #[test]
+    fn splitting_keeps_one_job_per_line_and_rebases_its_sections() {
+        let text = "fn f() {\n    let x = 1;\n}";
+        let job = crate::editor::gui::code_editor::rust_layout_job(
+            text,
+            &ColorTheme::GRUVBOX,
+            12.0,
+            &Syntax::rust(),
+            crate::editor::gui::code_editor::Marks::default(),
+        );
+        let rows = split_job_by_lines(&job);
+        assert_eq!(rows.len(), 3);
+        for (row, want) in rows.iter().zip(text.split('\n')) {
+            assert_eq!(row.text, want);
+            // Every section has to index into its OWN line, or the label panics.
+            for s in &row.sections {
+                assert!(s.byte_range.end <= row.text.len(), "{:?}", s.byte_range);
+            }
+        }
+        // The colouring survived the split — `fn` is a keyword, not plain text.
+        assert!(!rows[0].sections.is_empty());
+    }
+
+    /// An empty row would collapse to zero height and slide every row below it
+    /// out of step with the pitch `show_rows` was told to use.
+    #[test]
+    fn an_empty_line_becomes_a_space() {
+        let job = egui::text::LayoutJob {
+            text: "a\n\nb".to_owned(),
+            ..Default::default()
+        };
+        let rows = split_job_by_lines(&job);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].text, " ");
     }
 }
