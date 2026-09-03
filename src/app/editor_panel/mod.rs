@@ -30,6 +30,7 @@ mod diag_embed;
 pub(crate) mod diff_gutter;
 mod doc_md;
 mod duplicate_line;
+pub(crate) mod extract_fn;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
 mod fold;
@@ -804,6 +805,19 @@ impl AppIde {
         // at the cursor. Consumed before the editor so it never inserts
         // a newline. Ignored while the code-action popup is already open
         // (its own Enter handling wins there).
+        // Ctrl+Alt+Insert — move the selected lines into a new function.
+        // Consumed here, before the editor, so `Insert` never reaches the text;
+        // gated on `editor_kbd_active` so the OTHER view's pass can claim it
+        // when this one does not own the keyboard.
+        let mut extract_pressed = editor_kbd_active
+            && !self.ed.extract.active
+            && ui.input_mut(|i| {
+                i.consume_key(
+                    egui::Modifiers::CTRL | egui::Modifiers::ALT,
+                    egui::Key::Insert,
+                )
+            });
+
         let ctrl_enter_pressed = editor_kbd_active
             && !self.ed.add_dep.open
             && !self.ed.code_action_popup_open
@@ -1483,6 +1497,11 @@ impl AppIde {
                 .cursor
                 .char_range()
                 .map(|r| r.primary.index);
+            let sel_end_idx = editor_resp
+                .state
+                .cursor
+                .char_range()
+                .map(|r| r.secondary.index);
             let anchor = editor_resp
                 .state
                 .cursor
@@ -1505,7 +1524,7 @@ impl AppIde {
                         + egui::vec2(0.0, local.height() + 4.0)
                 })
                 .unwrap_or_else(|| editor_resp.response.rect.left_top());
-            self.trigger_code_actions(&display_code, cursor_idx, anchor, slot);
+            self.trigger_code_actions(&display_code, cursor_idx, sel_end_idx, anchor, slot);
         }
         self.show_code_action_popup(ui);
         self.show_add_dep_popup(ui);
@@ -1528,6 +1547,7 @@ impl AppIde {
         {
             use context_menu::EditorAction as A;
             match menu_action {
+                Some(A::ExtractFn) => extract_pressed = true,
                 Some(A::DeleteLine) => cut_line_pressed = true,
                 Some(A::DuplicateLine) => ctrl_d_pressed = true,
                 Some(A::Comment) => ctrl_slash_pressed = true,
@@ -1646,6 +1666,31 @@ impl AppIde {
                 Some(A::ZoomReset) => self.editor_font_size = DEFAULT_EDITOR_FONT_SIZE,
                 None => {}
             }
+        }
+
+        // ── Extract function (Ctrl+Alt+Insert) ────────────────────────────
+        // After the editor rendered, so the selection it works on is the one
+        // the editor just reported — and after the context menu, so a click
+        // on its entry lands in the SAME frame the shortcut would.
+        if extract_pressed {
+            let sel = editor_resp
+                .state
+                .cursor
+                .char_range()
+                .map(|r| (r.primary.index, r.secondary.index));
+            let anchor = editor_resp.response.rect.left_top() + egui::vec2(24.0, 24.0);
+            self.begin_extract_fn(&display_code, displayed_file, is_rust_file, sel, anchor);
+        }
+        // A finished extraction rewrites the buffer. Applied HERE, before the
+        // write-back below, so the new text is what gets persisted — the same
+        // rule the context-menu line ops follow.
+        if let Some((next, caret)) = self.show_extract_fn_popup(ui, &display_code, displayed_file) {
+            display_code = next;
+            let mut st = editor_resp.state.clone();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(caret),
+            )));
+            st.store(ui.ctx(), editor_resp.response.id);
         }
 
         // ── Ctrl+[ / Ctrl+] — select + copy the block at the caret ────

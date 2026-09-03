@@ -36,6 +36,8 @@ pub(super) enum EditorAction {
     SelectAll,
     /// Select + copy the innermost `{ … }` block around the caret (Ctrl+[).
     SelectBlock,
+    /// Move the selected lines into a new function (Ctrl+Alt+Insert).
+    ExtractFn,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -170,6 +172,13 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
             "Format code",
             "Shift+Alt+F",
             EditorAction::Format,
+        );
+        item(
+            ui,
+            ph::SCISSORS,
+            "Extract selection into a function",
+            "Ctrl+Alt+Insert",
+            EditorAction::ExtractFn,
         );
         item(
             ui,

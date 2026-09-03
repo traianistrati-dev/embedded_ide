@@ -180,6 +180,9 @@ pub(crate) struct EditorState {
     /// The crate chooser that row opens.
     pub(crate) add_dep: editor_panel::add_dep::AddDepState,
 
+    /// Ctrl+Alt+Insert: the "move these lines into a new function" popup.
+    pub(crate) extract: editor_panel::extract_fn::ExtractFnState,
+
     /// The inferred-type hint to draw as ghost text after an untyped `let` on
     /// the cursor's line, if any (its `text_edits` insert the type on Tab).
     /// Cleared when the caret leaves an untyped `let`.
@@ -261,6 +264,7 @@ impl EditorState {
             code_action_choice: None,
             code_action_add_dep: None,
             add_dep: editor_panel::add_dep::AddDepState::default(),
+            extract: editor_panel::extract_fn::ExtractFnState::default(),
             inlay_hint: None,
             inlay_requested: None,
             inlay_accept_pending: false,

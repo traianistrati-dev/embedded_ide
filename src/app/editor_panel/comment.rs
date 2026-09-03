@@ -15,7 +15,7 @@
 /// Shared by both toggles so they can never disagree about which lines count as
 /// selected — in particular the rule that a selection ending exactly at a line
 /// start must not pull in the next line.
-fn selected_lines(
+pub(super) fn selected_lines(
     chars: &[char],
     sel_lo: usize,
     sel_hi: usize,

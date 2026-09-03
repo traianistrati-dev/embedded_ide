@@ -810,7 +810,22 @@ impl LspState {
     /// `rel_path` (`textDocument/codeAction`, Ctrl+Enter). A zero-width range at
     /// the cursor is enough for import/qualify assists. Poll
     /// [`take_code_actions_result`].
-    pub fn request_code_actions(&mut self, rel_path: &str, line: u32, character: u32) {
+    /// `(line, character)` .. `(end_line, end_character)` is the SELECTION, or
+    /// the same position twice when there is none.
+    ///
+    /// The range is not decoration: rust-analyzer offers a different set of
+    /// assists for a span than for a point, and the useful ones — "Extract into
+    /// function", "Extract into variable", "Convert to guarded return" — are
+    /// span-only. Sending a zero-width range made every one of them
+    /// unreachable, which is why Ctrl+Enter never offered an extraction.
+    pub fn request_code_actions(
+        &mut self,
+        rel_path: &str,
+        line: u32,
+        character: u32,
+        end_line: u32,
+        end_character: u32,
+    ) {
         if self.sender.is_none() {
             return;
         }
@@ -821,6 +836,7 @@ impl LspState {
         self.code_actions.clear();
         let uri = format!("{}/{}", self.root_uri, rel_path);
         let pos = serde_json::json!({ "line": line, "character": character });
+        let end = serde_json::json!({ "line": end_line, "character": end_character });
         self.send_raw(
             serde_json::json!({
                 "jsonrpc": "2.0",
@@ -828,7 +844,7 @@ impl LspState {
                 "method":  "textDocument/codeAction",
                 "params": {
                     "textDocument": { "uri": uri },
-                    "range":        { "start": pos, "end": pos },
+                    "range":        { "start": pos, "end": end },
                     // No diagnostics in context (v1 = assists at the cursor, not
                     // diagnostic quick-fixes); `only` unset → RA returns all.
                     "context":      { "diagnostics": [] },

@@ -20,7 +20,11 @@ impl AppIde {
     pub(super) fn trigger_code_actions(
         &mut self,
         display_code: &str,
+        // The caret, and the far end of the selection when there is one. Both,
+        // because rust-analyzer's most useful assists are offered for a SPAN and
+        // not for a point — see `LspState::request_code_actions`.
         cursor_char_idx: Option<usize>,
+        sel_end_char_idx: Option<usize>,
         anchor: egui::Pos2,
         slot: crate::app::EditorSlot,
     ) {
@@ -42,8 +46,18 @@ impl AppIde {
         // on the `let` pattern, not on the initializer where the cursor usually
         // sits. This makes Ctrl+Enter add the type from anywhere on the line.
         let chars: Vec<char> = display_code.chars().collect();
-        let target = super::let_annotation::let_binding_pos(&chars, idx).unwrap_or(idx);
-        let (line, col) = lsp_cursor_pos(display_code, target);
+        // A selection is asked about as-is: re-targeting it to a `let` pattern
+        // would throw the span away, which is the whole point of sending one.
+        let sel = sel_end_char_idx.filter(|&e| e != idx);
+        let (start, end) = match sel {
+            Some(e) => (idx.min(e), idx.max(e)),
+            None => {
+                let t = super::let_annotation::let_binding_pos(&chars, idx).unwrap_or(idx);
+                (t, t)
+            }
+        };
+        let (line, col) = lsp_cursor_pos(display_code, start);
+        let (end_line, end_col) = lsp_cursor_pos(display_code, end);
         // Our own row — rust-analyzer never offers this one, it does not know
         // Cargo.toml exists. Computed BEFORE the LSP is consulted, and offered
         // even when it is down: a missing dependency is a fact about Cargo.toml,
@@ -60,7 +74,7 @@ impl AppIde {
                 return;
             }
             lsp.did_change(&rel, display_code, false);
-            lsp.request_code_actions(&rel, line, col);
+            lsp.request_code_actions(&rel, line, col, end_line, end_col);
         }
         // The answer lands at frame top, before any view has drawn — record
         // who asked so it is written into the right one.
