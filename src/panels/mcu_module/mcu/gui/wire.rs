@@ -230,8 +230,7 @@ fn l_route(
         return None; // not perpendicular
     }
     let corner = at(adir, on(term, adir), across(anchor, adir));
-    (ahead(anchor, adir, corner) && ahead(term, tdir, corner))
-        .then(|| vec![anchor, corner, term])
+    (ahead(anchor, adir, corner) && ahead(term, tdir, corner)).then(|| vec![anchor, corner, term])
 }
 
 /// TWO corners over a shared lane, for two rays pointing the SAME way.
@@ -286,17 +285,48 @@ fn z_facing(
     ])
 }
 
-/// Whether every segment of `pts` stays out of `body`.
-fn clears(pts: &[egui::Pos2], body: egui::Rect) -> bool {
+/// What a wire may not cross.
+#[derive(Clone, Copy)]
+pub struct Blocked<'a> {
+    /// The package.
+    pub body: egui::Rect,
+    /// Every module box on the canvas.
+    pub boxes: &'a [egui::Rect],
+    /// Where in `boxes` this wire's OWN box sits.
+    ///
+    /// Exempt, and it costs nothing: every route arrives at its terminal along
+    /// the inward normal of the edge it leaves by, so it reaches the box from
+    /// outside and stops on the boundary. The exemption is for the boundary
+    /// itself — and for a chamfered box, whose terminal is snapped onto the
+    /// silhouette and can therefore sit inside the axis-aligned rect while being
+    /// visually outside the shape.
+    pub own: usize,
+}
+
+fn hits(a: egui::Pos2, b: egui::Pos2, r: egui::Rect) -> bool {
+    crate::panels::structure_map::layout::seg_hits_rect(
+        (a.x, a.y),
+        (b.x, b.y),
+        r.left(),
+        r.top(),
+        r.width(),
+        r.height(),
+    )
+}
+
+/// Whether every segment of `pts` stays out of the package and out of every
+/// module box but its own.
+///
+/// A wire drawn across a box reads as though it connects to it. That is the one
+/// thing a schematic line may never suggest wrongly, so a route that would do it
+/// is refused and a longer one is taken instead.
+fn clears(pts: &[egui::Pos2], b: Blocked<'_>) -> bool {
     !pts.windows(2).any(|w| {
-        crate::panels::structure_map::layout::seg_hits_rect(
-            (w[0].x, w[0].y),
-            (w[1].x, w[1].y),
-            body.left(),
-            body.top(),
-            body.width(),
-            body.height(),
-        )
+        hits(w[0], w[1], b.body)
+            || b.boxes
+                .iter()
+                .enumerate()
+                .any(|(i, r)| i != b.own && hits(w[0], w[1], *r))
     })
 }
 
@@ -315,12 +345,13 @@ fn clears(pts: &[egui::Pos2], body: egui::Rect) -> bool {
 /// * `body` — the package, which no segment may cross.
 pub fn route(
     ring: egui::Rect,
-    body: egui::Rect,
+    blocked: Blocked<'_>,
     anchor: egui::Pos2,
     adir: egui::Vec2,
     term: egui::Pos2,
     tdir: egui::Vec2,
 ) -> Option<Vec<egui::Pos2>> {
+    let body = blocked.body;
     // Three refusals, and each of them is a real shape this cannot draw.
     if !is_axis(adir) || !is_axis(tdir) {
         // A 45° diamond. A diagonal package reads correctly with diagonal
@@ -342,22 +373,27 @@ pub fn route(
     ];
     for c in cheap.into_iter().flatten() {
         let pts = dedup_collinear(c);
-        if pts.len() >= 2 && clears(&pts, body) {
+        if pts.len() >= 2 && clears(&pts, blocked) {
             return Some(pts);
         }
     }
-    // Nothing short works: the pad is on the far side of the package, so the
-    // wire has to go around it.
-    wrap(ring, body, anchor, adir, term, tdir)
+    // Nothing short works: something is in the way - the package, or a module
+    // box - so the wire goes around.
+    wrap(ring, anchor, adir, term, tdir)
 }
 
 /// The last resort: onto the corridor around the package, round it, and off.
 ///
-/// Only reached when no one- or two-corner route clears the die — in practice a
-/// box wired to a pad on the opposite face.
+/// Only reached when no one- or two-corner route is clear — in practice a box
+/// wired to a pad on the opposite face.
+///
+/// It does NOT re-check what it produces. The corridor is clear of the die by
+/// construction, so there is nothing there to catch; and a box dragged onto the
+/// corridor is accepted rather than refused, because refusing here hands the
+/// caller its straight-segment fallback, and one diagonal across the die and
+/// three boxes is worse than a wire that clips one.
 fn wrap(
     ring: egui::Rect,
-    body: egui::Rect,
     anchor: egui::Pos2,
     adir: egui::Vec2,
     term: egui::Pos2,
@@ -376,7 +412,7 @@ fn wrap(
     pts.push(t2);
     pts.push(term);
     let pts = dedup_collinear(pts);
-    (pts.len() >= 2 && clears(&pts, body)).then_some(pts)
+    (pts.len() >= 2).then_some(pts)
 }
 
 /// The cheaper of several ways out of a box, as the drawn path and the terminal
@@ -387,7 +423,7 @@ fn wrap(
 /// talked out of it.
 pub fn best_route(
     ring: egui::Rect,
-    body: egui::Rect,
+    blocked: Blocked<'_>,
     anchor: egui::Pos2,
     adir: egui::Vec2,
     cands: &[(egui::Pos2, egui::Vec2)],
@@ -396,7 +432,7 @@ pub fn best_route(
         .iter()
         .enumerate()
         .filter_map(|(i, (t, d))| {
-            route(ring, body, anchor, adir, *t, *d).map(|p| (p.len(), i, p, *t))
+            route(ring, blocked, anchor, adir, *t, *d).map(|p| (p.len(), i, p, *t))
         })
         .min_by_key(|(n, i, ..)| (*n, *i))
         .map(|(_, _, p, t)| (p.into_iter().rev().collect(), t))
@@ -405,6 +441,16 @@ pub fn best_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A canvas with nothing on it but the package — what most of these tests
+    /// are about, since the box obstacles have their own.
+    fn free(c: egui::Rect) -> Blocked<'static> {
+        Blocked {
+            body: c,
+            boxes: &[],
+            own: usize::MAX,
+        }
+    }
 
     fn chip() -> egui::Rect {
         egui::Rect::from_min_max(egui::pos2(-100.0, -100.0), egui::pos2(100.0, 100.0))
@@ -424,7 +470,10 @@ mod tests {
         let r = ring(c);
         let tip = c.right() + PIN_HEIGHT;
         let box_edge = c.right() + PIN_HEIGHT + super::super::modules::PIN_GAP;
-        assert!((r.right() - tip - RING_MID).abs() < 0.01, "clear of the stubs");
+        assert!(
+            (r.right() - tip - RING_MID).abs() < 0.01,
+            "clear of the stubs"
+        );
         assert!(
             (box_edge - r.right() - RING_MID).abs() < 0.01,
             "and clear of the boxes"
@@ -439,9 +488,19 @@ mod tests {
         let c = chip();
         let r = ring(c);
         let anchor = egui::pos2(c.right() + PIN_HEIGHT, 20.0);
-        let term = egui::pos2(c.right() + PIN_HEIGHT + super::super::modules::PIN_GAP, 20.0);
-        let pts = route(r, c, anchor, egui::vec2(1.0, 0.0), term, egui::vec2(-1.0, 0.0))
-            .expect("a route");
+        let term = egui::pos2(
+            c.right() + PIN_HEIGHT + super::super::modules::PIN_GAP,
+            20.0,
+        );
+        let pts = route(
+            r,
+            free(c),
+            anchor,
+            egui::vec2(1.0, 0.0),
+            term,
+            egui::vec2(-1.0, 0.0),
+        )
+        .expect("a route");
         assert_eq!(pts.len(), 2, "{pts:?}");
         assert_eq!(pts[0], anchor);
         assert_eq!(pts[1], term);
@@ -458,8 +517,15 @@ mod tests {
             c.left() - PIN_HEIGHT - super::super::modules::PIN_GAP,
             -20.0,
         );
-        let pts = route(r, c, anchor, egui::vec2(0.0, -1.0), term, egui::vec2(1.0, 0.0))
-            .expect("a route");
+        let pts = route(
+            r,
+            free(c),
+            anchor,
+            egui::vec2(0.0, -1.0),
+            term,
+            egui::vec2(1.0, 0.0),
+        )
+        .expect("a route");
         assert!(axis_aligned(&pts), "{pts:?}");
         assert!(pts.len() >= 3, "it really does turn: {pts:?}");
         assert_eq!(*pts.first().expect("start"), anchor);
@@ -477,8 +543,15 @@ mod tests {
             c.right() + PIN_HEIGHT + super::super::modules::PIN_GAP,
             -10.0,
         );
-        let pts = route(r, c, anchor, egui::vec2(-1.0, 0.0), term, egui::vec2(-1.0, 0.0))
-            .expect("a route");
+        let pts = route(
+            r,
+            free(c),
+            anchor,
+            egui::vec2(-1.0, 0.0),
+            term,
+            egui::vec2(-1.0, 0.0),
+        )
+        .expect("a route");
         assert!(axis_aligned(&pts), "{pts:?}");
         assert!(
             !pts.windows(2).any(|w| {
@@ -501,7 +574,7 @@ mod tests {
         assert!(
             route(
                 r,
-                c,
+                free(c),
                 egui::pos2(-140.0, -140.0),
                 egui::vec2(-d, -d),
                 egui::pos2(-200.0, -200.0),
@@ -513,7 +586,7 @@ mod tests {
         assert!(
             route(
                 r,
-                c,
+                free(c),
                 egui::pos2(0.0, 0.0),
                 egui::vec2(1.0, 0.0),
                 egui::pos2(200.0, 0.0),
@@ -525,7 +598,7 @@ mod tests {
         assert!(
             route(
                 r,
-                c,
+                free(c),
                 egui::pos2(150.0, 0.0),
                 egui::vec2(1.0, 0.0),
                 egui::pos2(120.0, 0.0),
@@ -543,10 +616,13 @@ mod tests {
         let c = chip();
         let r = ring(c);
         let anchor = egui::pos2(-30.0, c.top() - PIN_HEIGHT);
-        let term = egui::pos2(c.left() - PIN_HEIGHT - super::super::modules::PIN_GAP, -20.0);
+        let term = egui::pos2(
+            c.left() - PIN_HEIGHT - super::super::modules::PIN_GAP,
+            -20.0,
+        );
         let (p, _) = best_route(
             r,
-            c,
+            free(c),
             anchor,
             egui::vec2(0.0, -1.0),
             &[(term, egui::vec2(1.0, 0.0))],
@@ -568,7 +644,7 @@ mod tests {
         assert!(
             best_route(
                 r,
-                c,
+                free(c),
                 ball,
                 egui::vec2(1.0, 0.0),
                 &[(term, egui::vec2(-1.0, 0.0))]
@@ -586,8 +662,15 @@ mod tests {
         let r = ring(c);
         let anchor = egui::pos2(c.left() + 30.0, c.bottom() + PIN_HEIGHT);
         let term = egui::pos2(c.right() + 68.0, c.bottom() + 200.0);
-        let pts = route(r, c, anchor, egui::vec2(0.0, 1.0), term, egui::vec2(-1.0, 0.0))
-            .expect("a route");
+        let pts = route(
+            r,
+            free(c),
+            anchor,
+            egui::vec2(0.0, 1.0),
+            term,
+            egui::vec2(-1.0, 0.0),
+        )
+        .expect("a route");
         assert_eq!(pts.len(), 3, "one corner: {pts:?}");
         assert_eq!(pts[1], egui::pos2(anchor.x, term.y), "and it is the L's");
         assert!(
@@ -608,8 +691,15 @@ mod tests {
         // and FURTHER out than the pad, which is what says the lane is placed
         // beyond whichever end is already outermost rather than beyond the pad.
         let term = egui::pos2(c.left() - 120.0, c.top() - PIN_HEIGHT - 60.0);
-        let pts = route(r, c, anchor, egui::vec2(0.0, -1.0), term, egui::vec2(0.0, -1.0))
-            .expect("a route");
+        let pts = route(
+            r,
+            free(c),
+            anchor,
+            egui::vec2(0.0, -1.0),
+            term,
+            egui::vec2(0.0, -1.0),
+        )
+        .expect("a route");
         assert_eq!(pts.len(), 4, "two corners: {pts:?}");
         let lane = pts[1].y;
         assert_eq!(pts[2].y, lane, "and one shared lane");
@@ -643,8 +733,15 @@ mod tests {
             !c.contains(corner) && corner.y > anchor.y,
             "the corner is behind the pad and outside the die: {corner:?}"
         );
-        let pts = route(r, c, anchor, egui::vec2(0.0, -1.0), term, egui::vec2(1.0, 0.0))
-            .expect("a route");
+        let pts = route(
+            r,
+            free(c),
+            anchor,
+            egui::vec2(0.0, -1.0),
+            term,
+            egui::vec2(1.0, 0.0),
+        )
+        .expect("a route");
         assert!(
             !pts.contains(&corner),
             "it took the corner behind the pad: {pts:?}"
@@ -660,10 +757,16 @@ mod tests {
         let c = chip();
         let r = ring(c);
         let anchor = egui::pos2(c.right() - 30.0, c.top() - PIN_HEIGHT);
-        let facing = (egui::pos2(c.left() - 68.0, c.top() + 40.0), egui::vec2(1.0, 0.0));
-        let top = (egui::pos2(c.left() - 120.0, c.top() + 40.0), egui::vec2(0.0, -1.0));
+        let facing = (
+            egui::pos2(c.left() - 68.0, c.top() + 40.0),
+            egui::vec2(1.0, 0.0),
+        );
+        let top = (
+            egui::pos2(c.left() - 120.0, c.top() + 40.0),
+            egui::vec2(0.0, -1.0),
+        );
         let (pts, term) =
-            best_route(r, c, anchor, egui::vec2(0.0, -1.0), &[facing, top]).expect("a route");
+            best_route(r, free(c), anchor, egui::vec2(0.0, -1.0), &[facing, top]).expect("a route");
         assert_eq!(term, top.0, "the top edge won: {pts:?}");
         assert_eq!(pts.len(), 4);
         assert_eq!(pts[0], top.0, "terminal first");
@@ -677,14 +780,123 @@ mod tests {
         let r = ring(c);
         let anchor = egui::pos2(c.right() + PIN_HEIGHT, 20.0);
         let facing = (
-            egui::pos2(c.right() + PIN_HEIGHT + super::super::modules::PIN_GAP, 20.0),
+            egui::pos2(
+                c.right() + PIN_HEIGHT + super::super::modules::PIN_GAP,
+                20.0,
+            ),
             egui::vec2(-1.0, 0.0),
         );
         let other = (egui::pos2(c.right() + 200.0, 20.0), egui::vec2(-1.0, 0.0));
-        let (pts, term) =
-            best_route(r, c, anchor, egui::vec2(1.0, 0.0), &[facing, other]).expect("a route");
+        let (pts, term) = best_route(r, free(c), anchor, egui::vec2(1.0, 0.0), &[facing, other])
+            .expect("a route");
         assert_eq!(pts.len(), 2, "still one straight segment");
         assert_eq!(term, facing.0);
+    }
+
+    /// A wire drawn across a module box reads as though it connects to it. A box
+    /// standing in the way of the short route is an obstacle like the package,
+    /// and the wire takes the longer way rather than the lie.
+    #[test]
+    fn a_wire_goes_around_a_box_in_its_way_rather_than_through_it() {
+        let c = chip();
+        let r = ring(c);
+        let anchor = egui::pos2(c.left() + 30.0, c.bottom() + PIN_HEIGHT);
+        let term = egui::pos2(c.right() + 68.0, c.bottom() + 200.0);
+        let adir = egui::vec2(0.0, 1.0);
+        let tdir = egui::vec2(-1.0, 0.0);
+        // With nothing in the way it is the one-corner L.
+        let plain = route(r, free(c), anchor, adir, term, tdir).expect("a route");
+        assert_eq!(plain.len(), 3);
+
+        // A foreign box sitting exactly on that L's long leg.
+        let other = egui::Rect::from_min_max(
+            egui::pos2(anchor.x - 40.0, c.bottom() + 100.0),
+            egui::pos2(anchor.x + 40.0, c.bottom() + 150.0),
+        );
+        let boxes = [other];
+        let blocked = Blocked {
+            body: c,
+            boxes: &boxes,
+            own: usize::MAX,
+        };
+        let pts = route(r, blocked, anchor, adir, term, tdir).expect("a route");
+        assert!(
+            !pts.windows(2).any(|w| super::hits(w[0], w[1], other)),
+            "it still crosses the box: {pts:?}"
+        );
+        assert_ne!(pts, plain, "so it is not the same route");
+    }
+
+    /// Its OWN box is not an obstacle to a wire, and the exemption is per-INDEX
+    /// rather than a blanket "ignore boxes".
+    ///
+    /// Every route arrives at its terminal along the inward normal of the edge it
+    /// leaves by, so it reaches the box from outside and stops on the boundary.
+    /// The exemption is for the boundary itself — and for a chamfered box, whose
+    /// terminal is snapped onto the silhouette and can sit inside the
+    /// axis-aligned rect while being outside the drawn shape.
+    #[test]
+    fn a_wire_is_not_blocked_by_the_box_it_belongs_to() {
+        let c = chip();
+        let mine = egui::Rect::from_min_max(
+            egui::pos2(c.right() + 68.0, -40.0),
+            egui::pos2(c.right() + 238.0, 60.0),
+        );
+        // A terminal snapped onto a chamfer sits INSIDE the axis-aligned rect.
+        let term = egui::pos2(mine.left() + 6.0, 20.0);
+        assert!(mine.contains(term));
+        let seg = [egui::pos2(c.right() + PIN_HEIGHT, 20.0), term];
+
+        let one = [mine];
+        assert!(
+            clears(
+                &seg,
+                Blocked {
+                    body: c,
+                    boxes: &one,
+                    own: 0
+                }
+            ),
+            "its own box does not block it"
+        );
+        assert!(
+            !clears(
+                &seg,
+                Blocked {
+                    body: c,
+                    boxes: &one,
+                    own: usize::MAX
+                }
+            ),
+            "and it would, without the exemption"
+        );
+        // Per-index: a SECOND box in the same place is foreign and still blocks.
+        let two = [mine, mine];
+        assert!(
+            !clears(
+                &seg,
+                Blocked {
+                    body: c,
+                    boxes: &two,
+                    own: 0
+                }
+            ),
+            "the exemption is not a blanket switch"
+        );
+    }
+
+    /// The corridor route collapses back to a straight segment when getting on
+    /// and off the lane happens to be collinear — which is what stops the last
+    /// resort from emitting four points to draw one line.
+    #[test]
+    fn a_degenerate_corridor_route_collapses_to_one_segment() {
+        let c = chip();
+        let r = ring(c);
+        let anchor = egui::pos2(c.right() + PIN_HEIGHT, 20.0);
+        let term = egui::pos2(c.right() + 68.0, 20.0);
+        let pts = wrap(r, anchor, egui::vec2(1.0, 0.0), term, egui::vec2(-1.0, 0.0))
+            .expect("a route");
+        assert_eq!(pts.len(), 2, "{pts:?}");
     }
 
     /// The walk is the SHORT way round, and it does not depend on which wire
@@ -693,10 +905,22 @@ mod tests {
     fn the_walk_takes_the_short_way_round() {
         let r = ring(chip());
         // From the top edge to the right edge: one corner, the top-right one.
-        let w = ring_walk(r, egui::pos2(0.0, r.top()), 0, egui::pos2(r.right(), 0.0), 1);
+        let w = ring_walk(
+            r,
+            egui::pos2(0.0, r.top()),
+            0,
+            egui::pos2(r.right(), 0.0),
+            1,
+        );
         assert_eq!(w, vec![r.right_top()]);
         // The other way is three corners, so it loses.
-        let w = ring_walk(r, egui::pos2(r.right(), 0.0), 1, egui::pos2(0.0, r.top()), 0);
+        let w = ring_walk(
+            r,
+            egui::pos2(r.right(), 0.0),
+            1,
+            egui::pos2(0.0, r.top()),
+            0,
+        );
         assert_eq!(w.len(), 1, "{w:?}");
     }
 

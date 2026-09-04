@@ -151,6 +151,10 @@ pub(crate) struct EditorState {
     // ── Code actions (Ctrl+Enter — RA assists / quick-fixes) ─────────────────
     /// `true` after a codeAction request, until the list arrives.
     pub(crate) code_action_in_flight: bool,
+    /// When that request went out. rust-analyzer restarting, or dropping the
+    /// request, otherwise leaves `code_action_in_flight` true forever — and the
+    /// early return it guards then refuses every later Ctrl+Enter, silently.
+    pub(crate) code_action_sent_at: Option<std::time::Instant>,
 
     /// `true` after a codeAction/resolve request, until its edits arrive.
     pub(crate) code_action_resolve_in_flight: bool,
@@ -256,6 +260,7 @@ impl EditorState {
             rename_popup_pos: egui::Pos2::ZERO,
             rename_in_flight: false,
             code_action_in_flight: false,
+            code_action_sent_at: None,
             code_action_resolve_in_flight: false,
             code_actions: Vec::new(),
             code_action_popup_open: false,

@@ -148,9 +148,7 @@ impl Mcu {
                     egui::Sense::click_and_drag(),
                 )
                 .on_hover_cursor(egui::CursorIcon::Grab)
-                .on_hover_text(
-                    "Click to select the whole device - drag to move every part of it",
-                );
+                .on_hover_text("Click to select the whole device - drag to move every part of it");
             if resp.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                 let d = resp.drag_delta();

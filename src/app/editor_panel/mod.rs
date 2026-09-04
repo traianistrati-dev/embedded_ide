@@ -831,10 +831,38 @@ impl AppIde {
                 i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, EXTRACT_FN_KEY)
             });
 
-        let ctrl_enter_pressed = editor_kbd_active
-            && !self.ed.add_dep.open
-            && !self.ed.code_action_popup_open
+        // A code-action popup flagged open with NOTHING to show is a latch with
+        // no way out: the renderer returns early (so you see nothing), the
+        // nav block is skipped (so Escape cannot reach it), and the gate below
+        // then refuses every Ctrl+Enter for the rest of the session. Whatever
+        // put it in that state, it cannot be a state we stay in.
+        if self.ed.code_action_popup_open
+            && self.ed.code_actions.is_empty()
+            && self.ed.code_action_add_dep.is_none()
+        {
+            self.ed.code_action_popup_open = false;
+        }
+        // Consumed whether or not it can act, and REFUSED OUT LOUD. A shortcut
+        // that silently does nothing is indistinguishable from a broken one —
+        // which is exactly how this arrived as a bug report with nothing to go
+        // on.
+        let ctrl_enter_raw = editor_kbd_active
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
+        let blocked = if self.ed.add_dep.open {
+            Some("a crate chooser is open - Esc first")
+        } else if self.ed.code_action_popup_open {
+            Some("the action list is open - Esc first")
+        } else if self.ed.code_action_in_flight {
+            Some("still waiting on rust-analyzer")
+        } else {
+            None
+        };
+        if ctrl_enter_raw {
+            if let Some(why) = blocked {
+                self.set_status_msg(format!("Ctrl+Enter: {why}"));
+            }
+        }
+        let ctrl_enter_pressed = ctrl_enter_raw && blocked.is_none();
         // F12 → show the definition of the symbol at the cursor.
         let mut f12_pressed = editor_kbd_active
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12));

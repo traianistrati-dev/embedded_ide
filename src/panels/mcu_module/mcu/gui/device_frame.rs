@@ -611,9 +611,7 @@ mod tests {
             .find(|p| p.number != spare && !p.name.is_empty())
             .map(|p| p.name.clone())
             .expect("some other pin");
-        assert!(!name.eq_ignore_ascii_case(
-            &mcu.find_pin(spare).expect("the spare pad").name
-        ));
+        assert!(!name.eq_ignore_ascii_case(&mcu.find_pin(spare).expect("the spare pad").name));
         name
     }
 
@@ -629,7 +627,15 @@ mod tests {
         let mcu = grouped_mcu(&[("radar", &[1, 2])]);
         let members = vec![member(Some("radar"), boxx(300.0, 0.0), &[1, 2])];
         with_painter(|p| {
-            let (mats, tabs) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new());
+            let (mats, tabs) = frames(
+                &mcu,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &members,
+                &[],
+                &mut Vec::new(),
+            );
             assert_eq!(mats.len(), 1);
             assert_eq!(tabs.len(), 2);
             assert!(matches!(tabs[1], egui::Shape::Text(_)), "the name is last");
@@ -648,7 +654,15 @@ mod tests {
             member(Some("display"), boxx(300.0, 400.0), &[9]),
         ];
         with_painter(|p| {
-            let (mats, tabs) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new());
+            let (mats, tabs) = frames(
+                &mcu,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &members,
+                &[],
+                &mut Vec::new(),
+            );
             assert_eq!(mats.len(), 2, "one mat per device");
             assert_eq!(tabs.len(), 4, "a plate and a name per device");
             assert!(
@@ -665,10 +679,26 @@ mod tests {
         let bare = grouped_mcu(&[]);
         let orphan = grouped_mcu(&[("radar", &[1])]);
         with_painter(|p| {
-            let (m, t) = frames(&bare, p, egui::Pos2::ZERO, roomy(), &[], &[], &mut Vec::new());
+            let (m, t) = frames(
+                &bare,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &[],
+                &[],
+                &mut Vec::new(),
+            );
             assert!(m.is_empty() && t.is_empty());
             // Grouped, but nothing on the canvas stands for the pad.
-            let (m, t) = frames(&orphan, p, egui::Pos2::ZERO, roomy(), &[], &[], &mut Vec::new());
+            let (m, t) = frames(
+                &orphan,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &[],
+                &[],
+                &mut Vec::new(),
+            );
             assert!(m.is_empty() && t.is_empty());
         });
     }
@@ -681,7 +711,15 @@ mod tests {
         let mcu = grouped_mcu(&[("", &[1])]);
         let members = vec![member(Some(""), boxx(300.0, 0.0), &[1])];
         with_painter(|p| {
-            let (m, t) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new());
+            let (m, t) = frames(
+                &mcu,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &members,
+                &[],
+                &mut Vec::new(),
+            );
             assert!(m.is_empty() && t.is_empty());
         });
     }
@@ -700,8 +738,15 @@ mod tests {
         let canvas =
             egui::Rect::from_min_max(egui::pos2(0.0, -100.0), egui::pos2(anchor + 40.0, 400.0));
         with_painter(|p| {
-            let (_, tabs) =
-                frames(&mcu, p, egui::Pos2::ZERO, canvas, &members, &[], &mut Vec::new());
+            let (_, tabs) = frames(
+                &mcu,
+                p,
+                egui::Pos2::ZERO,
+                canvas,
+                &members,
+                &[],
+                &mut Vec::new(),
+            );
             let plate = match &tabs[0] {
                 egui::Shape::Rect(r) => r.rect,
                 _ => panic!("the plate is first"),
@@ -733,19 +778,45 @@ mod tests {
             _ => panic!("the mat is first"),
         };
         with_painter(|p| {
-            let plain =
-                mat(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            let plain = mat(&frames(
+                &mcu,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &members,
+                &[],
+                &mut Vec::new(),
+            )
+            .0);
             mcu.selected_device = Some("radar".into());
-            let selected =
-                mat(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            let selected = mat(&frames(
+                &mcu,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &members,
+                &[],
+                &mut Vec::new(),
+            )
+            .0);
             assert!(selected.0 > plain.0, "selecting it does brighten the mat");
             assert!(selected.1 > plain.1, "and thickens its hairline");
 
             mcu.pin_search = search_missing(&mcu, 1);
-            let hits = mcu.pin_search_highlight().expect("the search really filters");
+            let hits = mcu
+                .pin_search_highlight()
+                .expect("the search really filters");
             assert!(!hits.contains(&1), "and it excludes this device's pad");
-            let searched_out =
-                mat(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            let searched_out = mat(&frames(
+                &mcu,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &members,
+                &[],
+                &mut Vec::new(),
+            )
+            .0);
             assert!(
                 searched_out.0 < plain.0,
                 "…but the search still wins on the fill: {searched_out:?} vs {plain:?}"
@@ -768,12 +839,36 @@ mod tests {
             _ => panic!("the mat is first"),
         };
         with_painter(|p| {
-            let bright = fill(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            let bright = fill(
+                &frames(
+                    &mcu,
+                    p,
+                    egui::Pos2::ZERO,
+                    roomy(),
+                    &members,
+                    &[],
+                    &mut Vec::new(),
+                )
+                .0,
+            );
             // A search that hits a real pin, but not this device's.
             mcu.pin_search = search_missing(&mcu, 1);
-            let hits = mcu.pin_search_highlight().expect("the search really filters");
+            let hits = mcu
+                .pin_search_highlight()
+                .expect("the search really filters");
             assert!(!hits.contains(&1), "and it excludes this device's pad");
-            let faded = fill(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            let faded = fill(
+                &frames(
+                    &mcu,
+                    p,
+                    egui::Pos2::ZERO,
+                    roomy(),
+                    &members,
+                    &[],
+                    &mut Vec::new(),
+                )
+                .0,
+            );
             assert!(faded < bright, "dimmed, and measurably so");
         });
     }
@@ -790,9 +885,20 @@ mod tests {
         let mcu = grouped_mcu(&[("radar", &[3]), ("display", &[4])]);
         // One box, wiring both pads, resolved to "radar".
         let members = vec![member(Some("radar"), boxx(300.0, 0.0), &[3, 4])];
-        let pads = vec![pad(Some("radar"), 3, tip(3)), pad(Some("display"), 4, tip(4))];
+        let pads = vec![
+            pad(Some("radar"), 3, tip(3)),
+            pad(Some("display"), 4, tip(4)),
+        ];
         with_painter(|p| {
-            let (mats, _) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &pads, &mut Vec::new());
+            let (mats, _) = frames(
+                &mcu,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &members,
+                &pads,
+                &mut Vec::new(),
+            );
             assert_eq!(mats.len(), 2, "both devices are on the canvas");
         });
     }
@@ -980,9 +1086,7 @@ mod tests {
         let hulls = cluster(&[top, right], &pads);
         assert_eq!(hulls.len(), 2);
         assert!(
-            !hulls
-                .iter()
-                .any(|h| pads.iter().any(|p| h.intersects(*p))),
+            !hulls.iter().any(|h| pads.iter().any(|p| h.intersects(*p))),
             "neither mat touches a pad the device does not own"
         );
     }
@@ -1017,13 +1121,7 @@ mod tests {
             v
         };
         let want = key(cluster(&[a, b, c], &[corner]));
-        for order in [
-            [c, b, a],
-            [b, a, c],
-            [c, a, b],
-            [a, c, b],
-            [b, c, a],
-        ] {
+        for order in [[c, b, a], [b, a, c], [c, a, b], [a, c, b], [b, c, a]] {
             assert_eq!(key(cluster(&order, &[corner])), want, "order {order:?}");
         }
         // …and a long row still collapses to one mat whatever order it arrives in.
@@ -1193,9 +1291,15 @@ mod tests {
         let a = egui::Rect::from_min_max(egui::pos2(90.0, 90.0), egui::pos2(110.0, 110.0));
         let b = egui::Rect::from_min_max(egui::pos2(110.0, 130.0), egui::pos2(130.0, 150.0));
         assert!(a.intersects(f) && b.intersects(f), "both already graze it");
-        assert!(gap(a, b) <= JOIN, "and they are close enough to want to merge");
+        assert!(
+            gap(a, b) <= JOIN,
+            "and they are close enough to want to merge"
+        );
         let u = a.union(b);
-        assert!(u.contains(f.min) && u.contains(f.max), "the union would hold it");
+        assert!(
+            u.contains(f.min) && u.contains(f.max),
+            "the union would hold it"
+        );
         assert_eq!(cluster(&[a, b], &[f]).len(), 2, "so the merge is refused");
     }
 
@@ -1250,8 +1354,15 @@ mod tests {
         let bx = boxx(300.0, 0.0);
         let members = vec![member(Some("r"), bx, &[1])];
         with_painter(|p| {
-            let (mats, tabs) =
-                frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new());
+            let (mats, tabs) = frames(
+                &mcu,
+                p,
+                egui::Pos2::ZERO,
+                roomy(),
+                &members,
+                &[],
+                &mut Vec::new(),
+            );
             let mat = match &mats[0] {
                 egui::Shape::Rect(r) => r.rect,
                 _ => panic!("the mat is first"),

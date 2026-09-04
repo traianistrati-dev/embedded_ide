@@ -464,10 +464,7 @@ pub fn draw_io_arrows(
             painter.rect_filled(
                 egui::Rect::from_min_size(
                     egui::pos2(name_rect.left(), name_rect.top() - 4.0),
-                    egui::vec2(
-                        name_rect.width().max(12.0),
-                        super::modules::GROUP_BAR_H,
-                    ),
+                    egui::vec2(name_rect.width().max(12.0), super::modules::GROUP_BAR_H),
                 ),
                 1.0,
                 super::modules::group_color(g),

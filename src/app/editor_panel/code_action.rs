@@ -32,8 +32,22 @@ impl AppIde {
             self.selected_file,
             ProjectFileId::MainRs | ProjectFileId::UserFile(_)
         );
-        if !lsp_file || self.ed.code_action_in_flight {
+        if !lsp_file {
             return;
+        }
+        // A request older than this was never answered — rust-analyzer restarted
+        // under it, or dropped it. Without the deadline the flag stays true and
+        // every later Ctrl+Enter returns here instead of asking.
+        const CODE_ACTION_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        if self.ed.code_action_in_flight {
+            let stale = self
+                .ed
+                .code_action_sent_at
+                .is_none_or(|t| t.elapsed() > CODE_ACTION_WAIT);
+            if !stale {
+                return;
+            }
+            self.ed.code_action_in_flight = false;
         }
         let Some(rel) =
             selected_file_rel_path(&self.selected_file, &self.project_tree.user_src_files)
@@ -80,6 +94,7 @@ impl AppIde {
         // who asked so it is written into the right one.
         self.lsp_asker.code_action = slot;
         self.ed.code_action_in_flight = true;
+        self.ed.code_action_sent_at = Some(std::time::Instant::now());
         self.ed.code_action_popup_open = false;
     }
 
@@ -97,7 +112,16 @@ impl AppIde {
                 // the choice the user has not made yet.
                 let ours = self.ed.code_action_add_dep.is_some();
                 match actions.len() {
-                    0 if !ours => {}
+                    // Say so. An empty answer used to be indistinguishable from
+                    // a broken shortcut — which is how "Ctrl+Enter does not
+                    // react" arrived as a bug report with nothing to go on. It
+                    // is also the most COMMON outcome: rust-analyzer offers
+                    // assists at a few positions, not at every caret.
+                    0 if !ours => {
+                        self.set_status_msg(
+                            "Ctrl+Enter: rust-analyzer has no action at the cursor".into(),
+                        );
+                    }
                     1 if !ours => self.begin_code_action(actions.into_iter().next().unwrap()),
                     _ => {
                         self.ed.code_actions = actions;

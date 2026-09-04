@@ -481,10 +481,7 @@ impl Mcu {
     /// What decides whether the tab offers "reset to auto" at all.
     pub fn device_is_manual(&self, name: &str) -> bool {
         let name = name.trim();
-        let mine = |p: usize| {
-            self.group_of_pin(p)
-                .is_some_and(|g| g.name.trim() == name)
-        };
+        let mine = |p: usize| self.group_of_pin(p).is_some_and(|g| g.name.trim() == name);
         self.modules
             .iter()
             .any(|m| m.pos != (0.0, 0.0) && m.connections.iter().any(|c| mine(c.mcu_pin)))
@@ -543,7 +540,11 @@ impl Mcu {
         // one line, and come back after a reload as two devices with literally
         // the same name.
         if !name.trim().is_empty() {
-            match self.groups.iter_mut().find(|g| g.name.trim() == name.trim()) {
+            match self
+                .groups
+                .iter_mut()
+                .find(|g| g.name.trim() == name.trim())
+            {
                 Some(g) => {
                     g.pins.insert(pin);
                 }
@@ -628,9 +629,7 @@ impl Mcu {
             .groups
             .iter()
             .enumerate()
-            .find(|(k, g)| {
-                *k != idx && g.name.trim() == name.trim() && !name.trim().is_empty()
-            })
+            .find(|(k, g)| *k != idx && g.name.trim() == name.trim() && !name.trim().is_empty())
             .map(|(k, _)| k);
         match other {
             Some(other) => {
@@ -2512,12 +2511,20 @@ mod device_groups {
         assert_eq!(mcu.active_device(), Some("by pin"));
 
         mcu.selected_module = Some(m.id.clone());
-        assert_eq!(mcu.active_device(), Some("by module"), "the module outranks the pin");
+        assert_eq!(
+            mcu.active_device(),
+            Some("by module"),
+            "the module outranks the pin"
+        );
 
         // Give "by tab" a pad of its own, so it is a live device.
         mcu.join_group(loose, "by tab");
         mcu.selected_device = Some("by tab".into());
-        assert_eq!(mcu.active_device(), Some("by tab"), "explicit outranks both");
+        assert_eq!(
+            mcu.active_device(),
+            Some("by tab"),
+            "explicit outranks both"
+        );
     }
 
     /// A device can be renamed or dissolved from the roster while its name is
@@ -2573,7 +2580,10 @@ mod device_groups {
         mcu.join_group_module(&m, "radar");
         mcu.join_group(spare, "radar");
 
-        assert!(!mcu.device_is_manual("radar"), "everything starts auto-packed");
+        assert!(
+            !mcu.device_is_manual("radar"),
+            "everything starts auto-packed"
+        );
         mcu.modules[0].pos = (40.0, -30.0);
         mcu.io_pin_pos.insert(spare, (10.0, 10.0));
         assert!(mcu.device_is_manual("radar"));
@@ -2684,7 +2694,11 @@ mod device_groups {
             .filter(|g| g.pins.contains(&to))
             .map(|g| g.name.as_str())
             .collect();
-        assert_eq!(holders, ["radar"], "the destination is in exactly one device");
+        assert_eq!(
+            holders,
+            ["radar"],
+            "the destination is in exactly one device"
+        );
         assert_eq!(named(&mcu, "radar"), Some(vec![to]));
         assert_eq!(
             named(&mcu, "display"),

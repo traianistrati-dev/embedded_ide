@@ -486,7 +486,10 @@ mod auto_fit_tests {
         // What the Scene will do with it.
         let scale = (avail / fed.size()).min_elem();
         let drawn = content.size() * scale;
-        assert!((drawn.x / avail.x - AUTO_FIT_FILL).abs() < 0.001, "{drawn:?}");
+        assert!(
+            (drawn.x / avail.x - AUTO_FIT_FILL).abs() < 0.001,
+            "{drawn:?}"
+        );
         assert!(drawn.y / avail.y <= AUTO_FIT_FILL + 0.001);
     }
 
@@ -494,7 +497,8 @@ mod auto_fit_tests {
     #[test]
     fn the_margin_is_a_tenth_of_the_panel_on_each_side() {
         let avail = egui::vec2(800.0, 800.0);
-        let content = egui::Rect::from_min_size(egui::pos2(-500.0, -500.0), egui::vec2(1000.0, 1000.0));
+        let content =
+            egui::Rect::from_min_size(egui::pos2(-500.0, -500.0), egui::vec2(1000.0, 1000.0));
         let fed = auto_fit_bounds(content, avail);
         let scale = (avail / fed.size()).min_elem();
         let margin = (avail.x - content.width() * scale) / 2.0;

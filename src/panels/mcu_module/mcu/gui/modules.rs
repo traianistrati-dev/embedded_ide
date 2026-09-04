@@ -1410,7 +1410,11 @@ const GROUP_COLOURS: [egui::Color32; 6] = [
 /// lane well clear of it.
 fn edge_terminal(rect: egui::Rect, normal: egui::Vec2, anchor: egui::Pos2) -> egui::Pos2 {
     if normal.x.abs() > normal.y.abs() {
-        let x = if normal.x > 0.0 { rect.right() } else { rect.left() };
+        let x = if normal.x > 0.0 {
+            rect.right()
+        } else {
+            rect.left()
+        };
         egui::pos2(
             x,
             anchor
@@ -1418,7 +1422,11 @@ fn edge_terminal(rect: egui::Rect, normal: egui::Vec2, anchor: egui::Pos2) -> eg
                 .clamp(rect.top() + CORNER_INSET, rect.bottom() - CORNER_INSET),
         )
     } else {
-        let y = if normal.y > 0.0 { rect.bottom() } else { rect.top() };
+        let y = if normal.y > 0.0 {
+            rect.bottom()
+        } else {
+            rect.top()
+        };
         egui::pos2(
             anchor
                 .x
@@ -1465,10 +1473,7 @@ pub fn nudge(v: egui::Vec2) -> (f32, f32) {
 /// the box, such a box would light both its wires or neither, and the mat under
 /// it would be telling the truth while its wires lied.
 pub fn wire_lit<'a>(active: Option<&'a str>, mcu: &Mcu, pad: usize) -> Option<&'a str> {
-    active.filter(|d| {
-        mcu.group_of_pin(pad)
-            .is_some_and(|g| g.name.trim() == *d)
-    })
+    active.filter(|d| mcu.group_of_pin(pad).is_some_and(|g| g.name.trim() == *d))
 }
 
 /// One wire, lit or not, as shapes rather than paint calls.
@@ -2274,6 +2279,10 @@ pub fn draw_modules(
     let active = mcu.active_device().map(str::to_owned);
     // The corridor every wire is routed down, computed once for the canvas.
     let wire_ring = super::wire::ring(chip_rect);
+    // Every box, as an obstacle. A wire drawn across a box reads as though it
+    // connects to it, which is the one thing a schematic line may never suggest
+    // wrongly.
+    let box_rects: Vec<egui::Rect> = boxes.iter().map(|(_, r, ..)| *r).collect();
     // ONE slot for every wire on the canvas, reserved before the boxes are
     // drawn and filled after. Wires used to be painted per box, inside the loop,
     // so a box packed later covered the wires of a box packed earlier - and a
@@ -2317,7 +2326,7 @@ pub fn draw_modules(
             }
         }
     }
-    for (i, rect, conns, side, connected, manual) in boxes.iter() {
+    for (bi, (i, rect, conns, side, connected, manual)) in boxes.iter().enumerate() {
         let m = &mcu.modules[*i];
         let inst = m.instance();
         let removing = removing_id.as_deref() == Some(m.id.as_str());
@@ -2374,7 +2383,11 @@ pub fn draw_modules(
             let port = nearest_on_outline(&sil, edge_terminal(*rect, adir, *anchor));
             let pts = super::wire::best_route(
                 wire_ring,
-                chip_rect,
+                super::wire::Blocked {
+                    body: chip_rect,
+                    boxes: &box_rects,
+                    own: bi,
+                },
                 *anchor,
                 adir,
                 &[(term, facing_normal(face)), (port, adir)],
@@ -8025,7 +8038,10 @@ mod wire_tests {
         // Up: on the top edge, lined up with the pad but never in the corner.
         let t = super::edge_terminal(r, egui::vec2(0.0, -1.0), far);
         assert_eq!(t.y, r.top());
-        assert!(t.x < r.right() && t.x > r.left(), "clear of the corners: {t:?}");
+        assert!(
+            t.x < r.right() && t.x > r.left(),
+            "clear of the corners: {t:?}"
+        );
         // Right: on the right edge.
         let t = super::edge_terminal(r, egui::vec2(1.0, 0.0), far);
         assert_eq!(t.x, r.right());
@@ -8062,7 +8078,11 @@ mod wire_tests {
         mcu.join_group(7, "radar");
         mcu.join_group(8, "display");
         assert_eq!(wire_lit(Some("radar"), &mcu, 7), Some("radar"));
-        assert_eq!(wire_lit(Some("radar"), &mcu, 8), None, "the other device's pad");
+        assert_eq!(
+            wire_lit(Some("radar"), &mcu, 8),
+            None,
+            "the other device's pad"
+        );
         assert_eq!(wire_lit(None, &mcu, 7), None, "nothing is selected");
     }
 

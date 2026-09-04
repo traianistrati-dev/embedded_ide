@@ -398,13 +398,23 @@ mod tests {
     #[test]
     fn a_rename_that_merges_leaves_the_rest_of_the_roster_alone() {
         let mut mcu = bare_mcu();
-        mcu.groups = vec![group("radar", &[1]), group("display", &[2]), group("imu", &[3])];
+        mcu.groups = vec![
+            group("radar", &[1]),
+            group("display", &[2]),
+            group("imu", &[3]),
+        ];
         let before: Vec<String> = mcu.groups.iter().map(|g| g.name.clone()).collect();
         // The user retypes the FIRST row as "display".
         let mut names = before.clone();
         names[0] = "display".into();
 
-        super::apply_renames(&mut mcu, &names, &before, &blurred(names.len()), &blurred(names.len()));
+        super::apply_renames(
+            &mut mcu,
+            &names,
+            &before,
+            &blurred(names.len()),
+            &blurred(names.len()),
+        );
 
         assert_eq!(mcu.groups.len(), 2, "one merge, one row gone");
         assert_eq!(named(&mcu, "display"), Some(vec![1, 2]));
@@ -427,7 +437,13 @@ mod tests {
         let mut names = before.clone();
         names[1] = "a".into();
 
-        super::apply_renames(&mut mcu, &names, &before, &blurred(names.len()), &blurred(names.len()));
+        super::apply_renames(
+            &mut mcu,
+            &names,
+            &before,
+            &blurred(names.len()),
+            &blurred(names.len()),
+        );
 
         assert_eq!(named(&mcu, "a"), Some(vec![1, 2]));
         assert_eq!(named(&mcu, "c"), Some(vec![3]));
@@ -450,7 +466,13 @@ mod tests {
         let before: Vec<String> = mcu.groups.iter().map(|g| g.name.clone()).collect();
         let names = vec!["b".to_owned(), "x".to_owned(), "c".to_owned()];
 
-        super::apply_renames(&mut mcu, &names, &before, &blurred(names.len()), &blurred(names.len()));
+        super::apply_renames(
+            &mut mcu,
+            &names,
+            &before,
+            &blurred(names.len()),
+            &blurred(names.len()),
+        );
 
         assert_eq!(named(&mcu, "c"), Some(vec![3]), "c was never edited");
         assert_eq!(
@@ -507,7 +529,13 @@ mod tests {
         let before: Vec<String> = mcu.groups.iter().map(|g| g.name.clone()).collect();
         let mut names = before.clone();
         names[0] = "mw radar".into();
-        super::apply_renames(&mut mcu, &names, &before, &blurred(names.len()), &blurred(names.len()));
+        super::apply_renames(
+            &mut mcu,
+            &names,
+            &before,
+            &blurred(names.len()),
+            &blurred(names.len()),
+        );
         assert_eq!(named(&mcu, "mw radar"), Some(vec![1]));
         assert_eq!(named(&mcu, "display"), Some(vec![2]));
     }
@@ -524,7 +552,13 @@ mod tests {
         for ch in "mw radar".chars() {
             let before: Vec<String> = mcu.groups.iter().map(|g| g.name.clone()).collect();
             let names = vec![format!("{}{ch}", before[0])];
-            super::apply_renames(&mut mcu, &names, &before, &blurred(names.len()), &blurred(names.len()));
+            super::apply_renames(
+                &mut mcu,
+                &names,
+                &before,
+                &blurred(names.len()),
+                &blurred(names.len()),
+            );
         }
         assert_eq!(mcu.groups[0].name, "mw radar");
         // …and the pad gesture still finds the group by that name.
@@ -581,7 +615,13 @@ mod tests {
         let mut names = before.clone();
         names[1] = "Device 1 ".into();
 
-        super::apply_renames(&mut mcu, &names, &before, &blurred(names.len()), &blurred(names.len()));
+        super::apply_renames(
+            &mut mcu,
+            &names,
+            &before,
+            &blurred(names.len()),
+            &blurred(names.len()),
+        );
 
         assert_eq!(mcu.groups.len(), 1, "they merged");
         assert_eq!(named(&mcu, "Device 1"), Some(vec![1, 2]));
