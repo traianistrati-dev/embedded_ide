@@ -373,6 +373,20 @@ pub struct Mcu {
     /// auto-placed beside the pin. Draggable like virtual modules; persisted in
     /// `mcu.config` `@iopins`. View-only.
     pub io_pin_pos: std::collections::BTreeMap<usize, (f32, f32)>,
+    /// Devices on the board: a name over a set of pads.
+    ///
+    /// A VIEW of the wiring, not part of it: nothing here changes a binding, an
+    /// init call or a pad's function. A sensor with a UART and a spare input
+    /// line is three pads that belong together, and the diagram had no way to
+    /// say so.
+    ///
+    /// The one thing it DOES reach is `codegen::common::device_comment`, which
+    /// is why it feeds `calculate_mcu_state_hash` - a rename has to regenerate
+    /// main.rs or the comment would go stale.
+    ///
+    /// See [`PinGroup`](crate::panels::mcu_module::mcu_config::PinGroup) for
+    /// why membership is by pad rather than by module.
+    pub groups: Vec<crate::panels::mcu_module::mcu_config::PinGroup>,
     /// IWDG / WWDG settings from the Configuration tab. Not a `VirtualModule`:
     /// those live on the Pins canvas and own pins, and a watchdog has none.
     /// Persisted in `mcu.config` `@watchdog`; feeds `calculate_mcu_state_hash`

@@ -32,11 +32,15 @@ const V_GAP: f32 = 52.0;
 pub const MARGIN: f32 = 14.0;
 
 /// Rows drawn for a node: every symbol, or MAX + a trailing "+K more" row.
-pub fn shown_rows(symbol_count: usize) -> usize {
-    if symbol_count > MAX_SYMBOL_ROWS {
-        MAX_SYMBOL_ROWS + 1
-    } else {
+///
+/// An EXPANDED node truncates nothing. The cap exists so a big module cannot
+/// dominate the overview, but expanding one is the user asking to see that
+/// module's flow - and a flow with "+7 more" in the middle of it is not a flow.
+pub fn shown_rows(symbol_count: usize, expanded: bool) -> usize {
+    if expanded || symbol_count <= MAX_SYMBOL_ROWS {
         symbol_count
+    } else {
+        MAX_SYMBOL_ROWS + 1
     }
 }
 
@@ -79,6 +83,20 @@ pub fn layout(graph: &ModuleGraph) -> GraphLayout {
 /// should overlap as little as possible" objective. One-time cost per layout
 /// (cached by content hash), tiny at this graph size.
 pub fn layout_with_calls(graph: &ModuleGraph, calls: &[(usize, usize)]) -> GraphLayout {
+    layout_with_calls_expanded(graph, calls, &std::collections::BTreeSet::new())
+}
+
+/// [`layout_with_calls`] with a set of EXPANDED node indices.
+///
+/// An expanded node lists every symbol instead of capping at
+/// [`MAX_SYMBOL_ROWS`], so it is TALLER - which is why expansion has to reach
+/// the layout at all rather than being a paint-time detail. The set is part of
+/// the caller's cache key for the same reason.
+pub fn layout_with_calls_expanded(
+    graph: &ModuleGraph,
+    calls: &[(usize, usize)],
+    expanded: &std::collections::BTreeSet<usize>,
+) -> GraphLayout {
     let n = graph.nodes.len();
     if n == 0 {
         return GraphLayout::default();
@@ -279,7 +297,7 @@ pub fn layout_with_calls(graph: &ModuleGraph, calls: &[(usize, usize)]) -> Graph
     };
     // Node height: header band + the symbol rows (none → Phase-1 compact box).
     let height_of = |i: usize| -> f32 {
-        let rows = shown_rows(graph.nodes[i].symbols.len());
+        let rows = shown_rows(graph.nodes[i].symbols.len(), expanded.contains(&i));
         if rows == 0 {
             HEADER_H
         } else {
@@ -705,9 +723,11 @@ use crate::m::report::decode;
 
     #[test]
     fn truncated_symbol_list_caps_rows() {
-        assert_eq!(shown_rows(0), 0);
-        assert_eq!(shown_rows(MAX_SYMBOL_ROWS), MAX_SYMBOL_ROWS);
-        assert_eq!(shown_rows(MAX_SYMBOL_ROWS + 5), MAX_SYMBOL_ROWS + 1);
+        assert_eq!(shown_rows(0, false), 0);
+        assert_eq!(shown_rows(MAX_SYMBOL_ROWS, false), MAX_SYMBOL_ROWS);
+        assert_eq!(shown_rows(MAX_SYMBOL_ROWS + 5, false), MAX_SYMBOL_ROWS + 1);
+        // Expanded: nothing is hidden.
+        assert_eq!(shown_rows(MAX_SYMBOL_ROWS + 5, true), MAX_SYMBOL_ROWS + 5);
     }
 
     #[test]

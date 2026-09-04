@@ -29,6 +29,7 @@ mod chip_search_ui;
 mod clock_import_dialog;
 mod clone_project_dialog;
 mod datasheet_import_dialog;
+mod device_groups;
 mod dialogs;
 mod extract_crate_dialog;
 mod mcu_form_dialog;
@@ -2946,6 +2947,17 @@ impl AppIde {
         // this the Configuration tab would edit a value that never reaches the
         // generated project until something else happened to bump the hash.
         format!("{:?}", mcu.watchdog).hash(&mut hasher);
+
+        // Device groups. A group changes no binding and no init call - but it
+        // does write `device_comment` into the generated main.rs, so renaming or
+        // refilling one has to regenerate. Without this the roster would edit a
+        // comment that only appeared once something else moved.
+        // Only the LIVE ones: an empty row the roster has just created, or one
+        // whose name the user cleared, produces no comment and no mat - hashing
+        // it forced a full regeneration that emitted identical bytes.
+        for g in mcu.groups.iter().filter(|g| g.is_live()) {
+            format!("{:?}", g).hash(&mut hasher);
+        }
 
         // Hash modules
         for module in &mcu.modules {

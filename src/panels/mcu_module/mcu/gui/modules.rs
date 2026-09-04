@@ -46,7 +46,7 @@ const BOX_W: f32 = 170.0;
 /// Tall enough for the name, the config summary, and the rename field at the
 /// bottom.
 const BOX_H: f32 = 98.0;
-const BOX_GAP: f32 = 14.0;
+pub(super) const BOX_GAP: f32 = 14.0;
 /// Height of one pin row inside a Custom module's box (its rename field).
 const CUSTOM_ROW_H: f32 = 21.0;
 
@@ -944,6 +944,8 @@ fn draw_box(
     // matching how a selected pin is called out on the chip. EVERY text in the
     // box grows by `SELECTED_TEXT_SCALE`, not just the title.
     selected: bool,
+    // The device this module is part of, if the user grouped it.
+    group: Option<&str>,
 ) {
     // Background: the panel dark, tinted towards the module's own colour, or a
     // red pulse while the remove-confirm for this module is open.
@@ -1039,6 +1041,12 @@ fn draw_box(
             LEGEND_GREY_OFF
         };
         paint_legend(&painter.with_clip_rect(rect), &l, grey);
+    }
+    // The device this module belongs to, if any - a bar in the group's colour
+    // under the title, where it reads as "part of" rather than as another
+    // signal on the diagram.
+    if let Some(g) = group {
+        painter.rect_filled(group_bar_rect(rect, scale), 1.5, group_color(g));
     }
     let title_size = TITLE_SIZE * scale;
     painter.text(
@@ -1382,6 +1390,54 @@ fn pcnt_legend_shape(r: egui::Rect) -> Legend {
         count.push(egui::pos2(x + slot, y));
     }
     Legend::new().signal(wave).accent(square_edges(count))
+}
+
+/// The accents a device group is drawn in.
+///
+/// Chosen to sit OUTSIDE two vocabularies already spoken on this canvas. White
+/// at 2.8 px is selection, shared by pins, boxes and io fields; every saturated
+/// hue belongs to `PinFunction::color` and is reused for wires, borders, titles
+/// and list rows. These are desaturated and light, which reads as "a label on
+/// top of" rather than "another kind of signal".
+const GROUP_COLOURS: [egui::Color32; 6] = [
+    egui::Color32::from_rgb(196, 168, 120), // sand
+    egui::Color32::from_rgb(150, 176, 190), // slate blue
+    egui::Color32::from_rgb(178, 152, 186), // mauve
+    egui::Color32::from_rgb(150, 186, 158), // sage
+    egui::Color32::from_rgb(200, 152, 148), // clay
+    egui::Color32::from_rgb(168, 172, 200), // periwinkle
+];
+
+/// The colour of the group called `name`.
+///
+/// Derived from the NAME rather than stored, so it needs no field, no picker
+/// and no migration - and a project reopened years later draws its devices the
+/// same colour it did before. Two names can land on one colour; renaming either
+/// moves it, which is a smaller price than a colour field nobody wants to fill
+/// in.
+pub fn group_color(name: &str) -> egui::Color32 {
+    let h = name
+        .trim()
+        .bytes()
+        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(u32::from(b)));
+    GROUP_COLOURS[h as usize % GROUP_COLOURS.len()]
+}
+
+/// Height of the bar that marks a group member.
+const GROUP_BAR_H: f32 = 3.0;
+
+/// The bar under a member module's title, inside its box.
+///
+/// A BAR and not a tinted fill: the fill already carries the peripheral's own
+/// colour, and re-tinting it would be two facts fighting over one area. A bar
+/// is a second, smaller mark that survives zoom-out for the same reason the
+/// fill does - it has area, unlike a border.
+fn group_bar_rect(rect: egui::Rect, scale: f32) -> egui::Rect {
+    let w = rect.width() * 0.42;
+    egui::Rect::from_min_size(
+        egui::pos2(rect.center().x - w / 2.0, rect.top() + 22.0 * scale),
+        egui::vec2(w, GROUP_BAR_H),
+    )
 }
 
 /// The one grey every legend's signal is drawn in, connected and not.
@@ -1975,6 +2031,11 @@ pub fn draw_modules(
     display_chip: egui::Rect,
     rot: Rot,
     ui: &mut egui::Ui,
+    // Out-param, the same idiom as `field_pass` below: every box's rect and the
+    // pads it speaks for, for the device mats painted into the slot reserved
+    // before the chip body. Collected here rather than recomputed, so a mat is
+    // drawn around what was actually painted.
+    members: &mut Vec<super::device_frame::Member>,
 ) {
     // Boxes are placed around the DISPLAY rect (what the user sees); pin anchors
     // are computed on the LOCAL rect then rotated. For an un-rotated chip the two
@@ -2117,7 +2178,27 @@ pub fn draw_modules(
     let mut drag_updates: Vec<(usize, (f32, f32))> = Vec::new();
     let mut reset_updates: Vec<usize> = Vec::new();
     let mut field_pass: Vec<(usize, egui::Rect)> = Vec::new();
-    for (i, rect, conns, side, connected, manual) in &boxes {
+    // Which device each module belongs to. Read BEFORE the loop, because
+    // `group_of_module` borrows the whole `Mcu` and the loop already holds a
+    // module out of it.
+    let box_groups: Vec<Option<String>> = boxes
+        .iter()
+        .map(|(i, ..)| {
+            mcu.group_of_module(&mcu.modules[*i])
+                .map(|g| g.name.clone())
+        })
+        .collect();
+    // A box speaks for every pad it wires, including one another device holds:
+    // `group_of_module` answers with the first pad's group, so without `covers`
+    // the second device would draw a competing mat over the same box.
+    members.extend(boxes.iter().zip(&box_groups).map(|((_, r, conns, ..), g)| {
+        super::device_frame::Member {
+            group: g.clone(),
+            rect: *r,
+            covers: conns.iter().map(|(_, _, n)| *n).collect(),
+        }
+    }));
+    for (n, (i, rect, conns, side, connected, manual)) in boxes.iter().enumerate() {
         let m = &mcu.modules[*i];
         let inst = m.instance();
         let removing = removing_id.as_deref() == Some(m.id.as_str());
@@ -2131,6 +2212,7 @@ pub fn draw_modules(
             native_forced,
             removing.then_some(blink),
             mcu.selected_module.as_deref() == Some(m.id.as_str()),
+            box_groups[n].as_deref(),
         );
 
         for (sig, anchor, anchor_pin) in conns {

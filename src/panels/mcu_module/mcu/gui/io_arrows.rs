@@ -161,6 +161,11 @@ pub fn draw_io_arrows(
     local_chip: egui::Rect,
     rot: Rot,
     ui: &mut egui::Ui,
+    // Out-param: each field's full painted footprint, for the device mats. It is
+    // filled from INSIDE the draw loop, which is legal because the mats go into
+    // a slot reserved before the chip body and filled after this returns - so
+    // `name_rect`, the one rect that cannot exist before painting, costs nothing.
+    members: &mut Vec<super::device_frame::Member>,
 ) {
     // Snapshot geometry first (immutable borrow), then edit labels (mutable).
     struct Item {
@@ -170,6 +175,14 @@ pub fn draw_io_arrows(
         flow: IoDir,
         color: egui::Color32,
         preview_base: String,
+        /// The device holding this pad, if any. The NAME and not the colour:
+        /// `group_color` maps six hues over unbounded names, so two devices can
+        /// collide and a mat keyed on colour would merge them into one.
+        /// Snapshotted here because the draw loop below borrows `mcu` mutably.
+        group: Option<String>,
+        /// Whether this field draws an IRQ strip under it - known only from the
+        /// pin, which the loop reads again only behind a mutable borrow.
+        has_irq: bool,
     }
     // A pin whose name belongs to a virtual module gets no field here: a Custom
     // module draws it inside its own box, and a Timer module owns the PWM
@@ -194,6 +207,8 @@ pub fn draw_io_arrows(
             color: p.selected_function.color(),
             // Base binding the label is appended to, e.g. "pc13_out" / "gpio2_out".
             preview_base: pin_binding(&p.name.to_ascii_lowercase(), &p.selected_function, ""),
+            group: mcu.group_of_pin(p.number).map(|g| g.name.clone()),
+            has_irq: p.selected_function == PinFunction::GpioInput,
         });
     }
 
@@ -404,6 +419,38 @@ pub fn draw_io_arrows(
             egui::FontId::proportional(9.0 * scale),
             pcol,
         );
+
+        // The device this pad belongs to: the same bar a grouped module's box
+        // wears, laid over the variable name rather than under a title. The pad
+        // itself is ticked on the chip; this says the field out here is the same
+        // device, without making the reader follow the wire back.
+        if let Some(g) = &it.group {
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(name_rect.left(), name_rect.top() - 4.0),
+                    egui::vec2(name_rect.width().max(12.0), 3.0),
+                ),
+                1.0,
+                super::modules::group_color(g),
+            );
+        }
+
+        // The field's full painted footprint, for the device mat: the text box,
+        // the drag handle, the variable name above it (which is routinely WIDER
+        // than the box), the group bar over that, and the IRQ strip below when
+        // there is one. The connector is left out on purpose - it belongs to the
+        // pin as much as to the field, and including it would drag every mat
+        // back onto the chip.
+        let mut foot = field_rect.union(handle_rect).union(name_rect);
+        foot.min.y -= 4.0;
+        if it.has_irq {
+            foot.max.y += 18.0 * scale;
+        }
+        members.push(super::device_frame::Member {
+            group: it.group.clone(),
+            rect: foot,
+            covers: vec![it.num],
+        });
 
         if let Some(pin) = mcu.find_pin_mut(it.num) {
             ui.push_id(("io_label", it.num), |ui| {

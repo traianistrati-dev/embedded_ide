@@ -35,6 +35,7 @@ const CLOCK_MANUAL_HEADER: &str = "@clockmanual";
 const IOPINS_HEADER: &str = "@iopins";
 const IRQ_HEADER: &str = "@irq";
 const IOMODE_HEADER: &str = "@iomode";
+const GROUPS_HEADER: &str = "@groups";
 const WATCHDOG_HEADER: &str = "@watchdog";
 const COMP_HEADER: &str = "@comp";
 
@@ -319,6 +320,99 @@ pub fn iopins_section(pos: &std::collections::BTreeMap<usize, (f32, f32)>) -> St
         s.push_str(&format!("{num}={x},{y}\n"));
     }
     s
+}
+
+/// One device on the board: a name, and the pads that belong to it.
+///
+/// Keyed by PIN NUMBER, like `@iopins`, `@irq` and `@iomode` - and that is the
+/// whole design decision. A group could have named the modules it contains
+/// instead, but a module has no stable identity: `reconcile_modules` deletes a
+/// peripheral module whose pads were re-purposed and re-wiring mints a NEW id,
+/// so a list of ids loses its members on an ordinary gesture. A pin number
+/// comes from the chip definition and never moves.
+///
+/// A MODULE is in the group when any of its pads is - derived, never stored, so
+/// it survives that delete-and-recreate for free.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PinGroup {
+    pub name: String,
+    pub pins: std::collections::BTreeSet<usize>,
+}
+
+impl PinGroup {
+    /// Whether this is a device yet.
+    ///
+    /// ONE predicate, shared by persistence, the generated comment and the
+    /// canvas mats. They used to disagree: `@groups` required a name and the
+    /// other two did not, so a device whose name the user had cleared was
+    /// painted on the canvas and written into main.rs as a nameless
+    /// `// : PA4, PA5` - and then vanished on the next save, because
+    /// persistence alone refused to write it.
+    ///
+    /// A group the roster is still filling in is not yet a device; it stays on
+    /// the roster and nowhere else.
+    pub fn is_live(&self) -> bool {
+        !self.name.trim().is_empty() && !self.pins.is_empty()
+    }
+}
+
+/// The `@groups` section - one `pin,pin,pin=name` per device - or "" when
+/// nothing is grouped, so a project that groups nothing round-trips without it.
+///
+/// PINS FIRST, name last, which is the opposite of every other section here and
+/// is load-bearing twice over. The name is free text typed into a panel field:
+///
+/// * written last and split on the FIRST `=`, it may CONTAIN an `=`
+///   ("PA0=reset"). Written first it would take the pin list with it.
+/// * written after the digits, the line can never START with `@` - and
+///   [`section_body`] ends a section at the first line that does. A device
+///   named "@radar" on the other layout would truncate the section and take
+///   every group after it with it.
+pub fn groups_section(groups: &[PinGroup]) -> String {
+    let live: Vec<&PinGroup> = groups.iter().filter(|g| g.is_live()).collect();
+    if live.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(GROUPS_HEADER);
+    s.push('\n');
+    for g in live {
+        let pins: Vec<String> = g.pins.iter().map(usize::to_string).collect();
+        s.push_str(&format!("{}={}\n", pins.join(","), g.name.trim()));
+    }
+    s
+}
+
+/// Read `@groups` back. A line whose pins do not parse is dropped rather than
+/// guessed at - a half-read group would claim pads it was never given.
+pub fn parse_groups(text: &str) -> Vec<PinGroup> {
+    let mut out = Vec::new();
+    let Some(body) = section_body(text, GROUPS_HEADER) else {
+        return out;
+    };
+    for line in body.lines() {
+        let Some((rest, name)) = line.split_once('=') else {
+            continue;
+        };
+        // Only the padding a panel field allows is trimmed off the name; its
+        // interior is whatever the user typed.
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let pins: Option<std::collections::BTreeSet<usize>> = rest
+            .split(',')
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| p.trim().parse::<usize>().ok())
+            .collect();
+        match pins {
+            Some(pins) if !pins.is_empty() => out.push(PinGroup {
+                name: name.to_owned(),
+                pins,
+            }),
+            _ => continue,
+        }
+    }
+    out
 }
 
 /// The `@irq` section — one `num=Edge` per interrupt-enabled input pin — or ""
@@ -946,5 +1040,80 @@ mod lpuart_persist_tests {
         assert!(matches!(back[0].config, ModuleConfig::Lpuart(_)));
         assert_eq!(back[0].instance(), 1);
         assert_eq!(back[0].pin_for(ModuleSignal::LpTx), Some(21));
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::{PinGroup, groups_section, parse_groups};
+
+    fn g(name: &str, pins: &[usize]) -> PinGroup {
+        PinGroup {
+            name: name.to_owned(),
+            pins: pins.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn a_board_full_of_devices_round_trips() {
+        let groups = vec![g("mw radar", &[4, 5, 6]), g("display", &[10, 11])];
+        let back = parse_groups(&groups_section(&groups));
+        assert_eq!(back, groups);
+    }
+
+    /// A project that groups nothing must write no section at all, or every
+    /// existing `mcu.config` gains a line it did not have and stops matching
+    /// itself across a save.
+    #[test]
+    fn nothing_grouped_writes_nothing() {
+        assert_eq!(groups_section(&[]), "");
+        assert_eq!(groups_section(&[g("", &[1]), g("empty", &[])]), "");
+        assert!(parse_groups("@iopins\n1=3.0,4.0\n").is_empty());
+    }
+
+    /// The section ends where the next `@` begins - the shared rule for every
+    /// section in this file. A group reading past its own body would swallow
+    /// `@iopins` and drop the lot as unparseable.
+    #[test]
+    fn the_section_stops_at_the_next_one() {
+        let text = format!("{}@irq\n7=rising\n", groups_section(&[g("radar", &[4, 5])]));
+        assert_eq!(parse_groups(&text), vec![g("radar", &[4, 5])]);
+    }
+
+    /// Names are free text typed into a panel field. Everything but a newline
+    /// has to survive - including the `=` the line is split on, and a leading
+    /// `@`, which on the obvious `name=pins` layout would end the section.
+    #[test]
+    fn a_name_may_hold_anything_but_a_newline() {
+        for name in ["a=b", "SPI, and the reset line", "  padded  ", "@iopins"] {
+            let back = parse_groups(&groups_section(&[g(name, &[2])]));
+            assert_eq!(back.len(), 1, "{name}");
+            assert_eq!(back[0].name, name.trim(), "{name}");
+            assert_eq!(back[0].pins, [2].into_iter().collect(), "{name}");
+        }
+    }
+
+    /// A line whose pins do not parse is DROPPED, never half-read: a group that
+    /// kept the pads it could read would silently claim a different set than the
+    /// one saved, and the diagram would mark pads the user never grouped.
+    #[test]
+    fn a_half_readable_line_is_dropped_whole() {
+        assert!(parse_groups("@groups\n4,x,6=radar\n").is_empty());
+        assert!(parse_groups("@groups\n=radar\n").is_empty());
+        assert!(parse_groups("@groups\n4,5=\n").is_empty());
+        // …and it takes only itself with it.
+        assert_eq!(
+            parse_groups("@groups\n4,x=radar\n10,11=display\n"),
+            vec![g("display", &[10, 11])]
+        );
+    }
+
+    /// A device whose name starts with `@` must not end the section. This is the
+    /// whole reason the line is written pins-first, so it is checked with a
+    /// group AFTER it - the one that would otherwise be lost.
+    #[test]
+    fn a_name_starting_with_an_at_does_not_end_the_section() {
+        let groups = vec![g("@radar", &[4, 5]), g("display", &[10])];
+        assert_eq!(parse_groups(&groups_section(&groups)), groups);
     }
 }

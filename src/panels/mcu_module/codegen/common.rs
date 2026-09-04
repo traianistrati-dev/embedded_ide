@@ -9,6 +9,85 @@
 pub const GEN_BEGIN: &str = "// <<< GENERATED BEGIN — do not edit between these markers >>>";
 pub const GEN_END: &str = "// <<< GENERATED END >>>";
 
+use super::super::mcu::Mcu;
+
+/// The devices the user grouped, as a comment at the top of the generated
+/// block.
+///
+/// A sensor is three pads that belong together, and the generated file had no
+/// way to say so: the bindings come out ordered by pad, so a UART pair and the
+/// spare input line beside it end up wherever the chip's pin numbering puts
+/// them. This gathers each device into one place to read.
+///
+/// A COMMENT and nothing else. The group name is deliberately kept out of every
+/// identifier: a name spliced into a binding is re-parsed as part of the pin's
+/// label when the project is reopened, and doubles - `pa3_in_radar_pulse`
+/// becomes `pa3_in_radar_radar_pulse` on the next open. And any generated name
+/// that moves with the grouping breaks the user's own code, because only the
+/// text between the markers is ever rewritten.
+///
+/// It sits INSIDE the markers, at the TOP of the file where the block starts
+/// (the markers wrap the whole generated preamble, not the body of `main`), so
+/// it is rebuilt on every save and a device renamed in the panel is renamed
+/// here too.
+pub fn device_comment(mcu: &Mcu) -> String {
+    let live: Vec<&crate::panels::mcu_module::mcu_config::PinGroup> =
+        mcu.groups.iter().filter(|g| g.is_live()).collect();
+    if live.is_empty() {
+        return String::new();
+    }
+    let mut o = String::from("// ── Devices on this board ──\n");
+    for g in live {
+        let pads: Vec<String> = g
+            .pins
+            .iter()
+            .filter_map(|n| mcu.find_pin(*n))
+            .map(|p| {
+                let what = p.selected_function.short_label();
+                if matches!(p.selected_function, PinFunction::Unset) {
+                    p.name.clone()
+                } else {
+                    format!("{} ({what})", p.name)
+                }
+            })
+            .collect();
+        if !pads.is_empty() {
+            // Trimmed, like `mcu.config` writes it - otherwise a name the user
+            // left a space on reads "// radar : GP0" here and "radar" there.
+            o.push_str(&format!("// {}: {}\n", g.name.trim(), pads.join(", ")));
+        }
+    }
+    o.push('\n');
+    o
+}
+
+/// Put [`device_comment`] just inside the generated block.
+///
+/// One insertion point for every backend: they all funnel through
+/// `Mcu::fresh_main_rs` and `Mcu::update_main_rs`, so the six of them do not
+/// each need to remember. A file with no block (the ESP scheme, or a family
+/// with no backend) is returned untouched.
+pub fn with_device_comment(code: String, mcu: &Mcu) -> String {
+    let block = device_comment(mcu);
+    if block.is_empty() {
+        return code;
+    }
+    let Some(i) = code.find(GEN_BEGIN) else {
+        return code;
+    };
+    let after = i + GEN_BEGIN.len();
+    // After the marker AND its newline, so the marker keeps its own line.
+    let at = match code[after..].find('\n') {
+        Some(nl) => after + nl + 1,
+        None => return code,
+    };
+    let mut out = String::with_capacity(code.len() + block.len());
+    out.push_str(&code[..at]);
+    out.push_str(&block);
+    out.push_str(&code[at..]);
+    out
+}
+
 // ── MCU identity marker ───────────────────────────────────────────────────────
 //
 // Written into the invariant file header (above GEN_BEGIN, so it survives every
@@ -77,6 +156,32 @@ pub fn keep_manual_clock(existing: &str, section: String, manual: bool) -> Strin
         return section;
     };
     section.replace(new, old)
+}
+
+/// Join generated statements so ONE blank line separates each from the next.
+///
+/// A "statement" here is usually two lines — an `#[allow(unused_mut,
+/// unused_variables)]` and the `let` it guards — and a column of those run
+/// together reads as an unbroken wall: the attribute of the next pin sits
+/// directly under the previous pin's code, so nothing tells the eye where one
+/// pin ends and the next begins. The blank line turns the wall back into a list.
+///
+/// No blank is left after the LAST item — the caller's own section separator
+/// follows, and two blank lines in a row is just the wall again with holes.
+/// Items that do not already end in a newline get one, so a caller can pass
+/// either shape.
+pub fn blank_separated<I: IntoIterator<Item = String>>(items: I) -> String {
+    let mut out = String::new();
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&item);
+        if !item.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 // ── User tail — closes fn main() ─────────────────────────────────────────────
@@ -1187,5 +1292,201 @@ mod async_tail_tests {
             retarget_pristine_tail(&with_lead, true),
             format!("\n\n{ASYNC_USER_TAIL}")
         );
+    }
+}
+
+#[cfg(test)]
+mod blank_separated_tests {
+    use super::blank_separated;
+
+    #[test]
+    fn one_blank_line_between_and_none_after_the_last() {
+        let out = blank_separated(["a\n".to_owned(), "b\n".to_owned()]);
+        assert_eq!(out, "a\n\nb\n");
+    }
+
+    /// A caller that builds lines without their newline gets the same result —
+    /// the three backends do not agree on which shape they hand over.
+    #[test]
+    fn an_item_without_a_newline_gets_one() {
+        assert_eq!(
+            blank_separated(["a".to_owned(), "b".to_owned()]),
+            "a\n\nb\n"
+        );
+    }
+
+    /// A multi-line item stays ONE paragraph: an `#[allow(…)]` and the `let` it
+    /// guards must not be split by the separator.
+    #[test]
+    fn a_multi_line_item_is_not_split() {
+        let out = blank_separated([
+            "#[allow]\nlet a = 1;\n".to_owned(),
+            "let b = 2;\n".to_owned(),
+        ]);
+        assert_eq!(out, "#[allow]\nlet a = 1;\n\nlet b = 2;\n");
+    }
+
+    #[test]
+    fn nothing_in_nothing_out() {
+        assert_eq!(blank_separated(Vec::<String>::new()), "");
+        assert_eq!(blank_separated(["only\n".to_owned()]), "only\n");
+    }
+}
+
+#[cfg(test)]
+mod device_comment_tests {
+    use super::{GEN_BEGIN, device_comment, with_device_comment};
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::mcu::Mcu;
+    use crate::panels::mcu_module::modules::{ModuleKind, ModuleSignal};
+
+    fn pico() -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu()
+    }
+
+    /// A sensor: a UART pair and a spare input line, under one name. The whole
+    /// point is that the three read together, so the test asserts they are on
+    /// ONE line.
+    fn radar() -> (Mcu, usize, usize, usize) {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let tx = mcu.modules[0].pin_for(ModuleSignal::Tx).expect("a TX pad");
+        let rx = mcu.modules[0].pin_for(ModuleSignal::Rx).expect("an RX pad");
+        let spare = mcu
+            .iter_all_pins()
+            .find(|p| {
+                !p.reserved
+                    && p.number != tx
+                    && p.number != rx
+                    && p.available_functions
+                        .contains(&crate::panels::mcu_module::pins::PinFunction::GpioInput)
+            })
+            .map(|p| p.number)
+            .expect("a free input pad");
+        mcu.apply_pin_function(
+            spare,
+            crate::panels::mcu_module::pins::PinFunction::GpioInput,
+        );
+        let m = mcu.modules[0].clone();
+        mcu.join_group_module(&m, "mw radar");
+        mcu.join_group(spare, "mw radar");
+        (mcu, tx, rx, spare)
+    }
+
+    /// Nothing grouped, nothing written. Every existing project is in this case,
+    /// and none of them may gain a line.
+    #[test]
+    fn a_board_with_no_devices_says_nothing() {
+        let mcu = pico();
+        assert_eq!(device_comment(&mcu), "");
+        let code = format!("{GEN_BEGIN}\nuse embassy_rp as _;\n");
+        assert_eq!(with_device_comment(code.clone(), &mcu), code);
+    }
+
+    /// The three pads of one sensor on one line, each named with what it
+    /// carries - the reason the comment exists.
+    #[test]
+    fn one_device_gathers_its_pads_onto_one_line() {
+        let (mcu, tx, rx, spare) = radar();
+        let text = device_comment(&mcu);
+        let line = text
+            .lines()
+            .find(|l| l.contains("mw radar"))
+            .expect("the device is named");
+        for pin in [tx, rx, spare] {
+            let name = &mcu.find_pin(pin).expect("the pad").name;
+            assert!(line.contains(name.as_str()), "{name} missing from {line:?}");
+        }
+        assert!(
+            line.contains("(IN)"),
+            "the spare line says what it is: {line:?}"
+        );
+        assert!(
+            text.lines()
+                .all(|l| l.trim().is_empty() || l.starts_with("//")),
+            "every line is a comment: {text:?}"
+        );
+    }
+
+    /// It goes INSIDE the block, on its own line, after the marker.
+    ///
+    /// Inside, because only that text is rewritten - a comment outside would go
+    /// stale the moment a device was renamed. On its own line, because the
+    /// marker line is matched exactly by `update_main_rs`.
+    #[test]
+    fn the_comment_lands_just_inside_the_markers() {
+        let (mcu, ..) = radar();
+        let code = with_device_comment(
+            format!("#![no_std]\n{GEN_BEGIN}\nuse embassy_rp as _;\n"),
+            &mcu,
+        );
+        let lines: Vec<&str> = code.lines().collect();
+        // EQUALS, not starts_with: the marker has to keep its own line. Inserted
+        // one byte earlier the block would land on the end of the marker line,
+        // and `update_main_rs` matches that line to find the block.
+        let at = lines
+            .iter()
+            .position(|l| l.trim() == GEN_BEGIN)
+            .expect("the marker kept its own line");
+        assert!(lines[at + 1].starts_with("//"), "{:?}", lines[at + 1]);
+        assert!(
+            lines[at + 1..].iter().any(|l| l.contains("mw radar")),
+            "the device is named after the marker, not before"
+        );
+    }
+
+    /// A file with no block is left alone: a family with no backend generates
+    /// nothing, and there is no place to put a comment in a file we did not
+    /// write.
+    #[test]
+    fn a_file_with_no_block_is_untouched() {
+        let (mcu, ..) = radar();
+        let foreign = "fn main() {}\n".to_owned();
+        assert_eq!(with_device_comment(foreign.clone(), &mcu), foreign);
+    }
+
+    /// The app rebuilds the block on every save, so inserting has to be
+    /// idempotent through the real path - two saves must not stack two
+    /// comments.
+    #[test]
+    fn saving_twice_does_not_stack_two_comments() {
+        let (mcu, ..) = radar();
+        let once = mcu.fresh_main_rs();
+        let twice = mcu.update_main_rs(&once);
+        let count = |s: &str| s.matches("Devices on this board").count();
+        assert_eq!(count(&once), 1, "the fresh file has it once");
+        assert_eq!(count(&twice), 1, "and so does the re-spliced one");
+    }
+
+    /// The device name reaches the comment and NOTHING else. A name spliced into
+    /// a binding would be re-parsed as part of the pin's label on reopen and
+    /// double, and any generated name that moved with the grouping would break
+    /// the user's own code below the markers.
+    #[test]
+    fn the_name_never_reaches_an_identifier() {
+        let (mut mcu, ..) = radar();
+        let plain = {
+            let mut m = mcu.clone();
+            m.groups.clear();
+            m.fresh_main_rs()
+        };
+        mcu.rename_group(0, "wildly distinctive name");
+        let grouped = mcu.fresh_main_rs();
+        let strip = |s: &str| {
+            s.lines()
+                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            strip(&plain),
+            strip(&grouped),
+            "grouping changed a line of CODE"
+        );
+        assert!(grouped.contains("wildly distinctive name"));
     }
 }

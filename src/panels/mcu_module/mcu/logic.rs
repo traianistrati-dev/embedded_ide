@@ -148,6 +148,7 @@ impl Mcu {
             collapse_modules: false,
             rotated: false,
             io_pin_pos: std::collections::BTreeMap::new(),
+            groups: Vec::new(),
             watchdog: Default::default(),
             comp: Default::default(),
         }
@@ -396,9 +397,177 @@ impl Mcu {
         true
     }
 
-    /// Remove a module by id, resetting the pins it was wired to back to `Unset`
-    /// (so removing a _USART/SPI/I2C frees its pins, mirroring "unplugging" the
-    /// device).
+    /// The group a pad belongs to, if any.
+    ///
+    /// A pad is in at most one: `join_group` takes it out of whatever held it
+    /// first, because "this pad is part of the radar AND part of the display"
+    /// is not a thing a schematic can show, and a pad with two accent colours
+    /// would just look broken.
+    /// Only a LIVE group answers — the same predicate persistence, the generated
+    /// comment and the canvas mats use. A row the roster is still filling in has
+    /// no name yet, and a pad tick or a box bar for it would mark a device that
+    /// exists nowhere else.
+    pub fn group_of_pin(
+        &self,
+        pin: usize,
+    ) -> Option<&crate::panels::mcu_module::mcu_config::PinGroup> {
+        self.groups
+            .iter()
+            .find(|g| g.is_live() && g.pins.contains(&pin))
+    }
+
+    /// The group a MODULE belongs to: the one holding any of its pads.
+    ///
+    /// Derived rather than stored, which is what lets a group survive
+    /// `reconcile_modules` deleting and re-creating the module under a new id.
+    pub fn group_of_module(
+        &self,
+        m: &crate::panels::mcu_module::modules::VirtualModule,
+    ) -> Option<&crate::panels::mcu_module::mcu_config::PinGroup> {
+        m.connections
+            .iter()
+            .find_map(|c| self.group_of_pin(c.mcu_pin))
+    }
+
+    /// Put `pin` in the group called `name`, creating it if it is new.
+    ///
+    /// An empty name is how a pad leaves its group - the same field does both,
+    /// so there is no second gesture to find.
+    pub fn join_group(&mut self, pin: usize, name: &str) {
+        // A group that gave this pad up and has nothing left is finished. Only
+        // THOSE are dropped: a device the user has just created and not filled
+        // yet is empty too, and deleting it out from under them the moment they
+        // group something else would be indistinguishable from a bug.
+        let mut emptied: Vec<usize> = Vec::new();
+        for (i, g) in self.groups.iter_mut().enumerate() {
+            if g.pins.remove(&pin) && g.pins.is_empty() {
+                emptied.push(i);
+            }
+        }
+        // STORED verbatim, so it matches a name the roster is still editing
+        // (see `rename_group`) - but two names are the SAME NAME when they
+        // differ only in padding. Storage and identity have to part company
+        // here: `mcu.config` trims on the way out and `group_color` hashes the
+        // trimmed name, so "radar " and "radar" would draw one colour, save as
+        // one line, and come back after a reload as two devices with literally
+        // the same name.
+        if !name.trim().is_empty() {
+            match self.groups.iter_mut().find(|g| g.name.trim() == name.trim()) {
+                Some(g) => {
+                    g.pins.insert(pin);
+                }
+                // Pushed, so the indices collected above stay valid.
+                None => self
+                    .groups
+                    .push(crate::panels::mcu_module::mcu_config::PinGroup {
+                        name: name.to_owned(),
+                        pins: std::iter::once(pin).collect(),
+                    }),
+            }
+        }
+        for i in emptied.into_iter().rev() {
+            // Still empty: moving a pad WITHIN its own group empties it here and
+            // fills it again above, and that group must survive.
+            if self.groups[i].pins.is_empty() {
+                self.groups.remove(i);
+            }
+        }
+    }
+
+    /// Start an empty device, named by the roster.
+    ///
+    /// It holds nothing yet, so it is not written to `mcu.config` and does not
+    /// reach the generated comment - both skip empty groups. It exists to be
+    /// filled in the next gesture.
+    pub fn new_group(&mut self, name: String) {
+        self.groups
+            .push(crate::panels::mcu_module::mcu_config::PinGroup {
+                name,
+                pins: Default::default(),
+            });
+    }
+
+    /// Set group `idx`'s name without ever merging.
+    ///
+    /// What the roster calls while its field still has FOCUS. Committing a merge
+    /// on every keystroke destroyed devices in passing: typing "disp" out to
+    /// "display2" passes through "display", and if another device answered to
+    /// that, the two were merged at that keystroke and the rest of the word
+    /// landed on whatever row had shifted into the slot. A name is only a
+    /// decision once the user leaves the field.
+    ///
+    /// Two devices may briefly share a name this way. Nothing is lost by it: the
+    /// canvas draws them as one mat for those frames, and `rename_group` folds
+    /// them together the moment the field is left.
+    pub fn set_group_name(&mut self, idx: usize, name: &str) {
+        if let Some(g) = self.groups.get_mut(idx) {
+            g.name = name.to_owned();
+        }
+    }
+
+    /// Rename group `idx`, merging onto a name already taken.
+    ///
+    /// Renaming onto a name already taken MERGES the two: `join_group` finds a
+    /// group by name, so leaving duplicates behind would mean two rows on the
+    /// roster, one colour between them, and only one of them ever receiving a
+    /// pad. Merging is the reading that matches what the user typed.
+    ///
+    /// Called when the roster's field is LEFT, never while it is being typed in
+    /// — see [`set_group_name`](Self::set_group_name).
+    pub fn rename_group(&mut self, idx: usize, name: &str) {
+        // Stored EXACTLY as typed. Trimming here made a space impossible to
+        // type: the roster re-seeds its text field from the stored name every
+        // frame, so "mw " came back as "mw" and the next keystroke produced
+        // "mwr". Whitespace is normalised where it belongs - on the way into
+        // `mcu.config` - and an all-whitespace name still counts as no name.
+        let name = name.to_owned();
+        if idx >= self.groups.len() {
+            return;
+        }
+        // ANOTHER group answering to this name - found by scanning past `idx`
+        // rather than by `position(..).filter(!= idx)`, which returns the FIRST
+        // match and so answers "none" whenever `idx` is itself that first match.
+        // Two rows can transiently share a name (a name being typed is stored
+        // without merging), and that is exactly the case the merge is owed.
+        //
+        // Deliberately NOT skipped when the name is unchanged: the roster defers
+        // every merge until the field is left, at which point the text has long
+        // since stopped changing and this is the only call that will make it.
+        let other = self
+            .groups
+            .iter()
+            .enumerate()
+            .find(|(k, g)| {
+                *k != idx && g.name.trim() == name.trim() && !name.trim().is_empty()
+            })
+            .map(|(k, _)| k);
+        match other {
+            Some(other) => {
+                let moved = std::mem::take(&mut self.groups[idx].pins);
+                self.groups[other].pins.extend(moved);
+                self.groups.remove(idx);
+            }
+            None => {
+                if self.groups[idx].name != name {
+                    self.groups[idx].name = name;
+                }
+            }
+        }
+    }
+
+    /// Put every pad of `m` in `name` at once - the gesture the panel offers on
+    /// a module, since grouping "the UART" means its pads, not one of them.
+    pub fn join_group_module(
+        &mut self,
+        m: &crate::panels::mcu_module::modules::VirtualModule,
+        name: &str,
+    ) {
+        let pins: Vec<usize> = m.connections.iter().map(|c| c.mcu_pin).collect();
+        for p in pins {
+            self.join_group(p, name);
+        }
+    }
+
     /// Move one pin's function to ANOTHER pad, as a single operation.
     ///
     /// Deliberately NOT `apply_pin_function` twice, because neither order works:
@@ -446,6 +615,34 @@ impl Mcu {
         }
         if let Some(p) = self.find_pin_mut(to) {
             p.selected_function = func;
+        }
+        // A group is a set of PAD numbers, so a signal that changes pad drops
+        // out of its device unless the set is rewritten here. This is the only
+        // place in the app where a signal moves between pads, which is why it
+        // is also the only place that has to know.
+        //
+        // The destination is not necessarily device-free: a pad keeps its
+        // device when its function goes away (removing a module resets its pads
+        // to `Unset` but leaves them grouped), and the move only requires the
+        // pad to be function-free. So `to` is taken out of whatever held it
+        // before it is handed `from`'s device - otherwise one pad sat in two
+        // devices at once and `group_of_pin` answered by Vec order.
+        if let Some(mine) = self.groups.iter().position(|g| g.pins.contains(&from)) {
+            let mut emptied: Vec<usize> = Vec::new();
+            for (k, g) in self.groups.iter_mut().enumerate() {
+                if g.pins.remove(&to) && g.pins.is_empty() && k != mine {
+                    emptied.push(k);
+                }
+            }
+            self.groups[mine].pins.remove(&from);
+            self.groups[mine].pins.insert(to);
+            // Only a device this move emptied disappears, the same rule
+            // `join_group` follows.
+            for k in emptied.into_iter().rev() {
+                if self.groups[k].pins.is_empty() {
+                    self.groups.remove(k);
+                }
+            }
         }
         self.reconcile_modules();
         true
@@ -653,6 +850,13 @@ impl Mcu {
             s.push_str(&rotation);
         }
         // Manual in/out field positions (`@iopins`) — view preference.
+        let groups = mcu_config::groups_section(&self.groups);
+        if !groups.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&groups);
+        }
         let iopins = mcu_config::iopins_section(&self.io_pin_pos);
         if !iopins.is_empty() {
             if !s.is_empty() {
@@ -722,6 +926,7 @@ impl Mcu {
         }
         // Manual in/out field positions (`@iopins`) — missing = all auto-placed.
         self.io_pin_pos = mcu_config::parse_iopins(text);
+        self.groups = mcu_config::parse_groups(text);
         self.watchdog = mcu_config::parse_watchdog(text);
         self.comp = mcu_config::parse_comp(text);
         // Interrupt edges (`@irq`) — a missing section means every input is
@@ -2029,6 +2234,307 @@ mod a_wiring_is_committed_whole_or_not_at_all {
             mcu.find_pin(good).expect("the good pad").selected_function,
             PinFunction::Unset,
             "the pad that COULD have been written was not"
+        );
+    }
+}
+
+#[cfg(test)]
+mod device_groups {
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::mcu::Mcu;
+    use crate::panels::mcu_module::mcu_config::PinGroup;
+    use crate::panels::mcu_module::modules::{ModuleKind, ModuleSignal};
+    use crate::panels::mcu_module::pins::PinFunction;
+
+    fn pico() -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu()
+    }
+
+    /// Three free pads that can all host a plain output, so a move between two of
+    /// them is legal on the silicon.
+    fn three_output_pads(mcu: &Mcu) -> (usize, usize, usize) {
+        let free: Vec<usize> = mcu
+            .iter_all_pins()
+            .filter(|p| {
+                !p.reserved
+                    && p.selected_function == PinFunction::Unset
+                    && p.available_functions.contains(&PinFunction::GpioOutput)
+            })
+            .map(|p| p.number)
+            .take(3)
+            .collect();
+        assert_eq!(free.len(), 3, "the Pico has three free GPIOs");
+        (free[0], free[1], free[2])
+    }
+
+    fn named(mcu: &Mcu, name: &str) -> Option<Vec<usize>> {
+        mcu.groups
+            .iter()
+            .find(|g| g.name == name)
+            .map(|g| g.pins.iter().copied().collect())
+    }
+
+    /// A pad belongs to ONE device. Two accent colours on one stub would read as
+    /// a drawing error, and `join_group` finds a group by name - so a pad in two
+    /// of them would answer to whichever came first.
+    #[test]
+    fn a_pad_belongs_to_one_device_at_a_time() {
+        let mut mcu = pico();
+        mcu.join_group(7, "radar");
+        mcu.join_group(8, "radar");
+        mcu.join_group(7, "display");
+        assert_eq!(named(&mcu, "radar"), Some(vec![8]));
+        assert_eq!(named(&mcu, "display"), Some(vec![7]));
+    }
+
+    /// The empty name is how a pad leaves - the roster's × and the same call.
+    /// The device it leaves behind disappears only when nothing is left in it.
+    #[test]
+    fn the_last_pad_out_takes_the_device_with_it() {
+        let mut mcu = pico();
+        mcu.join_group(7, "radar");
+        mcu.join_group(8, "radar");
+        mcu.join_group(7, "");
+        assert_eq!(
+            named(&mcu, "radar"),
+            Some(vec![8]),
+            "one pad left, still a device"
+        );
+        mcu.join_group(8, "");
+        assert!(mcu.groups.is_empty(), "nothing left, no device");
+    }
+
+    /// A device created from the roster is empty until the next gesture fills
+    /// it. Grouping something ELSE in between must not sweep it away - the row
+    /// vanishing under the user's cursor is indistinguishable from a bug.
+    #[test]
+    fn a_device_with_nothing_in_it_yet_survives_the_next_grouping() {
+        let mut mcu = pico();
+        mcu.new_group("Device 2".into());
+        mcu.join_group(7, "Device 1");
+        assert!(
+            mcu.groups.iter().any(|g| g.name == "Device 2"),
+            "the unfilled device is still on the roster"
+        );
+    }
+
+    /// Moving a pad WITHIN its own device empties the group in passing. It must
+    /// not be collected as a casualty of that.
+    #[test]
+    fn regrouping_a_pad_into_its_own_device_keeps_it() {
+        let mut mcu = pico();
+        mcu.join_group(7, "radar");
+        mcu.join_group(7, "radar");
+        assert_eq!(named(&mcu, "radar"), Some(vec![7]));
+    }
+
+    /// Renaming onto a name already taken MERGES: `join_group` looks a group up
+    /// by name, so two rows sharing one would draw one colour and only ever fill
+    /// one of them.
+    #[test]
+    fn renaming_onto_a_taken_name_merges_the_two() {
+        let mut mcu = pico();
+        mcu.join_group(7, "radar");
+        mcu.join_group(8, "sensor");
+        mcu.rename_group(1, "radar");
+        assert_eq!(mcu.groups.len(), 1);
+        assert_eq!(named(&mcu, "radar"), Some(vec![7, 8]));
+    }
+
+    /// A group is a set of PAD NUMBERS, so a signal that changes pad would drop
+    /// out of its device unless the move rewrites the set. `move_pin_function`
+    /// is the only place in the app where a signal changes pad.
+    #[test]
+    fn a_device_follows_its_pad_across_a_move() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let tx = mcu.modules[0]
+            .pin_for(ModuleSignal::Tx)
+            .expect("the UART got a TX pad");
+        let want = mcu
+            .find_pin(tx)
+            .expect("the TX pad")
+            .selected_function
+            .clone();
+        let dest = mcu
+            .iter_all_pins()
+            .find(|p| {
+                p.number != tx
+                    && !p.reserved
+                    && p.available_functions.contains(&want)
+                    && p.selected_function == PinFunction::Unset
+            })
+            .map(|p| p.number)
+            .expect("the RP maps the same TX to a second pad");
+
+        mcu.join_group(tx, "radar");
+        assert!(mcu.move_pin_function(tx, dest));
+        assert_eq!(
+            named(&mcu, "radar"),
+            Some(vec![dest]),
+            "the device followed the signal to its new pad"
+        );
+    }
+
+    /// The pad tick, the box bar and the io bar all ask `group_of_pin`, so it has
+    /// to answer with the same predicate everything else uses. A device whose name
+    /// the user cleared draws no mat and writes no comment — it may not keep
+    /// marking its pads either.
+    #[test]
+    fn a_nameless_device_marks_none_of_its_pads() {
+        let mut mcu = pico();
+        mcu.join_group(7, "radar");
+        assert!(mcu.group_of_pin(7).is_some());
+        mcu.rename_group(0, "  ");
+        assert_eq!(mcu.groups.len(), 1, "still on the roster");
+        assert!(
+            mcu.group_of_pin(7).is_none(),
+            "but nothing on the canvas answers for it"
+        );
+    }
+
+    /// A pad added under a padded spelling of a device's name joins THAT device
+    /// rather than starting a second one beside it.
+    #[test]
+    fn a_pad_joins_a_device_whose_name_differs_only_in_padding() {
+        let mut mcu = pico();
+        mcu.join_group(7, "mw radar");
+        mcu.join_group(8, " mw radar ");
+        assert_eq!(mcu.groups.len(), 1);
+        assert_eq!(named(&mcu, "mw radar"), Some(vec![7, 8]));
+    }
+
+    /// Membership is derived for a MODULE, never stored: `reconcile_modules`
+    /// deletes and re-creates a module under a fresh id on an ordinary edit, and
+    /// a stored id would lose its device every time.
+    #[test]
+    fn a_module_is_in_the_device_holding_any_of_its_pads() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let m = mcu.modules[0].clone();
+        assert!(mcu.group_of_module(&m).is_none());
+        mcu.join_group(m.connections[0].mcu_pin, "radar");
+        assert_eq!(
+            mcu.group_of_module(&m).map(|g| g.name.as_str()),
+            Some("radar")
+        );
+        // …and the roster's gesture puts the WHOLE bus in.
+        mcu.join_group_module(&m, "radar");
+        assert_eq!(
+            named(&mcu, "radar").map(|v| v.len()),
+            Some(m.connections.len())
+        );
+    }
+
+    /// The whole point of keying by pad: a device outlives the module that
+    /// carried it, because it never knew the module's id.
+    #[test]
+    fn a_device_outlives_the_module_id_it_was_grouped_through() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let m = mcu.modules[0].clone();
+        mcu.join_group_module(&m, "radar");
+        let before = m.id.clone();
+        mcu.remove_module(&before);
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        // Same pads, and the device is still on them.
+        let again = mcu.modules[0].clone();
+        assert_eq!(
+            mcu.group_of_module(&again).map(|g| g.name.as_str()),
+            Some("radar"),
+            "the re-created module is still part of the device"
+        );
+    }
+
+    /// A pad keeps its device when its function goes away, so the destination of
+    /// a move is not necessarily device-free. Handing it the mover's device
+    /// without taking it out of its own left one pad in two devices at once, and
+    /// `group_of_pin` then answered by Vec order.
+    #[test]
+    fn a_move_never_leaves_a_pad_in_two_devices() {
+        let mut mcu = pico();
+        let (from, to, spare) = three_output_pads(&mcu);
+        mcu.apply_pin_function(from, PinFunction::GpioOutput);
+        mcu.join_group(from, "radar");
+        // The destination carries no function, but does carry a device.
+        mcu.join_group(to, "display");
+        mcu.join_group(spare, "display");
+
+        assert!(mcu.move_pin_function(from, to));
+
+        let holders: Vec<&str> = mcu
+            .groups
+            .iter()
+            .filter(|g| g.pins.contains(&to))
+            .map(|g| g.name.as_str())
+            .collect();
+        assert_eq!(holders, ["radar"], "the destination is in exactly one device");
+        assert_eq!(named(&mcu, "radar"), Some(vec![to]));
+        assert_eq!(
+            named(&mcu, "display"),
+            Some(vec![spare]),
+            "and display kept the rest"
+        );
+    }
+
+    /// The device the move empties disappears — but only that one.
+    #[test]
+    fn a_move_onto_a_devices_last_pad_retires_that_device() {
+        let mut mcu = pico();
+        let (from, to, _) = three_output_pads(&mcu);
+        mcu.apply_pin_function(from, PinFunction::GpioOutput);
+        mcu.join_group(from, "radar");
+        mcu.join_group(to, "display");
+        mcu.new_group("unfilled".into());
+
+        assert!(mcu.move_pin_function(from, to));
+
+        assert!(named(&mcu, "display").is_none(), "it had only that pad");
+        assert_eq!(named(&mcu, "radar"), Some(vec![to]));
+        assert!(
+            mcu.groups.iter().any(|g| g.name == "unfilled"),
+            "a device the user has not filled yet is not swept up"
+        );
+    }
+
+    /// A device the user has not named is not a device yet: it stays on the
+    /// roster and reaches neither `mcu.config` nor the generated comment. The
+    /// three used to disagree, so an unnamed device was written into main.rs as
+    /// a nameless `// : PA4, PA5` and then lost on the next save.
+    #[test]
+    fn an_unnamed_device_reaches_neither_the_file_nor_the_comment() {
+        let mut mcu = pico();
+        mcu.join_group(7, "radar");
+        mcu.rename_group(0, "");
+        assert_eq!(mcu.groups.len(), 1, "still on the roster");
+        assert!(!mcu.groups[0].is_live());
+        assert!(!mcu.mcu_config_text().contains("@groups"));
+        assert_eq!(
+            crate::panels::mcu_module::codegen::common::device_comment(&mcu),
+            ""
+        );
+    }
+
+    /// `mcu.config` is the only place a device is stored, so the section has to
+    /// survive the app's own write-then-read.
+    #[test]
+    fn a_device_round_trips_through_mcu_config() {
+        let mut mcu = pico();
+        mcu.join_group(7, "mw radar");
+        mcu.join_group(8, "mw radar");
+        let text = mcu.mcu_config_text();
+        let mut back = pico();
+        back.apply_mcu_config(&text);
+        assert_eq!(
+            back.groups,
+            vec![PinGroup {
+                name: "mw radar".into(),
+                pins: [7, 8].into_iter().collect(),
+            }]
         );
     }
 }

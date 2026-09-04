@@ -65,32 +65,35 @@ const ALLOW: &str = "    #[allow(unused_mut, unused_variables)]
 ";
 
 fn gpio_lines(mcu: &Mcu) -> String {
-    let mut out = String::new();
+    // One entry per pin, joined with a blank line between — see
+    // `common::blank_separated`. The interrupt note below belongs to ITS pin, so
+    // it goes in the same entry rather than becoming an orphan paragraph.
+    let mut pins_out: Vec<String> = Vec::new();
     for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
         let Some(n) = gpio_index(&p.name) else {
             continue;
         };
         let sfx = var_suffix(&p.selected_function);
         match p.selected_function {
-            PinFunction::GpioOutput => out.push_str(&format!(
+            PinFunction::GpioOutput => pins_out.push(format!(
                 "{ALLOW}    let mut gp{n}{sfx} = pins.gpio{n}.into_push_pull_output();\n"
             )),
             PinFunction::GpioInput => {
-                out.push_str(&format!(
-                    "{ALLOW}    let gp{n}{sfx} = pins.gpio{n}.into_pull_up_input();\n"
-                ));
+                let mut entry =
+                    format!("{ALLOW}    let gp{n}{sfx} = pins.gpio{n}.into_pull_up_input();\n");
                 // The edge is set in the pin panel on every runtime, but only
                 // Async can act on it here. Saying so beats dropping it.
                 if p.irq.is_some() {
-                    out.push_str(&format!(
+                    entry.push_str(&format!(
                         "    // GP{n} is armed for an interrupt, which this Blocking project\n    // does not generate. Switch Runtime to Async in the System tab and\n    // the pin becomes a task that awaits the edge.\n"
                     ));
                 }
+                pins_out.push(entry);
             }
             _ => {}
         }
     }
-    out
+    super::common::blank_separated(pins_out)
 }
 
 /// The boot stage, which differs between the two chips and is not optional on
@@ -2372,19 +2375,23 @@ fn wait_fn(edge: Edge) -> &'static str {
 /// as the program runs, and a task is the cheapest thing that can hold it.
 fn async_gpio_lines(mcu: &Mcu) -> (String, String) {
     let mut tasks = String::new();
-    let mut out = String::new();
+    // One entry per pin, blank-line separated (see `common::blank_separated`).
+    // An armed input's `let` and its `spawner.spawn` belong together, so they
+    // are ONE entry — a blank line between them would split a pair that reads
+    // as a unit.
+    let mut pins_out: Vec<String> = Vec::new();
     for p in mcu.iter_all_pins().filter(|p| !p.reserved) {
         let Some(n) = gpio_index(&p.name) else {
             continue;
         };
         let sfx = var_suffix(&p.selected_function);
         match p.selected_function {
-            PinFunction::GpioOutput => out.push_str(&format!(
+            PinFunction::GpioOutput => pins_out.push(format!(
                 "{ALLOW}    let mut gp{n}{sfx} = Output::new(p.PIN_{n}, Level::Low);\n"
             )),
             PinFunction::GpioInput => {
                 let Some(edge) = p.irq else {
-                    out.push_str(&format!(
+                    pins_out.push(format!(
                         "{ALLOW}    let gp{n}{sfx} = Input::new(p.PIN_{n}, Pull::Up);\n"
                     ));
                     continue;
@@ -2403,17 +2410,14 @@ fn async_gpio_lines(mcu: &Mcu) -> (String, String) {
                 ));
                 tasks.push_str(&format!("    loop {{\n        pin.{wait}().await;\n"));
                 tasks.push_str("        // The edge arrived. Your code here.\n    }\n}\n\n");
-                out.push_str(&format!(
-                    "    let {name} = Input::new(p.PIN_{n}, Pull::Up);\n"
-                ));
-                out.push_str(&format!(
-                    "    spawner.spawn({name}_irq({name}).unwrap());\n"
+                pins_out.push(format!(
+                    "    let {name} = Input::new(p.PIN_{n}, Pull::Up);\n    spawner.spawn({name}_irq({name}).unwrap());\n"
                 ));
             }
             _ => {}
         }
     }
-    (tasks, out)
+    (tasks, super::common::blank_separated(pins_out))
 }
 
 /// The buses, on embassy-rp.

@@ -1394,6 +1394,19 @@ impl AppIde {
                                                 .id_salt("vmod_list")
                                                 .auto_shrink([false, false])
                                                 .show(ui, |ui| {
+                                                    // ── the devices, above the
+                                                    //    modules that make them
+                                                    //    up. Drawn FIRST, and
+                                                    //    with `mcu` still free:
+                                                    //    the module loop below
+                                                    //    borrows it for the rest
+                                                    //    of the closure.
+                                                    super::device_groups::device_roster(
+                                                        ui, mcu,
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    ui.separator();
+                                                    ui.add_space(2.0);
                                                     for m in &mcu.modules {
                                                         let mut st =
                                                             egui::collapsing_header::CollapsingState::load_with_default_open(

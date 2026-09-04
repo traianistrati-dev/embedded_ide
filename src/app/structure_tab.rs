@@ -28,6 +28,12 @@ impl AppIde {
             // so it participates in the cache key — toggling rebuilds
             // instantly (parse is cheap) and restarts the call pass (node
             // indices shift).
+            // An OPEN node is taller, so the geometry - and therefore the
+            // cached layout - depends on which nodes are open, exactly as it
+            // depends on the externals toggle.
+            for n in &self.structure_view.expanded {
+                n.hash(&mut h);
+            }
             h.finish()
                 ^ if self.structure_view.show_externals {
                     0x9E37_79B9_7F4A_7C15
@@ -45,7 +51,8 @@ impl AppIde {
                     &self.project_tree.user_src_files,
                 );
             }
-            let mut lay = layout::layout(&graph);
+            let mut lay =
+                layout::layout_with_calls_expanded(&graph, &[], &self.structure_view.expanded);
             layout::apply_overrides(&mut lay, &graph, &self.structure_overrides);
             self.structure_cache = Some((hash, graph, lay));
             self.structure_layout_calls = 0; // fresh layout knows no call edges
@@ -66,9 +73,12 @@ impl AppIde {
                     .map(|e| (e.from_node, e.to_node))
                     .collect();
                 if pairs.len() != self.structure_layout_calls {
+                    // Cloned before the cache is borrowed mutably: the layout
+                    // needs the open set, and `self` cannot be borrowed twice.
+                    let expanded = self.structure_view.expanded.clone();
                     if let Some((_, graph, lay)) = self.structure_cache.as_mut() {
                         let pairs: Vec<(usize, usize)> = pairs.into_iter().collect();
-                        *lay = layout::layout_with_calls(graph, &pairs);
+                        *lay = layout::layout_with_calls_expanded(graph, &pairs, &expanded);
                         layout::apply_overrides(lay, graph, &self.structure_overrides);
                         self.structure_layout_calls = pairs.len();
                     }
@@ -90,6 +100,12 @@ impl AppIde {
             .structure_calls
             .as_ref()
             .map(|p| p.edges.as_slice())
+            .unwrap_or(&[]);
+        // A module's own internal calls: the flow an EXPANDED node draws.
+        let inner_edges: &[calls::CallEdge] = self
+            .structure_calls
+            .as_ref()
+            .map(|p| p.inner_edges.as_slice())
             .unwrap_or(&[]);
         // Focused module for the call-edge filter = the currently selected
         // file's node (main by default — also for config files like
@@ -134,6 +150,7 @@ impl AppIde {
             lay,
             &mut self.structure_view,
             call_edges,
+            inner_edges,
             &calls_status,
             focus_node,
             &node_errors,
@@ -164,7 +181,8 @@ impl AppIde {
                     set.into_iter().collect()
                 })
                 .unwrap_or_default();
-            *lay = layout::layout_with_calls(&*graph, &pairs);
+            *lay =
+                layout::layout_with_calls_expanded(&*graph, &pairs, &self.structure_view.expanded);
             self.structure_layout_calls = pairs.len();
         }
 

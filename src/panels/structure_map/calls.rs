@@ -55,6 +55,16 @@ pub struct CallPass {
     /// The one in-flight request: `(local key, node, row)`.
     pub in_flight: Option<(usize, usize, usize)>,
     pub edges: Vec<CallEdge>,
+    /// Calls WITHIN one module (`from_node == to_node`) — the flow inside a
+    /// single file.
+    ///
+    /// Kept apart from [`Self::edges`] on purpose. Between collapsed boxes an
+    /// intra-module edge says nothing the dep arrows do not already say, which
+    /// is why the pass used to drop it on the floor; but it is exactly the
+    /// order in which a file's own items call each other, so it is what an
+    /// EXPANDED node draws. Separate collections mean turning this on cannot
+    /// change a single pixel of the collapsed diagram.
+    pub inner_edges: Vec<CallEdge>,
     /// TOTAL reference sites found per queried symbol `(node, row)` — shown as
     /// a count next to the symbol row (many sites aggregate into few edges, so
     /// the count keeps the full picture visible).
@@ -63,6 +73,7 @@ pub struct CallPass {
     /// edge's stroke width, so heavy relationships read thicker.
     pub pair_counts: HashMap<CallEdge, usize>,
     seen: HashSet<CallEdge>,
+    seen_inner: HashSet<CallEdge>,
     pub done: usize,
     pub total: usize,
     /// Symbols the cap left unqueried, or 0.
@@ -98,9 +109,11 @@ impl CallPass {
             in_flight: None,
             sent_at_generation: 0,
             edges: Vec::new(),
+            inner_edges: Vec::new(),
             ref_counts: HashMap::new(),
             pair_counts: HashMap::new(),
             seen: HashSet::new(),
+            seen_inner: HashSet::new(),
             done: 0,
             total,
             skipped,
@@ -164,7 +177,21 @@ impl CallPass {
                 continue; // unknown file, or a use-line/attr site (anchor None)
             };
             if from_node == to_node {
-                continue; // intra-module call — not drawn
+                // A file's own flow. Self-calls are skipped: direct recursion
+                // draws as a loop from a row to itself, which carries no
+                // ordering information and only clutters the layout.
+                if from_row != to_row {
+                    let edge = CallEdge {
+                        from_node,
+                        from_row,
+                        to_node,
+                        to_row,
+                    };
+                    if self.seen_inner.insert(edge) {
+                        self.inner_edges.push(edge);
+                    }
+                }
+                continue;
             }
             let edge = CallEdge {
                 from_node,
@@ -391,5 +418,152 @@ fn main() {
         let helper = &g.nodes[a].symbols[0];
         // "pub fn helper..." → name starts at col 7.
         assert_eq!((helper.line, helper.col), (1, 7));
+    }
+}
+
+/// The rows of one module, ordered the way its own code calls them.
+///
+/// A call graph has no total order - a row can be called from several places,
+/// not called at all, or sit in a cycle - so "call order" has to be a stated
+/// rule rather than a sort. This one:
+///
+///   1. Roots first: rows nothing in this module calls. They are the entry
+///      points, and a file with no internal calls keeps its source order.
+///   2. From each root, depth-first through its callees, so a caller is always
+///      followed by what it calls.
+///   3. Ties broken by ROW INDEX, which is source order - two callees of the
+///      same function keep the order they appear in the file.
+///   4. Cycles: a row already placed is never placed again, so the back-edge
+///      that closes a cycle is simply not followed. Nothing is lost - the row
+///      is on the list, once.
+///   5. Anything still unplaced (a cycle no root reaches) follows in row order,
+///      so every row appears exactly once whatever the graph looks like.
+///
+/// Deterministic for a given edge set: same input, same order, every frame.
+pub fn call_order(row_count: usize, edges: &[CallEdge]) -> Vec<usize> {
+    let mut callees: Vec<Vec<usize>> = vec![Vec::new(); row_count];
+    let mut called = vec![false; row_count];
+    for e in edges {
+        if e.from_row < row_count && e.to_row < row_count {
+            callees[e.from_row].push(e.to_row);
+            called[e.to_row] = true;
+        }
+    }
+    for c in &mut callees {
+        c.sort_unstable();
+        c.dedup();
+    }
+
+    let mut out = Vec::with_capacity(row_count);
+    let mut placed = vec![false; row_count];
+    let visit = |start: usize, out: &mut Vec<usize>, placed: &mut Vec<bool>| {
+        // Explicit stack, not recursion: a deep or cyclic graph must not be
+        // able to blow the frame in a UI thread.
+        let mut stack = vec![start];
+        while let Some(r) = stack.pop() {
+            if placed[r] {
+                continue;
+            }
+            placed[r] = true;
+            out.push(r);
+            // Reversed, so the lowest row index is popped first and source
+            // order survives the stack.
+            for &c in callees[r].iter().rev() {
+                if !placed[c] {
+                    stack.push(c);
+                }
+            }
+        }
+    };
+
+    for (r, &is_called) in called.iter().enumerate() {
+        if !is_called {
+            visit(r, &mut out, &mut placed);
+        }
+    }
+    // Index-based on purpose: `placed` is written by `visit` inside the loop,
+    // so it cannot also be borrowed by an iterator over itself.
+    for r in 0..row_count {
+        if !placed[r] {
+            visit(r, &mut out, &mut placed);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod call_order_tests {
+    use super::{CallEdge, call_order};
+
+    fn e(from_row: usize, to_row: usize) -> CallEdge {
+        CallEdge {
+            from_node: 0,
+            from_row,
+            to_node: 0,
+            to_row,
+        }
+    }
+
+    /// A caller comes before what it calls.
+    #[test]
+    fn a_caller_precedes_its_callee() {
+        // 0 calls 2, 2 calls 1. Source order would be 0,1,2.
+        let o = call_order(3, &[e(0, 2), e(2, 1)]);
+        assert_eq!(o, vec![0, 2, 1]);
+    }
+
+    /// Two callees of one function keep the order they appear in the file.
+    #[test]
+    fn ties_fall_back_to_source_order() {
+        let o = call_order(3, &[e(0, 2), e(0, 1)]);
+        assert_eq!(o, vec![0, 1, 2], "row index breaks the tie, not edge order");
+    }
+
+    /// A file with no internal calls is left exactly as written.
+    #[test]
+    fn no_calls_means_source_order() {
+        assert_eq!(call_order(4, &[]), vec![0, 1, 2, 3]);
+    }
+
+    /// A cycle terminates, and every row still appears exactly once.
+    ///
+    /// The back edge that closes the cycle is simply not followed - without
+    /// this the walk would spin forever on a UI thread.
+    #[test]
+    fn a_cycle_terminates_and_loses_nothing() {
+        let o = call_order(3, &[e(0, 1), e(1, 2), e(2, 0)]);
+        assert_eq!(o.len(), 3);
+        let mut sorted = o.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2], "every row exactly once");
+    }
+
+    /// A cycle NO root reaches is still emitted - nothing may vanish.
+    #[test]
+    fn an_unreachable_cycle_is_still_listed() {
+        // 0 is a root; 1 and 2 call only each other, so neither is a root.
+        let o = call_order(3, &[e(1, 2), e(2, 1)]);
+        assert_eq!(o.len(), 3);
+        assert_eq!(o[0], 0, "the real root leads");
+        let mut sorted = o.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2]);
+    }
+
+    /// Same input, same answer - the layout must not shuffle between frames.
+    #[test]
+    fn the_order_is_deterministic() {
+        let edges = [e(0, 3), e(3, 1), e(0, 2), e(2, 1)];
+        let first = call_order(4, &edges);
+        for _ in 0..5 {
+            assert_eq!(call_order(4, &edges), first);
+        }
+    }
+
+    /// An edge naming a row the module does not have is ignored, not a panic.
+    #[test]
+    fn out_of_range_rows_are_ignored() {
+        let o = call_order(2, &[e(0, 9), e(7, 1)]);
+        assert_eq!(o.len(), 2);
     }
 }

@@ -75,7 +75,7 @@ fn dimmed(painter: &egui::Painter, dim: bool) -> egui::Painter {
 }
 
 /// Opacity of a pin filtered out by the search box.
-const SEARCH_DIM: f32 = 0.3;
+pub const SEARCH_DIM: f32 = 0.3;
 
 /// A bare chip's body — dark grey plastic.
 pub const CHIP_FILL: egui::Color32 = egui::Color32::from_rgb(45, 45, 55);
@@ -181,7 +181,7 @@ pub fn render_pins_rotated(
     match mode {
         RotMode::Quarter => render_quarter(mcu, painter, chip_rect, rot, ui),
         RotMode::Diamond => render_diamond(mcu, painter, chip_rect, rot, ui),
-        RotMode::None => render_pins_and_detect_clicks(mcu, painter, chip_rect, ui),
+        RotMode::None => render_pins_and_detect_clicks(mcu, painter, chip_rect, rot, ui),
     }
 }
 
@@ -234,6 +234,9 @@ fn render_quarter(
             egui::Align2::CENTER_CENTER,
             lp.pin,
         );
+        if let Some(grp) = mcu.group_of_pin(lp.pin.number) {
+            draw_group_tick(painter, &lp, rot, super::modules::group_color(&grp.name));
+        }
         if hit {
             clicked = Some(lp.pin.number);
         }
@@ -349,11 +352,54 @@ fn render_diamond(
             egui::Align2::CENTER_CENTER,
             lp.pin,
         );
+        if let Some(grp) = mcu.group_of_pin(lp.pin.number) {
+            draw_group_tick(painter, lp, rot, super::modules::group_color(&grp.name));
+        }
         if clicked_now && hovered {
             clicked = Some(lp.pin.number);
         }
     }
     clicked
+}
+
+/// The device mark on a pad: a short bar across the outer tip of its stub, in
+/// the colour of the group that holds it.
+///
+/// Built from `anchor()` and `outward` carried through `rot`, so one call sites
+/// all three rotation modes. A QUAD and not an axis-aligned rect: on the 45°
+/// diamond `outward` points diagonally, and a rect branch keyed on
+/// `outward.x == 0.0` would lay the bar ALONG the stub instead of across it.
+/// `Rot` with angle 0 is the identity, so the un-rotated path pays nothing for
+/// going through the same code.
+///
+/// A BAR rather than a tinted stub: the stub already carries the peripheral's
+/// own colour, and a device is a second, unrelated fact about the same pad. Two
+/// colours over one area would read as one blended wrong colour.
+fn draw_group_tick(painter: &egui::Painter, g: &PinGeom<'_>, rot: Rot, color: egui::Color32) {
+    match g.place {
+        PinPlace::Edge(_) => {
+            let n = rot.vec(g.outward).normalized();
+            let t = egui::vec2(-n.y, n.x);
+            let c = rot.apply(g.anchor()) + n * 2.5;
+            let across = t * (PIN_WIDTH / 2.0);
+            let thick = n * 1.5;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    c - across - thick,
+                    c + across - thick,
+                    c + across + thick,
+                    c - across + thick,
+                ],
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+        // A ball has no stub to mark the end of, so the tick becomes a dot at
+        // its upper-right - clear of the designator, which is drawn centred.
+        PinPlace::Ball { .. } => {
+            painter.circle_filled(rot.apply(g.rect.right_top()), 2.5, color);
+        }
+    }
 }
 
 /// Render every pin upright and detect clicks.
@@ -366,6 +412,9 @@ pub fn render_pins_and_detect_clicks(
     mcu: &Mcu,
     painter: &egui::Painter,
     chip_rect: egui::Rect,
+    // Identity here (`RotMode::None` is angle 0), carried only so the device
+    // tick is placed by the same code on all three paths.
+    rot: Rot,
     ui: &mut egui::Ui,
 ) -> Option<usize> {
     let mut clicked_pin: Option<usize> = None;
@@ -425,6 +474,12 @@ pub fn render_pins_and_detect_clicks(
                 designator,
                 g.pin,
             ),
+        }
+        // The device this pad belongs to, if the user grouped it. Painted after
+        // the pin so the mark is not covered by the stub, and through the same
+        // dimming painter so a search that hides the pin hides its mark too.
+        if let Some(grp) = mcu.group_of_pin(g.pin.number) {
+            draw_group_tick(painter, &g, rot, super::modules::group_color(&grp.name));
         }
         if hit {
             clicked_pin = Some(g.pin.number);

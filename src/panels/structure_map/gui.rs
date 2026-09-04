@@ -33,6 +33,12 @@ pub struct StructureView {
     pub last_scale: f32,
     /// Draw the cross-module call edges (Phase 3) over the diagram.
     pub show_calls: bool,
+    /// Nodes drawn OPEN: every symbol row listed, in the order the module's own
+    /// code calls them, with its internal call edges drawn between the rows.
+    ///
+    /// Not persisted - it is a reading position, like zoom and pan. Part of the
+    /// layout cache key in the tab driver, because an open node is taller.
+    pub expanded: std::collections::BTreeSet<usize>,
     /// How many call-hops BELOW the focused module to draw: `Some(1)` = only
     /// its direct edges (default), `Some(n)` = the downstream tree n levels
     /// deep, `None` = "All" (the whole tree under the selected module).
@@ -102,6 +108,7 @@ impl Default for StructureView {
             show_externals: false,
             search: String::new(),
             pan: egui::Vec2::ZERO,
+            expanded: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -173,6 +180,10 @@ const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(250, 250, 250);
 /// into the background while stays brighter than the dashed containment.
 const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(40, 40, 40);
 const CONTAIN_COLOR: egui::Color32 = egui::Color32::from_rgb(105, 105, 115);
+/// A module's INTERNAL flow, drawn inside an expanded node. Dimmer than the
+/// cross-module edges on purpose: at this zoom the reader is inside one box,
+/// and these must not compete with the arrows that connect boxes to each other.
+const FLOW_COLOR: egui::Color32 = egui::Color32::from_rgb(150, 165, 195);
 
 /// Render the diagram; the [`ShowResult`] carries clicks, a finished node drag
 /// and the Auto-layout request. `lay` is mutable: dragging a node's HEADER
@@ -185,6 +196,8 @@ pub fn show(
     lay: &mut GraphLayout,
     view: &mut StructureView,
     calls: &[CallEdge],
+    // Calls WITHIN a module - see `show_canvas`.
+    inner_calls: &[CallEdge],
     calls_status: &str,
     // Focused module (index): only call edges touching it are drawn — showing
     // every collected edge at once was unreadable. Driven by the currently
@@ -408,6 +421,7 @@ pub fn show(
         lay,
         view,
         calls,
+        inner_calls,
         scale,
         content,
         avail,
@@ -454,6 +468,9 @@ fn show_canvas(
     lay: &mut GraphLayout,
     view: &mut StructureView,
     calls: &[CallEdge],
+    // Calls WITHIN a module - drawn only inside an expanded node, and the
+    // source of the order its rows are listed in.
+    inner_calls: &[CallEdge],
     scale: f32,
     content: egui::Vec2,
     avail: egui::Vec2,
@@ -635,7 +652,7 @@ fn show_canvas(
         // from `lay.pos` next frame, so they follow with a one-frame lag —
         // the usual immediate-mode drag behaviour.
         let pre_rows = if show_detail {
-            shown_rows(node.symbols.len())
+            shown_rows(node.symbols.len(), view.expanded.contains(&i))
         } else {
             0
         };
@@ -651,6 +668,17 @@ fn show_canvas(
                 egui::Sense::click_and_drag(),
             )
             .on_hover_cursor(egui::CursorIcon::Grab);
+        // Double-click the header: open the node, or close it again.
+        //
+        // On the header rather than the box, so it cannot be confused with a
+        // row's click-to-jump; a double-click, so it cannot be confused with the
+        // single click that opens the file or with the drag that moves the node.
+        // A node with no symbols has nothing to open.
+        if drag_resp.double_clicked() && show_detail && !node.symbols.is_empty() {
+            if !view.expanded.remove(&i) {
+                view.expanded.insert(i);
+            }
+        }
         if drag_resp.dragged() {
             let d = drag_resp.drag_delta() / scale;
             lay.pos[i].x = (lay.pos[i].x + d.x).max(MARGIN);
@@ -730,8 +758,12 @@ fn show_canvas(
         // ── Header band: name + fn/ty badge ───────────────────────────────
         // Rows below need the detail scale; a row-less (or zoomed-out) node
         // centers the header content in the whole box instead.
+        // Open nodes list every row, in call order, with their internal flow
+        // drawn between the rows. Zoomed out past the legibility floor nothing
+        // is detailed, so expansion is moot there.
+        let expanded_here = show_detail && view.expanded.contains(&i);
         let rows = if show_detail {
-            shown_rows(node.symbols.len())
+            shown_rows(node.symbols.len(), expanded_here)
         } else {
             0
         };
@@ -792,13 +824,73 @@ fn show_canvas(
                 egui::Stroke::new(0.8_f32, NODE_STROKE),
             );
             let row_h = ROW_H * scale;
-            for j in 0..rows {
+            // Where each row is DRAWN, when the node is open: its own call
+            // order rather than source order.
+            //
+            // Only the position moves. `j` stays the SYMBOL index everywhere
+            // else - it addresses `node.symbols`, it is half of the click id,
+            // and it is what a `CallEdge`'s `from_row`/`to_row` mean. Reordering
+            // the identity instead of the placement would silently point every
+            // call edge and every jump-to-line at the wrong item.
+            let draw_order: Vec<usize> = if expanded_here {
+                let mine: Vec<CallEdge> = inner_calls
+                    .iter()
+                    .copied()
+                    .filter(|e| e.from_node == i)
+                    .collect();
+                crate::panels::structure_map::calls::call_order(node.symbols.len(), &mine)
+            } else {
+                (0..rows).collect()
+            };
+            // Slot of each symbol, for drawing the flow between rows.
+            let mut slot_of = vec![usize::MAX; node.symbols.len()];
+            for (slot, &j) in draw_order.iter().enumerate() {
+                if j < slot_of.len() {
+                    slot_of[j] = slot;
+                }
+            }
+            if expanded_here {
+                // The module's own flow, drawn in the left gutter INSIDE the
+                // box: a short bow from the caller's row down to the callee's.
+                //
+                // Rows are already in call order, so nearly every one of these
+                // runs downward and short - which is the whole point of the
+                // ordering. A bow that runs UP is a back edge, and reads as one.
+                let gutter = r.left() + 3.0 * scale;
+                for e in inner_calls.iter().filter(|e| e.from_node == i) {
+                    let (Some(&a), Some(&b)) = (slot_of.get(e.from_row), slot_of.get(e.to_row))
+                    else {
+                        continue;
+                    };
+                    if a == usize::MAX || b == usize::MAX {
+                        continue;
+                    }
+                    let y = |slot: usize| header.bottom() + (slot as f32 + 0.5) * row_h;
+                    let (ya, yb) = (y(a), y(b));
+                    let bow = (6.0 * scale).min((yb - ya).abs() * 0.4);
+                    painter.add(egui::Shape::CubicBezier(
+                        egui::epaint::CubicBezierShape::from_points_stroke(
+                            [
+                                egui::pos2(gutter, ya),
+                                egui::pos2(gutter - bow, ya),
+                                egui::pos2(gutter - bow, yb),
+                                egui::pos2(gutter, yb),
+                            ],
+                            false,
+                            egui::Color32::TRANSPARENT,
+                            egui::Stroke::new(1.0_f32.max(scale), FLOW_COLOR),
+                        ),
+                    ));
+                }
+            }
+            for (slot, &j) in draw_order.iter().enumerate() {
                 let row_rect = egui::Rect::from_min_size(
-                    egui::pos2(r.left(), header.bottom() + j as f32 * row_h),
+                    egui::pos2(r.left(), header.bottom() + slot as f32 * row_h),
                     egui::vec2(r.width(), row_h),
                 );
-                // Trailing "+K more" row when truncated (not clickable).
-                if node.symbols.len() > MAX_SYMBOL_ROWS && j == rows - 1 {
+                // Trailing "+K more" row when truncated (not clickable). Never
+                // on an open node, which lists everything.
+                if !expanded_here && node.symbols.len() > MAX_SYMBOL_ROWS && slot == rows - 1 {
                     painter.text(
                         egui::pos2(row_rect.left() + 6.0 * scale, row_rect.center().y),
                         egui::Align2::LEFT_CENTER,

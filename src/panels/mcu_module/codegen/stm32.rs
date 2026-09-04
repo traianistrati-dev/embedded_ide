@@ -453,10 +453,11 @@ pub(super) fn gen_parts(
     let mut pin_section = String::new();
     for (port, lines) in &port_groups {
         pin_section.push_str(&format!("    // ── Port {port} ──\n"));
-        for l in lines {
-            pin_section.push_str(l);
-            pin_section.push('\n');
-        }
+        // Blank-line separated, like every other backend: an `#[allow(…)]` sat
+        // directly under the previous pin's `let` reads as one wall of text.
+        pin_section.push_str(&super::common::blank_separated(
+            lines.iter().map(|l| format!("{l}\n")),
+        ));
         pin_section.push('\n');
     }
 

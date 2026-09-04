@@ -655,16 +655,18 @@ fn make_gen_section(
         // editing the line. Scoped to the one statement, it goes inert the
         // moment the pin is used. Same rule as the STM32F1 backend.
         const ALLOW: &str = "    #[allow(unused_mut, unused_variables)]\n";
+        // Collected rather than pushed, so `blank_separated` can put one blank
+        // line between each pin's attribute+`let` pair. Run together they read
+        // as one wall — see that function.
+        let mut pins_out: Vec<String> = Vec::new();
         for p in &outputs {
-            body.push_str(ALLOW);
-            body.push_str(&format!(
-                "    let mut {var} = Output::new(peripherals.{gpio}, Level::High, OutputConfig::default()); // GPIO Output\n",
+            pins_out.push(format!(
+                "{ALLOW}    let mut {var} = Output::new(peripherals.{gpio}, Level::High, OutputConfig::default()); // GPIO Output\n",
                 var = esp_binding(p),
                 gpio = p.name,
             ));
         }
         for p in &inputs {
-            body.push_str(ALLOW);
             // `listen` takes `&mut self`, so an input the blocking path arms has
             // to be bound mutably. On Async it does not: the pin is MOVED into
             // its task, which declares its own `mut`.
@@ -687,12 +689,13 @@ fn make_gen_section(
                 GpioMode::PullDown => "Pull::Down",
                 _ => "Pull::None",
             };
-            body.push_str(&format!(
-                "    let {m}{var} = Input::new(peripherals.{gpio}, InputConfig::default().with_pull({pull})); // GPIO Input\n",
+            pins_out.push(format!(
+                "{ALLOW}    let {m}{var} = Input::new(peripherals.{gpio}, InputConfig::default().with_pull({pull})); // GPIO Input\n",
                 var = esp_binding(p),
                 gpio = p.name,
             ));
         }
+        body.push_str(&crate::panels::mcu_module::codegen::common::blank_separated(pins_out));
     }
 
     // ── GPIO interrupts ──────────────────────────────────────────────────────
@@ -3499,6 +3502,56 @@ mod async_tail_esp {
 
     /// Async on ESP is esp-rtos driving embassy-executor — same cooperative
     /// scheduler, same warning.
+    /// Every pin's `#[allow(…)]` + `let` pair is its own paragraph.
+    ///
+    /// Run together, the attribute of the next pin sits directly under the
+    /// previous pin's code and the whole GPIO block reads as one wall — which is
+    /// exactly what it looked like before `blank_separated`.
+    #[test]
+    fn each_gpio_pin_is_its_own_paragraph() {
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+        let mut mcu = crate::panels::mcu_module::mock_esp32c3::create_esp32c3();
+        let mut n = 0;
+        let nums: Vec<usize> = mcu.iter_all_pins().map(|p| p.number).collect();
+        for num in nums {
+            if let Some(p) = mcu.find_pin_mut(num) {
+                if p.name.starts_with("GPIO") && !p.reserved && n < 3 {
+                    p.selected_function = if n == 0 {
+                        PinFunction::GpioOutput
+                    } else {
+                        PinFunction::GpioInput
+                    };
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, 3, "the mock has three free GPIOs to wire");
+        let code = mcu.fresh_main_rs();
+
+        // A `let` is never the line directly after another pin's `let`…
+        let lines: Vec<&str> = code.lines().collect();
+        let allow = "#[allow(unused_mut, unused_variables)]";
+        let mut pairs = 0;
+        for w in lines.windows(2) {
+            if w[0].contains("= Output::new(") || w[0].contains("= Input::new(") {
+                assert!(
+                    w[1].trim().is_empty() || !w[1].contains(allow),
+                    "no blank line between two pins:\n{}\n{}",
+                    w[0],
+                    w[1]
+                );
+                pairs += 1;
+            }
+        }
+        assert_eq!(pairs, 3, "all three pins generated:\n{code}");
+        // …and the attribute is still glued to the `let` it guards.
+        for w in lines.windows(2) {
+            if w[0].contains(allow) {
+                assert!(w[1].contains("let "), "the allow lost its statement");
+            }
+        }
+    }
+
     #[test]
     fn an_async_esp_opens_its_loop_with_the_warning() {
         let mut mcu = crate::panels::mcu_module::mock_esp32c3::create_esp32c3();

@@ -8,6 +8,7 @@
 
 pub mod chip;
 pub mod clock;
+pub mod device_frame;
 pub mod geometry;
 pub mod info;
 pub mod io_arrows;
@@ -68,6 +69,16 @@ impl Mcu {
             mx = mx.max(io_arrows::MARGIN_X);
             my = my.max(io_arrows::MARGIN_Y);
         }
+        // A device mat reaches past its outermost part by a rim and a tab, and a
+        // mat on a BARE pad reaches past the stub tip as well. Painted shapes
+        // never grow `ui.min_rect()`, so the Scene's auto-fit cannot discover
+        // that on its own - the painter has to be told, or the mat is clipped at
+        // the canvas edge with nothing to show for it.
+        let has_groups = self.groups.iter().any(|g| g.is_live());
+        if has_groups {
+            mx = mx.max(device_frame::BARE_REACH) + device_frame::HALO;
+            my = my.max(device_frame::BARE_REACH) + device_frame::HALO;
+        }
         // Canvas size follows the rotation — a diamond needs a bigger square box
         // (its bounding circle spans the chip's diagonal), a 90° chip swaps axes.
         let (canvas_w, canvas_h) = match rot_mode {
@@ -83,8 +94,9 @@ impl Mcu {
         // Scene's auto-fit encompasses them instead of clipping at the panel
         // edge. The chip stays centred; the extra span is just empty canvas.
         let drag_ext = modules::dragged_half_extent(self).max(io_arrows::dragged_half_extent(self));
-        let half_w = (canvas_w / 2.0 + mx).max(drag_ext.x + 16.0);
-        let half_h = (canvas_h / 2.0 + my).max(drag_ext.y + 16.0);
+        let halo = if has_groups { device_frame::HALO } else { 0.0 };
+        let half_w = (canvas_w / 2.0 + mx).max(drag_ext.x + 16.0 + halo);
+        let half_h = (canvas_h / 2.0 + my).max(drag_ext.y + 16.0 + halo);
         // The canvas senses CLICKS so empty space can clear the selection. Sensing
         // click (not drag) leaves the Scene's drag-pan alone: egui hit-tests click
         // and drag targets separately, and every pin / module / field registers
@@ -114,6 +126,15 @@ impl Mcu {
             _ => display_chip,
         };
 
+        // Filled by the two passes below with every box and field rect they
+        // actually paint.
+        let mut members: Vec<device_frame::Member> = Vec::new();
+        // The device mats go in a slot reserved BEFORE the body, so the opaque
+        // body punches the chip out of every mat for free - no keep-out rect, no
+        // inner-edge geometry. `Painter::set` is documented for exactly this;
+        // this is the codebase's first use of it.
+        let mat_slot = has_groups.then(|| painter.add(egui::Shape::Noop));
+
         // ── Chip body ───────────────────────────────────────────────────────
         // A board is a PCB with a chip on it, and it says so in one colour.
         let body_fill = if self.board_chip.is_some() {
@@ -129,19 +150,57 @@ impl Mcu {
         // ── Pins + click detection ───────────────────────────────────────────
         let clicked_pin = match rot_mode {
             rotate::RotMode::None => {
-                chip::render_pins_and_detect_clicks(self, &painter, display_chip, ui)
+                chip::render_pins_and_detect_clicks(self, &painter, display_chip, rot, ui)
             }
             _ => chip::render_pins_rotated(self, &painter, local_chip, rot, rot_mode, ui),
         };
 
+        // The name tabs go in a SECOND slot, here: above the body and the pin
+        // stubs, still below every box, wire and field. A tab shares the mat's
+        // depth only until a mat lands on the pin row - which is exactly where a
+        // bare pad's mat is - and a name under a 50 px opaque stub cannot be
+        // read at all.
+        let tab_slot = has_groups.then(|| painter.add(egui::Shape::Noop));
+
         // ── Virtual modules (boxes + wires) around the chip ───────────────────
         if !self.modules.is_empty() {
-            modules::draw_modules(self, &painter, local_chip, display_chip, rot, ui);
+            modules::draw_modules(
+                self,
+                &painter,
+                local_chip,
+                display_chip,
+                rot,
+                ui,
+                &mut members,
+            );
         }
 
         // ── In/out arrows + rename fields for GPIO In/Out/PWM pins ────────────
         if has_io {
-            io_arrows::draw_io_arrows(self, &painter, local_chip, rot, ui);
+            io_arrows::draw_io_arrows(self, &painter, local_chip, rot, ui, &mut members);
+        }
+
+        // ── Device mats, back-filled into the reserved slot ───────────────────
+        // Unconditional, because both passes above are gated: a device made only
+        // of module pads on a chip with no io pins - or only of loose pads on a
+        // chip with no modules - still has a mat to draw.
+        //
+        // Through the SAME `painter` binding, never a `chip::dimmed` clone and
+        // never `with_clip_rect`: `Painter::set` re-stamps the setting painter's
+        // clip rect and re-runs its opacity transform, so a faded or narrowed
+        // painter would silently fade or clip every mat at once.
+        if let (Some(mats), Some(tabs)) = (mat_slot, tab_slot) {
+            let pads = device_frame::pad_footprints(self, local_chip, rot);
+            let (mat_shapes, tab_shapes) = device_frame::frames(
+                self,
+                &painter,
+                display_chip.center(),
+                rect,
+                &members,
+                &pads,
+            );
+            painter.set(mats, egui::Shape::Vec(mat_shapes));
+            painter.set(tabs, egui::Shape::Vec(tab_shapes));
         }
 
         // Toggle selected_pin (click again to deselect); reset the list scroll on
