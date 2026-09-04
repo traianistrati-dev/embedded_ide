@@ -17,6 +17,7 @@ pub mod module_docs;
 pub mod modules;
 pub mod panel;
 pub mod rotate;
+pub mod wire;
 
 use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -129,6 +130,50 @@ impl Mcu {
         // Filled by the two passes below with every box and field rect they
         // actually paint.
         let mut members: Vec<device_frame::Member> = Vec::new();
+        // ── The device tabs' drag handles ────────────────────────────────
+        // Minted against LAST frame's rects (see `Mcu::device_tabs`), and placed
+        // HERE on purpose: after the canvas background, so a tab takes its own
+        // click instead of clearing the selection; before every pad, box and
+        // field, so each of those wins any tie inside a tab that happens to lie
+        // under one.
+        let mut drag_now: Option<(String, (f32, f32))> = None;
+        let mut tab_click: Option<String> = None;
+        let mut tab_reset: Option<String> = None;
+        for h in self.device_tabs.clone() {
+            let manual = self.device_is_manual(&h.name);
+            let resp = ui
+                .interact(
+                    h.off.translate(center.to_vec2()),
+                    ui.id().with(("device_tab", &h.name, h.cluster)),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::Grab)
+                .on_hover_text(
+                    "Click to select the whole device - drag to move every part of it",
+                );
+            if resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                let d = resp.drag_delta();
+                if d != egui::Vec2::ZERO {
+                    drag_now = Some((h.name.clone(), (d.x, d.y)));
+                }
+            }
+            if resp.clicked() {
+                tab_click = Some(h.name.clone());
+            }
+            if manual {
+                resp.context_menu(|ui| {
+                    if ui.button("Reset device to auto position").clicked() {
+                        tab_reset = Some(h.name.clone());
+                        ui.close();
+                    }
+                });
+            }
+        }
+        // Fixed BEFORE either paint pass, so the boxes and the io fields move by
+        // one and the same value.
+        self.device_drag = drag_now;
+
         // The device mats go in a slot reserved BEFORE the body, so the opaque
         // body punches the chip out of every mat for free - no keep-out rect, no
         // inner-edge geometry. `Painter::set` is documented for exactly this;
@@ -191,6 +236,7 @@ impl Mcu {
         // painter would silently fade or clip every mat at once.
         if let (Some(mats), Some(tabs)) = (mat_slot, tab_slot) {
             let pads = device_frame::pad_footprints(self, local_chip, rot);
+            let mut handles: Vec<device_frame::TabHandle> = Vec::new();
             let (mat_shapes, tab_shapes) = device_frame::frames(
                 self,
                 &painter,
@@ -198,9 +244,33 @@ impl Mcu {
                 rect,
                 &members,
                 &pads,
+                &mut handles,
             );
             painter.set(mats, egui::Shape::Vec(mat_shapes));
             painter.set(tabs, egui::Shape::Vec(tab_shapes));
+            // A device under the pointer keeps LAST frame's handle entries. Its
+            // mat re-clusters as it moves past a foreign box, which would change
+            // the cluster index, change the widget id, and drop the drag halfway
+            // across the canvas.
+            if let Some((dev, _)) = self.device_drag.clone() {
+                handles.retain(|h| h.name != dev);
+                handles.extend(self.device_tabs.iter().filter(|h| h.name == dev).cloned());
+            }
+            self.device_tabs = handles;
+        }
+
+        // Deferred out of the handle loop above, which ran while `self` was
+        // borrowed for the interact.
+        if let Some(name) = tab_click {
+            // Click again to deselect, exactly as a pin and a box behave.
+            self.selected_device = if self.selected_device.as_deref() == Some(name.as_str()) {
+                None
+            } else {
+                Some(name)
+            };
+        }
+        if let Some(name) = tab_reset {
+            self.reset_device_position(&name);
         }
 
         // Toggle selected_pin (click again to deselect); reset the list scroll on
@@ -233,9 +303,7 @@ impl Mcu {
             .interact_pointer_pos()
             .is_some_and(|p| display_chip.contains(p));
         if response.clicked() && !on_body {
-            self.selected_pin = None;
-            self.selected_module = None;
-            self.collapse_modules = true;
+            self.clear_canvas_selection();
         }
 
         // ── Inner chip panel ─────────────────────────────────────────────────

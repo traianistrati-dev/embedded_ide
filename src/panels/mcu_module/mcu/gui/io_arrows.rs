@@ -31,9 +31,15 @@ fn connector(
     // `false` for a signal whose direction we don't know (a generic alternate
     // function): a plain line says "wired here", an arrow would be a guess.
     head: bool,
+    // The device this pad belongs to, when the canvas is pointing at it: the
+    // shaft gains a halo in that device's colour, exactly as a module wire does.
+    lit: Option<&str>,
+    out: &mut (Vec<egui::Shape>, Vec<egui::Shape>),
 ) {
-    let stroke = egui::Stroke::new(2.0_f32, color);
-    painter.line_segment([from, to], stroke);
+    let (halo, line) = super::modules::wire_shapes(&[from, to], color, 2.0, lit);
+    out.0.extend(halo);
+    out.1.push(line);
+    let stroke = egui::Stroke::new(if lit.is_some() { 2.6_f32 } else { 2.0 }, color);
     let v = to - from;
     if !head || v.length() < 1.0 {
         return;
@@ -307,6 +313,15 @@ pub fn draw_io_arrows(
     let mut drag_updates: Vec<(usize, (f32, f32))> = Vec::new();
     let mut reset_updates: Vec<usize> = Vec::new();
     let mut click_request: Option<usize> = None;
+    // Same idiom as the module wires: one slot for every connector shaft, so a
+    // field drawn later cannot paint over an earlier field's line. Halos in `.0`,
+    // lines in `.1`, concatenated in that order when the slot is filled.
+    let conn_slot = painter.add(egui::Shape::Noop);
+    let mut conn_shapes: (Vec<egui::Shape>, Vec<egui::Shape>) = (Vec::new(), Vec::new());
+    // The device the canvas is pointing at. Read before the loop takes `mcu`.
+    let active = mcu.active_device().map(str::to_owned);
+    // …and the one being dragged, for the same reason.
+    let dev_drag = mcu.device_drag.clone();
     // The pin the user has selected on the chip: its field group out here is
     // called out the same way as the pin itself and as a selected module box.
     let selected_pin = mcu.selected_pin;
@@ -327,6 +342,16 @@ pub fn draw_io_arrows(
         };
         let field_rect = egui::Rect::from_center_size(field_center, egui::vec2(FIELD_W, FIELD_H));
 
+        // The device this field belongs to is being dragged: move with it, from
+        // wherever the auto placement just put it. Pushed BEFORE this field's own
+        // drag handler below, so dragging one field out of a device still wins.
+        if let Some((dev, (dx, dy))) = &dev_drag
+            && it.group.as_deref().map(str::trim) == Some(dev.trim())
+        {
+            let off = field_center + egui::vec2(*dx, *dy) - chip_center;
+            drag_updates.push((it.num, (off.x, off.y)));
+        }
+
         // Connector pin ↔ field, with a FIXED-size arrowhead (see `connector`).
         // Straight axis-aligned auto = a short arrow along the pin direction;
         // dragged OR packed-column = a line to the nearest field edge (re-routes
@@ -345,7 +370,18 @@ pub fn draw_io_arrows(
             IoDir::In => (far, it.anchor),
             IoDir::Out | IoDir::Plain => (it.anchor, far),
         };
-        connector(painter, from, to, it.color, it.flow != IoDir::Plain);
+        let lit = active
+            .as_deref()
+            .filter(|d| it.group.as_deref().map(str::trim) == Some(*d));
+        connector(
+            painter,
+            from,
+            to,
+            it.color,
+            it.flow != IoDir::Plain,
+            lit,
+            &mut conn_shapes,
+        );
 
         // Preview of the resulting binding name — faint above the field, and the
         // DRAG HANDLE (the field itself is a text box, so drag from its label).
@@ -428,7 +464,10 @@ pub fn draw_io_arrows(
             painter.rect_filled(
                 egui::Rect::from_min_size(
                     egui::pos2(name_rect.left(), name_rect.top() - 4.0),
-                    egui::vec2(name_rect.width().max(12.0), 3.0),
+                    egui::vec2(
+                        name_rect.width().max(12.0),
+                        super::modules::GROUP_BAR_H,
+                    ),
                 ),
                 1.0,
                 super::modules::group_color(g),
@@ -535,6 +574,10 @@ pub fn draw_io_arrows(
         }
     }
     // Apply drag / reset now the per-item `mcu` borrows have ended.
+    let (mut halos, mut lines) = conn_shapes;
+    halos.append(&mut lines);
+    painter.set(conn_slot, egui::Shape::Vec(halos));
+
     for (num, off) in drag_updates {
         mcu.io_pin_pos.insert(num, off);
     }

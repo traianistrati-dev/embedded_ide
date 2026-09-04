@@ -382,7 +382,7 @@ fn draw_group_tick(painter: &egui::Painter, g: &PinGeom<'_>, rot: Rot, color: eg
             let t = egui::vec2(-n.y, n.x);
             let c = rot.apply(g.anchor()) + n * 2.5;
             let across = t * (PIN_WIDTH / 2.0);
-            let thick = n * 1.5;
+            let thick = n * (super::modules::GROUP_BAR_H / 2.0);
             painter.add(egui::Shape::convex_polygon(
                 vec![
                     c - across - thick,

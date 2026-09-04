@@ -357,6 +357,29 @@ pub struct Mcu {
     /// and double-bordered, the module counterpart of [`Mcu::selected_pin`].
     /// Clicking it again clears it. View state only; not persisted.
     pub selected_module: Option<String>,
+    /// Name of the device the canvas is pointing at, when the user said so
+    /// OUTRIGHT — by clicking its tab. Most of the time nothing is here and
+    /// [`Mcu::active_device`] derives the answer from the selected pin or module
+    /// instead, so there is no second gesture to learn. View state only; not
+    /// persisted.
+    pub selected_device: Option<String>,
+    /// Where each device's tab was drawn LAST frame, as an offset from the chip
+    /// centre.
+    ///
+    /// A tab's rect is only known after both paint passes have run, but its drag
+    /// handle has to be registered BEFORE them — above the canvas background so
+    /// it takes its own click, below every pad, box and field so they win any
+    /// tie. Those cannot both happen in one frame, so the handle is minted
+    /// against last frame's rect. Only the PRESS is hit-tested that way: egui
+    /// carries a live drag on the id it started on, so a tab moving under its
+    /// own drag keeps it. View state only; not persisted.
+    pub device_tabs: Vec<crate::panels::mcu_module::mcu::gui::device_frame::TabHandle>,
+    /// A device being dragged this frame, and by how much.
+    ///
+    /// Set before both paint passes and read by each of them, so the boxes and
+    /// the io fields move by one value fixed before either ran. Cleared when the
+    /// gesture ends.
+    pub device_drag: Option<(String, (f32, f32))>,
     /// Transient one-shot: a click on EMPTY canvas (beside the chip, on no
     /// module box and no pin field) cleared the selection, so the module list
     /// below should collapse every entry too — the canvas and the list show the

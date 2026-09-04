@@ -145,6 +145,9 @@ impl Mcu {
             pin_goto: None,
             module_goto: None,
             selected_module: None,
+            selected_device: None,
+            device_tabs: Vec::new(),
+            device_drag: None,
             collapse_modules: false,
             rotated: false,
             io_pin_pos: std::collections::BTreeMap::new(),
@@ -416,6 +419,50 @@ impl Mcu {
             .find(|g| g.is_live() && g.pins.contains(&pin))
     }
 
+    /// The device the canvas is currently talking about.
+    ///
+    /// EXPLICIT first — a click on a device's tab says so outright — then
+    /// DERIVED, so clicking any PART of a device already lights the whole device
+    /// and there is nothing extra to learn. Trimmed, like `is_live`,
+    /// `group_color` and `mcu.config`: two spellings of one name are one device
+    /// everywhere else.
+    ///
+    /// The explicit answer is re-checked against a LIVE group every frame. The
+    /// roster can rename or dissolve a device under us, and a stale name that
+    /// merely suppressed the derivation would leave the canvas lighting nothing,
+    /// forever, with no way to notice.
+    pub fn active_device(&self) -> Option<&str> {
+        if let Some(name) = self.selected_device.as_deref()
+            && let Some(g) = self
+                .groups
+                .iter()
+                .find(|g| g.is_live() && g.name.trim() == name.trim())
+        {
+            return Some(g.name.trim());
+        }
+        if let Some(id) = self.selected_module.as_deref()
+            && let Some(m) = self.modules.iter().find(|m| m.id == id)
+            && let Some(g) = self.group_of_module(m)
+        {
+            return Some(g.name.trim());
+        }
+        self.selected_pin
+            .and_then(|p| self.group_of_pin(p))
+            .map(|g| g.name.trim())
+    }
+
+    /// The one place the canvas drops what it is pointing at.
+    ///
+    /// One function and not three assignments, because there are now three
+    /// selections and a fourth is plausible — a clearing site that forgets one
+    /// leaves the canvas lit for something the user has stopped looking at.
+    pub fn clear_canvas_selection(&mut self) {
+        self.selected_pin = None;
+        self.selected_module = None;
+        self.selected_device = None;
+        self.collapse_modules = true;
+    }
+
     /// The group a MODULE belongs to: the one holding any of its pads.
     ///
     /// Derived rather than stored, which is what lets a group survive
@@ -427,6 +474,50 @@ impl Mcu {
         m.connections
             .iter()
             .find_map(|c| self.group_of_pin(c.mcu_pin))
+    }
+
+    /// Whether any part of device `name` sits at a hand-placed position.
+    ///
+    /// What decides whether the tab offers "reset to auto" at all.
+    pub fn device_is_manual(&self, name: &str) -> bool {
+        let name = name.trim();
+        let mine = |p: usize| {
+            self.group_of_pin(p)
+                .is_some_and(|g| g.name.trim() == name)
+        };
+        self.modules
+            .iter()
+            .any(|m| m.pos != (0.0, 0.0) && m.connections.iter().any(|c| mine(c.mcu_pin)))
+            || self.io_pin_pos.keys().any(|p| mine(*p))
+    }
+
+    /// Return every part of device `name` to auto-packing.
+    ///
+    /// The counterpart of the per-box "Reset field position" already on the
+    /// canvas: a device moved as one has to be resettable as one, or the user is
+    /// left hunting for every part they moved.
+    pub fn reset_device_position(&mut self, name: &str) {
+        let name = name.trim().to_owned();
+        // Collected first: `group_of_pin` borrows the whole `Mcu`.
+        let mine: Vec<usize> = self
+            .groups
+            .iter()
+            .filter(|g| g.is_live() && g.name.trim() == name)
+            .flat_map(|g| g.pins.iter().copied())
+            .collect();
+        let idx: Vec<usize> = self
+            .modules
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.connections.iter().any(|c| mine.contains(&c.mcu_pin)))
+            .map(|(i, _)| i)
+            .collect();
+        for i in idx {
+            self.modules[i].pos = (0.0, 0.0);
+        }
+        for p in mine {
+            self.io_pin_pos.remove(&p);
+        }
     }
 
     /// Put `pin` in the group called `name`, creating it if it is new.
@@ -2394,6 +2485,127 @@ mod device_groups {
         assert!(
             mcu.group_of_pin(7).is_none(),
             "but nothing on the canvas answers for it"
+        );
+    }
+
+    /// The explicit answer outranks both derived ones, and the module outranks
+    /// the pin — a tab click has to be able to override a pad that is still
+    /// selected from before.
+    #[test]
+    fn active_device_prefers_explicit_then_module_then_pin() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let m = mcu.modules[0].clone();
+        let bus_pad = m.connections[0].mcu_pin;
+        let loose = mcu
+            .iter_all_pins()
+            .map(|p| p.number)
+            .find(|n| !m.connections.iter().any(|c| c.mcu_pin == *n))
+            .expect("a pad the bus does not use");
+
+        mcu.join_group_module(&m, "by module");
+        mcu.join_group(loose, "by pin");
+        mcu.new_group("by tab".into());
+        mcu.join_group(bus_pad, "by module");
+
+        mcu.selected_pin = Some(loose);
+        assert_eq!(mcu.active_device(), Some("by pin"));
+
+        mcu.selected_module = Some(m.id.clone());
+        assert_eq!(mcu.active_device(), Some("by module"), "the module outranks the pin");
+
+        // Give "by tab" a pad of its own, so it is a live device.
+        mcu.join_group(loose, "by tab");
+        mcu.selected_device = Some("by tab".into());
+        assert_eq!(mcu.active_device(), Some("by tab"), "explicit outranks both");
+    }
+
+    /// A device can be renamed or dissolved from the roster while its name is
+    /// still stored here. A stale name that merely suppressed the derivation
+    /// would leave the canvas lighting nothing at all, with no way to notice.
+    #[test]
+    fn active_device_ignores_a_dead_name() {
+        let mut mcu = pico();
+        // TWO devices, and the dead name is neither — so falling through to the
+        // derivation and falling onto whichever device happens to be first are
+        // different answers.
+        mcu.join_group(8, "display");
+        mcu.join_group(7, "radar");
+        assert_eq!(mcu.groups[0].name, "display", "display is the first row");
+        mcu.selected_pin = Some(7);
+        mcu.selected_device = Some("dissolved long ago".into());
+        assert_eq!(mcu.active_device(), Some("radar"), "the PIN's device");
+    }
+
+    /// Three selections now, and a fourth is plausible. A clearing site that
+    /// forgets one leaves the canvas lit for something the user stopped looking
+    /// at.
+    #[test]
+    fn clear_canvas_selection_drops_all_three() {
+        let mut mcu = pico();
+        mcu.join_group(7, "radar");
+        mcu.selected_pin = Some(7);
+        mcu.selected_module = Some("whatever".into());
+        mcu.selected_device = Some("radar".into());
+        mcu.collapse_modules = false;
+
+        mcu.clear_canvas_selection();
+
+        assert!(mcu.selected_pin.is_none());
+        assert!(mcu.selected_module.is_none());
+        assert!(mcu.selected_device.is_none());
+        assert!(mcu.collapse_modules, "and the list is told to agree");
+        assert_eq!(mcu.active_device(), None);
+    }
+
+    /// A device dragged as one has to be resettable as one, or the user is left
+    /// hunting for every part they moved.
+    #[test]
+    fn resetting_a_device_returns_every_part_of_it_to_auto() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let m = mcu.modules[0].clone();
+        let spare = mcu
+            .iter_all_pins()
+            .map(|p| p.number)
+            .find(|n| !m.connections.iter().any(|c| c.mcu_pin == *n))
+            .expect("a free pad");
+        mcu.join_group_module(&m, "radar");
+        mcu.join_group(spare, "radar");
+
+        assert!(!mcu.device_is_manual("radar"), "everything starts auto-packed");
+        mcu.modules[0].pos = (40.0, -30.0);
+        mcu.io_pin_pos.insert(spare, (10.0, 10.0));
+        assert!(mcu.device_is_manual("radar"));
+
+        mcu.reset_device_position("radar");
+
+        assert_eq!(mcu.modules[0].pos, (0.0, 0.0), "the box is auto again");
+        assert!(!mcu.io_pin_pos.contains_key(&spare), "and so is the field");
+        assert!(!mcu.device_is_manual("radar"));
+    }
+
+    /// Resetting one device leaves another device's hand-placed parts alone.
+    #[test]
+    fn resetting_a_device_leaves_the_other_devices_where_they_are() {
+        let mut mcu = pico();
+        // A MODULE each, not just a pad each: the module half of the reset has
+        // its own filter, and a test with no modules never runs it.
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        let (uart, spi) = (mcu.modules[0].clone(), mcu.modules[1].clone());
+        mcu.join_group_module(&uart, "radar");
+        mcu.join_group_module(&spi, "display");
+        mcu.modules[0].pos = (5.0, 5.0);
+        mcu.modules[1].pos = (9.0, 9.0);
+
+        mcu.reset_device_position("radar");
+
+        assert_eq!(mcu.modules[0].pos, (0.0, 0.0), "radar's box is auto again");
+        assert_eq!(
+            mcu.modules[1].pos,
+            (9.0, 9.0),
+            "and display's box has not moved"
         );
     }
 

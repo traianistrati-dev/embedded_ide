@@ -61,7 +61,13 @@ use eframe::egui;
 const JOIN: f32 = 24.0;
 
 /// The tinted rim a mat adds around its outermost part.
-const PAD: f32 = 4.0;
+///
+/// Seven, not four: at four the mat read as a tight outline traced on the parts
+/// rather than as ground they sit on, and a box's own border sat almost on the
+/// mat's hairline. Two devices on ADJACENT pads now have rims that overlap by a
+/// few pixels — a rim is not a claim, and `cluster` still measures the
+/// UN-expanded rects, so what the mats say about membership is unchanged.
+const PAD: f32 = 7.0;
 
 /// Side of the square a bare pad contributes, centred on its stub TIP.
 ///
@@ -81,12 +87,14 @@ const PAD: f32 = 4.0;
 /// `the_tip_square_fits_between_two_pads_in_every_rotation`.
 const TIP: f32 = 22.0;
 
-const TAB_H: f32 = 13.0;
-/// The tab's inset from the mat's left edge.
-const TAB_INSET: f32 = 4.0;
+/// Tall enough for [`TAB_PT`] plus a little air above and below.
+const TAB_H: f32 = 18.0;
 /// Text inset inside the tab.
 const TAB_PAD_X: f32 = 5.0;
-const TAB_PT: f32 = 8.5;
+/// The tab's type size. Half again the 8.5 the rest of the diagram's small text
+/// uses: the tab names the whole assembly, so it outranks the signal names and
+/// pin numbers around it rather than joining them.
+const TAB_PT: f32 = 12.75;
 
 /// A third corner radius: the chip body is 4, a module box 6.
 const R_MAT: f32 = 8.0;
@@ -97,6 +105,14 @@ const R_TAB: f32 = 3.0;
 /// stay legible.
 const FILL_A: u8 = 30;
 const EDGE_A: u8 = 95;
+/// The same fill and hairline when the canvas is pointing AT this device.
+///
+/// One step below the white 2.8 px a selected box wears: a mat is far larger
+/// than a box, so matching that weight would make the device shout over the
+/// thing inside it that the user actually clicked.
+const FILL_A_SEL: u8 = 52;
+const EDGE_A_SEL: u8 = 200;
+const EDGE_W_SEL: f32 = 2.4;
 /// Dark text on the light desaturated tab.
 const TAB_FG: egui::Color32 = egui::Color32::from_rgb(0x21, 0x25, 0x2b);
 
@@ -126,6 +142,23 @@ pub struct Member {
     /// without this the second device would draw a competing mat over the same
     /// box.
     pub covers: Vec<usize>,
+}
+
+/// Where one device's tab was drawn, so the next frame can put a widget there.
+///
+/// An OFFSET from the chip centre, never an absolute rect. `Mcu::show` grows the
+/// allocated painter to cover parts dragged far from the chip, which moves the
+/// canvas centre — a rect stashed in screen coordinates would drift by half that
+/// growth exactly while a drag is in flight. Both existing drag stores are
+/// centre-relative for the same reason.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabHandle {
+    /// The device's TRIMMED name — the key everything else uses.
+    pub name: String,
+    /// Which of that device's mats this is, so a device drawn in two pieces
+    /// gets two distinct widget ids.
+    pub cluster: usize,
+    pub off: egui::Rect,
 }
 
 /// One edge pad's tip square.
@@ -270,9 +303,9 @@ fn refuses(f: egui::Rect, a: egui::Rect, b: egui::Rect, u: egui::Rect) -> bool {
 ///   That is the case `JOIN` structurally cannot see, and the one the guard is
 ///   for.
 ///
-/// The candidate union is tested UN-expanded. The 4 px rim may graze a
-/// neighbour; a rim is not a claim. Containment is the lie, and containment is
-/// what is refused.
+/// The candidate union is tested UN-expanded: the rim [`PAD`] adds afterwards
+/// may graze a neighbour, and a rim is not a claim. Containment is the lie, and
+/// containment is what is refused.
 pub(crate) fn cluster(mine: &[egui::Rect], foreign: &[egui::Rect]) -> Vec<egui::Rect> {
     let mut hulls: Vec<egui::Rect> = mine.to_vec();
     loop {
@@ -331,6 +364,9 @@ fn alpha(c: egui::Color32, a: u8, dim: f32) -> egui::Color32 {
 
 /// Where a cluster's tab sits.
 ///
+/// It is as wide as the mat (wider only when the name would not fit), so it
+/// reads as that device's title bar rather than as a label pinned to its corner.
+///
 /// Three candidates, in order: the mat's outward edge, its other edge, and — if
 /// neither is clear — INSIDE the mat's top edge.
 ///
@@ -347,16 +383,18 @@ fn tab_rect(
     canvas: egui::Rect,
     foreign: &[egui::Rect],
 ) -> egui::Rect {
+    // The tab spans the DEVICE, so the name reads as a title over the whole
+    // assembly instead of a sticker on its corner. It grows past the mat only
+    // when the name needs more room than the mat is wide - a clipped name would
+    // be worse than an overhanging tab.
+    let w = w.max(hull.width());
     let at = |top: bool| {
         let (t0, t1) = if top {
             (hull.top() - TAB_H + 1.0, hull.top() + 1.0)
         } else {
             (hull.bottom() - 1.0, hull.bottom() + TAB_H - 1.0)
         };
-        egui::Rect::from_min_max(
-            egui::pos2(hull.left() + TAB_INSET, t0),
-            egui::pos2(hull.left() + TAB_INSET + w, t1),
-        )
+        egui::Rect::from_min_max(egui::pos2(hull.left(), t0), egui::pos2(hull.left() + w, t1))
     };
     let d = hull.center() - chip_center;
     let prefer_top = !(d.y.abs() > d.x.abs() && d.y > 0.0);
@@ -364,8 +402,8 @@ fn tab_rect(
     // Inside the mat's own top edge: not pretty on a small mat, but it is the
     // device's own area, so it covers nobody and nobody covers it.
     let inside = egui::Rect::from_min_max(
-        egui::pos2(hull.left() + TAB_INSET, hull.top()),
-        egui::pos2(hull.left() + TAB_INSET + w, hull.top() + TAB_H),
+        egui::pos2(hull.left(), hull.top()),
+        egui::pos2(hull.left() + w, hull.top() + TAB_H),
     );
     // The two edges are the candidates; `inside` is what is left when neither is
     // clear, which is why it is the fallback and not a third entry - as an entry
@@ -409,6 +447,10 @@ pub fn frames(
     canvas: egui::Rect,
     members: &[Member],
     pads: &[Pad],
+    // Where each tab landed, for next frame's drag handle. Reported rather than
+    // sensed: this function takes a `&Painter` and mints no widget, which is the
+    // compile-time proof in the module docs.
+    handles: &mut Vec<TabHandle>,
 ) -> (Vec<egui::Shape>, Vec<egui::Shape>) {
     let hits = mcu.pin_search_highlight();
 
@@ -465,14 +507,23 @@ pub fn frames(
             (None, _) => true,
         };
         let dim = if lit { 1.0_f32 } else { chip::SEARCH_DIM };
+        // The search filter answers FIRST. A device the search has faded may not
+        // become the brightest thing on the chip just because it is selected -
+        // two different questions would be answering in one alpha channel.
+        let sel = lit && mcu.active_device() == Some(name);
+        let (fill_a, edge_a, edge_w) = if sel {
+            (FILL_A_SEL, EDGE_A_SEL, EDGE_W_SEL)
+        } else {
+            (FILL_A, EDGE_A, 1.0_f32)
+        };
         let n = hulls.len();
         for (i, h) in hulls.into_iter().enumerate() {
             let hull = h.expand(PAD);
             mats.push(egui::Shape::Rect(egui::epaint::RectShape::new(
                 hull,
                 R_MAT,
-                alpha(c, FILL_A, dim),
-                egui::Stroke::new(1.0_f32, alpha(c, EDGE_A, dim)),
+                alpha(c, fill_a, dim),
+                egui::Stroke::new(edge_w, alpha(c, edge_a, dim)),
                 egui::StrokeKind::Inside,
             )));
             let galley = painter.layout_no_wrap(
@@ -487,6 +538,11 @@ pub fn frames(
                 canvas,
                 &foreign,
             );
+            handles.push(TabHandle {
+                name: name.to_owned(),
+                cluster: i,
+                off: tab.translate(-chip_center.to_vec2()),
+            });
             tabs.push(egui::Shape::rect_filled(tab, R_TAB, alpha(c, 255, dim)));
             tabs.push(egui::Shape::galley(
                 egui::pos2(
@@ -543,6 +599,24 @@ mod tests {
         mcu
     }
 
+    /// A search string that hits a real pin, but never `spare`.
+    ///
+    /// A search matching NOTHING is not a filter: `pin_search_highlight` turns
+    /// an empty hit set into `None`, i.e. "show everything". A test that used one
+    /// was asserting that an unfiltered chip is not brighter than an unfiltered
+    /// chip, which is true and says nothing.
+    fn search_missing(mcu: &crate::panels::mcu_module::mcu::Mcu, spare: usize) -> String {
+        let name = mcu
+            .iter_all_pins()
+            .find(|p| p.number != spare && !p.name.is_empty())
+            .map(|p| p.name.clone())
+            .expect("some other pin");
+        assert!(!name.eq_ignore_ascii_case(
+            &mcu.find_pin(spare).expect("the spare pad").name
+        ));
+        name
+    }
+
     /// A canvas big enough that the tab clamp never fires.
     fn roomy() -> egui::Rect {
         egui::Rect::from_min_max(egui::pos2(-2000.0, -2000.0), egui::pos2(2000.0, 2000.0))
@@ -555,7 +629,7 @@ mod tests {
         let mcu = grouped_mcu(&[("radar", &[1, 2])]);
         let members = vec![member(Some("radar"), boxx(300.0, 0.0), &[1, 2])];
         with_painter(|p| {
-            let (mats, tabs) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[]);
+            let (mats, tabs) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new());
             assert_eq!(mats.len(), 1);
             assert_eq!(tabs.len(), 2);
             assert!(matches!(tabs[1], egui::Shape::Text(_)), "the name is last");
@@ -574,7 +648,7 @@ mod tests {
             member(Some("display"), boxx(300.0, 400.0), &[9]),
         ];
         with_painter(|p| {
-            let (mats, tabs) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[]);
+            let (mats, tabs) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new());
             assert_eq!(mats.len(), 2, "one mat per device");
             assert_eq!(tabs.len(), 4, "a plate and a name per device");
             assert!(
@@ -591,10 +665,10 @@ mod tests {
         let bare = grouped_mcu(&[]);
         let orphan = grouped_mcu(&[("radar", &[1])]);
         with_painter(|p| {
-            let (m, t) = frames(&bare, p, egui::Pos2::ZERO, roomy(), &[], &[]);
+            let (m, t) = frames(&bare, p, egui::Pos2::ZERO, roomy(), &[], &[], &mut Vec::new());
             assert!(m.is_empty() && t.is_empty());
             // Grouped, but nothing on the canvas stands for the pad.
-            let (m, t) = frames(&orphan, p, egui::Pos2::ZERO, roomy(), &[], &[]);
+            let (m, t) = frames(&orphan, p, egui::Pos2::ZERO, roomy(), &[], &[], &mut Vec::new());
             assert!(m.is_empty() && t.is_empty());
         });
     }
@@ -607,7 +681,7 @@ mod tests {
         let mcu = grouped_mcu(&[("", &[1])]);
         let members = vec![member(Some(""), boxx(300.0, 0.0), &[1])];
         with_painter(|p| {
-            let (m, t) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[]);
+            let (m, t) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new());
             assert!(m.is_empty() && t.is_empty());
         });
     }
@@ -622,11 +696,12 @@ mod tests {
         let members = vec![member(Some("front distance sensor board rev C"), bx, &[1])];
         // Where the tab WANTS to start, and a canvas that ends 40 px later — far
         // less than the name needs.
-        let anchor = bx.expand(PAD).left() + TAB_INSET;
+        let anchor = bx.expand(PAD).left();
         let canvas =
             egui::Rect::from_min_max(egui::pos2(0.0, -100.0), egui::pos2(anchor + 40.0, 400.0));
         with_painter(|p| {
-            let (_, tabs) = frames(&mcu, p, egui::Pos2::ZERO, canvas, &members, &[]);
+            let (_, tabs) =
+                frames(&mcu, p, egui::Pos2::ZERO, canvas, &members, &[], &mut Vec::new());
             let plate = match &tabs[0] {
                 egui::Shape::Rect(r) => r.rect,
                 _ => panic!("the plate is first"),
@@ -642,6 +717,46 @@ mod tests {
         });
     }
 
+    /// Selection may not undo the search dim. Two different questions answer in
+    /// the same alpha channel, so the order between them has to be fixed: a
+    /// device the search has faded stays faded even while it is selected, or it
+    /// becomes the brightest thing on a filtered chip.
+    #[test]
+    fn a_searched_out_device_is_never_the_brightest_thing() {
+        let mut mcu = grouped_mcu(&[("radar", &[1])]);
+        let members = vec![member(Some("radar"), boxx(300.0, 0.0), &[1])];
+        // The stroke WIDTH, not only the fill alpha: the alpha is multiplied by
+        // the dim whichever order the two gates run in, so it cannot tell them
+        // apart. The width is not dimmed at all, so it can.
+        let mat = |shapes: &[egui::Shape]| match &shapes[0] {
+            egui::Shape::Rect(r) => (r.fill.a(), r.stroke.width),
+            _ => panic!("the mat is first"),
+        };
+        with_painter(|p| {
+            let plain =
+                mat(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            mcu.selected_device = Some("radar".into());
+            let selected =
+                mat(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            assert!(selected.0 > plain.0, "selecting it does brighten the mat");
+            assert!(selected.1 > plain.1, "and thickens its hairline");
+
+            mcu.pin_search = search_missing(&mcu, 1);
+            let hits = mcu.pin_search_highlight().expect("the search really filters");
+            assert!(!hits.contains(&1), "and it excludes this device's pad");
+            let searched_out =
+                mat(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            assert!(
+                searched_out.0 < plain.0,
+                "…but the search still wins on the fill: {searched_out:?} vs {plain:?}"
+            );
+            assert_eq!(
+                searched_out.1, plain.1,
+                "and on the hairline, which no dim can hide"
+            );
+        });
+    }
+
     /// The pin search dims the pads it filtered out; a full-strength mat around
     /// them would make the device the brightest thing on the chip.
     #[test]
@@ -653,15 +768,13 @@ mod tests {
             _ => panic!("the mat is first"),
         };
         with_painter(|p| {
-            let bright = fill(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[]).0);
-            // A search that matches nothing this device owns.
-            mcu.pin_search = "no such pin anywhere".into();
-            assert!(
-                mcu.pin_search_highlight().is_none_or(|h| !h.contains(&1)),
-                "the search does not hit pin 1"
-            );
-            let faded = fill(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[]).0);
-            assert!(faded <= bright, "dimmed, never brightened");
+            let bright = fill(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            // A search that hits a real pin, but not this device's.
+            mcu.pin_search = search_missing(&mcu, 1);
+            let hits = mcu.pin_search_highlight().expect("the search really filters");
+            assert!(!hits.contains(&1), "and it excludes this device's pad");
+            let faded = fill(&frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new()).0);
+            assert!(faded < bright, "dimmed, and measurably so");
         });
     }
 
@@ -679,7 +792,7 @@ mod tests {
         let members = vec![member(Some("radar"), boxx(300.0, 0.0), &[3, 4])];
         let pads = vec![pad(Some("radar"), 3, tip(3)), pad(Some("display"), 4, tip(4))];
         with_painter(|p| {
-            let (mats, _) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &pads);
+            let (mats, _) = frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &pads, &mut Vec::new());
             assert_eq!(mats.len(), 2, "both devices are on the canvas");
         });
     }
@@ -1114,6 +1227,55 @@ mod tests {
         let t = tab_rect(hull, 40.0, egui::Pos2::ZERO, roomy, &[above, below]);
         assert!(!t.intersects(above) && !t.intersects(below), "{t:?}");
         assert!(hull.contains(t.left_top()) && hull.contains(t.left_bottom()));
+    }
+
+    /// The rim is at least seven pixels. Below that the mat stopped reading as
+    /// ground the parts sit on and became an outline traced tightly around them,
+    /// with a box's own border almost touching the mat's hairline.
+    #[test]
+    fn a_mat_keeps_at_least_seven_pixels_of_rim() {
+        assert!(PAD >= 7.0, "{PAD}");
+        let hull = boxx(0.0, 0.0);
+        let grown = hull.expand(PAD);
+        assert!(grown.left() <= hull.left() - 7.0);
+        assert!(grown.top() <= hull.top() - 7.0);
+    }
+
+    /// The tab spans the device, so its name reads as a title over the whole
+    /// assembly rather than a sticker on one corner — and it grows past the mat
+    /// only when a long name would otherwise be cut.
+    #[test]
+    fn the_tab_is_at_least_as_wide_as_the_device() {
+        let mcu = grouped_mcu(&[("r", &[1])]);
+        let bx = boxx(300.0, 0.0);
+        let members = vec![member(Some("r"), bx, &[1])];
+        with_painter(|p| {
+            let (mats, tabs) =
+                frames(&mcu, p, egui::Pos2::ZERO, roomy(), &members, &[], &mut Vec::new());
+            let mat = match &mats[0] {
+                egui::Shape::Rect(r) => r.rect,
+                _ => panic!("the mat is first"),
+            };
+            let plate = match &tabs[0] {
+                egui::Shape::Rect(r) => r.rect,
+                _ => panic!("the plate is first"),
+            };
+            assert!(
+                plate.width() >= mat.width() - 0.01,
+                "tab {} vs mat {}",
+                plate.width(),
+                mat.width()
+            );
+            assert!(plate.left() <= mat.left() + 0.01, "and it starts with it");
+        });
+    }
+
+    /// The tab's type is half again the diagram's small text: it names the whole
+    /// assembly, so it outranks the signal names and pin numbers around it.
+    #[test]
+    fn the_tab_reads_larger_than_the_diagrams_small_text() {
+        assert!(TAB_PT >= 8.5 * 1.5 - 0.01, "{TAB_PT}");
+        assert!(TAB_H > TAB_PT, "and the plate fits the type");
     }
 
     /// The only coupling this module has to constants it does not own. Both ends

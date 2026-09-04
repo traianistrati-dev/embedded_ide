@@ -336,7 +336,7 @@ fn custom_pin_row(box_rect: egui::Rect, i: usize) -> egui::Rect {
     )
 }
 /// Gap between the pin tips and a module box.
-const PIN_GAP: f32 = 18.0;
+pub(super) const PIN_GAP: f32 = 18.0;
 /// Canvas margin reserved around the chip for modules (so boxes + wires sit
 /// beyond the pins without overlapping the chip). Horizontal fits a box's width,
 /// vertical its height.
@@ -944,8 +944,6 @@ fn draw_box(
     // matching how a selected pin is called out on the chip. EVERY text in the
     // box grows by `SELECTED_TEXT_SCALE`, not just the title.
     selected: bool,
-    // The device this module is part of, if the user grouped it.
-    group: Option<&str>,
 ) {
     // Background: the panel dark, tinted towards the module's own colour, or a
     // red pulse while the remove-confirm for this module is open.
@@ -1041,12 +1039,6 @@ fn draw_box(
             LEGEND_GREY_OFF
         };
         paint_legend(&painter.with_clip_rect(rect), &l, grey);
-    }
-    // The device this module belongs to, if any - a bar in the group's colour
-    // under the title, where it reads as "part of" rather than as another
-    // signal on the diagram.
-    if let Some(g) = group {
-        painter.rect_filled(group_bar_rect(rect, scale), 1.5, group_color(g));
     }
     let title_size = TITLE_SIZE * scale;
     painter.text(
@@ -1408,6 +1400,82 @@ const GROUP_COLOURS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(168, 172, 200), // periwinkle
 ];
 
+/// The outward normal of the box edge that faces the chip.
+///
+/// `Side` is which side of the CHIP the box sits on, so a box on the right faces
+/// left. This is the direction its wires leave by, and the one the router walks
+/// to reach the corridor.
+fn facing_normal(side: Side) -> egui::Vec2 {
+    match side {
+        Side::Right => egui::vec2(-1.0, 0.0),
+        Side::Left => egui::vec2(1.0, 0.0),
+        Side::Bottom => egui::vec2(0.0, -1.0),
+        Side::Top => egui::vec2(0.0, 1.0),
+    }
+}
+
+/// A stored offset that can never be mistaken for "auto-packed".
+///
+/// `VirtualModule.pos == (0, 0)` is the sentinel for "let the packer place it".
+/// A device drag computes each part's offset ARITHMETICALLY rather than from the
+/// pointer, so it can land exactly on that sentinel and silently un-pin a box in
+/// the middle of a gesture — the box would jump back to its packed slot while
+/// the rest of the device kept moving.
+pub fn nudge(v: egui::Vec2) -> (f32, f32) {
+    if v.x == 0.0 && v.y == 0.0 {
+        (0.0, f32::EPSILON)
+    } else {
+        (v.x, v.y)
+    }
+}
+
+/// Whether a wire ending on `pad` belongs to the device the canvas is pointing
+/// at.
+///
+/// Keyed on the PAD and never on the wire's box. A box can wire two devices'
+/// pads, and `group_of_module` answers with the first one it finds — keyed on
+/// the box, such a box would light both its wires or neither, and the mat under
+/// it would be telling the truth while its wires lied.
+pub fn wire_lit<'a>(active: Option<&'a str>, mcu: &Mcu, pad: usize) -> Option<&'a str> {
+    active.filter(|d| {
+        mcu.group_of_pin(pad)
+            .is_some_and(|g| g.name.trim() == *d)
+    })
+}
+
+/// One wire, lit or not, as shapes rather than paint calls.
+///
+/// A POLYLINE and not two points: a routed wire has corners, and both places
+/// that draw a wire have to grow the same way.
+///
+/// A lit wire KEEPS its signal colour — that is what says which line this is —
+/// and gains a halo in the device's colour underneath. Nothing is dimmed to make
+/// it stand out: every selection mark on this canvas is additive, so five wires
+/// scattered over three sides of the package read as one bundle without the rest
+/// of the diagram going quiet.
+pub fn wire_shapes(
+    path: &[egui::Pos2],
+    color: egui::Color32,
+    w: f32,
+    lit: Option<&str>,
+) -> (Option<egui::Shape>, egui::Shape) {
+    let halo = lit.map(|dev| {
+        let c = group_color(dev);
+        egui::Shape::line(
+            path.to_vec(),
+            egui::Stroke::new(
+                w + 4.0,
+                egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 90),
+            ),
+        )
+    });
+    let wire = egui::Shape::line(
+        path.to_vec(),
+        egui::Stroke::new(if lit.is_some() { w * 1.35 } else { w }, color),
+    );
+    (halo, wire)
+}
+
 /// The colour of the group called `name`.
 ///
 /// Derived from the NAME rather than stored, so it needs no field, no picker
@@ -1423,22 +1491,14 @@ pub fn group_color(name: &str) -> egui::Color32 {
     GROUP_COLOURS[h as usize % GROUP_COLOURS.len()]
 }
 
-/// Height of the bar that marks a group member.
-const GROUP_BAR_H: f32 = 3.0;
-
-/// The bar under a member module's title, inside its box.
+/// Height of the bar that marks a grouped PAD.
 ///
-/// A BAR and not a tinted fill: the fill already carries the peripheral's own
-/// colour, and re-tinting it would be two facts fighting over one area. A bar
-/// is a second, smaller mark that survives zoom-out for the same reason the
-/// fill does - it has area, unlike a border.
-fn group_bar_rect(rect: egui::Rect, scale: f32) -> egui::Rect {
-    let w = rect.width() * 0.42;
-    egui::Rect::from_min_size(
-        egui::pos2(rect.center().x - w / 2.0, rect.top() + 22.0 * scale),
-        egui::vec2(w, GROUP_BAR_H),
-    )
-}
+/// A module box wears no such bar. It used to, under its title, and it was one
+/// mark too many: the box already sits on the device's tinted mat and inside its
+/// named tab, so a third statement of the same fact only crowded the title. A
+/// PAD has no mat under it — its mat is the tip square out on the pin row — so
+/// there the bar is the mark that says which device the pad belongs to.
+pub(super) const GROUP_BAR_H: f32 = 3.0;
 
 /// The one grey every legend's signal is drawn in, connected and not.
 ///
@@ -2181,6 +2241,21 @@ pub fn draw_modules(
     // Which device each module belongs to. Read BEFORE the loop, because
     // `group_of_module` borrows the whole `Mcu` and the loop already holds a
     // module out of it.
+    // The device the canvas is pointing at, as an OWNED name: the loop below
+    // holds `mcu` and the tail of this function takes it mutably.
+    let active = mcu.active_device().map(str::to_owned);
+    // The corridor every wire is routed down, computed once for the canvas.
+    let wire_ring = super::wire::ring(chip_rect);
+    // ONE slot for every wire on the canvas, reserved before the boxes are
+    // drawn and filled after. Wires used to be painted per box, inside the loop,
+    // so a box packed later covered the wires of a box packed earlier - and a
+    // device's highlight, which is the whole point of lighting them, was the
+    // first thing to be cut in half by it.
+    let wire_slot = painter.add(egui::Shape::Noop);
+    // Halos first, wires after, so one wire's halo can never lie over its
+    // neighbour's line.
+    let mut wire_halos: Vec<egui::Shape> = Vec::new();
+    let mut wire_lines: Vec<egui::Shape> = Vec::new();
     let box_groups: Vec<Option<String>> = boxes
         .iter()
         .map(|(i, ..)| {
@@ -2198,7 +2273,23 @@ pub fn draw_modules(
             covers: conns.iter().map(|(_, _, n)| *n).collect(),
         }
     }));
-    for (n, (i, rect, conns, side, connected, manual)) in boxes.iter().enumerate() {
+    // A device being dragged moves every one of its parts. Seeded here, BEFORE
+    // the box loop, so a box-header drag pushed later into the same vec still
+    // wins for that box under last-write-wins - dragging one box out of a device
+    // keeps working exactly as it did.
+    //
+    // An auto-packed box is converted to a manual position AT the slot the packer
+    // just gave it, so nothing jumps on the first frame of the gesture and the
+    // arrangement the user was looking at is what starts moving.
+    if let Some((dev, (dx, dy))) = mcu.device_drag.clone() {
+        for ((i, rect, ..), g) in boxes.iter().zip(&box_groups) {
+            if g.as_deref().map(str::trim) == Some(dev.trim()) {
+                let off = rect.min - chip_center + egui::vec2(dx, dy);
+                drag_updates.push((*i, nudge(off)));
+            }
+        }
+    }
+    for (i, rect, conns, side, connected, manual) in boxes.iter() {
         let m = &mcu.modules[*i];
         let inst = m.instance();
         let removing = removing_id.as_deref() == Some(m.id.as_str());
@@ -2212,7 +2303,6 @@ pub fn draw_modules(
             native_forced,
             removing.then_some(blink),
             mcu.selected_module.as_deref() == Some(m.id.as_str()),
-            box_groups[n].as_deref(),
         );
 
         for (sig, anchor, anchor_pin) in conns {
@@ -2224,9 +2314,36 @@ pub fn draw_modules(
             } else {
                 facing_terminal(*rect, *side, *anchor)
             };
-            painter.circle_filled(term, 3.5, color);
-            painter.circle_filled(*anchor, 3.5, color);
-            painter.line_segment([term, *anchor], egui::Stroke::new(1.6_f32, color));
+            let lit = wire_lit(active.as_deref(), mcu, *anchor_pin);
+            let dot = if lit.is_some() { 4.5 } else { 3.5 };
+            painter.circle_filled(term, dot, color);
+            painter.circle_filled(*anchor, dot, color);
+            // Right angles down the free corridor around the package, instead of
+            // a diagonal that cuts the corner - or, for a pad on the far side,
+            // crosses the die. `route` refuses anything it cannot carry (a
+            // rotated diamond, a ball, a box dragged onto the corridor) and the
+            // straight segment is what we fall back to, so a wire is always
+            // drawn.
+            let face = if *manual { facing(*rect) } else { *side };
+            let adir = pin_anchor_dir(mcu, local_chip, rot, *anchor_pin)
+                .map(|(_, d)| d)
+                .unwrap_or_default();
+            let pts = super::wire::wire_path(
+                wire_ring,
+                chip_rect,
+                *anchor,
+                adir,
+                term,
+                facing_normal(face),
+            );
+            let (halo, line) = wire_shapes(
+                &crate::panels::structure_map::gui::rounded_path(&pts, super::wire::WIRE_R),
+                color,
+                1.6,
+                lit,
+            );
+            wire_halos.extend(halo);
+            wire_lines.push(line);
             // Custom modules show the DATA DIRECTION: an MCU input is driven by
             // the device (module → pin), an output is driven by the MCU
             // (pin → module). Peripheral buses are bidirectional, so no head.
@@ -2234,10 +2351,14 @@ pub fn draw_modules(
                 let dir = mcu
                     .find_pin(*anchor_pin)
                     .map(|p| p.selected_function.clone());
+                // The LAST leg of the route, not the two endpoints: on a wire
+                // that turns, an arrow aimed straight from one end at the other
+                // points off into the middle of the diagram.
+                let n = pts.len();
                 let (from, to) = match dir {
-                    Some(PinFunction::GpioInput) => (term, *anchor),
+                    Some(PinFunction::GpioInput) => (pts[n - 2], pts[n - 1]),
                     Some(PinFunction::GpioOutput) | Some(PinFunction::TimerPwm { .. }) => {
-                        (*anchor, term)
+                        (pts[1], pts[0])
                     }
                     _ => (term, term), // unknown direction → plain wire
                 };
@@ -2293,6 +2414,9 @@ pub fn draw_modules(
         }
         field_pass.push((*i, *rect));
     }
+    wire_halos.append(&mut wire_lines);
+    painter.set(wire_slot, egui::Shape::Vec(wire_halos));
+
     // Apply drag / reset now that the box borrow of `mcu.modules` has ended.
     for (i, off) in drag_updates {
         mcu.modules[i].pos = off;
@@ -7827,6 +7951,90 @@ mod the_palette_agrees_with_the_model {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::{Mcu, wire_lit, wire_shapes};
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use eframe::egui;
+
+    fn pico() -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu()
+    }
+
+    /// A device drag computes each part's offset arithmetically, so it can land
+    /// exactly on `(0, 0)` — the sentinel that means "let the packer place this".
+    /// A box that hit it would jump back to its packed slot while the rest of the
+    /// device kept moving.
+    #[test]
+    fn a_dragged_offset_never_lands_on_the_auto_sentinel() {
+        assert_ne!(super::nudge(egui::Vec2::ZERO), (0.0, 0.0));
+        // …and every other offset is passed through untouched.
+        assert_eq!(super::nudge(egui::vec2(3.0, -4.0)), (3.0, -4.0));
+        assert_eq!(super::nudge(egui::vec2(0.0, 1.0)), (0.0, 1.0));
+    }
+
+    /// One box can wire two devices' pads. Each WIRE belongs to the device of
+    /// the pad it ends on — keyed on the box instead, such a box would light
+    /// both its wires or neither.
+    #[test]
+    fn a_wire_is_lit_by_the_pad_it_ends_on_not_by_its_box() {
+        let mut mcu = pico();
+        mcu.join_group(7, "radar");
+        mcu.join_group(8, "display");
+        assert_eq!(wire_lit(Some("radar"), &mcu, 7), Some("radar"));
+        assert_eq!(wire_lit(Some("radar"), &mcu, 8), None, "the other device's pad");
+        assert_eq!(wire_lit(None, &mcu, 7), None, "nothing is selected");
+    }
+
+    /// A padded spelling is the same device here too.
+    #[test]
+    fn a_wire_is_lit_through_a_padded_spelling() {
+        let mut mcu = pico();
+        mcu.groups = vec![crate::panels::mcu_module::mcu_config::PinGroup {
+            name: "radar ".into(),
+            pins: [7].into_iter().collect(),
+        }];
+        assert_eq!(wire_lit(Some("radar"), &mcu, 7), Some("radar"));
+    }
+
+    /// An unlit wire is ONE shape. A halo painted at full strength on every wire
+    /// would recolour the whole diagram.
+    #[test]
+    fn an_unlit_wire_emits_exactly_one_shape() {
+        let path = [egui::pos2(0.0, 0.0), egui::pos2(10.0, 0.0)];
+        let (halo, _) = wire_shapes(&path, egui::Color32::RED, 1.6, None);
+        assert!(halo.is_none());
+        let (halo, _) = wire_shapes(&path, egui::Color32::RED, 1.6, Some("radar"));
+        assert!(halo.is_some(), "and a lit one gains exactly one more");
+    }
+
+    /// The halo goes UNDER, wider, in the DEVICE's colour; the wire keeps its
+    /// SIGNAL colour, which is what says which line it is.
+    #[test]
+    fn a_lit_wire_keeps_its_signal_colour_and_gains_a_wider_halo() {
+        let path = [egui::pos2(0.0, 0.0), egui::pos2(10.0, 0.0)];
+        let (halo, wire) = wire_shapes(&path, egui::Color32::RED, 1.6, Some("radar"));
+        let hw = match halo.expect("a halo") {
+            egui::Shape::Path(p) => p.stroke.width,
+            _ => panic!("a path"),
+        };
+        let (ww, wc) = match wire {
+            egui::Shape::Path(p) => (p.stroke.width, p.stroke.color),
+            _ => panic!("a path"),
+        };
+        assert!(hw > ww, "the halo is wider: {hw} vs {ww}");
+        assert_eq!(
+            wc,
+            egui::epaint::ColorMode::Solid(egui::Color32::RED),
+            "the wire keeps its signal colour"
+        );
     }
 }
 

@@ -1660,7 +1660,12 @@ fn lane_y(
     y + if below { clearance } else { -clearance }
 }
 
-fn rounded_path(pts: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
+/// A polyline with its corners filleted.
+///
+/// `pub(crate)` rather than moved: the Pins canvas needs exactly this and there
+/// must be ONE of it, or two panels' corners drift apart over a release or two
+/// and nobody can say which is right.
+pub(crate) fn rounded_path(pts: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
     if pts.len() < 3 {
         return pts.to_vec();
     }

@@ -442,6 +442,86 @@ fn add_module_hint(kind: ModuleKind) -> &'static str {
     }
 }
 
+/// How much of the panel the auto-fitted diagram fills.
+///
+/// Not 1.0. A fit that touches the panel's edges reads as "already zoomed in as
+/// far as it goes": the outermost pin labels sit flush against the border, a
+/// device mat's tab has nowhere to go, and there is no room to see that anything
+/// continues past the edge. The remaining fifth becomes a tenth of the panel as
+/// margin on each side.
+const AUTO_FIT_FILL: f32 = 0.8;
+
+/// The scene rect to feed the `Scene` so `content` lands at
+/// [`AUTO_FIT_FILL`] of `avail`.
+///
+/// The `Scene` scales the rect it is given to fill the panel, so asking for a
+/// SMALLER picture means handing it a LARGER rect — the content's own bounds
+/// divided by the fill fraction.
+///
+/// Floored at the panel size, so content that already fits comfortably is shown
+/// at 100 % and centred rather than blown up to reach the 80 % mark.
+fn auto_fit_bounds(content: egui::Rect, avail: egui::Vec2) -> egui::Rect {
+    if !content.is_finite() {
+        return content;
+    }
+    let want = content.size() / AUTO_FIT_FILL;
+    egui::Rect::from_center_size(
+        content.center(),
+        egui::vec2(want.x.max(avail.x), want.y.max(avail.y)),
+    )
+}
+
+#[cfg(test)]
+mod auto_fit_tests {
+    use super::{AUTO_FIT_FILL, auto_fit_bounds};
+    use eframe::egui;
+
+    /// The Scene scales what it is given to fill the panel, so the fed rect is
+    /// the content divided by the fill fraction — and the picture lands at 80 %.
+    #[test]
+    fn a_diagram_larger_than_the_panel_lands_at_eighty_percent() {
+        let avail = egui::vec2(1000.0, 600.0);
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(2000.0, 1200.0));
+        let fed = auto_fit_bounds(content, avail);
+        // What the Scene will do with it.
+        let scale = (avail / fed.size()).min_elem();
+        let drawn = content.size() * scale;
+        assert!((drawn.x / avail.x - AUTO_FIT_FILL).abs() < 0.001, "{drawn:?}");
+        assert!(drawn.y / avail.y <= AUTO_FIT_FILL + 0.001);
+    }
+
+    /// A tenth of the panel on each side is the point of the exercise.
+    #[test]
+    fn the_margin_is_a_tenth_of_the_panel_on_each_side() {
+        let avail = egui::vec2(800.0, 800.0);
+        let content = egui::Rect::from_min_size(egui::pos2(-500.0, -500.0), egui::vec2(1000.0, 1000.0));
+        let fed = auto_fit_bounds(content, avail);
+        let scale = (avail / fed.size()).min_elem();
+        let margin = (avail.x - content.width() * scale) / 2.0;
+        assert!((margin / avail.x - 0.1).abs() < 0.001, "margin {margin}");
+    }
+
+    /// Content that already fits comfortably is shown at 100 % and centred, not
+    /// blown up to reach the 80 % mark — a four-pin chip in a wide panel would
+    /// otherwise be magnified until its labels were huge.
+    #[test]
+    fn a_small_diagram_is_centred_at_full_size_not_magnified() {
+        let avail = egui::vec2(1000.0, 1000.0);
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let fed = auto_fit_bounds(content, avail);
+        assert_eq!(fed.size(), avail, "the panel itself is fed");
+        assert_eq!(fed.center(), content.center(), "and the content is centred");
+    }
+
+    /// A frame before anything has been drawn feeds `NOTHING` straight through
+    /// rather than turning it into a NaN rect the Scene would latch.
+    #[test]
+    fn an_empty_canvas_is_passed_through_untouched() {
+        let fed = auto_fit_bounds(egui::Rect::NOTHING, egui::vec2(100.0, 100.0));
+        assert_eq!(fed, egui::Rect::NOTHING);
+    }
+}
+
 impl AppIde {
     /// What an MCU tab shows when there is no [`Mcu`](crate::panels::mcu_module::mcu::model::Mcu)
     /// to draw.
@@ -2251,22 +2331,9 @@ impl AppIde {
                                 }
                             }
 
-                            // Keep auto-fitting until the user takes over. Pad
-                            // the fed rect to at least the panel size so a panel
-                            // larger than the chip fits at 100% (centered, not
-                            // blown up); a smaller panel still shrinks to fit.
+            // Keep auto-fitting until the user takes over.
                             if !self.mcu_view_adjusted {
-                                self.mcu_scene_bounds = if content_bounds.is_finite() {
-                                    egui::Rect::from_center_size(
-                                        content_bounds.center(),
-                                        egui::vec2(
-                                            content_bounds.width().max(avail.x),
-                                            content_bounds.height().max(avail.y),
-                                        ),
-                                    )
-                                } else {
-                                    content_bounds
-                                };
+                                self.mcu_scene_bounds = auto_fit_bounds(content_bounds, avail);
                             }
 
                             inner
