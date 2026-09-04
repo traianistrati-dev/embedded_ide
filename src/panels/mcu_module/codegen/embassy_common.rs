@@ -1449,8 +1449,8 @@ mod emit_for_manual_compile {
             .map(|(_, b)| b)
             .unwrap_or_default();
         assert!(
-            pwm2.contains("const FREQUENCY_HZ: u32 = 20000;")
-                && pwm2.contains("const DUTY_CH3_X100: u32 = 7500;"),
+            pwm2.contains("pub const FREQUENCY_HZ: u32 = 20000;")
+                && pwm2.contains("pub const DUTY_CH3_X100: u32 = 7500;"),
             "the module's frequency and duty must reach the code:\n{pwm2}"
         );
         // What each peripheral is left asking for once its WIRING has had its

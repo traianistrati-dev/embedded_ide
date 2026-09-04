@@ -1357,9 +1357,9 @@ const CAN_TMPL: &str = r#"// <<< GENERATED>>>
 // Kept for the reader (and rewritten when you change the bit rate in the
 // module): `init` programs BTR, which is what the hardware actually takes.
 #[allow(dead_code)]
-const BITRATE: u32 = {BITRATE}; // bits/s
+pub const BITRATE: u32 = {BITRATE}; // bits/s
 // CAN_BTR register value, computed from BITRATE and the APB1 clock ({PCLK1} Hz).
-const BTR: u32 = {BTR};
+pub const BTR: u32 = {BTR};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -1440,10 +1440,10 @@ fn can_config_file(cfg: Option<&CanModuleConfig>, pclk1: u32) -> String {
 
 const USART_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const BAUDRATE: u32 = {BAUD};
-const DATA_BITS: u8 = {DATA}; // 8, 9
-const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
-const STOP_BITS: u8 = {STOP}; // 1, 2
+pub const BAUDRATE: u32 = {BAUD};
+pub const DATA_BITS: u8 = {DATA}; // 8, 9
+pub const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+pub const STOP_BITS: u8 = {STOP}; // 1, 2
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -1951,10 +1951,10 @@ fn spi_dma_channels(n: u8) -> Option<(&'static str, &'static str)> {
 /// the `nb` halves, so it gets its own file and its own worked example.
 const USART_TMPL_DMA: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) - auto-updated; edit in the module.
-const BAUDRATE: u32 = {BAUD};
-const DATA_BITS: u8 = {DATA}; // 8, 9
-const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
-const STOP_BITS: u8 = {STOP}; // 1, 2
+pub const BAUDRATE: u32 = {BAUD};
+pub const DATA_BITS: u8 = {DATA}; // 8, 9
+pub const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+pub const STOP_BITS: u8 = {STOP}; // 1, 2
 // <<< GENERATED END >>>
 
 // Everything below is editable - your changes are preserved on regeneration.
@@ -2016,8 +2016,8 @@ pub fn init<PINS: serial::Pins<pac::USART{N}>>(
 /// Blocking `stm32f1xx-hal` SPI on DMA. Returns the combined RX+TX handle.
 const SPI_TMPL_DMA: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) - auto-updated; edit in the module.
-const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
-const CLOCK_KHZ: u32 = {KHZ};
+pub const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+pub const CLOCK_KHZ: u32 = {KHZ};
 
 // The wired pins, straight from the MCU Configurator's pin map. They live in
 // this block because re-wiring the peripheral has to update them; the `use` is
@@ -2078,10 +2078,10 @@ pub fn init(
 /// tuple (`let (mut _txN, mut _rxN) = …`), unlike the single-value Portable form.
 const USART_TMPL_NATIVE: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const BAUDRATE: u32 = {BAUD};
-const DATA_BITS: u8 = {DATA}; // 8, 9
-const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
-const STOP_BITS: u8 = {STOP}; // 1, 2
+pub const BAUDRATE: u32 = {BAUD};
+pub const DATA_BITS: u8 = {DATA}; // 8, 9
+pub const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+pub const STOP_BITS: u8 = {STOP}; // 1, 2
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -2153,8 +2153,8 @@ pub fn init<PINS: serial::Pins<pac::USART{N}>>(
 
 const SPI_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
-const CLOCK_KHZ: u32 = {KHZ};
+pub const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+pub const CLOCK_KHZ: u32 = {KHZ};
 
 // The wired pins, straight from the MCU Configurator's pin map. They live in
 // this block because re-wiring the peripheral has to update them; the `use` is
@@ -2413,7 +2413,7 @@ fn pwm_config_file(
     for (c, _) in chans {
         let x100 = cfg.map(|t| t.duty_x100_of(*c)).unwrap_or(0);
         duties.push_str(&format!(
-            "const DUTY_CH{c}_X100: u32 = {x100}; // {} %\n",
+            "pub const DUTY_CH{c}_X100: u32 = {x100}; // {} %\n",
             duty_percent_str(x100)
         ));
         // u32 all the way through the multiply: a 16-bit reload times 10_000
@@ -2502,7 +2502,7 @@ fn pwm_config_file(
 /// reads the pads off the remap type-state, so both live in the generated block.
 const PWM_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const FREQUENCY_HZ: u32 = {HZ}; // one frequency for the whole timer
+pub const FREQUENCY_HZ: u32 = {HZ}; // one frequency for the whole timer
 // Duty per channel, in HUNDREDTHS of a percent — 750 is 7.5 %, which is what a
 // hobby servo wants and what whole percent cannot say.
 {DUTIES}
@@ -2604,8 +2604,8 @@ fn afio_subst(takes_mapr: bool) -> (&'static str, &'static str) {
 /// Native `stm32f1xx-hal` SPI init (no eh-1.0 bridge). Returns `Spi<…>`.
 const SPI_TMPL_NATIVE: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
-const CLOCK_KHZ: u32 = {KHZ};
+pub const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+pub const CLOCK_KHZ: u32 = {KHZ};
 
 // The wired pins, straight from the MCU Configurator's pin map. They live in
 // this block because re-wiring the peripheral has to update them; the `use` is
@@ -2688,7 +2688,7 @@ pub fn init(
 
 const I2C_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const CLOCK_KHZ: u32 = {KHZ}; // <=100 Standard, >100 Fast
+pub const CLOCK_KHZ: u32 = {KHZ}; // <=100 Standard, >100 Fast
 
 // The wired pins, straight from the MCU Configurator's pin map. They live in
 // this block because re-wiring the peripheral has to update them; the `use` is
@@ -2840,7 +2840,7 @@ fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>, pins: &str) -> String {
 /// Native `stm32f1xx-hal` I2C init (no eh-1.0 bridge). Returns `BlockingI2c<…>`.
 const I2C_TMPL_NATIVE: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const CLOCK_KHZ: u32 = {KHZ}; // <=100 Standard, >100 Fast
+pub const CLOCK_KHZ: u32 = {KHZ}; // <=100 Standard, >100 Fast
 
 // The wired pins, straight from the MCU Configurator's pin map. They live in
 // this block because re-wiring the peripheral has to update them; the `use` is
@@ -4053,17 +4053,20 @@ mod blocking_dma_tests {
         assert!(!main_rs.contains(".pwm_hz::<"), "{main_rs}");
 
         // The config file carries the settings, as editable consts.
-        assert!(pwm2.contains("const FREQUENCY_HZ: u32 = 20000;"), "{pwm2}");
+        assert!(
+            pwm2.contains("pub const FREQUENCY_HZ: u32 = 20000;"),
+            "{pwm2}"
+        );
         // A channel the user set, and one they never touched — 0 %, enabled,
         // pin low, which is the safe state the model documents. The duty is a
         // ratio out of 10_000, so a fraction of a percent reaches the pin
         // instead of being rounded to the nearest whole one.
         assert!(
-            pwm2.contains("const DUTY_CH3_X100: u32 = 7550; // 75.5 %"),
+            pwm2.contains("pub const DUTY_CH3_X100: u32 = 7550; // 75.5 %"),
             "{pwm2}"
         );
         assert!(
-            pwm2.contains("const DUTY_CH4_X100: u32 = 0; // 0 %"),
+            pwm2.contains("pub const DUTY_CH4_X100: u32 = 0; // 0 %"),
             "{pwm2}"
         );
         assert!(
@@ -4093,7 +4096,10 @@ mod blocking_dma_tests {
 
         // Defaults when the module has not been touched: 1 kHz, every duty 0.
         let (main_rs, pwm2) = build(&[ch3.clone()], false);
-        assert!(pwm2.contains("const FREQUENCY_HZ: u32 = 1000;"), "{pwm2}");
+        assert!(
+            pwm2.contains("pub const FREQUENCY_HZ: u32 = 1000;"),
+            "{pwm2}"
+        );
         // ONE channel is not a 1-tuple — the HAL's `Pins` impl for a single pin
         // is the pin itself, and the channel marker follows.
         assert!(

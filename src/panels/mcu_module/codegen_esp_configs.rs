@@ -212,10 +212,10 @@ fn uart_file(n: u8, sigs: &[&str], cfg: Option<&UsartModuleConfig>, rt: EspRunti
     let (cts, rts) = (c.flow.needs_cts(), c.flow.needs_rts());
 
     let mut consts = format!(
-        "const BAUDRATE: u32 = {};\n\
-         const DATA_BITS: DataBits = DataBits::{};\n\
-         const PARITY: Parity = Parity::{};\n\
-         const STOP_BITS: StopBits = StopBits::{};\n",
+        "pub const BAUDRATE: u32 = {};\n\
+         pub const DATA_BITS: DataBits = DataBits::{};\n\
+         pub const PARITY: Parity = Parity::{};\n\
+         pub const STOP_BITS: StopBits = StopBits::{};\n",
         c.baud_rate,
         data_bits_variant(c.data_bits),
         parity_variant(c.parity),
@@ -225,7 +225,7 @@ fn uart_file(n: u8, sigs: &[&str], cfg: Option<&UsartModuleConfig>, rt: EspRunti
         consts.push_str(&format!(
             "// Hardware flow control. The RTS threshold is how many bytes may\n\
              // still arrive after it is asserted - the sender needs the slack.\n\
-             const FLOW: HwFlowControl = HwFlowControl {{\n\
+             pub const FLOW: HwFlowControl = HwFlowControl {{\n\
              \x20   cts: CtsConfig::{},\n\
              \x20   rts: RtsConfig::{},\n\
              }};\n",
@@ -415,9 +415,9 @@ fn uart_file(n: u8, sigs: &[&str], cfg: Option<&UsartModuleConfig>, rt: EspRunti
 fn spi_slave_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime) -> String {
     let mode = cfg.map_or(1, |c| c.mode).min(3);
     let consts = format!(
-        "const MODE: Mode = Mode::_{mode}; // CPOL/CPHA - the MASTER's choice\n\
+        "pub const MODE: Mode = Mode::_{mode}; // CPOL/CPHA - the MASTER's choice\n\
          // Both directions move at once on a full-duplex bus, so one size.\n\
-         const BUFFER_BYTES: usize = 4096;\n"
+         pub const BUFFER_BYTES: usize = 4096;\n"
     );
     // The mirror image of the master's bounds: only MISO is driven.
     let params = format!(
@@ -502,7 +502,7 @@ fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime)
         return spi_slave_file(n, sigs, cfg, rt);
     }
     let mut consts = format!(
-        "const FREQUENCY_HZ: u32 = {};\nconst MODE: Mode = Mode::_{}; // CPOL/CPHA, 0..=3\n",
+        "pub const FREQUENCY_HZ: u32 = {};\npub const MODE: Mode = Mode::_{}; // CPOL/CPHA, 0..=3\n",
         cfg.map_or(1_000_000, |c| c.clock_hz),
         cfg.map_or(0, |c| c.mode).min(3),
     );
@@ -531,7 +531,7 @@ fn spi_file(n: u8, sigs: &[&str], cfg: Option<&SpiModuleConfig>, rt: EspRuntime)
     // constant in a generated file is a warning in the user's project.
     if cfg.is_some_and(|c| c.async_mode == AsyncBusMode::AsyncDma) {
         consts.push_str(
-            "const DMA_BUFFER_BYTES: usize = 4096; // per direction, static-backed
+            "pub const DMA_BUFFER_BYTES: usize = 4096; // per direction, static-backed
 ",
         );
     }
@@ -804,9 +804,9 @@ fn i2s_file(
     let ty = if tx { "I2sTx" } else { "I2sRx" };
     let samples = cfg.map_or(256, |c| c.buffer_len) as usize;
     let consts = format!(
-        "const SAMPLE_RATE_HZ: u32 = {};\n\
+        "pub const SAMPLE_RATE_HZ: u32 = {};\n\
          // Samples are 32-bit at the widest, and the ring holds both channels.\n\
-         const BUFFER_BYTES: usize = {} * 4 * 2;\n",
+         pub const BUFFER_BYTES: usize = {} * 4 * 2;\n",
         cfg.map_or(48_000, |c| c.sample_rate_hz),
         samples,
     );
@@ -978,7 +978,7 @@ fn dac_file(channels: &[u8], cfg: Option<&DacModuleConfig>, rt: EspRuntime) -> S
     for ch in channels {
         consts.push_str(&format!(
             "// The level the pad holds once `init` returns.\n\
-             const START_OUT{ch}: u8 = {};\n",
+             pub const START_OUT{ch}: u8 = {};\n",
             esp_dac_value(c.value_of(*ch)),
         ));
     }
@@ -1118,8 +1118,8 @@ fn parl_io_file(
         let lower = prefix.to_lowercase();
         let pad = if *is_rx { "r" } else { "" };
         consts.push_str(&format!(
-            "const {prefix}_FREQUENCY_HZ: u32 = {};\n\
-             const {prefix}_BUFFER_BYTES: usize = {};\n",
+            "pub const {prefix}_FREQUENCY_HZ: u32 = {};\n\
+             pub const {prefix}_BUFFER_BYTES: usize = {};\n",
             c.freq_hz, c.buffer_bytes,
         ));
         let pad_bound = if *is_rx {
@@ -1408,7 +1408,7 @@ fn mcpwm_file(
     let mut consts = String::new();
     for t in &timers {
         consts.push_str(&format!(
-            "const FREQUENCY_HZ_T{t}: u32 = {};\n\
+            "pub const FREQUENCY_HZ_T{t}: u32 = {};\n\
              // Timer {t} counts 0..=PERIOD_T{t}, so a duty lands on one of PERIOD_T{t}+1 steps. Public: main.rs sets duty in terms of it.\n\
              pub const PERIOD_T{t}: u16 = {};\n",
             c.timer_freq_hz(*t),
@@ -1417,7 +1417,7 @@ fn mcpwm_file(
     }
     for (op, b) in outputs {
         consts.push_str(&format!(
-            "const TIMESTAMP_OP{op}{}: u16 = {}; // {:.2} % of timer {}\n",
+            "pub const TIMESTAMP_OP{op}{}: u16 = {}; // {:.2} % of timer {}\n",
             if *b { "B" } else { "A" },
             c.timestamp_of(*op, *b),
             f64::from(c.duty_x100_of(*op, *b)) / 100.0,
@@ -1608,7 +1608,7 @@ fn usb_otg_file(cfg: Option<&UsbModuleConfig>) -> String {
          pub const PRODUCT: &str = {:?};\n\
          // Endpoint scratch, in 32-bit words. 256 is enough for a CDC serial\n\
          // port; a composite device with more endpoints needs more.\n\
-         const EP_WORDS: usize = 256;\n",
+         pub const EP_WORDS: usize = 256;\n",
         c.vid, c.pid, c.product,
     );
 
@@ -2069,20 +2069,20 @@ fn lcd_cam_file(
 /// need one more nudge, and a rolling picture is what a wrong one looks like.
 fn lcd_cam_consts(prefix: &str, cfg: &LcdCamModuleConfig) -> String {
     let mut s = format!(
-        "const {prefix}_FREQUENCY: Rate = Rate::from_hz({});\n",
+        "pub const {prefix}_FREQUENCY: Rate = Rate::from_hz({});\n",
         cfg.clock_hz.max(1)
     );
     if cfg.mode == LcdCamMode::Dpi {
         s.push_str(&format!(
             "// Straight off the panel's datasheet. Total = active + blanking.\n\
-             const {prefix}_H_ACTIVE: usize = {};\n\
-             const {prefix}_V_ACTIVE: usize = {};\n\
-             const {prefix}_H_TOTAL: usize = {};\n\
-             const {prefix}_V_TOTAL: usize = {};\n\
-             const {prefix}_H_FRONT_PORCH: usize = {};\n\
-             const {prefix}_V_FRONT_PORCH: usize = {};\n\
-             const {prefix}_HSYNC_WIDTH: usize = {};\n\
-             const {prefix}_VSYNC_WIDTH: usize = {};\n",
+             pub const {prefix}_H_ACTIVE: usize = {};\n\
+             pub const {prefix}_V_ACTIVE: usize = {};\n\
+             pub const {prefix}_H_TOTAL: usize = {};\n\
+             pub const {prefix}_V_TOTAL: usize = {};\n\
+             pub const {prefix}_H_FRONT_PORCH: usize = {};\n\
+             pub const {prefix}_V_FRONT_PORCH: usize = {};\n\
+             pub const {prefix}_HSYNC_WIDTH: usize = {};\n\
+             pub const {prefix}_VSYNC_WIDTH: usize = {};\n",
             cfg.h_active,
             cfg.v_active,
             cfg.h_total,
@@ -2095,7 +2095,7 @@ fn lcd_cam_consts(prefix: &str, cfg: &LcdCamModuleConfig) -> String {
     }
     if cfg.mode != LcdCamMode::I8080 {
         s.push_str(&format!(
-            "const {prefix}_TWO_BYTE_MODE: bool = {};\n",
+            "pub const {prefix}_TWO_BYTE_MODE: bool = {};\n",
             cfg.width >= 16
         ));
     }
@@ -2245,14 +2245,14 @@ fn lcd_cam_example(
 /// the async runtime therefore gets `init` alone, and this file says so.
 fn touch_file(pads: &[u8], cfg: &TouchModuleConfig, rt: EspRuntime) -> String {
     let consts = format!(
-        "const THRESHOLD_MODE: ThresholdMode = ThresholdMode::{};\n\
-         const MEASUREMENT_DURATION: u16 = {};\n\
+        "pub const THRESHOLD_MODE: ThresholdMode = ThresholdMode::{};\n\
+         pub const MEASUREMENT_DURATION: u16 = {};\n\
          {}// The count that means \"touched\". There is no right value: read your\n\
          // own pad untouched and take a margin off it.\n\
          pub const THRESHOLD: u16 = {};\n\
          // What the driver is handed. `None` anywhere here means esp-hal's own\n\
          // default for that field.\n\
-         const CONFIG: TouchConfig = TouchConfig {{\n\
+         pub const CONFIG: TouchConfig = TouchConfig {{\n\
          \x20   threshold_mode: Some(THRESHOLD_MODE),\n\
          \x20   measurement_duration: Some(MEASUREMENT_DURATION),\n\
          \x20   sleep_cycles: {},\n\
@@ -2260,7 +2260,10 @@ fn touch_file(pads: &[u8], cfg: &TouchModuleConfig, rt: EspRuntime) -> String {
         cfg.threshold_mode.token(),
         cfg.measurement_duration.max(1),
         if cfg.scan.is_continuous() {
-            format!("const SLEEP_CYCLES: u16 = {};\n", cfg.sleep_cycles.max(1))
+            format!(
+                "pub const SLEEP_CYCLES: u16 = {};\n",
+                cfg.sleep_cycles.max(1)
+            )
         } else {
             String::new()
         },
@@ -2424,8 +2427,8 @@ fn twai_file(n: u8, cfg: Option<&CanModuleConfig>, rt: EspRuntime) -> String {
         _ => "B500K",
     };
     let consts = format!(
-        "const BAUD: BaudRate = BaudRate::{baud};\n\
-         const MODE: TwaiMode = TwaiMode::{};\n",
+        "pub const BAUD: BaudRate = BaudRate::{baud};\n\
+         pub const MODE: TwaiMode = TwaiMode::{};\n",
         c.mode.esp_token(),
     );
 
@@ -2531,15 +2534,15 @@ fn pcnt_file(
     let c = cfg.unwrap_or(&d);
     let any_ctrl = chans.iter().any(|(_, has_ctrl)| *has_ctrl);
     let consts = format!(
-        "const LOW_LIMIT: i16 = {};\n\
-         const HIGH_LIMIT: i16 = {};\n\
+        "pub const LOW_LIMIT: i16 = {};\n\
+         pub const HIGH_LIMIT: i16 = {};\n\
          {}",
         c.low_limit,
         c.high_limit,
         if c.filter > 0 {
             format!(
                 "// Pulses shorter than this many APB clocks are ignored.\n\
-                 const FILTER: u16 = {};\n",
+                 pub const FILTER: u16 = {};\n",
                 c.filter,
             )
         } else {
@@ -2679,25 +2682,25 @@ fn rmt_file(n: u8, cfg: Option<&RmtModuleConfig>, rt: EspRuntime, source_hz: u32
     let (high, low) = (period / 2, period - period / 2);
 
     let mut consts = format!(
-        "const CLK_DIVIDER: u8 = {divider}; // 1 tick = {} ns\n",
+        "pub const CLK_DIVIDER: u8 = {divider}; // 1 tick = {} ns\n",
         (1_000_000_000f64 / (source_hz as f64 / f64::from(divider))).round() as u64,
     );
     if tx {
         consts.push_str(&format!(
-            "const IDLE_HIGH: bool = {}; // where the pad rests between trains\n",
+            "pub const IDLE_HIGH: bool = {}; // where the pad rests between trains\n",
             cfg.is_some_and(|c| c.idle_high),
         ));
     } else {
         consts.push_str(&format!(
-            "const IDLE_THRESHOLD: u16 = {}; // ticks of silence that end a frame\n",
+            "pub const IDLE_THRESHOLD: u16 = {}; // ticks of silence that end a frame\n",
             cfg.map_or(10_000, |c| c.idle_threshold),
         ));
     }
     if carrier {
         consts.push_str(&format!(
             "// Carrier {carrier_hz} Hz at 50%: source / CLK_DIVIDER / carrier, split in two.\n\
-             const CARRIER_HIGH: u16 = {high};\n\
-             const CARRIER_LOW: u16 = {low};\n",
+             pub const CARRIER_HIGH: u16 = {high};\n\
+             pub const CARRIER_LOW: u16 = {low};\n",
         ));
     }
 
@@ -2851,7 +2854,7 @@ fn rmt_file(n: u8, cfg: Option<&RmtModuleConfig>, rt: EspRuntime, source_hz: u32
 
 fn i2c_file(n: u8, sigs: &[&str], cfg: Option<&I2cModuleConfig>, rt: EspRuntime) -> String {
     let consts = format!(
-        "const FREQUENCY_HZ: u32 = {};\n\
+        "pub const FREQUENCY_HZ: u32 = {};\n\
          // 7-bit address of the device on this bus — for YOUR code, not for `init`:\n\
          // an esp-hal I2C master takes the address per transaction.\n\
          pub const DEVICE_ADDRESS: u8 = 0x{:02X};\n",
@@ -3035,7 +3038,7 @@ fn pwm_file(
     let bits = wanted.clamp(narrowest, widest);
 
     // ── the GENERATED block: fixed names, plain numbers ─────────────────────
-    let mut consts = format!("const FREQUENCY_HZ: u32 = {freq};\n");
+    let mut consts = format!("pub const FREQUENCY_HZ: u32 = {freq};\n");
     // One `push_str` per line on purpose: rustfmt joins a `\`-continued literal
     // and keeps the SOURCE indentation, which drops the `//` off every line but
     // the first — inside a generated file that is a syntax error, not a typo.
@@ -3043,7 +3046,7 @@ fn pwm_file(
     consts.push_str("// under 80_000_000 / FREQUENCY_HZ (the LEDC runs off the 80 MHz APB\n");
     consts.push_str("// clock), or `configure` returns Err(Divisor). Change one, check the\n");
     consts.push_str("// other. `get_duty_resolution_bit()` below turns it into the enum.\n");
-    consts.push_str(&format!("const DUTY_RESOLUTION_BIT: u8 = {bits};"));
+    consts.push_str(&format!("pub const DUTY_RESOLUTION_BIT: u8 = {bits};"));
     // Reduced in the open, never in silence.
     if bits != wanted {
         consts.push_str(&format!(
@@ -3079,9 +3082,9 @@ fn pwm_file(
         consts.push_str(&format!(
             "// Which LEDC channel this pad drives, 0..={max_ch}.\n"
         ));
-        consts.push_str(&format!("const CHANNEL{}: u8 = {ch};\n", sfx(pad)));
+        consts.push_str(&format!("pub const CHANNEL{}: u8 = {ch};\n", sfx(pad)));
         let pct = (*x100 as u32).div_ceil(100).min(100);
-        consts.push_str(&format!("const DUTY{}: u8 = {pct};", sfx(pad)));
+        consts.push_str(&format!("pub const DUTY{}: u8 = {pct};", sfx(pad)));
         // esp-hal takes duty in WHOLE percent, so a module set to 7.5 % cannot
         // be carried across as-is. Say so in the file rather than rounding in
         // silence.
@@ -3474,13 +3477,13 @@ mod tests {
         cfg.stop_bits = StopBits::Two;
         let f = uart_file(1, &["rx", "tx"], Some(&cfg), EspRuntime::Blocking);
 
-        assert!(f.contains("const BAUDRATE: u32 = 9600;"), "{f}");
+        assert!(f.contains("pub const BAUDRATE: u32 = 9600;"), "{f}");
         assert!(f.contains("DataBits::_7"), "{f}");
         assert!(f.contains("Parity::Even"), "{f}");
         assert!(f.contains("StopBits::_2"), "{f}");
 
         let (begin, end) = (f.find(GEN_BEGIN).unwrap(), f.find(GEN_END).unwrap());
-        let baud = f.find("const BAUDRATE").unwrap();
+        let baud = f.find("pub const BAUDRATE").unwrap();
         assert!(begin < baud && baud < end, "consts inside the block:\n{f}");
         // The `init` the user edits is BELOW the markers, and the `use` items
         // the consts need are ABOVE them.
@@ -3539,7 +3542,7 @@ mod tests {
     #[test]
     fn a_bus_without_a_module_falls_back_to_defaults() {
         let f = uart_file(0, &["rx", "tx"], None, EspRuntime::Blocking);
-        assert!(f.contains("const BAUDRATE: u32 = 115200;"), "{f}");
+        assert!(f.contains("pub const BAUDRATE: u32 = 115200;"), "{f}");
         assert!(f.contains("pub fn init"), "{f}");
     }
 
@@ -3672,7 +3675,7 @@ mod tests {
         cfg.set_duty_x100(1, 2_000);
         let f = pwm_file(0, &[(1, 2_000, "GPIO19".into())], Some(&cfg), 5);
 
-        assert!(f.contains("const FREQUENCY_HZ: u32 = 20000;"), "{f}");
+        assert!(f.contains("pub const FREQUENCY_HZ: u32 = 20000;"), "{f}");
         assert!(
             f.contains("pub fn timer<'d>(ledc: &Ledc<'d>) -> timer::Timer<'d, LowSpeed>"),
             "{f}"
@@ -3698,15 +3701,15 @@ mod tests {
         let b = one(2);
 
         for f in [&a, &b] {
-            assert!(f.contains("const DUTY: u8 = 20;"), "{f}");
-            assert!(f.contains("const DUTY_RESOLUTION_BIT: u8 = "), "{f}");
+            assert!(f.contains("pub const DUTY: u8 = 20;"), "{f}");
+            assert!(f.contains("pub const DUTY_RESOLUTION_BIT: u8 = "), "{f}");
             // The old, channel-bearing spellings are gone for good.
             assert!(!f.contains("DUTY_CH"), "{f}");
-            assert!(!f.contains("const DUTY_RESOLUTION:"), "{f}");
+            assert!(!f.contains("pub const DUTY_RESOLUTION:"), "{f}");
         }
         // Only the VALUE moves.
-        assert!(a.contains("const CHANNEL: u8 = 1;"), "{a}");
-        assert!(b.contains("const CHANNEL: u8 = 2;"), "{b}");
+        assert!(a.contains("pub const CHANNEL: u8 = 1;"), "{a}");
+        assert!(b.contains("pub const CHANNEL: u8 = 2;"), "{b}");
 
         // Everything outside the marker block is byte-identical between the two
         // — which is the property that keeps a re-wire from breaking the file.
@@ -3754,14 +3757,14 @@ mod tests {
         cfg.freq_hz = 20_000;
         let derived = pwm_file(0, &[(1, 0, "GPIO19".into())], Some(&cfg), 5);
         assert!(
-            derived.contains("const DUTY_RESOLUTION_BIT: u8 = 11;"),
+            derived.contains("pub const DUTY_RESOLUTION_BIT: u8 = 11;"),
             "{derived}"
         );
 
         cfg.duty_res_bits = Some(8);
         let pinned = pwm_file(0, &[(1, 0, "GPIO19".into())], Some(&cfg), 5);
         assert!(
-            pinned.contains("const DUTY_RESOLUTION_BIT: u8 = 8;"),
+            pinned.contains("pub const DUTY_RESOLUTION_BIT: u8 = 8;"),
             "{pinned}"
         );
     }
@@ -3771,14 +3774,14 @@ mod tests {
     #[test]
     fn a_fractional_duty_is_rounded_and_says_so() {
         let f = pwm_file(0, &[(0, 750, "GPIO19".into())], None, 5);
-        assert!(f.contains("const DUTY: u8 = 8;"), "{f}");
+        assert!(f.contains("pub const DUTY: u8 = 8;"), "{f}");
         assert!(
             f.contains("7.50 % rounded up — esp-hal's LEDC takes whole percent"),
             "{f}"
         );
         // A whole percent gets no note — there is nothing to explain.
         let f = pwm_file(0, &[(0, 2_000, "GPIO19".into())], None, 5);
-        assert!(f.contains("const DUTY: u8 = 20;\n"), "{f}");
+        assert!(f.contains("pub const DUTY: u8 = 20;\n"), "{f}");
         assert!(!f.contains("rounded up"), "{f}");
     }
 
@@ -3803,8 +3806,11 @@ mod tests {
             // Constants shout; functions and parameters are snake_case, or the
             // generated file warns on every one of them.
             let low = pad.to_ascii_lowercase();
-            assert!(f.contains(&format!("const CHANNEL_{pad}: u8 = ")), "{f}");
-            assert!(f.contains(&format!("const DUTY_{pad}: u8 = ")), "{f}");
+            assert!(
+                f.contains(&format!("pub const CHANNEL_{pad}: u8 = ")),
+                "{f}"
+            );
+            assert!(f.contains(&format!("pub const DUTY_{pad}: u8 = ")), "{f}");
             assert!(
                 f.contains(&format!("fn get_channel_{low}() -> channel::Number")),
                 "{f}"
@@ -3836,7 +3842,7 @@ mod tests {
                 .to_owned()
         };
         assert_eq!(tail(&f), tail(&g), "the editable half must not move");
-        assert!(g.contains("const CHANNEL_GPIO5: u8 = 4;"), "{g}");
+        assert!(g.contains("pub const CHANNEL_GPIO5: u8 = 4;"), "{g}");
     }
 
     /// The duty helper speaks the Virtual Module's units, and `set_duty` on ESP

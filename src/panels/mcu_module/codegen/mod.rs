@@ -2143,3 +2143,81 @@ mod tests {
         assert!(mcu.find_pin(10).unwrap().custom_label.is_empty());
     }
 }
+
+#[cfg(test)]
+mod public_constants {
+    use crate::panels::mcu_module::builtins;
+    use crate::panels::mcu_module::mcu::Runtime;
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+    /// A generated constant the reader cannot import is a value they have to
+    /// retype — the file already knows the baud rate, the frequency, the duty
+    /// resolution, and the whole point of a `const` is that other code can say
+    /// `usart1::BAUDRATE` instead of repeating the number.
+    ///
+    /// Scans REAL generated output rather than the templates, and that is the
+    /// load-bearing choice: the templates come in FOUR shapes — `"const …"`,
+    /// `…\nconst …`, a continuation line of a `\`-joined literal, and a
+    /// `r#"…"#` block with real newlines. Three passes over the source made 106
+    /// constants public and missed 60 more in the raw blocks entirely; only the
+    /// generated text said so.
+    fn assert_all_public(what: &str, body: &str) {
+        for (n, line) in body.lines().enumerate() {
+            let t = line.trim_start();
+            // `const fn` is a function, not a constant, and the ones generated
+            // here are helpers living in the reader's own editable zone.
+            if t.starts_with("const ") && !t.starts_with("const fn ") {
+                panic!("{what}:{}: generated constant is private:\n{line}", n + 1);
+            }
+        }
+    }
+
+    /// Give `mcu` a USART and an SPI on whatever pads can carry them, so the
+    /// bus config files — the richest source of generated constants — exist.
+    fn wire_two_buses(mcu: &mut crate::panels::mcu_module::mcu::Mcu) {
+        let wants = [
+            PinFunction::UsartTx(1),
+            PinFunction::UsartRx(1),
+            PinFunction::SpiSck(1),
+            PinFunction::SpiMosi(1),
+            PinFunction::SpiMiso(1),
+        ];
+        for want in wants {
+            let target = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    !p.reserved
+                        && p.selected_function == PinFunction::Unset
+                        && p.available_functions.contains(&want)
+                })
+                .map(|p| p.number);
+            if let Some(n) = target.and_then(|n| mcu.find_pin_mut(n)) {
+                n.selected_function = want;
+            }
+        }
+        mcu.reconcile_modules();
+    }
+
+    /// Every built-in chip, on every runtime, main.rs and every config file.
+    #[test]
+    fn no_generated_constant_is_private() {
+        let mut files = 0;
+        for def in builtins::builtin_definitions() {
+            for runtime in [Runtime::Blocking, Runtime::Async] {
+                let mut mcu = def.build_mcu();
+                mcu.runtime = runtime;
+                wire_two_buses(&mut mcu);
+                assert_all_public(&format!("{} main.rs", def.id), &mcu.fresh_main_rs());
+                for (name, body) in mcu.config_files() {
+                    assert_all_public(&format!("{} {name}", def.id), &body);
+                    files += 1;
+                }
+            }
+        }
+        assert!(
+            files >= 2,
+            "no bus config file was generated, so the richest source of \
+             constants went unchecked"
+        );
+    }
+}

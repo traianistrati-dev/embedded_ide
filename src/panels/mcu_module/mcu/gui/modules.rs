@@ -1400,6 +1400,58 @@ const GROUP_COLOURS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(168, 172, 200), // periwinkle
 ];
 
+/// The path ONE wire is drawn along, and the terminal it actually leaves from.
+///
+/// Extracted from the paint loop so the decision can be tested with real box
+/// geometry — the silhouette, the chamfers, both candidate edges and the
+/// obstacles — instead of only as arithmetic. The caller does nothing with the
+/// result but draw it.
+///
+/// Returns the path TERMINAL-FIRST, so `path[0]` is always the returned
+/// terminal. The endpoint dot is painted from that, never from the candidate the
+/// caller happened to compute first: when the second candidate wins, a dot
+/// placed early is left stranded on the wrong edge with no wire reaching it.
+#[allow(clippy::too_many_arguments)]
+fn wire_path_for_box(
+    ring: egui::Rect,
+    blocked: super::wire::Blocked<'_>,
+    rect: egui::Rect,
+    shape: BoxShape,
+    face: Side,
+    manual: bool,
+    anchor: egui::Pos2,
+    adir: egui::Vec2,
+) -> (Vec<egui::Pos2>, egui::Pos2) {
+    let sil = silhouette(rect, shape, face);
+    // A dragged box's stored side no longer implies an edge, so aim at the
+    // outline point nearest the pin; an auto box keeps its side.
+    let facing = if manual {
+        nearest_on_outline(&sil, anchor)
+    } else {
+        facing_terminal(rect, face, anchor)
+    };
+    // WHICH EDGE the wire leaves by. Two candidates, and the one that costs
+    // fewer corners wins:
+    //
+    //  * the edge facing the chip — right for a pad across the channel, which
+    //    is most of them, and the only one for a pad on the far side;
+    //  * the edge facing the PAD's own side — a box on the chip's left wired to
+    //    a pad on its top leaves by its own top edge, and the two rays then run
+    //    the same way, which turns a wire that had to crawl along the pin row
+    //    into two corners over a lane well clear of it.
+    //
+    // Ties go to the facing edge, so the everyday straight wire is untouched.
+    let port = nearest_on_outline(&sil, edge_terminal(rect, adir, anchor));
+    super::wire::best_route(
+        ring,
+        blocked,
+        anchor,
+        adir,
+        &[(facing, facing_normal(face)), (port, adir)],
+    )
+    .unwrap_or_else(|| (vec![facing, anchor], facing))
+}
+
 /// A terminal on the box edge whose outward normal is `normal`, lined up with
 /// `anchor`.
 ///
@@ -2347,56 +2399,29 @@ pub fn draw_modules(
             // A dragged box's stored side no longer implies an edge, so aim the
             // wire at the box edge nearest the pin; auto boxes keep their side.
             let face = if *manual { facing(*rect) } else { *side };
-            let mut term = if *manual {
-                nearest_on_outline(&silhouette(*rect, BoxShape::of(m.kind), face), *anchor)
-            } else {
-                facing_terminal(*rect, face, *anchor)
-            };
-            let lit = wire_lit(active.as_deref(), mcu, *anchor_pin);
-            let dot = if lit.is_some() { 4.5 } else { 3.5 };
-            painter.circle_filled(term, dot, color);
-            painter.circle_filled(*anchor, dot, color);
-            // Right angles down the free corridor around the package, instead of
-            // a diagonal that cuts the corner - or, for a pad on the far side,
-            // crosses the die. `route` refuses anything it cannot carry (a
-            // rotated diamond, a ball, a box dragged onto the corridor) and the
-            // straight segment is what we fall back to, so a wire is always
-            // drawn.
             let adir = pin_anchor_dir(mcu, local_chip, rot, *anchor_pin)
                 .map(|(_, d)| d)
                 .unwrap_or_default();
-            // WHICH EDGE the wire leaves the box by. Two candidates, and the one
-            // that costs fewer corners wins:
-            //
-            //  * the edge facing the chip - right for a pad across the channel,
-            //    which is most of them, and the only one for a pad on the far
-            //    side of the package;
-            //  * the edge facing the PAD's own side - a box on the chip's left
-            //    wired to a pad on its top leaves by its own top edge, and the
-            //    two rays then run the same way, which is what turns a wire that
-            //    had to crawl along the pin row into two corners over a lane
-            //    well clear of it.
-            //
-            // Ties go to the facing edge, so the everyday straight wire is
-            // untouched.
-            let sil = silhouette(*rect, BoxShape::of(m.kind), face);
-            let port = nearest_on_outline(&sil, edge_terminal(*rect, adir, *anchor));
-            let pts = super::wire::best_route(
+            let (pts, term) = wire_path_for_box(
                 wire_ring,
                 super::wire::Blocked {
                     body: chip_rect,
                     boxes: &box_rects,
                     own: bi,
                 },
+                *rect,
+                BoxShape::of(m.kind),
+                face,
+                *manual,
                 *anchor,
                 adir,
-                &[(term, facing_normal(face)), (port, adir)],
-            )
-            .map(|(p, t)| {
-                term = t;
-                p
-            })
-            .unwrap_or_else(|| vec![term, *anchor]);
+            );
+            let lit = wire_lit(active.as_deref(), mcu, *anchor_pin);
+            // Painted from the terminal the route actually chose, and only after
+            // it has chosen.
+            let dot = if lit.is_some() { 4.5 } else { 3.5 };
+            painter.circle_filled(term, dot, color);
+            painter.circle_filled(*anchor, dot, color);
             let (halo, line) = wire_shapes(
                 &crate::panels::structure_map::gui::rounded_path(&pts, super::wire::WIRE_R),
                 color,
@@ -8017,8 +8042,9 @@ mod the_palette_agrees_with_the_model {
 
 #[cfg(test)]
 mod wire_tests {
-    use super::{Mcu, wire_lit, wire_shapes};
+    use super::{BoxShape, Mcu, Side, wire_lit, wire_shapes};
     use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::mcu::model::PIN_HEIGHT;
     use eframe::egui;
 
     fn pico() -> Mcu {
@@ -8027,6 +8053,139 @@ mod wire_tests {
             .find(|d| d.id == "rp2040_pico")
             .expect("built-in Pico")
             .build_mcu()
+    }
+
+    /// The chip, and a pad on one of its edges.
+    fn die() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(300.0, 300.0))
+    }
+
+    fn blocked_by<'a>(die: egui::Rect, boxes: &'a [egui::Rect]) -> super::super::wire::Blocked<'a> {
+        super::super::wire::Blocked {
+            body: die,
+            boxes,
+            own: 0,
+        }
+    }
+
+    /// Whether `p` lies on one of `r`'s four edges.
+    fn on_outline(p: egui::Pos2, r: egui::Rect) -> bool {
+        let e = 0.01;
+        let inx = p.x >= r.left() - e && p.x <= r.right() + e;
+        let iny = p.y >= r.top() - e && p.y <= r.bottom() + e;
+        (inx && ((p.y - r.top()).abs() < e || (p.y - r.bottom()).abs() < e))
+            || (iny && ((p.x - r.left()).abs() < e || (p.x - r.right()).abs() < e))
+    }
+
+    /// The scene from the report: an I2C module dragged far up and to the LEFT of
+    /// the chip, wired to a pad on the chip's TOP edge, with the box straddling
+    /// the pad tip's own level.
+    ///
+    /// The wire leaves by the box's TOP edge, because the edge facing the chip
+    /// would need a corner behind the pad. The DOT has to be drawn where the wire
+    /// actually ends — painted from the first candidate instead, it was left
+    /// sitting on the box's right edge with no wire reaching it, which is exactly
+    /// what "the connection is not resolved" looked like.
+    #[test]
+    fn the_endpoint_dot_is_where_the_wire_really_ends() {
+        let c = die();
+        let r = super::super::wire::ring(c);
+        let anchor = egui::pos2(250.0, c.top() - PIN_HEIGHT);
+        let bx = egui::Rect::from_min_max(egui::pos2(-400.0, -120.0), egui::pos2(-100.0, 40.0));
+        let boxes = [bx];
+
+        let (pts, term) = super::wire_path_for_box(
+            r,
+            blocked_by(c, &boxes),
+            bx,
+            BoxShape::Serial,
+            Side::Left,
+            true,
+            anchor,
+            egui::vec2(0.0, -1.0),
+        );
+
+        assert_eq!(pts[0], term, "the path starts AT the terminal it reports");
+        assert_eq!(*pts.last().expect("an end"), anchor);
+        assert!(
+            on_outline(term, bx),
+            "and the terminal is on the box: {term:?}"
+        );
+    }
+
+    /// The other scene from the report: a PWM module below and to the RIGHT,
+    /// wired to a pad on the chip's BOTTOM edge.
+    #[test]
+    fn the_endpoint_dot_is_right_for_a_box_below_the_chip_too() {
+        let c = die();
+        let r = super::super::wire::ring(c);
+        let anchor = egui::pos2(220.0, c.bottom() + PIN_HEIGHT);
+        let bx = egui::Rect::from_min_max(egui::pos2(400.0, 330.0), egui::pos2(700.0, 460.0));
+        let boxes = [bx];
+
+        let (pts, term) = super::wire_path_for_box(
+            r,
+            blocked_by(c, &boxes),
+            bx,
+            BoxShape::Driver,
+            Side::Right,
+            true,
+            anchor,
+            egui::vec2(0.0, 1.0),
+        );
+
+        assert_eq!(pts[0], term, "the path starts AT the terminal it reports");
+        assert!(on_outline(term, bx), "{term:?} is not on {bx:?}");
+    }
+
+    /// A wire may touch its own box only where it ENDS. Running the length of its
+    /// own box's interior on the way there looks exactly as wrong as crossing
+    /// somebody else's.
+    #[test]
+    fn a_wire_crosses_its_own_box_only_on_the_segment_that_ends_there() {
+        let c = die();
+        let r = super::super::wire::ring(c);
+        for (anchor, adir, bx, face) in [
+            (
+                egui::pos2(250.0, c.top() - PIN_HEIGHT),
+                egui::vec2(0.0, -1.0),
+                egui::Rect::from_min_max(egui::pos2(-400.0, -120.0), egui::pos2(-100.0, 40.0)),
+                Side::Left,
+            ),
+            (
+                egui::pos2(220.0, c.bottom() + PIN_HEIGHT),
+                egui::vec2(0.0, 1.0),
+                egui::Rect::from_min_max(egui::pos2(400.0, 330.0), egui::pos2(700.0, 460.0)),
+                Side::Right,
+            ),
+        ] {
+            let boxes = [bx];
+            let (pts, _) = super::wire_path_for_box(
+                r,
+                blocked_by(c, &boxes),
+                bx,
+                BoxShape::Serial,
+                face,
+                true,
+                anchor,
+                adir,
+            );
+            // `pts` is terminal-first, so the FIRST window is the one entitled to
+            // touch the box.
+            for (k, w) in pts.windows(2).enumerate().skip(1) {
+                assert!(
+                    !crate::panels::structure_map::layout::seg_hits_rect(
+                        (w[0].x, w[0].y),
+                        (w[1].x, w[1].y),
+                        bx.left(),
+                        bx.top(),
+                        bx.width(),
+                        bx.height(),
+                    ),
+                    "segment {k} of {pts:?} runs through its own box {bx:?}"
+                );
+            }
+        }
     }
 
     /// The terminal on a box edge OTHER than the one facing the chip — the

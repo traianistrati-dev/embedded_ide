@@ -146,12 +146,12 @@ pub fn splice_section(existing: &str, new_section: &str, mcu_name: &str, mcu_id:
 /// the call site in `main.rs`. Real-compile verified on STM32F411RE.
 const ASYNC_USART_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const BAUDRATE: u32 = {BAUD};
-const DATA_BITS: u8 = {DATA}; // 7, 8, 9
-const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
-const STOP_BITS: u8 = {STOP}; // 1, 2
+pub const BAUDRATE: u32 = {BAUD};
+pub const DATA_BITS: u8 = {DATA}; // 7, 8, 9
+pub const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+pub const STOP_BITS: u8 = {STOP}; // 1, 2
 {EXTRA_CONSTS}// Byte capacity of the interrupt-driven TX/RX ring buffers.
-const BUF_LEN: usize = {BUF};
+pub const BUF_LEN: usize = {BUF};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -1884,12 +1884,12 @@ pub fn async_peripherals(
 /// `impl Trait`, and both types implement the standard traits anyway.
 const ASYNC_USART_TMPL_DMA: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const BAUDRATE: u32 = {BAUD};
-const DATA_BITS: u8 = {DATA}; // 7, 8, 9
-const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
-const STOP_BITS: u8 = {STOP}; // 1, 2
+pub const BAUDRATE: u32 = {BAUD};
+pub const DATA_BITS: u8 = {DATA}; // 7, 8, 9
+pub const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+pub const STOP_BITS: u8 = {STOP}; // 1, 2
 {EXTRA_CONSTS}// Bytes the DMA controller can receive without the CPU touching them.
-const RX_DMA_BUF: usize = {BUF};
+pub const RX_DMA_BUF: usize = {BUF};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -1990,10 +1990,10 @@ pub fn init<'d, TxD: TxDma<peripherals::{PERI}>, RxD: RxDma<peripherals::{PERI}>
 /// value with a `None` in it.
 const ASYNC_USART_TMPL_DMA_TX: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const BAUDRATE: u32 = {BAUD};
-const DATA_BITS: u8 = {DATA}; // 7, 8, 9
-const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
-const STOP_BITS: u8 = {STOP}; // 1, 2
+pub const BAUDRATE: u32 = {BAUD};
+pub const DATA_BITS: u8 = {DATA}; // 7, 8, 9
+pub const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+pub const STOP_BITS: u8 = {STOP}; // 1, 2
 {EXTRA_CONSTS}// <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -2047,12 +2047,12 @@ pub fn init<'d, TxD: TxDma<peripherals::{PERI}>>(
 /// `embedded_io_async::Read`, and reception must not stop between reads.
 const ASYNC_USART_TMPL_DMA_RX: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const BAUDRATE: u32 = {BAUD};
-const DATA_BITS: u8 = {DATA}; // 7, 8, 9
-const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
-const STOP_BITS: u8 = {STOP}; // 1, 2
+pub const BAUDRATE: u32 = {BAUD};
+pub const DATA_BITS: u8 = {DATA}; // 7, 8, 9
+pub const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+pub const STOP_BITS: u8 = {STOP}; // 1, 2
 {EXTRA_CONSTS}// Bytes the DMA controller can receive without the CPU touching them.
-const RX_DMA_BUF: usize = {BUF};
+pub const RX_DMA_BUF: usize = {BUF};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -2274,7 +2274,7 @@ fn serial_line_extras(cfg: Option<&UsartModuleConfig>, supported: bool) -> (Stri
     ] {
         if on {
             consts.push_str(&format!(
-                "const {konst}: bool = true;
+                "pub const {konst}: bool = true;
 "
             ));
             body.push_str(&format!(
@@ -2355,7 +2355,7 @@ pub fn serial_config_file(
 /// channels actually wired on the canvas become parameters; the rest are `None`.
 const ASYNC_PWM_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const FREQ_HZ: u32 = {FREQ};
+pub const FREQ_HZ: u32 = {FREQ};
 {DUTY_CONSTS}// <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -2418,14 +2418,14 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
 
     if complementary {
         duty_consts.push_str(&format!(
-            "const DEAD_TIME: u16 = {}; // timer ticks, same scale as the duty compare value\n",
+            "pub const DEAD_TIME: u16 = {}; // timer ticks, same scale as the duty compare value\n",
             cfg.dead_time
         ));
     }
     for ch in wiring.active_channels() {
         let duty = cfg.duty_x100_of(ch);
         duty_consts.push_str(&format!(
-            "const DUTY_CH{ch}: u32 = {duty}; // {} %, in hundredths (0..=10_000)\n",
+            "pub const DUTY_CH{ch}: u32 = {duty}; // {} %, in hundredths (0..=10_000)\n",
             duty_percent_str(duty)
         ));
     }
@@ -2924,7 +2924,7 @@ pub fn sai_config_file(n: u8, cfg: &SaiModuleConfig, blocks: &[(u8, SaiBlockWiri
         let blk = cfg.block_of(*b);
         let word = blk.data_size.word();
         consts.push_str(&format!(
-            "const {u}_SLOTS: u8 = {}; // slots per frame\nconst {u}_FRAME_BITS: u16 = {}; // frame length, in bits\nconst {u}_BUF_LEN: usize = {}; // ring buffer, in {word} samples\n",
+            "pub const {u}_SLOTS: u8 = {}; // slots per frame\npub const {u}_FRAME_BITS: u16 = {}; // frame length, in bits\npub const {u}_BUF_LEN: usize = {}; // ring buffer, in {word} samples\n",
             blk.slot_count, blk.frame_length, blk.buffer_len
         ));
         configs.push_str(&format!(
@@ -3102,7 +3102,7 @@ pub fn dac_config_file(
     let mut params = String::new();
     for (ch, _) in chans {
         start_consts.push_str(&format!(
-            "const START_CH{ch}: u16 = {}; // 12 bit, right-aligned (0..=4095)\n",
+            "pub const START_CH{ch}: u16 = {}; // 12 bit, right-aligned (0..=4095)\n",
             cfg.value_of(*ch)
         ));
         params.push_str(&format!(
@@ -3279,7 +3279,7 @@ pub fn hspi_config_file(n: u8, cfg: &HspiModuleConfig) -> String {
     format!(
         r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const PRESCALER: u8 = {prescaler}; // bus = kernel clock / (PRESCALER + 1)
+pub const PRESCALER: u8 = {prescaler}; // bus = kernel clock / (PRESCALER + 1)
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -3435,7 +3435,7 @@ pub fn xspi_config_file(n: u8, cfg: &XspiModuleConfig, dqs: usize) -> String {
     format!(
         r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const PRESCALER: u8 = {prescaler}; // bus = kernel clock / (PRESCALER + 1)
+pub const PRESCALER: u8 = {prescaler}; // bus = kernel clock / (PRESCALER + 1)
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -3574,7 +3574,7 @@ pub fn ospi_config_file(n: u8, cfg: &OspiModuleConfig, with_dqs: bool) -> String
     format!(
         r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const PRESCALER: u8 = {prescaler}; // bus = kernel clock / (PRESCALER + 1)
+pub const PRESCALER: u8 = {prescaler}; // bus = kernel clock / (PRESCALER + 1)
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -3748,7 +3748,7 @@ pub fn qspi_config_file(cfg: &QspiModuleConfig, b1: bool, b2: bool, handle: &str
     format!(
         r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const PRESCALER: u8 = {prescaler}; // bus = kernel clock / (PRESCALER + 1)
+pub const PRESCALER: u8 = {prescaler}; // bus = kernel clock / (PRESCALER + 1)
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -3941,7 +3941,7 @@ pub fn sdmmc_config_file(
     format!(
         r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const DATA_TIMEOUT: u32 = {timeout}; // card bus clock periods
+pub const DATA_TIMEOUT: u32 = {timeout}; // card bus clock periods
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -4051,8 +4051,8 @@ fn i2s_wires(pins: &[&Pin]) -> Vec<(u8, I2sWiring)> {
 /// `src/pins/configs/i2s{N}.rs`: embassy's `I2S` over the SPI{N} block.
 const ASYNC_I2S_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const SAMPLE_RATE_HZ: u32 = {RATE};
-const BUF_LEN: usize = {BUF};
+pub const SAMPLE_RATE_HZ: u32 = {RATE};
+pub const BUF_LEN: usize = {BUF};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -4200,8 +4200,8 @@ fn pwm_wires(pins: &[&Pin]) -> Vec<(u8, PwmWiring)> {
 /// `embedded-hal` 1.0 `SpiBus<u8>`. No DMA — compiles out of the box.
 const ASYNC_SPI_TMPL_BLOCKING: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
-const CLOCK_HZ: u32 = {CLK};
+pub const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+pub const CLOCK_HZ: u32 = {CLK};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -4254,8 +4254,8 @@ pub fn init<'d>(
 /// (`.await`-able). Needs two DMA channels, passed by `main.rs`.
 const ASYNC_SPI_TMPL_DMA: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
-const CLOCK_HZ: u32 = {CLK};
+pub const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+pub const CLOCK_HZ: u32 = {CLK};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -4364,8 +4364,8 @@ pub fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, tx_only: bool) -> S
 /// handing back a narrower type.
 const ASYNC_SPI_TMPL_DMA_TX: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
-const CLOCK_HZ: u32 = {CLK};
+pub const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+pub const CLOCK_HZ: u32 = {CLK};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -4415,8 +4415,8 @@ pub fn init<'d, TxD: TxDma<peripherals::SPI{N}>>(
 /// The same shape without DMA: `new_blocking_txonly`, no channels at all.
 const ASYNC_SPI_TMPL_BLOCKING_TX: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
-const CLOCK_HZ: u32 = {CLK};
+pub const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+pub const CLOCK_HZ: u32 = {CLK};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -4463,7 +4463,7 @@ pub fn init<'d>(
 /// `embedded-hal` 1.0 `I2c`. No DMA/interrupts — compiles out of the box.
 const ASYNC_I2C_TMPL_BLOCKING: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const CLOCK_HZ: u32 = {CLK};
+pub const CLOCK_HZ: u32 = {CLK};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -4509,7 +4509,7 @@ pub fn init<'d>(
 /// channels (passed by `main.rs`).
 const ASYNC_I2C_TMPL_DMA: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
-const CLOCK_HZ: u32 = {CLK};
+pub const CLOCK_HZ: u32 = {CLK};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -4740,7 +4740,7 @@ mod usart_mode_tests {
             };
             let f = serial_config_file("USART", 1, Some(&c), "USART1", true);
             assert!(
-                f.contains(&format!("const {name}: usize = 1024;")),
+                f.contains(&format!("pub const {name}: usize = 1024;")),
                 "{mode:?} must carry the size:
 {f}"
             );
@@ -4768,7 +4768,7 @@ mod usart_mode_tests {
             true,
         );
         let end = f.find("// <<< GENERATED END >>>").expect("marker");
-        let at = f.find("const BUF_LEN").expect("the constant");
+        let at = f.find("pub const BUF_LEN").expect("the constant");
         assert!(
             at < end,
             "BUF_LEN must be above the END marker:
@@ -4791,7 +4791,7 @@ mod usart_mode_tests {
         );
         // A zero-length StaticCell compiles and then never delivers a byte,
         // which reads as broken hardware rather than as a setting.
-        assert!(zero.contains("const BUF_LEN: usize = 16;"), "{zero}");
+        assert!(zero.contains("pub const BUF_LEN: usize = 16;"), "{zero}");
         let huge = serial_config_file(
             "USART",
             1,
@@ -4802,7 +4802,7 @@ mod usart_mode_tests {
             "USART1",
             true,
         );
-        assert!(huge.contains("const BUF_LEN: usize = 65536;"), "{huge}");
+        assert!(huge.contains("pub const BUF_LEN: usize = 65536;"), "{huge}");
     }
 
     #[test]
@@ -5974,7 +5974,7 @@ mod hspi_tests {
         let (_, body) = &out.config_files[0];
         assert!(body.contains("MemoryType::HyperBusMemory"), "{body}");
         assert!(body.contains("MemorySize::_64MiB"), "{body}");
-        assert!(body.contains("const PRESCALER: u8 = 3;"), "{body}");
+        assert!(body.contains("pub const PRESCALER: u8 = 3;"), "{body}");
         assert!(
             body.contains("Hspi<'d, peripherals::HSPI1, Blocking>"),
             "{body}"
@@ -6191,7 +6191,7 @@ mod xspi_tests {
         // embassy spells it `APMemory16Bits`, not `ApMemory16Bits`.
         assert!(body.contains("MemoryType::APMemory16Bits"), "{body}");
         assert!(body.contains("MemorySize::_128MiB"), "{body}");
-        assert!(body.contains("const PRESCALER: u8 = 5;"), "{body}");
+        assert!(body.contains("pub const PRESCALER: u8 = 5;"), "{body}");
     }
 }
 
@@ -6349,7 +6349,7 @@ mod ospi_tests {
         assert!(body.contains("peripherals::OCTOSPI2"), "{body}");
         assert!(body.contains("MemoryType::HyperBusMemory"), "{body}");
         assert!(body.contains("MemorySize::_64MiB"), "{body}");
-        assert!(body.contains("const PRESCALER: u8 = 3;"), "{body}");
+        assert!(body.contains("pub const PRESCALER: u8 = 3;"), "{body}");
         assert!(
             out.init_calls.contains("init(p.OCTOSPI2,"),
             "{}",
@@ -6489,7 +6489,7 @@ mod qspi_tests {
         assert!(body.contains("MemorySize::_256MiB"), "{body}");
         // embassy's own spelling is not uniform — `_8Bit` but `_32bit`.
         assert!(body.contains("AddressSize::_32bit"), "{body}");
-        assert!(body.contains("const PRESCALER: u8 = 7;"), "{body}");
+        assert!(body.contains("pub const PRESCALER: u8 = 7;"), "{body}");
     }
 
     /// No clock, no bus: the pads of a bank alone drive nothing.
@@ -6902,8 +6902,8 @@ mod dac_tests {
         assert_eq!(out.config_files.len(), 1, "one file per block");
         let (name, body) = &out.config_files[0];
         assert_eq!(name, "dac1.rs");
-        assert!(body.contains("const START_CH1: u16 = 2048;"), "{body}");
-        assert!(body.contains("const START_CH2: u16 = 4095;"), "{body}");
+        assert!(body.contains("pub const START_CH1: u16 = 2048;"), "{body}");
+        assert!(body.contains("pub const START_CH2: u16 = 4095;"), "{body}");
         assert!(
             body.contains("Dac::new_blocking(dac, out1, out2)"),
             "{body}"
@@ -6952,7 +6952,7 @@ mod dac_tests {
     fn an_untouched_channel_starts_at_zero_explicitly() {
         let out = run(&[mk("PA4", 1, 1)], Default::default());
         let (_, body) = &out.config_files[0];
-        assert!(body.contains("const START_CH1: u16 = 0;"), "{body}");
+        assert!(body.contains("pub const START_CH1: u16 = 0;"), "{body}");
         assert!(
             body.contains("dac.set(Value::Bit12Right(START_CH1));"),
             "{body}"
@@ -7059,10 +7059,10 @@ mod i2s_tests {
         let (_, body) = &out.config_files[0];
 
         assert!(
-            body.contains("const SAMPLE_RATE_HZ: u32 = 44100;"),
+            body.contains("pub const SAMPLE_RATE_HZ: u32 = 44100;"),
             "{body}"
         );
-        assert!(body.contains("const BUF_LEN: usize = 512;"), "{body}");
+        assert!(body.contains("pub const BUF_LEN: usize = 512;"), "{body}");
         assert!(body.contains("Standard::MsbFirst"), "{body}");
         assert!(body.contains("Format::Data24Channel32"), "{body}");
         // Receiving: the other constructor, and the RX half of the DMA.
@@ -7196,13 +7196,13 @@ mod pwm_tests {
         );
         // The frequency is the module's, shared; the duty is per channel, and a
         // channel the user never touched starts at 0 %.
-        assert!(body.contains("const FREQ_HZ: u32 = 20000;"), "{body}");
+        assert!(body.contains("pub const FREQ_HZ: u32 = 20000;"), "{body}");
         assert!(
-            body.contains("const DUTY_CH1: u32 = 7500; // 75 %, in hundredths"),
+            body.contains("pub const DUTY_CH1: u32 = 7500; // 75 %, in hundredths"),
             "{body}"
         );
         assert!(
-            body.contains("const DUTY_CH2: u32 = 0; // 0 %, in hundredths"),
+            body.contains("pub const DUTY_CH2: u32 = 0; // 0 %, in hundredths"),
             "{body}"
         );
         // Wired channels become parameters; the rest stay `None` slots.
@@ -7279,7 +7279,7 @@ mod pwm_tests {
         let dead = body.find("set_dead_time").expect("dead time");
         let enable = body.find("pwm.enable(").expect("enable");
         assert!(dead < enable, "dead time must land first:\n{body}");
-        assert!(body.contains("const DEAD_TIME: u16 = 40;"), "{body}");
+        assert!(body.contains("pub const DEAD_TIME: u16 = 40;"), "{body}");
         assert!(
             body.contains("pwm.set_duty(Channel::Ch1, max * DUTY_CH1 / 10_000);"),
             "{body}"
@@ -7317,7 +7317,7 @@ mod pwm_tests {
         let pins = [mkn("PB13", 1, 1)];
         let out = run(&pins, Default::default());
         let (_, body) = &out.config_files[0];
-        assert!(body.contains("const DUTY_CH1: u32 = 0;"), "{body}");
+        assert!(body.contains("pub const DUTY_CH1: u32 = 0;"), "{body}");
         assert!(
             body.contains("pwm.set_duty(Channel::Ch1, max * DUTY_CH1 / 10_000);"),
             "{body}"
@@ -7553,7 +7553,7 @@ mod pwm_tests {
         let out = run(&pins, [(3u8, cfg)].into_iter().collect());
         let (_, body) = &out.config_files[0];
         assert!(
-            body.contains("const DUTY_CH1: u32 = 750; // 7.5 %, in hundredths"),
+            body.contains("pub const DUTY_CH1: u32 = 750; // 7.5 %, in hundredths"),
             "{body}"
         );
         assert!(
@@ -7585,7 +7585,7 @@ mod pwm_tests {
             .find(|(n, _)| n == "pwm1.rs")
             .unwrap()
             .1;
-        assert!(body.contains("const FREQ_HZ: u32 = 1000;"), "{body}");
+        assert!(body.contains("pub const FREQ_HZ: u32 = 1000;"), "{body}");
     }
 
     /// PWM needs no interrupt and no DMA — `SimplePwm` writes the compare
@@ -7845,7 +7845,10 @@ mod flow_and_direction_tests {
         };
         let out = run(&full_duplex(), cfg.clone());
         let body = &out.config_files[0].1;
-        assert!(body.contains("const SWAP_RX_TX: bool = true;"), "{body}");
+        assert!(
+            body.contains("pub const SWAP_RX_TX: bool = true;"),
+            "{body}"
+        );
         assert!(
             body.contains("    config.swap_rx_tx = SWAP_RX_TX;"),
             "{body}"

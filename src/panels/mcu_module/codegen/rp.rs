@@ -428,7 +428,7 @@ fn section(mcu: &Mcu) -> String {
     o.push('\n');
 
     o.push_str("/// The crystal on the board, and each PLL as the Clock tab has it.\n");
-    o.push_str(&format!("const XTAL_FREQ_HZ: u32 = {xtal};\n\n"));
+    o.push_str(&format!("pub const XTAL_FREQ_HZ: u32 = {xtal};\n\n"));
     for (name, cfg, what) in [
         ("PLL_SYS_CFG", &sys, "the system clock"),
         ("PLL_USB_CFG", &usb, "USB, which needs exactly 48 MHz"),
@@ -441,7 +441,7 @@ fn section(mcu: &Mcu) -> String {
             cfg.vco_mhz / cfg.pd1 / cfg.pd2
         ));
         o.push_str(&format!(
-            "const {name}: {hal}::pll::PLLConfig = {hal}::pll::PLLConfig {{\n"
+            "pub const {name}: {hal}::pll::PLLConfig = {hal}::pll::PLLConfig {{\n"
         ));
         o.push_str(&format!(
             "    vco_freq: {hal}::fugit::HertzU32::MHz({}),\n",
@@ -641,9 +641,9 @@ fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)], hz: u32) -
         "// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.\n",
     );
     match kind {
-        "uart" => o.push_str(&format!("const BAUDRATE: u32 = {hz};\n")),
-        "spi" => o.push_str(&format!("const SPI_HZ: u32 = {hz};\n")),
-        _ => o.push_str(&format!("const I2C_HZ: u32 = {hz};\n")),
+        "uart" => o.push_str(&format!("pub const BAUDRATE: u32 = {hz};\n")),
+        "spi" => o.push_str(&format!("pub const SPI_HZ: u32 = {hz};\n")),
+        _ => o.push_str(&format!("pub const I2C_HZ: u32 = {hz};\n")),
     }
     o.push_str("// <<< GENERATED END >>>\n\n");
     o.push_str("// Everything below is editable — your changes are preserved on regeneration.\n");
@@ -736,7 +736,7 @@ fn pwm_config_file(mcu: &Mcu, slice: u8, chans: &[(u8, u8)]) -> String {
         let x100 = cfg.map_or(0, |c| c.duty_x100_of(*channel));
         let name = if *channel == 1 { "A" } else { "B" };
         o.push_str(&format!(
-            "const DUTY_{name}_X100: u32 = {x100}; // {} %\n",
+            "pub const DUTY_{name}_X100: u32 = {x100}; // {} %\n",
             super::common::duty_percent_str(x100)
         ));
     }

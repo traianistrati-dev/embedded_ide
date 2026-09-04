@@ -1019,13 +1019,13 @@ mod tests {
 
     #[test]
     fn strict_config_exemption_inserts_module_allow_after_marker() {
-        let body = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse foo;\n";
+        let body = "// <<< GENERATED>>>\npub const BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse foo;\n";
         assert_eq!(strict_config_exemption(body.to_string(), false), body);
         let on = strict_config_exemption(body.to_string(), true);
         // Module inner attribute, right after the marker, before the const.
         let attr = on.find("#![allow(clippy::").unwrap();
         let marker = on.find("// <<< GENERATED>>>").unwrap();
-        let konst = on.find("const BAUDRATE").unwrap();
+        let konst = on.find("pub const BAUDRATE").unwrap();
         assert!(
             marker < attr && attr < konst,
             "attr between marker and const:\n{on}"

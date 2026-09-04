@@ -294,12 +294,15 @@ pub struct Blocked<'a> {
     pub boxes: &'a [egui::Rect],
     /// Where in `boxes` this wire's OWN box sits.
     ///
-    /// Exempt, and it costs nothing: every route arrives at its terminal along
-    /// the inward normal of the edge it leaves by, so it reaches the box from
-    /// outside and stops on the boundary. The exemption is for the boundary
-    /// itself — and for a chamfered box, whose terminal is snapped onto the
-    /// silhouette and can therefore sit inside the axis-aligned rect while being
-    /// visually outside the shape.
+    /// Exempt on the FINAL segment only — the one that reaches the terminal.
+    /// That segment ends on the box by definition, and for a chamfered box the
+    /// terminal is snapped onto the silhouette and can sit inside the
+    /// axis-aligned rect while being visually outside the shape.
+    ///
+    /// Every OTHER segment is held to the same rule as any foreign box. A
+    /// blanket exemption let a wire run the length of its own box's interior on
+    /// the way to its terminal, which looks exactly as wrong as crossing
+    /// somebody else's.
     pub own: usize,
 }
 
@@ -321,12 +324,15 @@ fn hits(a: egui::Pos2, b: egui::Pos2, r: egui::Rect) -> bool {
 /// thing a schematic line may never suggest wrongly, so a route that would do it
 /// is refused and a longer one is taken instead.
 fn clears(pts: &[egui::Pos2], b: Blocked<'_>) -> bool {
-    !pts.windows(2).any(|w| {
+    // Routes are built anchor-first, so the LAST window is the one that lands on
+    // the terminal — the only place the wire is entitled to touch its own box.
+    let last = pts.len().saturating_sub(2);
+    !pts.windows(2).enumerate().any(|(k, w)| {
         hits(w[0], w[1], b.body)
             || b.boxes
                 .iter()
                 .enumerate()
-                .any(|(i, r)| i != b.own && hits(w[0], w[1], *r))
+                .any(|(i, r)| !(i == b.own && k == last) && hits(w[0], w[1], *r))
     })
 }
 
@@ -894,9 +900,46 @@ mod tests {
         let r = ring(c);
         let anchor = egui::pos2(c.right() + PIN_HEIGHT, 20.0);
         let term = egui::pos2(c.right() + 68.0, 20.0);
-        let pts = wrap(r, anchor, egui::vec2(1.0, 0.0), term, egui::vec2(-1.0, 0.0))
-            .expect("a route");
+        let pts =
+            wrap(r, anchor, egui::vec2(1.0, 0.0), term, egui::vec2(-1.0, 0.0)).expect("a route");
         assert_eq!(pts.len(), 2, "{pts:?}");
+    }
+
+    /// The own-box exemption is for the segment that ENDS on the box, and for no
+    /// other. Running the length of its own box's interior on the way to its
+    /// terminal looks exactly as wrong as crossing somebody else's.
+    #[test]
+    fn a_wire_may_touch_its_own_box_only_where_it_ends() {
+        let c = chip();
+        let bx = egui::Rect::from_min_max(egui::pos2(100.0, 100.0), egui::pos2(200.0, 200.0));
+        let boxes = [bx];
+        let mine = Blocked {
+            body: egui::Rect::NOTHING,
+            boxes: &boxes,
+            own: 0,
+        };
+        let _ = c;
+
+        // Anchor-first, so the LAST window is the one that lands on the box. Here
+        // it ends just inside the rect, as a terminal snapped onto a chamfer
+        // does — and that is allowed.
+        let ends_on_it = [
+            egui::pos2(250.0, 50.0),
+            egui::pos2(250.0, 150.0),
+            egui::pos2(190.0, 150.0),
+        ];
+        assert!(clears(&ends_on_it, mine), "the final segment may reach it");
+
+        // The same box, crossed by the FIRST segment on the way somewhere else.
+        let runs_through_it = [
+            egui::pos2(50.0, 150.0),
+            egui::pos2(250.0, 150.0),
+            egui::pos2(250.0, 50.0),
+        ];
+        assert!(
+            !clears(&runs_through_it, mine),
+            "but a segment that only passes through is refused"
+        );
     }
 
     /// The walk is the SHORT way round, and it does not depend on which wire
