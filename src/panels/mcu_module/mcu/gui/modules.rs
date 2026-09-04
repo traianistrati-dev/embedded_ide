@@ -1400,6 +1400,34 @@ const GROUP_COLOURS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(168, 172, 200), // periwinkle
 ];
 
+/// A terminal on the box edge whose outward normal is `normal`, lined up with
+/// `anchor`.
+///
+/// The counterpart of [`facing_terminal`] for a wire that does NOT leave by the
+/// edge facing the chip. A module on the chip's left wired to a pad on its top
+/// leaves by its own TOP edge, and the two rays then run the same way — which is
+/// what turns a wire that had to crawl along the pin row into two corners over a
+/// lane well clear of it.
+fn edge_terminal(rect: egui::Rect, normal: egui::Vec2, anchor: egui::Pos2) -> egui::Pos2 {
+    if normal.x.abs() > normal.y.abs() {
+        let x = if normal.x > 0.0 { rect.right() } else { rect.left() };
+        egui::pos2(
+            x,
+            anchor
+                .y
+                .clamp(rect.top() + CORNER_INSET, rect.bottom() - CORNER_INSET),
+        )
+    } else {
+        let y = if normal.y > 0.0 { rect.bottom() } else { rect.top() };
+        egui::pos2(
+            anchor
+                .x
+                .clamp(rect.left() + CORNER_INSET, rect.right() - CORNER_INSET),
+            y,
+        )
+    }
+}
+
 /// The outward normal of the box edge that faces the chip.
 ///
 /// `Side` is which side of the CHIP the box sits on, so a box on the right faces
@@ -2309,10 +2337,11 @@ pub fn draw_modules(
             let color = signal_color(*sig, inst);
             // A dragged box's stored side no longer implies an edge, so aim the
             // wire at the box edge nearest the pin; auto boxes keep their side.
-            let term = if *manual {
-                nearest_on_outline(&silhouette(*rect, BoxShape::of(m.kind), *side), *anchor)
+            let face = if *manual { facing(*rect) } else { *side };
+            let mut term = if *manual {
+                nearest_on_outline(&silhouette(*rect, BoxShape::of(m.kind), face), *anchor)
             } else {
-                facing_terminal(*rect, *side, *anchor)
+                facing_terminal(*rect, face, *anchor)
             };
             let lit = wire_lit(active.as_deref(), mcu, *anchor_pin);
             let dot = if lit.is_some() { 4.5 } else { 3.5 };
@@ -2324,18 +2353,37 @@ pub fn draw_modules(
             // rotated diamond, a ball, a box dragged onto the corridor) and the
             // straight segment is what we fall back to, so a wire is always
             // drawn.
-            let face = if *manual { facing(*rect) } else { *side };
             let adir = pin_anchor_dir(mcu, local_chip, rot, *anchor_pin)
                 .map(|(_, d)| d)
                 .unwrap_or_default();
-            let pts = super::wire::wire_path(
+            // WHICH EDGE the wire leaves the box by. Two candidates, and the one
+            // that costs fewer corners wins:
+            //
+            //  * the edge facing the chip - right for a pad across the channel,
+            //    which is most of them, and the only one for a pad on the far
+            //    side of the package;
+            //  * the edge facing the PAD's own side - a box on the chip's left
+            //    wired to a pad on its top leaves by its own top edge, and the
+            //    two rays then run the same way, which is what turns a wire that
+            //    had to crawl along the pin row into two corners over a lane
+            //    well clear of it.
+            //
+            // Ties go to the facing edge, so the everyday straight wire is
+            // untouched.
+            let sil = silhouette(*rect, BoxShape::of(m.kind), face);
+            let port = nearest_on_outline(&sil, edge_terminal(*rect, adir, *anchor));
+            let pts = super::wire::best_route(
                 wire_ring,
                 chip_rect,
                 *anchor,
                 adir,
-                term,
-                facing_normal(face),
-            );
+                &[(term, facing_normal(face)), (port, adir)],
+            )
+            .map(|(p, t)| {
+                term = t;
+                p
+            })
+            .unwrap_or_else(|| vec![term, *anchor]);
             let (halo, line) = wire_shapes(
                 &crate::panels::structure_map::gui::rounded_path(&pts, super::wire::WIRE_R),
                 color,
@@ -7966,6 +8014,31 @@ mod wire_tests {
             .find(|d| d.id == "rp2040_pico")
             .expect("built-in Pico")
             .build_mcu()
+    }
+
+    /// The terminal on a box edge OTHER than the one facing the chip — the
+    /// second way out that lets a wire leave towards its pad's own side.
+    #[test]
+    fn a_terminal_can_be_placed_on_any_edge_of_the_box() {
+        let r = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(170.0, 98.0));
+        let far = egui::pos2(1000.0, -1000.0);
+        // Up: on the top edge, lined up with the pad but never in the corner.
+        let t = super::edge_terminal(r, egui::vec2(0.0, -1.0), far);
+        assert_eq!(t.y, r.top());
+        assert!(t.x < r.right() && t.x > r.left(), "clear of the corners: {t:?}");
+        // Right: on the right edge.
+        let t = super::edge_terminal(r, egui::vec2(1.0, 0.0), far);
+        assert_eq!(t.x, r.right());
+        assert!(t.y > r.top() && t.y < r.bottom());
+        // Down and left, for completeness — an edge each.
+        assert_eq!(
+            super::edge_terminal(r, egui::vec2(0.0, 1.0), far).y,
+            r.bottom()
+        );
+        assert_eq!(
+            super::edge_terminal(r, egui::vec2(-1.0, 0.0), far).x,
+            r.left()
+        );
     }
 
     /// A device drag computes each part's offset arithmetically, so it can land

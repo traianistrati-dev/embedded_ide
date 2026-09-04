@@ -180,13 +180,139 @@ pub fn dedup_collinear(pts: Vec<egui::Pos2>) -> Vec<egui::Pos2> {
     out
 }
 
+/// How far beyond the outermost end a shared lane is placed.
+///
+/// The lane a wire shares with the package edge has to be visibly OFF the pins,
+/// not tucked against them. `RING_MID` puts it 9 px past the stub tips, which on
+/// screen reads as running along the pin row rather than clear of it.
+pub const LANE_OUT: f32 = 34.0;
+
+/// Whether `q` lies ahead of `p` along the axis unit `d`.
+fn ahead(p: egui::Pos2, d: egui::Vec2, q: egui::Pos2) -> bool {
+    (q - p).dot(d) > 0.5
+}
+
+/// The coordinate of `p` ALONG `d`'s axis.
+fn on(p: egui::Pos2, d: egui::Vec2) -> f32 {
+    if d.x.abs() > d.y.abs() { p.x } else { p.y }
+}
+
+/// The coordinate of `p` ACROSS `d`'s axis.
+///
+/// The distinction matters wherever the two rays are parallel: `on(p, tdir)`
+/// then answers about the SAME axis as `on(p, adir)` and a lane built from it
+/// collapses onto itself.
+fn across(p: egui::Pos2, d: egui::Vec2) -> f32 {
+    if d.x.abs() > d.y.abs() { p.y } else { p.x }
+}
+
+/// A point built from an along-`d` coordinate and an across-`d` one.
+fn at(d: egui::Vec2, along: f32, across: f32) -> egui::Pos2 {
+    if d.x.abs() > d.y.abs() {
+        egui::pos2(along, across)
+    } else {
+        egui::pos2(across, along)
+    }
+}
+
+/// ONE corner: out along `adir`, then straight in along `tdir`.
+///
+/// The shape the eye reads fastest, and the one the two rays admit whenever they
+/// are perpendicular and their crossing lies ahead of both. Its corner is as far
+/// from the pins as the box is, which is the other half of what makes it read.
+fn l_route(
+    anchor: egui::Pos2,
+    adir: egui::Vec2,
+    term: egui::Pos2,
+    tdir: egui::Vec2,
+) -> Option<Vec<egui::Pos2>> {
+    if adir.dot(tdir).abs() > 0.5 {
+        return None; // not perpendicular
+    }
+    let corner = at(adir, on(term, adir), across(anchor, adir));
+    (ahead(anchor, adir, corner) && ahead(term, tdir, corner))
+        .then(|| vec![anchor, corner, term])
+}
+
+/// TWO corners over a shared lane, for two rays pointing the SAME way.
+///
+/// The lane is placed beyond whichever end is already furthest out, plus
+/// [`LANE_OUT`] — so it clears the pin row, the stubs and both endpoints by
+/// construction, and both corners land well away from the pins.
+fn z_parallel(
+    anchor: egui::Pos2,
+    adir: egui::Vec2,
+    term: egui::Pos2,
+    tdir: egui::Vec2,
+) -> Option<Vec<egui::Pos2>> {
+    if adir.dot(tdir) < 0.5 {
+        return None; // not the same direction
+    }
+    let sign = on(egui::Pos2::ZERO + adir, adir);
+    let outer = if sign > 0.0 {
+        on(anchor, adir).max(on(term, adir))
+    } else {
+        on(anchor, adir).min(on(term, adir))
+    };
+    let lane = outer + sign * LANE_OUT;
+    Some(vec![
+        anchor,
+        at(adir, lane, across(anchor, adir)),
+        at(adir, lane, across(term, adir)),
+        term,
+    ])
+}
+
+/// TWO corners in the channel, for two rays pointing AT each other — a box
+/// across from its pad but not lined up with it.
+///
+/// The lane goes down the middle of what is between them, which is all the room
+/// there is: the box is 18 px away and there is nowhere further to put it.
+fn z_facing(
+    anchor: egui::Pos2,
+    adir: egui::Vec2,
+    term: egui::Pos2,
+    tdir: egui::Vec2,
+) -> Option<Vec<egui::Pos2>> {
+    if adir.dot(tdir) > -0.5 || !ahead(anchor, adir, term) {
+        return None;
+    }
+    let lane = (on(anchor, adir) + on(term, adir)) / 2.0;
+    Some(vec![
+        anchor,
+        at(adir, lane, across(anchor, adir)),
+        at(adir, lane, across(term, adir)),
+        term,
+    ])
+}
+
+/// Whether every segment of `pts` stays out of `body`.
+fn clears(pts: &[egui::Pos2], body: egui::Rect) -> bool {
+    !pts.windows(2).any(|w| {
+        crate::panels::structure_map::layout::seg_hits_rect(
+            (w[0].x, w[0].y),
+            (w[1].x, w[1].y),
+            body.left(),
+            body.top(),
+            body.width(),
+            body.height(),
+        )
+    })
+}
+
 /// The orthogonal route from a box terminal to a pad anchor, or `None` when the
-/// geometry cannot carry one and the caller should draw a straight segment.
+/// geometry cannot carry one and the caller should try another box edge or fall
+/// back to a straight segment.
+///
+/// Candidates in order of how few corners they cost, first one that clears the
+/// package wins: straight, then the one-corner L, then a two-corner lane. The
+/// package-wrapping ring is the last resort, for a pad on the far side where
+/// nothing shorter can avoid crossing the die.
 ///
 /// * `anchor` / `adir` — the pad's stub tip and its outward unit vector;
 /// * `term` / `tdir` — the box's terminal and the outward normal of the edge it
 ///   leaves by;
-/// * `body` — the package, used only to refuse a ball pad.
+/// * `body` — the package, which no segment may cross.
 pub fn route(
     ring: egui::Rect,
     body: egui::Rect,
@@ -195,7 +321,7 @@ pub fn route(
     term: egui::Pos2,
     tdir: egui::Vec2,
 ) -> Option<Vec<egui::Pos2>> {
-    // Four refusals, and each of them is a real shape this cannot draw.
+    // Three refusals, and each of them is a real shape this cannot draw.
     if !is_axis(adir) || !is_axis(tdir) {
         // A 45° diamond. A diagonal package reads correctly with diagonal
         // wires, and forcing axis-aligned ones onto it would be a lie about
@@ -206,8 +332,39 @@ pub fn route(
         // A ball: its anchor is inside the die, so there is no stub to leave.
         return None;
     }
+    if body.contains(term) {
+        return None;
+    }
+    let cheap = [
+        l_route(anchor, adir, term, tdir),
+        z_facing(anchor, adir, term, tdir),
+        z_parallel(anchor, adir, term, tdir),
+    ];
+    for c in cheap.into_iter().flatten() {
+        let pts = dedup_collinear(c);
+        if pts.len() >= 2 && clears(&pts, body) {
+            return Some(pts);
+        }
+    }
+    // Nothing short works: the pad is on the far side of the package, so the
+    // wire has to go around it.
+    wrap(ring, body, anchor, adir, term, tdir)
+}
+
+/// The last resort: onto the corridor around the package, round it, and off.
+///
+/// Only reached when no one- or two-corner route clears the die — in practice a
+/// box wired to a pad on the opposite face.
+fn wrap(
+    ring: egui::Rect,
+    body: egui::Rect,
+    anchor: egui::Pos2,
+    adir: egui::Vec2,
+    term: egui::Pos2,
+    tdir: egui::Vec2,
+) -> Option<Vec<egui::Pos2>> {
     if ring.contains(term) {
-        // A box dragged into the corridor itself — the route would start on the
+        // A box dragged onto the corridor itself — the route would start on the
         // lane it is supposed to join.
         return None;
     }
@@ -219,29 +376,30 @@ pub fn route(
     pts.push(t2);
     pts.push(term);
     let pts = dedup_collinear(pts);
-    (pts.len() >= 2).then_some(pts)
+    (pts.len() >= 2 && clears(&pts, body)).then_some(pts)
 }
 
-/// The path a wire is actually drawn along: TERMINAL first, pad last.
+/// The cheaper of several ways out of a box, as the drawn path and the terminal
+/// it leaves from.
 ///
-/// That orientation is not cosmetic. A Custom module's arrowhead is aimed along
-/// the route's last leg, and "last" has to mean the same end for every wire or
-/// half the arrows point into the middle of the diagram.
-///
-/// Always at least two points: a geometry [`route`] refuses falls back to the
-/// straight segment the canvas drew before this module existed.
-pub fn wire_path(
+/// FEWEST CORNERS wins, and a tie goes to the earlier candidate — so the
+/// everyday wire, whose first candidate is already a straight segment, is never
+/// talked out of it.
+pub fn best_route(
     ring: egui::Rect,
     body: egui::Rect,
     anchor: egui::Pos2,
     adir: egui::Vec2,
-    term: egui::Pos2,
-    tdir: egui::Vec2,
-) -> Vec<egui::Pos2> {
-    match route(ring, body, anchor, adir, term, tdir) {
-        Some(p) => p.into_iter().rev().collect(),
-        None => vec![term, anchor],
-    }
+    cands: &[(egui::Pos2, egui::Vec2)],
+) -> Option<(Vec<egui::Pos2>, egui::Pos2)> {
+    cands
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (t, d))| {
+            route(ring, body, anchor, adir, *t, *d).map(|p| (p.len(), i, p, *t))
+        })
+        .min_by_key(|(n, i, ..)| (*n, *i))
+        .map(|(_, _, p, t)| (p.into_iter().rev().collect(), t))
 }
 
 #[cfg(test)]
@@ -386,22 +544,147 @@ mod tests {
         let r = ring(c);
         let anchor = egui::pos2(-30.0, c.top() - PIN_HEIGHT);
         let term = egui::pos2(c.left() - PIN_HEIGHT - super::super::modules::PIN_GAP, -20.0);
-        let p = wire_path(r, c, anchor, egui::vec2(0.0, -1.0), term, egui::vec2(1.0, 0.0));
+        let (p, _) = best_route(
+            r,
+            c,
+            anchor,
+            egui::vec2(0.0, -1.0),
+            &[(term, egui::vec2(1.0, 0.0))],
+        )
+        .expect("a route");
         assert_eq!(p[0], term);
         assert_eq!(*p.last().expect("an end"), anchor);
         assert!(p.len() > 2, "and it is the routed one: {p:?}");
     }
 
-    /// A refused geometry still draws a wire — the straight one the canvas drew
-    /// before this module existed.
+    /// A geometry the router refuses yields NOTHING, so the caller falls back to
+    /// the straight segment the canvas drew before this module existed.
     #[test]
-    fn a_refused_geometry_still_draws_the_old_straight_wire() {
+    fn a_refused_geometry_yields_nothing_to_draw() {
         let c = chip();
         let r = ring(c);
         let ball = egui::pos2(0.0, 0.0);
         let term = egui::pos2(200.0, 0.0);
-        let p = wire_path(r, c, ball, egui::vec2(1.0, 0.0), term, egui::vec2(-1.0, 0.0));
-        assert_eq!(p, vec![term, ball]);
+        assert!(
+            best_route(
+                r,
+                c,
+                ball,
+                egui::vec2(1.0, 0.0),
+                &[(term, egui::vec2(-1.0, 0.0))]
+            )
+            .is_none()
+        );
+    }
+
+    /// The shape the user drew for PWM0: a pad on the bottom edge, its box below
+    /// and to the right. ONE corner, and it sits down at the box's own level
+    /// rather than up against the pin row.
+    #[test]
+    fn a_pad_below_its_box_turns_once_far_from_the_pins() {
+        let c = chip();
+        let r = ring(c);
+        let anchor = egui::pos2(c.left() + 30.0, c.bottom() + PIN_HEIGHT);
+        let term = egui::pos2(c.right() + 68.0, c.bottom() + 200.0);
+        let pts = route(r, c, anchor, egui::vec2(0.0, 1.0), term, egui::vec2(-1.0, 0.0))
+            .expect("a route");
+        assert_eq!(pts.len(), 3, "one corner: {pts:?}");
+        assert_eq!(pts[1], egui::pos2(anchor.x, term.y), "and it is the L's");
+        assert!(
+            pts[1].y - anchor.y > 100.0,
+            "the corner is well clear of the pin row: {pts:?}"
+        );
+    }
+
+    /// The shape the user drew for I2C0: pads on the top edge, the box away to
+    /// the left. Leaving by the box's TOP edge makes the two rays parallel, and
+    /// the lane then goes ABOVE both of them instead of crawling along the pins.
+    #[test]
+    fn a_box_beside_the_pads_row_runs_its_lane_clear_of_them() {
+        let c = chip();
+        let r = ring(c);
+        let anchor = egui::pos2(c.right() - 30.0, c.top() - PIN_HEIGHT);
+        // Out of the box's own top edge, pointing the same way the pad does —
+        // and FURTHER out than the pad, which is what says the lane is placed
+        // beyond whichever end is already outermost rather than beyond the pad.
+        let term = egui::pos2(c.left() - 120.0, c.top() - PIN_HEIGHT - 60.0);
+        let pts = route(r, c, anchor, egui::vec2(0.0, -1.0), term, egui::vec2(0.0, -1.0))
+            .expect("a route");
+        assert_eq!(pts.len(), 4, "two corners: {pts:?}");
+        let lane = pts[1].y;
+        assert_eq!(pts[2].y, lane, "and one shared lane");
+        // The corners sit directly out from each end — a lane whose ends do not
+        // line up with the endpoints is not a lane, it is two diagonals.
+        assert_eq!(pts[1].x, anchor.x, "{pts:?}");
+        assert_eq!(pts[2].x, term.x, "{pts:?}");
+        assert!(
+            term.y - lane >= LANE_OUT,
+            "the lane clears the OUTERMOST end by {}: {pts:?}",
+            term.y - lane
+        );
+        assert!(anchor.y - lane >= LANE_OUT, "and the pad tips too: {pts:?}");
+    }
+
+    /// The L is only an L when its corner lies AHEAD of both ends. A pad on the
+    /// top edge and a box away to the left, leaving by the edge that faces the
+    /// chip, cross behind the pad — taking that corner would run the wire back
+    /// down through the pin row it just left.
+    #[test]
+    fn an_l_whose_corner_lies_behind_an_end_is_refused() {
+        let c = chip();
+        let r = ring(c);
+        let anchor = egui::pos2(c.right() - 30.0, c.top() - PIN_HEIGHT);
+        // The terminal sits BELOW the pad tip but still above the die, so the L
+        // this would take is clear of the package - only the ahead test can
+        // refuse it, which is the point of the test.
+        let term = egui::pos2(c.left() - 68.0, c.top() - 20.0);
+        let corner = egui::pos2(anchor.x, term.y);
+        assert!(
+            !c.contains(corner) && corner.y > anchor.y,
+            "the corner is behind the pad and outside the die: {corner:?}"
+        );
+        let pts = route(r, c, anchor, egui::vec2(0.0, -1.0), term, egui::vec2(1.0, 0.0))
+            .expect("a route");
+        assert!(
+            !pts.contains(&corner),
+            "it took the corner behind the pad: {pts:?}"
+        );
+        assert!(pts.len() > 3, "so it costs more than an L: {pts:?}");
+    }
+
+    /// …and the choice between the two ways out of the box is the one that costs
+    /// fewer corners. Through the box's facing edge this same wire has to wrap
+    /// around the package.
+    #[test]
+    fn the_cheaper_way_out_of_the_box_is_the_one_taken() {
+        let c = chip();
+        let r = ring(c);
+        let anchor = egui::pos2(c.right() - 30.0, c.top() - PIN_HEIGHT);
+        let facing = (egui::pos2(c.left() - 68.0, c.top() + 40.0), egui::vec2(1.0, 0.0));
+        let top = (egui::pos2(c.left() - 120.0, c.top() + 40.0), egui::vec2(0.0, -1.0));
+        let (pts, term) =
+            best_route(r, c, anchor, egui::vec2(0.0, -1.0), &[facing, top]).expect("a route");
+        assert_eq!(term, top.0, "the top edge won: {pts:?}");
+        assert_eq!(pts.len(), 4);
+        assert_eq!(pts[0], top.0, "terminal first");
+    }
+
+    /// A tie goes to the FIRST candidate, so the everyday straight wire is never
+    /// talked out of the edge facing the chip.
+    #[test]
+    fn a_tie_keeps_the_edge_facing_the_chip() {
+        let c = chip();
+        let r = ring(c);
+        let anchor = egui::pos2(c.right() + PIN_HEIGHT, 20.0);
+        let facing = (
+            egui::pos2(c.right() + PIN_HEIGHT + super::super::modules::PIN_GAP, 20.0),
+            egui::vec2(-1.0, 0.0),
+        );
+        let other = (egui::pos2(c.right() + 200.0, 20.0), egui::vec2(-1.0, 0.0));
+        let (pts, term) =
+            best_route(r, c, anchor, egui::vec2(1.0, 0.0), &[facing, other]).expect("a route");
+        assert_eq!(pts.len(), 2, "still one straight segment");
+        assert_eq!(term, facing.0);
     }
 
     /// The walk is the SHORT way round, and it does not depend on which wire
