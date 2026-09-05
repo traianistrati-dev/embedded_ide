@@ -65,14 +65,28 @@ impl AppIde {
         let amber = egui::Color32::from_rgb(220, 180, 70);
         let blue = egui::Color32::from_rgb(100, 170, 240);
 
-        // The background LSP flush is part of the user's "save" — same label,
-        // so the busy chain (save worker → flush → check) has no status gap.
-        if self.save_in_progress.is_some()
-            || self
-                .lsp_flush_in_flight
-                .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Some((true, "Saving…".to_owned(), amber));
+        // The busy chain of one save, named by the step it is actually on.
+        //
+        // All three used to read "Saving…", which was wrong in two different
+        // ways. Once the worker is done the project IS on disk - what remains is
+        // refreshing the diagnostics - and the WAIT in the middle showed nothing
+        // at all: `save_in_progress` is already cleared and the flush has not
+        // started, so a save blocked on rust-analyzer looked finished while the
+        // spinner sat there. It is the longest step of a slow save and it was
+        // the one with no label.
+        let flush_in_flight = self
+            .lsp_flush_in_flight
+            .load(std::sync::atomic::Ordering::Acquire);
+        if self.save_in_progress.is_some() || flush_in_flight || self.lsp_flush_requested {
+            let status = self.lsp_state.lock().unwrap().status.clone();
+            if let Some(label) = save_step_label(
+                self.save_in_progress.is_some(),
+                flush_in_flight,
+                self.lsp_flush_requested,
+                &status,
+            ) {
+                return Some((true, label, amber));
+            }
         }
         if matches!(
             *self.build_state.lock().unwrap(),
@@ -455,6 +469,104 @@ impl AppIde {
             clip_paste,
             goto_error,
             rename_request,
+        }
+    }
+}
+
+/// Which step of a save the status bar should name, or `None` when no save is
+/// in flight.
+///
+/// All three steps used to read "Saving…", which was wrong in two ways. Once
+/// the worker is done the project IS on disk - what is left is refreshing the
+/// diagnostics - and the WAIT in the middle showed NOTHING: `save_in_progress`
+/// is already cleared and the flush has not started, so a save blocked on
+/// rust-analyzer looked finished while the spinner sat there. It is the longest
+/// step of a slow save and it was the one step with no label at all.
+pub(super) fn save_step_label(
+    worker_running: bool,
+    flush_in_flight: bool,
+    flush_requested: bool,
+    ra: &crate::lsp::LspStatus,
+) -> Option<String> {
+    // Order is the order the steps happen in, so an overlapping pair names the
+    // earlier one - the save is still "on" that step.
+    if worker_running {
+        return Some("Saving…".to_owned());
+    }
+    if flush_in_flight {
+        return Some("Syncing to rust-analyzer…".to_owned());
+    }
+    if flush_requested {
+        // The flush only runs while RA is Ready, so this waits on exactly that
+        // - and says so, rather than implying the disk is slow.
+        let why = match ra {
+            crate::lsp::LspStatus::Indexing => " (indexing)",
+            crate::lsp::LspStatus::Stopped => " (not running)",
+            crate::lsp::LspStatus::Failed(_) => " (failed)",
+            _ => "",
+        };
+        return Some(format!("Waiting for rust-analyzer{why}…"));
+    }
+    None
+}
+
+#[cfg(test)]
+mod save_step_label_tests {
+    use super::save_step_label;
+    use crate::lsp::LspStatus;
+
+    /// The step this whole change exists for.
+    ///
+    /// Between the worker finishing and the flush starting, NOTHING was shown:
+    /// the save looked done while it was in fact blocked. On a slow save this
+    /// is the longest step, and it was the invisible one.
+    #[test]
+    fn the_wait_is_no_longer_silent() {
+        let l = save_step_label(false, false, true, &LspStatus::Indexing)
+            .expect("a pending flush is not idle");
+        assert!(l.contains("rust-analyzer"), "{l}");
+        assert!(l.contains("indexing"), "it should say WHY: {l}");
+    }
+
+    /// It says the disk is busy only while the disk is actually busy.
+    #[test]
+    fn only_the_worker_step_says_saving() {
+        assert_eq!(
+            save_step_label(true, false, false, &LspStatus::Ready).as_deref(),
+            Some("Saving…")
+        );
+        // Worker done, flush running: the project is already on disk.
+        let l = save_step_label(false, true, false, &LspStatus::Ready).unwrap();
+        assert!(!l.contains("Saving"), "the project is written by now: {l}");
+        assert!(l.contains("rust-analyzer"), "{l}");
+    }
+
+    /// Overlapping flags name the EARLIER step - the save is still on it.
+    #[test]
+    fn overlap_names_the_earlier_step() {
+        assert_eq!(
+            save_step_label(true, true, true, &LspStatus::Indexing).as_deref(),
+            Some("Saving…")
+        );
+    }
+
+    /// Idle is idle - no spinner when nothing is in flight.
+    #[test]
+    fn nothing_in_flight_is_none() {
+        assert!(save_step_label(false, false, false, &LspStatus::Ready).is_none());
+        assert!(save_step_label(false, false, false, &LspStatus::Indexing).is_none());
+    }
+
+    /// A stopped or failed analyzer is named too - those waits never end on
+    /// their own, and "Waiting…" with no reason is where a user gives up.
+    #[test]
+    fn a_dead_analyzer_is_named() {
+        for (st, word) in [
+            (LspStatus::Stopped, "not running"),
+            (LspStatus::Failed("boom".into()), "failed"),
+        ] {
+            let l = save_step_label(false, false, true, &st).unwrap();
+            assert!(l.contains(word), "{l}");
         }
     }
 }

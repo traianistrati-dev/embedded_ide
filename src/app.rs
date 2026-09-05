@@ -1070,6 +1070,22 @@ struct SaveWall {
     started: std::time::Instant,
     worker_done: Option<std::time::Instant>,
     flush_done: Option<std::time::Instant>,
+    /// Work done on the UI THREAD before the clock even started: assembling the
+    /// project files, cloning the user's sources, serialising the two config
+    /// texts. It happens before `started` by construction, so nothing could
+    /// measure it - which is exactly why it is carried in here instead.
+    prelude: std::time::Duration,
+    /// When the flush actually SPAWNED, as opposed to when it was asked for.
+    ///
+    /// The flush only fires while rust-analyzer is `Ready`; if RA is indexing
+    /// or restarting, the request simply waits. That wait is the save the user
+    /// feels, and until this field existed no span named it - it was folded
+    /// into "click -> LSP flush finished" and only reported once the whole save
+    /// had finished, or after the 120 s timeout.
+    flush_spawned: Option<std::time::Instant>,
+    /// What the flush was waiting FOR, sampled when the save was requested.
+    /// Empty when it never waited.
+    waited_on: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -3453,6 +3469,12 @@ impl AppIde {
                         .load(std::sync::atomic::Ordering::Acquire)
                 {
                     self.lsp_flush_requested = false;
+                    // The moment the wait ends. This arm is `LspStatus::Ready`,
+                    // so reaching it IS the event a save has been blocked on -
+                    // and everything between the click and here was invisible.
+                    if let Some(w) = self.save_wall.as_mut() {
+                        w.flush_spawned.get_or_insert_with(std::time::Instant::now);
+                    }
                     self.spawn_lsp_flush();
                 }
 
@@ -3649,6 +3671,28 @@ impl AppIde {
 
         let mut rec =
             crate::activity::Recorder::new("Save (wall clock)").in_session(self.save_session);
+        // Two spans that are NOT cumulative, and are named for what they are.
+        // The rest of this entry measures from the click and overlaps; these
+        // two were previously unmeasurable, so they get their own rows.
+        if w.prelude > std::time::Duration::ZERO {
+            rec.add(
+                "UI thread: assemble files + configs (before the clock)",
+                w.prelude,
+            );
+        }
+        if let Some(t) = w.flush_spawned {
+            let waited = t - w.started;
+            rec.add(
+                "waiting for rust-analyzer before the flush could start",
+                waited,
+            );
+            if !w.waited_on.is_empty() {
+                rec.mark(format!(
+                    "the flush only runs while rust-analyzer is Ready; at the click it was {}",
+                    w.waited_on
+                ));
+            }
+        }
         if let Some(t) = w.worker_done {
             rec.add("click -> project written to disk", t - w.started);
         }
@@ -4658,10 +4702,16 @@ impl eframe::App for AppIde {
                 let session = self.save_session;
                 // Run the disk write on a worker thread so the UI stays responsive
                 // (the header shows a "Saving…" spinner until it completes).
+                // Timed: this is UI-THREAD work, it happens before the save
+                // clock starts, and until now nothing could see it. Cheap in
+                // principle - clones and string building - but "in principle"
+                // is what a measurement is for.
+                let t_prelude = std::time::Instant::now();
                 let files = self.current_project_files();
                 let user_files = self.project_tree.user_src_files.clone();
                 let mcu_cfg = self.mcu_config_text();
                 let structure_cfg = self.structure_config_text();
+                let prelude = t_prelude.elapsed();
                 let shared: Arc<Mutex<Option<Result<String, String>>>> = Arc::new(Mutex::new(None));
                 let out = Arc::clone(&shared);
                 let ctx = self.egui_ctx.clone();
@@ -4698,10 +4748,20 @@ impl eframe::App for AppIde {
                 self.save_in_progress = Some(shared);
                 self.save_dest = Some(dest);
                 // Start the user-perceived save clock (see `SaveWall`).
+                // Sampled NOW, not when the flush finally runs: by then RA is
+                // Ready by definition, and the reason for the wait is gone.
+                let ra_status = self.lsp_state.lock().unwrap().status.clone();
+                let waited_on = match &ra_status {
+                    crate::lsp::LspStatus::Ready => String::new(),
+                    other => format!("{other:?}"),
+                };
                 self.save_wall = Some(SaveWall {
                     started: std::time::Instant::now(),
                     worker_done: None,
                     flush_done: None,
+                    prelude,
+                    flush_spawned: None,
+                    waited_on,
                 });
             }
         }
