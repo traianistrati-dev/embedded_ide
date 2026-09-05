@@ -117,7 +117,7 @@ impl AppIde {
         // lived before it got its own file.
         {
             use crate::panels::mcu_module::structure_config;
-            let (positions, view, clock, clock_view) = structure_config::load(root);
+            let (positions, view, clock, clock_view, flow) = structure_config::load(root);
             self.structure_overrides = positions;
             // Clock-diagram node positions — applied by the Clock tab over the
             // generated layout (unknown ids, e.g. after a chip change, are
@@ -133,9 +133,16 @@ impl AppIde {
                     crate::panels::structure_map::gui::PathStyle::from_u8(style);
                 self.structure_view.show_externals = externals;
             }
+            // Flow-tab reading position - restored only onto its own file (see
+            // `FlowViewPersist`); an absent section leaves it empty and the tab
+            // opens on the file's entry point.
+            self.flow_selected = flow.unwrap_or_default();
             // Force the next Structure-tab frame to rebuild + re-apply them
             // even when the content hash happens to match the cached graph.
             self.structure_cache = None;
+            // Same for the Flow tab: a new project's files are different text
+            // even when a content hash happens to collide.
+            self.flow_cache = None;
         }
 
         // ── Restore pin state from src/main.rs ───────────────────────────────

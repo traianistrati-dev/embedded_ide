@@ -1,7 +1,7 @@
 //! The `project_structure.config` file — per-project DIAGRAM state: the
 //! Structure tab's dragged node positions (`@structure_layout`) and view options
-//! (`@structure_view`), plus the Clock tab's dragged node positions
-//! (`@clock_layout`).
+//! (`@structure_view`), the Clock tab's dragged node positions
+//! (`@clock_layout`), and the Flow tab's charted function (`@flow_view`).
 //!
 //! **Why it is its own file.** This state used to live in `mcu.config`. It
 //! changes on every node drag and every view toggle, so `mcu.config` — which
@@ -47,10 +47,20 @@ pub type ClockViewPersist = bool;
 /// A fresh project shows the diagram alone.
 pub const CLOCK_VIEW_DEFAULT: ClockViewPersist = false;
 
+/// Flow-tab reading position: `(project-root-relative file, function name)`.
+///
+/// The FILE is half of it deliberately. A bare function name would be restored
+/// onto whatever file happened to be open at the time, where it either means
+/// nothing or - worse - silently matches a same-named function in a different
+/// file. Restored only when the paths agree; otherwise the tab falls back to
+/// the file's own entry point.
+pub type FlowViewPersist = (String, String);
+
 pub(super) const LAYOUT_HEADER: &str = "@structure_layout";
 pub(super) const VIEW_HEADER: &str = "@structure_view";
 pub(super) const CLOCK_HEADER: &str = "@clock_layout";
 pub(super) const CLOCK_VIEW_HEADER: &str = "@clock_view";
+pub(super) const FLOW_HEADER: &str = "@flow_view";
 
 /// Full file text. Empty when there is nothing to persist (no dragged positions
 /// in either diagram AND a default view), so the caller can skip writing (and
@@ -60,6 +70,7 @@ pub fn serialize(
     view: &StructureViewPersist,
     clock: &ClockPositions,
     clock_view: &ClockViewPersist,
+    flow: &FlowViewPersist,
 ) -> String {
     let mut out = String::new();
     let section = |out: &mut String, header: &str, body: String| {
@@ -90,6 +101,13 @@ pub fn serialize(
             &mut out,
             CLOCK_VIEW_HEADER,
             ron::to_string(clock_view).unwrap_or_default(),
+        );
+    }
+    if !flow.0.is_empty() && !flow.1.is_empty() {
+        section(
+            &mut out,
+            FLOW_HEADER,
+            ron::to_string(flow).unwrap_or_default(),
         );
     }
     out
@@ -129,6 +147,13 @@ pub fn parse_clock_view(text: &str) -> ClockViewPersist {
         .unwrap_or(CLOCK_VIEW_DEFAULT)
 }
 
+/// Parse the `@flow_view` section (absent/garbled -> `None`, caller keeps its
+/// defaults).
+pub fn parse_flow_view(text: &str) -> Option<FlowViewPersist> {
+    mcu_config::section_body(text, FLOW_HEADER)
+        .and_then(|body| ron::from_str::<FlowViewPersist>(body.trim()).ok())
+}
+
 /// Parse the `@clock_layout` section (absent/garbled → empty map).
 pub fn parse_clock(text: &str) -> ClockPositions {
     mcu_config::section_body(text, CLOCK_HEADER)
@@ -148,6 +173,7 @@ pub fn load(
     Option<StructureViewPersist>,
     ClockPositions,
     ClockViewPersist,
+    Option<FlowViewPersist>,
 ) {
     let text = match std::fs::read_to_string(root.join(FILE_NAME)) {
         Ok(t) => t,
@@ -158,12 +184,18 @@ pub fn load(
         parse_view(&text),
         parse_clock(&text),
         parse_clock_view(&text),
+        parse_flow_view(&text),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No Flow-tab reading position — what most of these cases care about.
+    fn no_flow() -> FlowViewPersist {
+        FlowViewPersist::default()
+    }
 
     fn positions() -> StructurePositions {
         let mut p = StructurePositions::new();
@@ -175,14 +207,17 @@ mod tests {
     #[test]
     fn round_trips_positions_and_view() {
         let view: StructureViewPersist = (true, Some(3), 1, true);
+        let flow: FlowViewPersist = ("src/mw_radar/parse.rs".into(), "HmmdFrame::feed".into());
         let text = serialize(
             &positions(),
             &view,
             &ClockPositions::new(),
             &CLOCK_VIEW_DEFAULT,
+            &flow,
         );
         assert_eq!(parse_layout(&text), positions());
         assert_eq!(parse_view(&text), Some(view));
+        assert_eq!(parse_flow_view(&text), Some(flow));
     }
 
     /// A default project must not produce this file at all — otherwise the
@@ -194,7 +229,8 @@ mod tests {
                 &StructurePositions::new(),
                 &default_view(),
                 &ClockPositions::new(),
-                &CLOCK_VIEW_DEFAULT
+                &CLOCK_VIEW_DEFAULT,
+                &FlowViewPersist::default()
             ),
             "",
             "empty layout + default view must write nothing"
@@ -208,6 +244,7 @@ mod tests {
             &default_view(),
             &ClockPositions::new(),
             &CLOCK_VIEW_DEFAULT,
+            &no_flow(),
         );
         assert!(text.contains(LAYOUT_HEADER));
         assert!(!text.contains(VIEW_HEADER), "default view stays implicit");
@@ -223,12 +260,13 @@ mod tests {
                 &positions(),
                 &(true, Some(2), 0, false),
                 &ClockPositions::new(),
-                &CLOCK_VIEW_DEFAULT
+                &CLOCK_VIEW_DEFAULT,
+                &no_flow()
             )
         );
         std::fs::write(dir.path().join(mcu_config::FILE_NAME), legacy).unwrap();
 
-        let (pos, view, _clock, _cv) = load(dir.path());
+        let (pos, view, _clock, _cv, _flow) = load(dir.path());
         assert_eq!(pos, positions(), "layout recovered from mcu.config");
         assert_eq!(view, Some((true, Some(2), 0, false)));
     }
@@ -247,6 +285,7 @@ mod tests {
                 &default_view(),
                 &ClockPositions::new(),
                 &CLOCK_VIEW_DEFAULT,
+                &no_flow(),
             ),
         )
         .unwrap();
@@ -257,6 +296,7 @@ mod tests {
                 &default_view(),
                 &ClockPositions::new(),
                 &CLOCK_VIEW_DEFAULT,
+                &no_flow(),
             ),
         )
         .unwrap();
@@ -272,7 +312,13 @@ mod tests {
         clock.insert("pllm".into(), (240.0, 118.0));
         clock.insert("sysclk".into(), (612.5, 46.0));
 
-        let text = serialize(&positions(), &default_view(), &clock, &CLOCK_VIEW_DEFAULT);
+        let text = serialize(
+            &positions(),
+            &default_view(),
+            &clock,
+            &CLOCK_VIEW_DEFAULT,
+            &no_flow(),
+        );
         assert_eq!(parse_clock(&text), clock);
         assert_eq!(parse_layout(&text), positions(), "sections stay separate");
 
@@ -281,6 +327,7 @@ mod tests {
             &default_view(),
             &ClockPositions::new(),
             &CLOCK_VIEW_DEFAULT,
+            &no_flow(),
         );
         assert!(
             !without.contains(CLOCK_HEADER),
@@ -299,6 +346,7 @@ mod tests {
             &default_view(),
             &clock,
             &CLOCK_VIEW_DEFAULT,
+            &no_flow(),
         );
         assert!(text.contains(CLOCK_HEADER));
         assert!(!text.contains(LAYOUT_HEADER));
@@ -311,11 +359,11 @@ mod tests {
         let empty = StructurePositions::new();
         let none = ClockPositions::new();
 
-        let on = serialize(&empty, &default_view(), &none, &true);
+        let on = serialize(&empty, &default_view(), &none, &true, &no_flow());
         assert!(on.contains(CLOCK_VIEW_HEADER));
         assert!(parse_clock_view(&on));
 
-        let off = serialize(&empty, &default_view(), &none, &CLOCK_VIEW_DEFAULT);
+        let off = serialize(&empty, &default_view(), &none, &CLOCK_VIEW_DEFAULT, &no_flow());
         assert_eq!(off, "", "the default writes nothing at all");
         assert_eq!(parse_clock_view(&off), CLOCK_VIEW_DEFAULT);
 
@@ -333,7 +381,7 @@ mod tests {
     #[test]
     fn missing_files_are_not_an_error() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (pos, view, clock, _cv) = load(dir.path());
+        let (pos, view, clock, _cv, _flow) = load(dir.path());
         assert!(pos.is_empty());
         assert!(clock.is_empty());
         assert!(view.is_none());

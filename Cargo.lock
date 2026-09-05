@@ -1016,6 +1016,7 @@ dependencies = [
  "egui_code_editor",
  "libc",
  "notify",
+ "proc-macro2",
  "rfd",
  "ron 0.8.1",
  "roxmltree",
@@ -1024,6 +1025,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "similar",
+ "syn",
  "tempfile",
  "ureq",
 ]

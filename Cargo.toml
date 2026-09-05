@@ -20,6 +20,18 @@ rusb = "0.9"
 ureq = "2"
 roxmltree = "0.20"
 
+# Parsing the user's own Rust into a control-flow chart (the Flow tab). `syn`
+# was ALREADY in the tree (serde_derive pulls 2.0.117), so this adds no crate —
+# it only turns on `full`, which is what makes expressions (if / match / loop /
+# await) parseable instead of just item signatures.
+#
+# `span-locations` is NOT optional here despite looking like a nicety:
+# `Span::start()` does not exist without it (the method is cfg'd out, not
+# stubbed), and every flowchart box carries the source line it came from so a
+# click can jump there. Verified by compiling both ways before committing to it.
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
 # Killing a PROCESS GROUP (the rust-analyzer tree) has no std equivalent — the
 # Windows side shells out to `taskkill /T`, the unixes need `kill(-pgid)`.
 # Already in the tree transitively (rusb / serialport / eframe), so this costs

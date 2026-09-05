@@ -44,6 +44,8 @@ mod tree_clipboard;
 
 mod mcu_panel;
 
+mod flow_tab;
+
 mod structure_tab;
 
 mod editor_panel;
@@ -406,6 +408,8 @@ enum McuTab {
     System,
     /// Module-relationship diagram of the project (parse-based, chip-agnostic).
     Structure,
+    /// Algorithmic flowchart of the open file's functions (`syn`-based).
+    Flow,
     /// F12 "Go to definition" snippet (external / crate / std files). The tab
     /// appears only while `definition_view` is set.
     Definition,
@@ -423,6 +427,7 @@ impl McuTab {
             Self::Clock => "Clock",
             Self::System => "System",
             Self::Structure => "Structure",
+            Self::Flow => "Flow",
             Self::Definition => "Definition",
             Self::Reference => "Reference",
         }
@@ -1316,6 +1321,15 @@ pub struct AppIde {
     clock_ui: crate::panels::mcu_module::clock::gui::ClockUiState,
     /// Currently selected file in the project tree
     selected_file: ProjectFileId,
+    /// Flow tab: zoom / pan / which function is charted (session only).
+    flow_view: crate::panels::flow_map::gui::FlowView,
+    /// Flow tab: parsed charts for one file at one content hash.
+    flow_cache: Option<flow_tab::FlowCache>,
+    /// Flow tab: `(file, function)` last charted — persisted in
+    /// `project_structure.config`. The FILE is part of it on purpose: a bare
+    /// function name would be restored onto whatever file happens to be open,
+    /// where it means nothing.
+    flow_selected: (String, String),
     /// Shown briefly after a successful copy
     copy_flash: u8,
     /// Master switch for the inline RA/cargo diagnostic overlay (squiggles +
@@ -2011,6 +2025,9 @@ impl AppIde {
             cached_project_files: None,
             mcu,
             active_tab: McuTab::Pins,
+            flow_view: Default::default(),
+            flow_cache: None,
+            flow_selected: (String::new(), String::new()),
             renaming_project: None,
             renaming_project_focus: false,
             mcu_scene_bounds: egui::Rect::NOTHING,
@@ -2768,6 +2785,7 @@ impl AppIde {
             ),
             &self.clock_ui.positions,
             &self.clock_ui.fields,
+            &self.flow_selected,
         )
     }
 

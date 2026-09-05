@@ -832,6 +832,7 @@ mod tests {
             &(true, Some(2), 0, false),
             &Default::default(),
             &CLOCK_VIEW_DEFAULT,
+            &Default::default(),
         ));
 
         let (m, c) = parse(&text);

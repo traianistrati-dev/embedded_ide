@@ -782,7 +782,7 @@ impl AppIde {
             if !reference_active {
             ui.horizontal(|ui| {
                 let mut tabs: Vec<McuTab> = if project_active {
-                    let mut t = vec![McuTab::Structure];
+                    let mut t = vec![McuTab::Structure, McuTab::Flow];
                     if self.definition_view.is_some() {
                         t.push(McuTab::Definition);
                     }
@@ -2416,6 +2416,7 @@ impl AppIde {
                 // Module-relationship diagram — chip-agnostic (works with no
                 // MCU selected), so it doesn't gate on `self.mcu`.
                 McuTab::Structure => self.show_structure_tab(ui),
+                McuTab::Flow => self.show_flow_tab(ui),
                 McuTab::Definition => self.show_definition_tab(ui),
                 // The second editor draws with ITS OWN view state installed, so
                 // every `self.ed.*` inside means the Reference editor's popup,
