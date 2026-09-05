@@ -37,6 +37,7 @@ mod diag_embed;
 pub(crate) mod diff_gutter;
 mod doc_md;
 mod duplicate_line;
+mod error_list;
 pub(crate) mod extract_fn;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
@@ -937,6 +938,30 @@ impl AppIde {
             ui.input_mut(|i| {
                 find_prev = i.consume_key(egui::Modifiers::SHIFT, egui::Key::F3);
                 find_next = !find_prev && i.consume_key(egui::Modifiers::NONE, egui::Key::F3);
+            });
+        }
+
+        // F8 / Shift+F8 step the ERROR list — the keyboard twins of clicking one
+        // of its rows. Consumed here for the same two reasons F3 is: this is
+        // where `editor_kbd_active` lives, and the `&&` short-circuit leaves the
+        // key intact for the other editor when this one has not got the
+        // keyboard. Shift FIRST, same `consume_key` leniency trap.
+        //
+        // The direction travels down to `handle_editor_completion`, which is
+        // where the error rows and the caret position both already exist.
+        //
+        // Not gated on the file HAVING errors, unlike F3's `can_step()`: the
+        // count is not known until the rows are built downstream, and F8 is
+        // bound nowhere else in the app (the debugger took F5 / F10 / F11), so
+        // swallowing it on a clean file costs nothing.
+        let mut err_step: Option<bool> = None;
+        if editor_kbd_active {
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::SHIFT, error_list::ERROR_STEP_KEY) {
+                    err_step = Some(false);
+                } else if i.consume_key(egui::Modifiers::NONE, error_list::ERROR_STEP_KEY) {
+                    err_step = Some(true);
+                }
             });
         }
         self.show_find_replace_bar(ui, &mut display_code, displayed_file, find_next, find_prev);
@@ -1942,6 +1967,7 @@ impl AppIde {
                 pin_pulse,
                 slot,
                 displayed_file,
+                err_step,
             );
         }
         // Rename input popup (shown while active; sends the request on
@@ -2230,9 +2256,25 @@ mod shortcut_guard {
     /// `Shift+Delete` (cut).
     const REWRITTEN_WITH_CTRL: [Key; 4] = [Key::X, Key::C, Key::V, Key::Insert];
 
+    /// Keys `egui-winit` rewrites when SHIFT is held: `Shift+Insert` (paste)
+    /// and `Shift+Delete` (cut). Anything bound as `Shift+<key>` has to dodge
+    /// these two the same way.
+    const REWRITTEN_WITH_SHIFT: [Key; 2] = [Key::Insert, Key::Delete];
+
     /// The bug this guards against was invisible: Ctrl+Alt+Insert produced no
     /// key event at all, so the shortcut did nothing and nothing anywhere said
     /// why. A dead shortcut looks exactly like a missing feature.
+    /// The error-step key is bound BOTH bare and with Shift, so it has to
+    /// survive the shifted rewrite as well.
+    #[test]
+    fn error_step_key_survives_the_shifted_clipboard_rewrite() {
+        use crate::app::editor_panel::error_list::ERROR_STEP_KEY;
+        assert!(
+            !REWRITTEN_WITH_SHIFT.contains(&ERROR_STEP_KEY),
+            "Shift+{ERROR_STEP_KEY:?} is rewritten into a clipboard event by              egui-winit — the key event never reaches egui, so stepping backwards              would silently do nothing"
+        );
+    }
+
     #[test]
     fn extract_fn_key_survives_the_clipboard_rewrite() {
         assert!(

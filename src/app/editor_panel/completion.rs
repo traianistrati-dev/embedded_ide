@@ -64,6 +64,12 @@ impl AppIde {
         // rather than left half-wired.
         slot: crate::app::EditorSlot,
         owner_file: ProjectFileId,
+        // F8 / Shift+F8: step to the next / previous error of this file.
+        // `Some(true)` = forwards. Consumed in `show_code_view`, where
+        // `editor_kbd_active` decides which of the two editors owns the
+        // keyboard; the direction arrives here because this is where the error
+        // rows and the caret both already exist.
+        err_step: Option<bool>,
     ) {
         // ── LSP completion: post-editor apply + trigger + popup ───────
         let cursor_char_idx = editor_resp
@@ -883,6 +889,84 @@ impl AppIde {
                 highlight,
                 def_line,
             );
+        }
+
+        // ── Floating error list, top-right of the editor ──────────────
+        // Deliberately OUTSIDE the `inline_errors_enabled` gate above: that
+        // toggle hides the squiggles, and "I cannot see where the error is" is
+        // precisely the state it produces. The list is also what the bottom
+        // panel is not — scoped to the file on screen, and visible without
+        // opening anything.
+        //
+        // Both editors: it is anchored to `editor_clip` and jumps through the
+        // view's OWN `ed`, so the Reference view gets a working list of its own
+        // file rather than a half-wired one.
+        {
+            use super::error_list::{self, Freshness};
+            let (rows, fresh) = match current_rel_path.as_deref() {
+                None => (Vec::new(), Freshness::Live),
+                Some(rel) => {
+                    // One lock at a time, never both — the deadlock rule the
+                    // rest of this file follows.
+                    let (entries, ready, live) = {
+                        let lsp = self.lsp_state.lock().unwrap();
+                        (
+                            error_list::entries_from_lsp(&diags_for_file(&lsp.diagnostics, rel)),
+                            matches!(lsp.status, lsp::LspStatus::Ready),
+                            lsp.last_sent_matches(rel, &display_code) && lsp.diagnostics_fresh(rel),
+                        )
+                    };
+                    // Cargo only fills in while rust-analyzer is DOWN.
+                    //
+                    // `first_error_line` falls back whenever RA merely has
+                    // nothing to say, which is right for a one-shot jump but
+                    // wrong for a box that stays on screen: an error you just
+                    // fixed lingers in the last cargo result, and the list
+                    // would keep insisting on it after RA had already
+                    // published the file clean.
+                    if entries.is_empty() && !ready {
+                        let build = self.build_state.lock().unwrap();
+                        let e = build
+                            .result()
+                            .map(|r| error_list::entries_from_cargo(&r.for_file(rel)))
+                            .unwrap_or_default();
+                        (error_list::rows_for(&e), Freshness::Cargo)
+                    } else {
+                        (
+                            error_list::rows_for(&entries),
+                            if live {
+                                Freshness::Live
+                            } else {
+                                Freshness::Stale
+                            },
+                        )
+                    }
+                }
+            };
+            let salt = match slot {
+                crate::app::EditorSlot::Main => "main",
+                crate::app::EditorSlot::Reference => "ref",
+            };
+            // A click on a row, or F8 / Shift+F8 stepping from the caret. Both
+            // end in the same jump, so neither can drift from the other.
+            //
+            // Stepping walks the WHOLE list, not the six rows on screen: the
+            // seventh error is precisely the one the box cannot show you.
+            let target = error_list::show(ui, salt, editor_clip, &rows, fresh).or_else(|| {
+                let forward = err_step?;
+                let caret = cursor_char_idx
+                    .map(|i| lsp_cursor_pos(&display_code, i).0 + 1)
+                    .unwrap_or(0);
+                error_list::step(&rows, caret, forward)
+            });
+            if let Some(line) = target {
+                self.ed.pending_scroll_to_line = Some((owner_file, line as usize));
+                self.ed.highlighted_error_line = Some((
+                    owner_file,
+                    line as usize,
+                    crate::app::diag_highlight_color(lsp::DiagSeverity::Error),
+                ));
+            }
         }
 
         // ── Inferred-type ghost hint (cursor line only) ────────────────
