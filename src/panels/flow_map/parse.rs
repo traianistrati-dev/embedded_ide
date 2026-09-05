@@ -444,14 +444,14 @@ impl<'a> Builder<'a> {
                 // back edge from nothing to nothing, which reads as a broken
                 // chart rather than as an idle loop; the `panic_handler` every
                 // generated main.rs carries is exactly this shape.
-                if l.body.stmts.is_empty() {
-                    if let Flow::Loop { body, .. } = &mut f {
-                        **body = Flow::Seq(vec![Flow::Node(FlowNode::new(
-                            self.label(e.span()),
-                            Shape::Process,
-                            line,
-                        ))]);
-                    }
+                if l.body.stmts.is_empty()
+                    && let Flow::Loop { body, .. } = &mut f
+                {
+                    **body = Flow::Seq(vec![Flow::Node(FlowNode::new(
+                        self.label(e.span()),
+                        Shape::Process,
+                        line,
+                    ))]);
                 }
                 out.push(f);
             }
@@ -817,10 +817,10 @@ impl<'ast> Visit<'ast> for Scan {
     }
 
     fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(p) = &*e.func {
-            if let Some(seg) = p.path.segments.last() {
-                self.calls.push(seg.ident.to_string());
-            }
+        if let syn::Expr::Path(p) = &*e.func
+            && let Some(seg) = p.path.segments.last()
+        {
+            self.calls.push(seg.ident.to_string());
         }
         syn::visit::visit_expr_call(self, e);
     }

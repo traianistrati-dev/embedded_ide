@@ -284,6 +284,19 @@ fn exits_to_end(f: &Flow) -> bool {
 
 // ── Place ────────────────────────────────────────────────────────────────────
 
+/// How a jump leaves its box.
+///
+/// `band` is the clear horizontal strip to drop to before turning sideways (see
+/// [`Placer::lanes`]). Without one — the jump is not inside any branch — the
+/// arrow leaves through `side` directly, which is only safe because nothing
+/// else sits at that height.
+#[derive(Clone, Copy)]
+struct Leave {
+    side: (f32, f32),
+    bottom: (f32, f32),
+    band: Option<f32>,
+}
+
 /// One enclosing loop, as the `break` / `continue` router needs it.
 struct Frame {
     /// Where a `continue` arrives — the loop's entry point.
@@ -340,24 +353,11 @@ impl Placer {
         });
     }
 
-    /// Route a jump out to `to` through the vertical `lane`.
-    ///
-    /// `band` is the clear horizontal strip to drop to first (see
-    /// [`Placer::lanes`]); without one the arrow leaves the box sideways, which
-    /// is only safe when nothing is beside it.
-    fn route_out(
-        &mut self,
-        exit: (f32, f32),
-        drop_from: (f32, f32),
-        band: Option<f32>,
-        to: (f32, f32),
-        lane: f32,
-        label: &str,
-        k: EdgeKind,
-    ) {
-        let mut pts = match band {
-            Some(y) => vec![drop_from, (drop_from.0, y), (lane, y)],
-            None => vec![exit, (lane, exit.1)],
+    /// Route a jump out of `from` to `to` through the vertical `lane`.
+    fn route_out(&mut self, from: Leave, to: (f32, f32), lane: f32, label: &str, k: EdgeKind) {
+        let mut pts = match from.band {
+            Some(y) => vec![from.bottom, (from.bottom.0, y), (lane, y)],
+            None => vec![from.side, (lane, from.side.1)],
         };
         pts.push((lane, to.1));
         pts.push(to);
@@ -546,16 +546,12 @@ impl Placer {
             return;
         }
         let Some((end, lane)) = self.end else { return };
-        let band = self.band_for(0);
-        self.route_out(
-            (spine + w / 2.0, y + h / 2.0),
-            (spine, y + h),
-            band,
-            end,
-            lane,
-            "Err",
-            EdgeKind::Try,
-        );
+        let from = Leave {
+            side: (spine + w / 2.0, y + h / 2.0),
+            bottom: (spine, y + h),
+            band: self.band_for(0),
+        };
+        self.route_out(from, end, lane, "Err", EdgeKind::Try);
     }
 
     fn jump_edge(&mut self, target: Target, spine: f32, y: f32, w: f32, h: f32) {
@@ -567,45 +563,33 @@ impl Placer {
                     return;
                 };
                 let (exit, lane, base) = (fr.exit, fr.right_lane, fr.lane_base);
-                let band = self.band_for(base);
-                self.route_out(
-                    (spine + w / 2.0, mid),
+                let from = Leave {
+                    side: (spine + w / 2.0, mid),
                     bottom,
-                    band,
-                    exit,
-                    lane,
-                    "",
-                    EdgeKind::Break,
-                );
+                    band: self.band_for(base),
+                };
+                self.route_out(from, exit, lane, "", EdgeKind::Break);
             }
             Target::Continue(d) => {
                 let Some(fr) = frame_at(&self.frames, d) else {
                     return;
                 };
                 let (entry, lane, base) = (fr.entry, fr.left_lane, fr.lane_base);
-                let band = self.band_for(base);
-                self.route_out(
-                    (spine - w / 2.0, mid),
+                let from = Leave {
+                    side: (spine - w / 2.0, mid),
                     bottom,
-                    band,
-                    entry,
-                    lane,
-                    "",
-                    EdgeKind::Continue,
-                );
+                    band: self.band_for(base),
+                };
+                self.route_out(from, entry, lane, "", EdgeKind::Continue);
             }
             Target::Return => {
                 let Some((end, lane)) = self.end else { return };
-                let band = self.band_for(0);
-                self.route_out(
-                    (spine + w / 2.0, mid),
+                let from = Leave {
+                    side: (spine + w / 2.0, mid),
                     bottom,
-                    band,
-                    end,
-                    lane,
-                    "",
-                    EdgeKind::Return,
-                );
+                    band: self.band_for(0),
+                };
+                self.route_out(from, end, lane, "", EdgeKind::Return);
             }
         }
     }

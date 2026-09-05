@@ -363,7 +363,13 @@ mod tests {
         assert!(on.contains(CLOCK_VIEW_HEADER));
         assert!(parse_clock_view(&on));
 
-        let off = serialize(&empty, &default_view(), &none, &CLOCK_VIEW_DEFAULT, &no_flow());
+        let off = serialize(
+            &empty,
+            &default_view(),
+            &none,
+            &CLOCK_VIEW_DEFAULT,
+            &no_flow(),
+        );
         assert_eq!(off, "", "the default writes nothing at all");
         assert_eq!(parse_clock_view(&off), CLOCK_VIEW_DEFAULT);
 

@@ -64,7 +64,10 @@ mod against_generated_code {
                 let what = format!("{} {runtime:?}", def.id);
                 let charts = match parse::charts_of(&src) {
                     Ok(c) => c,
-                    Err(e) => panic!("{what} main.rs does not parse at line {}: {}", e.line, e.message),
+                    Err(e) => panic!(
+                        "{what} main.rs does not parse at line {}: {}",
+                        e.line, e.message
+                    ),
                 };
                 assert!(
                     charts.iter().any(|c| c.kind.is_entry()),
@@ -78,7 +81,10 @@ mod against_generated_code {
                 charted += charts.len();
             }
         }
-        assert!(charted > 10, "only {charted} functions charted — the sweep found almost nothing");
+        assert!(
+            charted > 10,
+            "only {charted} functions charted — the sweep found almost nothing"
+        );
     }
 
     /// A generated `main` runs forever, so its chart must not claim an END.
@@ -144,61 +150,5 @@ mod against_generated_code {
             "the generated setup must be a single box, got {}",
             generated.len()
         );
-    }
-}
-
-#[cfg(test)]
-mod dump_probe {
-    use super::{layout, parse};
-
-    const SMART_LIGHT: &str = r#"
-#[embassy_executor::task]
-async fn radar_task(mut rx: UartRx<'static, Async>, ctl: &'static Control) {
-    let mut buf = [0u8; 64];
-    let mut parser = Parser::new();
-    loop {
-        let n = rx.read(&mut buf).await.unwrap();
-        for b in buf[..n].iter() {
-            parser.feed(*b);
-        }
-        let Some(frame) = parser.take() else { continue };
-        info!("dist {}", frame.distance_mm);
-        if frame.distance_mm > MAX_RANGE {
-            continue;
-        }
-        match ctl.mode() {
-            Mode::Night => { ctl.fade_to(NIGHT_DUTY).await; }
-            Mode::Normal => { ctl.fade_to(FULL_DUTY).await; }
-            Mode::Smart0 => {
-                let target = smart_duty(frame.distance_mm);
-                ctl.fade_to(target).await;
-            }
-        }
-        Timer::after(Duration::from_millis(50)).await;
-    }
-}
-
-fn smart_duty(mm: u16) -> u16 {
-    if mm < 800 { FULL_DUTY } else if mm < 3000 { NIGHT_DUTY } else { 0 }
-}
-"#;
-
-    #[test]
-    #[ignore]
-    fn dump() {
-        for c in parse::charts_of(SMART_LIGHT).unwrap() {
-            println!("-- {} [{}] diverges={}", c.name, c.kind.word(), c.diverges);
-            let l = layout::layout(&c);
-            println!("   canvas {}x{}", l.width, l.height);
-            for b in &l.boxes {
-                println!(
-                    "   [{:?}] y={:>6.1} x={:>6.1} w={:>5.1} {:?} await={}",
-                    b.node.shape, b.y, b.x, b.w, b.node.text, b.node.awaits
-                );
-            }
-            for e in &l.edges {
-                println!("   edge {:?} label={:?} {:?}", e.kind, e.label, e.pts);
-            }
-        }
     }
 }

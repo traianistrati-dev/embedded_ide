@@ -263,18 +263,19 @@ pub fn show(
     if let Some(i) = hovered {
         let b = &lay.boxes[i];
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        if b.node.shape == Shape::Subroutine && b.node.goto_line.is_some() {
-            let target = b.node.goto_line.unwrap();
-            if let Some(c) = charts.iter().find(|c| c.line == target) {
-                if bg.clicked() {
-                    result.open_chart = Some(c.name.clone());
-                    result.goto_line = Some(b.node.line);
-                }
-            } else if bg.clicked() {
-                result.goto_line = Some(b.node.line);
-            }
-        } else if bg.clicked() {
+        if bg.clicked() {
+            // Always land on the box's own line — for a subroutine that is the
+            // CALL, so the editor and the chart never disagree about what is
+            // being looked at.
             result.goto_line = Some(b.node.line);
+            if b.node.shape == Shape::Subroutine
+                && let Some(c) = b
+                    .node
+                    .goto_line
+                    .and_then(|target| charts.iter().find(|c| c.line == target))
+            {
+                result.open_chart = Some(c.name.clone());
+            }
         }
         // The box text may be elided at this scale; the tooltip never is.
         let mut tip = b.node.text.clone();
