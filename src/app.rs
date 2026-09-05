@@ -443,7 +443,81 @@ impl McuTab {
     /// MCU and Project, because it holds an editor and has to line up with the
     /// main one. Nested a level deeper it sat below the code it is read against.
     fn is_project_group(self) -> bool {
-        matches!(self, Self::Structure | Self::Definition)
+        Self::project_group_tabs(true).contains(&self)
+    }
+
+    /// The tabs the "Project" group shows, in order.
+    ///
+    /// The ONE list. `is_project_group` is derived from it rather than written
+    /// beside it, because the two used to be written separately and drifted:
+    /// `Flow` was added to the row here and not to the group test over in
+    /// `app.rs`, so selecting Flow highlighted the MCU group, brought back the
+    /// chip header over a chip-agnostic view, and recorded Flow as the MCU
+    /// group's last tab — after which "MCU" opened Flow and "Project" did not.
+    ///
+    /// `definition` says whether an F12 snippet is loaded; that tab exists only
+    /// while one is.
+    fn project_group_tabs(definition: bool) -> Vec<Self> {
+        let mut t = vec![Self::Structure, Self::Flow];
+        if definition {
+            t.push(Self::Definition);
+        }
+        t
+    }
+}
+
+#[cfg(test)]
+mod tab_group_tests {
+    use super::McuTab;
+
+    /// Every tab the Project row draws belongs to the Project group. The two
+    /// used to be separate lists in separate files, and `Flow` was added to one
+    /// of them: selecting it highlighted the MCU group and brought the chip
+    /// header back over a chip-agnostic view.
+    #[test]
+    fn every_tab_in_the_project_row_is_in_the_project_group() {
+        for t in McuTab::project_group_tabs(true) {
+            assert!(t.is_project_group(), "{t:?} is drawn there but disowns it");
+        }
+    }
+
+    /// Flow specifically — the one that drifted.
+    #[test]
+    fn the_flow_tab_belongs_to_the_project_group() {
+        assert!(McuTab::Flow.is_project_group());
+        assert!(McuTab::project_group_tabs(false).contains(&McuTab::Flow));
+    }
+
+    /// The chip's own tabs stay out of it, or the Project group would claim the
+    /// chip header and the MCU group would lose its own tabs.
+    #[test]
+    fn the_chips_tabs_stay_out_of_the_project_group() {
+        for t in [
+            McuTab::Pins,
+            McuTab::Peripherals,
+            McuTab::Configuration,
+            McuTab::Clock,
+            McuTab::System,
+        ] {
+            assert!(!t.is_project_group(), "{t:?} is not a Project tab");
+        }
+    }
+
+    /// Reference is deliberately in NEITHER group: it is its own top-level
+    /// entry, level with the editor it is read beside.
+    #[test]
+    fn the_reference_file_belongs_to_neither_group() {
+        assert!(!McuTab::Reference.is_project_group());
+        assert!(!McuTab::project_group_tabs(true).contains(&McuTab::Reference));
+    }
+
+    /// The Definition tab exists only while an F12 snippet is loaded, so the row
+    /// drops it — but it is still a Project tab when it is there.
+    #[test]
+    fn the_definition_tab_appears_only_with_a_snippet() {
+        assert!(!McuTab::project_group_tabs(false).contains(&McuTab::Definition));
+        assert!(McuTab::project_group_tabs(true).contains(&McuTab::Definition));
+        assert!(McuTab::Definition.is_project_group());
     }
 }
 

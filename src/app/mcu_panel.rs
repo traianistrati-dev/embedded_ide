@@ -791,11 +791,7 @@ impl AppIde {
             if !reference_active {
             ui.horizontal(|ui| {
                 let mut tabs: Vec<McuTab> = if project_active {
-                    let mut t = vec![McuTab::Structure, McuTab::Flow];
-                    if self.definition_view.is_some() {
-                        t.push(McuTab::Definition);
-                    }
-                    t
+                    McuTab::project_group_tabs(self.definition_view.is_some())
                 } else {
                     vec![
                         McuTab::Pins,
