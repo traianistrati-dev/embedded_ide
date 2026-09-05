@@ -363,6 +363,13 @@ pub struct Mcu {
     /// instead, so there is no second gesture to learn. View state only; not
     /// persisted.
     pub selected_device: Option<String>,
+    /// The device whose row is showing its "remove?" confirm, by NAME — the
+    /// identity a device answers to everywhere else.
+    ///
+    /// One at a time, like `module_remove_confirm`: arming a second row disarms
+    /// the first, because a single `Option` cannot hold two. View state only;
+    /// not persisted.
+    pub device_remove_confirm: Option<String>,
     /// Where each device's tab was drawn LAST frame, as an offset from the chip
     /// centre.
     ///

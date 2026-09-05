@@ -3647,6 +3647,11 @@ pub fn module_config_ui(
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
+            // A LABELLED block, because three arms below finish early. A plain
+            // `return` there left the whole closure, taking the pin rows with it -
+            // an SPI slave and every ESP USB role lost their pad list, and with it
+            // the only place a signal can be moved to another pad.
+            'cfg: {
             match &mut m.config {
                 ModuleConfig::Touch(cfg) => {
                     out.field("Scan", docs::TOUCH_SCAN);
@@ -4698,7 +4703,7 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                         out.all_fields_documented();
-                        return;
+                        break 'cfg;
                     }
                     out.field("Clock", docs::SPI_CLOCK);
                     ui.label("Clock");
@@ -6334,7 +6339,7 @@ pub fn module_config_ui(
                         // This path draws fewer rows and leaves here, so it
                         // marks its own roster complete.
                         out.all_fields_documented();
-                        return;
+                        break 'cfg;
                     }
                     out.field("Product", docs::USB_PRODUCT);
                     ui.label("Product");
@@ -6369,7 +6374,7 @@ pub fn module_config_ui(
                         // This path draws fewer rows and leaves here, so it
                         // marks its own roster complete.
                         out.all_fields_documented();
-                        return;
+                        break 'cfg;
                     }
                     // Not a HAL constraint like the four above — the USB init
                     // takes PA11/PA12 directly, so one pad would spend the other
@@ -6696,6 +6701,7 @@ pub fn module_config_ui(
                     // is the pane's own Pins section, not a config row.
                     out.all_fields_documented();
                 }
+            }
             }
 
             // Peripheral modules list their wired pins here; a custom module

@@ -710,6 +710,15 @@ impl AppIde {
                                 .clicked()
                             {
                                 if let Some(mcu) = &mut self.mcu {
+                                    // The most destructive button in the panel,
+                                    // and the only one that took no undo point.
+                                    // A confirm is not an undo: it asks once,
+                                    // before the user can see what they lost.
+                                    // `undo_modules` restores exactly what this
+                                    // throws away - every pin's function and
+                                    // label, and every module - so Ctrl+Z is one
+                                    // snapshot away from working.
+                                    mcu.push_module_undo("Reset pins".to_owned());
                                     mcu.reset_all_pins();
                                 }
                                 self.reset_pins_confirm = false;
@@ -1283,6 +1292,28 @@ impl AppIde {
                             // Empty-canvas click last frame → close EVERY entry
                             // (the canvas cleared its selection at the same time).
                             let collapse_all = std::mem::take(&mut mcu.collapse_modules);
+                            // The confirm row and its Cancel live inside ONE open
+                            // config, so folding that config or collapsing the
+                            // panel takes Cancel away while leaving the question
+                            // armed - and the canvas goes on pulsing the box red,
+                            // repainting every frame, at a question nobody can
+                            // answer. `reconcile_modules` retires a confirm whose
+                            // MODULE died; this retires one whose ROW is no longer
+                            // drawn, and it sits OUTSIDE the gate below because
+                            // that gate is exactly what strands it.
+                            if let Some(id) = mcu.module_remove_confirm.clone() {
+                                let row_shows = !collapsed
+                                    && !collapse_all
+                                    && egui::collapsing_header::CollapsingState::load_with_default_open(
+                                        ui.ctx(),
+                                        egui::Id::new(("vmod_hdr", id.as_str())),
+                                        false,
+                                    )
+                                    .is_open();
+                                if !row_shows {
+                                    mcu.module_remove_confirm = None;
+                                }
+                            }
                             // The module selectors follow the STAGED runtime (what
                             // the user is about to Apply), not the applied one.
                             //
@@ -1303,7 +1334,23 @@ impl AppIde {
                                 );
                             let is_native = mcu.pending_is_native();
 
-                            if !mcu.modules.is_empty() && !collapsed {
+                            // A DEVICE is made of pads, not of modules: `loose_pins`
+                            // exists precisely to offer the pads no module owns, and
+                            // the roster is the only place a device is created,
+                            // renamed or dissolved. Gated on modules alone, a chip
+                            // whose pads are all hand-configured could not group
+                            // anything, and removing the last module stranded every
+                            // device that already existed.
+                            let anything_to_group = mcu.iter_all_pins().any(|p| {
+                                !p.reserved
+                                    && p.selected_function
+                                        != crate::panels::mcu_module::pins::logic::pin_function::PinFunction::Unset
+                            });
+                            let show_body = !collapsed
+                                && (!mcu.modules.is_empty()
+                                    || !mcu.groups.is_empty()
+                                    || anything_to_group);
+                            if show_body {
                                 use crate::panels::mcu_module::mcu::logic::module_style;
                                 use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode};
                                 let pin_names: std::collections::HashMap<usize, String> = mcu
@@ -1899,9 +1946,20 @@ impl AppIde {
                                             cs_id(&id),
                                             false,
                                         );
-                                    let now = st.is_open();
-                                    st.set_open(!now);
+                                    let was_open = st.is_open();
+                                    st.set_open(!was_open);
                                     st.store(ui.ctx());
+                                    // Closing a config from the LIST also drops
+                                    // the white border its box wears on the
+                                    // canvas. To the user those are one state:
+                                    // the box was called out BECAUSE its config
+                                    // was showing, and the list is where that
+                                    // showing ends. Left set, the diagram kept a
+                                    // box picked out with nothing open to say
+                                    // why.
+                                    if was_open {
+                                        mcu.config_collapsed(&id);
+                                    }
                                 }
                                 // A module added this frame is not in the list
                                 // yet (it was built after the loop ran), so its
@@ -1965,6 +2023,25 @@ impl AppIde {
                                     mcu.push_module_undo(format!("Remove {title}"));
                                     mcu.remove_module(&id);
                                     mcu.module_remove_confirm = None;
+                                    // The id is freed and `free_module_id` hands
+                                    // it straight to the next module, so anything
+                                    // still keyed on it would greet a stranger:
+                                    // the details pane open on its own, the row
+                                    // already unfolded. `selected_module` and the
+                                    // staged style are retired by
+                                    // `reconcile_modules`; these two live on the
+                                    // app, out of its reach.
+                                    if info_id.as_deref() == Some(id.as_str()) {
+                                        info_id = None;
+                                    }
+                                    let mut st =
+                                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                                            ui.ctx(),
+                                            cs_id(&id),
+                                            false,
+                                        );
+                                    st.set_open(false);
+                                    st.store(ui.ctx());
                                     modules_changed = true;
                                 }
                             }

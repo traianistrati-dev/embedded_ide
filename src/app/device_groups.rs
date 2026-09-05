@@ -94,6 +94,58 @@ fn fresh_name(mcu: &Mcu) -> String {
         .unwrap_or_else(|| "Device".to_owned())
 }
 
+/// What the roster's "remove?" question should hold after this frame.
+///
+/// Four ways it ends, and only the first adds one:
+///
+/// * a trash button ARMED a row — that wins outright, so arming a second row
+///   replaces the first rather than leaving two rows asking;
+/// * Cancel;
+/// * any ACT at all — Remove took the row away, and every other act moved
+///   something the question was about;
+/// * the row STOPPED ASKING. A folded row draws no controls, so it may hold no
+///   pending decision either, and a renamed one no longer answers to the name
+///   the question was filed under.
+///
+/// `still_asking` is the names whose rows actually drew the question this frame.
+fn next_confirm(
+    armed: Option<&str>,
+    arm: Option<&str>,
+    disarm: bool,
+    acted: bool,
+    still_asking: &[String],
+) -> Option<String> {
+    if let Some(n) = arm {
+        return Some(n.to_owned());
+    }
+    let n = armed?;
+    if disarm || acted || !still_asking.iter().any(|a| a == n) {
+        return None;
+    }
+    Some(n.to_owned())
+}
+
+/// Fold every row that answers to a name an earlier row already answers to.
+///
+/// A name typed onto another row's is MERGED when the field is left. If the
+/// panel stops being drawn first — the user clicks another MCU tab — no
+/// `lost_focus` ever arrives, and two rows keep one name for good: from then on
+/// the second row's `+` fills the first, and the canvas draws one mat where the
+/// roster shows two.
+///
+/// Called only when nothing is being typed, because a name being typed passes
+/// through duplicates on the way somewhere else.
+fn sweep_duplicate_names(mcu: &mut Mcu) {
+    while let Some(dup) = mcu.groups.iter().enumerate().position(|(i, g)| {
+        mcu.groups[..i]
+            .iter()
+            .any(|e| e.name.trim() == g.name.trim())
+    }) {
+        let name = mcu.groups[dup].name.clone();
+        mcu.rename_group(dup, &name);
+    }
+}
+
 /// Write the roster's edited names back to the devices.
 ///
 /// Two things make this safe, and both were learned the hard way.
@@ -175,6 +227,20 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
         })
         .collect();
     let mut act: Option<Act> = None;
+    // Which row is asking "remove?", and the two things a row can ask for.
+    // Deferred like everything else here: the row is drawn while the group list
+    // is borrowed.
+    let armed = mcu.device_remove_confirm.clone();
+    let mut arm_name: Option<String> = None;
+    let mut disarm = false;
+    // The names whose rows actually DREW the question this frame.
+    let mut still_asking: Vec<String> = Vec::new();
+    // The fold bit each row ENDS this frame with, by NAME. Three ordinary
+    // gestures shorten the roster and shift every row below - dissolving a
+    // device, a rename that merges two, and dropping a device's last pad - and
+    // the fold state is keyed by row, so without this the rows below inherit
+    // somebody else's fold: a device the user shut springs open on its own.
+    let mut folds: Vec<(String, bool)> = Vec::new();
     // Which row's name field holds the caret this frame, and which one is being
     // left. A name being typed is stored but never merged; the frame it is left
     // on is the frame the merge is owed — see `apply_renames`.
@@ -212,8 +278,29 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
 
     let focus = &mut focused;
     let left = &mut lost;
+    let arm = &mut arm_name;
+    let unarm = &mut disarm;
     for (gi, name) in names.iter_mut().enumerate() {
         let c = mod_gui::group_color(name);
+        // Keyed by ROW, not by name. The name is what the user edits, and an id
+        // built from it would change on every keystroke — the row would fold
+        // itself shut in the middle of being renamed. An index survives a rename
+        // untouched; it only shifts when a device is dissolved or merged away,
+        // which is rare and is the user's own doing.
+        let st_id = egui::Id::new(("device_row", gi));
+        let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            st_id,
+            false,
+        );
+        let open = st.is_open();
+        // Only an unfolded row can be asking: the trash that arms it is not
+        // drawn on a folded one.
+        let asking = open && armed.as_deref() == Some(names_before[gi].as_str());
+        if asking {
+            still_asking.push(names_before[gi].clone());
+        }
+        let mut toggle = false;
         egui::Frame::new()
             .fill(egui::Color32::from_rgba_unmultiplied(
                 c.r(),
@@ -229,29 +316,102 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
                     // The colour the diagram marks this device's pads with —
                     // shown here so the roster and the picture can be matched
                     // without reading either.
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(if open {
+                                    ph::CARET_DOWN
+                                } else {
+                                    ph::CARET_RIGHT
+                                })
+                                .size(11.0)
+                                .color(c),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(if open {
+                            "Fold the device away. Its name stays; its pads are hidden."
+                        } else {
+                            "Unfold the device to see its pads and rename it."
+                        })
+                        .clicked()
+                    {
+                        toggle = true;
+                    }
                     let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
                     ui.painter().rect_filled(r, 2.0, c);
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(name)
-                            .desired_width(ui.available_width() - 46.0)
-                            .font(egui::TextStyle::Small)
-                            .hint_text("name"),
-                    );
-                    // Still being typed in: `apply_renames` stores it without
-                    // letting it merge onto a name it is only passing through.
-                    focus[gi] = edit.has_focus();
-                    left[gi] = edit.lost_focus();
-                    edit.on_hover_text(
-                        "The device's name. It appears on the generated comment and \
-                         nowhere else in the code — renaming it is always safe.",
-                    );
+                    // The name is EDITABLE only while the device is unfolded. A
+                    // folded row is a summary, and a text field in one invites a
+                    // rename the user cannot see the consequences of - the pads
+                    // it applies to are not on screen.
+                    if open {
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(name)
+                                .desired_width(ui.available_width() - 46.0)
+                                .font(egui::TextStyle::Small)
+                                .hint_text("name"),
+                        );
+                        // Still being typed in: `apply_renames` stores it without
+                        // letting it merge onto a name it is only passing through.
+                        focus[gi] = edit.has_focus();
+                        left[gi] = edit.lost_focus();
+                        edit.on_hover_text(
+                            "The device's name. It appears on the generated comment and \
+                             nowhere else in the code — renaming it is always safe.",
+                        );
+                    } else {
+                        // The whole name is a second, larger target for the
+                        // caret beside it — a 9 px glyph is a small thing to ask
+                        // someone to hit.
+                        if ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(name.as_str())
+                                        .text_style(egui::TextStyle::Small),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Unfold the device to see its pads and rename it.")
+                            .clicked()
+                        {
+                            toggle = true;
+                        }
+                    }
+                    // A FOLDED row carries no controls. It is a summary — the
+                    // pads the `+` would add to and the trash would take apart
+                    // are not on screen, so neither button has anything visible
+                    // to act on.
+                    if !open {
+                        return;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if asking {
+                            // Cancel sits where the trash was, nearest the edge:
+                            // the pointer is already there, and the safe choice
+                            // is the one it lands on.
+                            if ui.button("Cancel").clicked() {
+                                *unarm = true;
+                            }
+                            if ui
+                                .button(
+                                    egui::RichText::new(format!("{} Remove", ph::TRASH))
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(220, 80, 80)),
+                                )
+                                .clicked()
+                            {
+                                act = Some(Act::Dissolve(gi));
+                            }
+                            return;
+                        }
                         if ui
                             .button(egui::RichText::new(ph::TRASH).size(11.0))
                             .on_hover_text("Take the device apart. Its pads keep their functions.")
                             .clicked()
                         {
-                            act = Some(Act::Dissolve(gi));
+                            *arm = Some(name.clone());
                         }
                         ui.menu_button(egui::RichText::new(ph::PLUS).size(11.0), |ui| {
                             ui.set_min_width(180.0);
@@ -291,7 +451,16 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
                         .on_hover_text("Add a module's pads, or one configured pin.");
                     });
                 });
-                for pin in &members[gi] {
+                if asking {
+                    ui.label(
+                        egui::RichText::new(
+                            "Takes the device apart. Its pads keep their functions.",
+                        )
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(220, 180, 90)),
+                    );
+                }
+                for pin in members[gi].iter().filter(|_| open) {
                     ui.horizontal(|ui| {
                         ui.add_space(13.0);
                         ui.label(
@@ -311,21 +480,83 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
                     });
                 }
             });
+        folds.push((names_before[gi].clone(), if toggle { !open } else { open }));
+        if toggle {
+            st.set_open(!open);
+        }
+        // `set_open` mutates a COPY of the state, so it only reaches egui here.
+        st.store(ui.ctx());
         ui.add_space(2.0);
     }
 
     // The deferred actions run FIRST, while their indices still mean what they
     // meant when the row was drawn. `apply_renames` then finds its row by NAME,
     // so it does not care what an action moved.
-    apply_act(mcu, act);
+    mcu.device_remove_confirm = next_confirm(
+        mcu.device_remove_confirm.as_deref(),
+        arm_name.as_deref(),
+        disarm,
+        act.is_some(),
+        &still_asking,
+    );
+    let rows_before = names_before.len();
+    let was_new = apply_act(mcu, act);
+    // The roster got shorter or longer, so every row below the change now holds
+    // a fold bit that belonged to a different device. Re-seat them by NAME - the
+    // identity everything else in this file uses.
+    if mcu.groups.len() != rows_before {
+        for (gi, g) in mcu.groups.iter().enumerate() {
+            let want = folds
+                .iter()
+                .find(|(n, _)| n.trim() == g.name.trim())
+                .map(|(_, o)| *o)
+                .unwrap_or(false);
+            let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                egui::Id::new(("device_row", gi)),
+                want,
+            );
+            st.set_open(want);
+            st.store(ui.ctx());
+        }
+    }
+    if names != names_before {
+        // Asked about a name that is about to stop existing.
+        mcu.device_remove_confirm = None;
+    }
     apply_renames(mcu, &names, &names_before, &focused, &lost);
+    // A name typed onto another row's is MERGED when the field is left. If the
+    // panel stops being drawn first - the user clicks another MCU tab - no
+    // `lost_focus` ever arrives, and two rows keep one name for good: from then
+    // on the second row's `+` fills the first, and the canvas draws one mat
+    // where the roster shows two. With nothing being typed anywhere, a duplicate
+    // is simply a merge that was owed.
+    if !focused.iter().any(|f| *f) {
+        sweep_duplicate_names(mcu);
+    }
+    // A device the user has just created is unfolded, so its name can be typed
+    // straight away — folded, the field it needs is not there.
+    if was_new {
+        let gi = mcu.groups.len().saturating_sub(1);
+        let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            egui::Id::new(("device_row", gi)),
+            true,
+        );
+        st.set_open(true);
+        st.store(ui.ctx());
+    }
 }
 
 /// Carry out what the roster's controls asked for.
 ///
 /// Indices are into the roster AS DRAWN, so this runs before any rename can
 /// move a row.
-fn apply_act(mcu: &mut Mcu, act: Option<Act>) {
+///
+/// Returns whether a device was CREATED — the caller unfolds that row, and the
+/// name field only exists while a row is unfolded.
+fn apply_act(mcu: &mut Mcu, act: Option<Act>) -> bool {
+    let was_new = matches!(act, Some(Act::New));
     match act {
         Some(Act::New) => {
             let name = fresh_name(mcu);
@@ -357,6 +588,7 @@ fn apply_act(mcu: &mut Mcu, act: Option<Act>) {
         Some(Act::Drop(pin)) => mcu.join_group(pin, ""),
         None => {}
     }
+    was_new
 }
 
 #[cfg(test)]
@@ -564,6 +796,95 @@ mod tests {
         // …and the pad gesture still finds the group by that name.
         mcu.join_group(2, "mw radar");
         assert_eq!(named(&mcu, "mw radar"), Some(vec![1, 2]));
+    }
+
+    /// Two rows answering to one name is a merge that never got its
+    /// `lost_focus` frame — the user typed the duplicate and then left the panel
+    /// by another route. With nothing being typed, it is simply owed.
+    #[test]
+    fn a_duplicate_name_left_behind_is_merged_when_nothing_is_being_typed() {
+        let mut mcu = bare_mcu();
+        mcu.groups = vec![
+            group("radar", &[1]),
+            group("radar", &[2]),
+            group("imu", &[3]),
+        ];
+
+        super::sweep_duplicate_names(&mut mcu);
+
+        assert_eq!(mcu.groups.len(), 2);
+        assert_eq!(
+            named(&mcu, "radar"),
+            Some(vec![1, 2]),
+            "the pads came together"
+        );
+        assert_eq!(named(&mcu, "imu"), Some(vec![3]), "and nothing else moved");
+    }
+
+    /// Padding is not a difference here either.
+    #[test]
+    fn a_padded_duplicate_is_swept_too() {
+        let mut mcu = bare_mcu();
+        mcu.groups = vec![group("radar", &[1]), group(" radar ", &[2])];
+        super::sweep_duplicate_names(&mut mcu);
+        assert_eq!(mcu.groups.len(), 1);
+        assert_eq!(named(&mcu, "radar"), Some(vec![1, 2]));
+    }
+
+    /// A roster with no duplicates is left exactly as it is.
+    #[test]
+    fn a_roster_without_duplicates_is_untouched() {
+        let mut mcu = bare_mcu();
+        let before = vec![group("radar", &[1]), group("imu", &[2])];
+        mcu.groups = before.clone();
+        super::sweep_duplicate_names(&mut mcu);
+        assert_eq!(mcu.groups, before);
+    }
+
+    /// The trash on a device asks before it takes anything apart, and the
+    /// question survives exactly as long as the row keeps asking it.
+    #[test]
+    fn the_remove_question_lasts_while_its_row_keeps_asking() {
+        let asking = ["radar".to_owned()];
+        // Armed by the trash.
+        assert_eq!(
+            super::next_confirm(None, Some("radar"), false, false, &[]).as_deref(),
+            Some("radar")
+        );
+        // Still on screen, still asking.
+        assert_eq!(
+            super::next_confirm(Some("radar"), None, false, false, &asking).as_deref(),
+            Some("radar")
+        );
+        // Cancel.
+        assert!(super::next_confirm(Some("radar"), None, true, false, &asking).is_none());
+        // Remove, or any other act on the roster.
+        assert!(super::next_confirm(Some("radar"), None, false, true, &asking).is_none());
+        // The row folded, or was renamed away: it no longer draws the question.
+        assert!(super::next_confirm(Some("radar"), None, false, false, &[]).is_none());
+    }
+
+    /// Arming a second row replaces the first — a single question at a time,
+    /// because two rows both asking is two answers the user did not give.
+    #[test]
+    fn arming_one_row_takes_the_question_off_another() {
+        let asking = ["radar".to_owned()];
+        assert_eq!(
+            super::next_confirm(Some("radar"), Some("display"), false, false, &asking).as_deref(),
+            Some("display")
+        );
+    }
+
+    /// Only creating a device asks the caller to unfold its row — that is the
+    /// one act after which the user needs the name field that folding hides.
+    #[test]
+    fn only_a_new_device_asks_to_be_unfolded() {
+        let mut mcu = bare_mcu();
+        mcu.groups = vec![group("radar", &[7])];
+        assert!(super::apply_act(&mut mcu, Some(super::Act::New)));
+        assert!(!super::apply_act(&mut mcu, None));
+        assert!(!super::apply_act(&mut mcu, Some(super::Act::Drop(7))));
+        assert!(!super::apply_act(&mut mcu, Some(super::Act::Dissolve(0))));
     }
 
     /// "+" on a row the user has not named yet must do NOTHING.

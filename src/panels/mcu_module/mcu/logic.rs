@@ -146,6 +146,7 @@ impl Mcu {
             module_goto: None,
             selected_module: None,
             selected_device: None,
+            device_remove_confirm: None,
             device_tabs: Vec::new(),
             device_drag: None,
             collapse_modules: false,
@@ -451,6 +452,21 @@ impl Mcu {
             .map(|g| g.name.trim())
     }
 
+    /// The list folded `id`'s config away, so the canvas stops calling its box
+    /// out.
+    ///
+    /// To the user the two are ONE state: a box is drawn white BECAUSE its
+    /// config is showing, and the list is the other place that showing can end.
+    /// Left set, the diagram kept a box picked out with nothing open to say why,
+    /// and the only way back was to click the box twice.
+    ///
+    /// Only the module named — folding one config says nothing about another.
+    pub fn config_collapsed(&mut self, id: &str) {
+        if self.selected_module.as_deref() == Some(id) {
+            self.selected_module = None;
+        }
+    }
+
     /// The one place the canvas drops what it is pointing at.
     ///
     /// One function and not three assignments, because there are now three
@@ -697,7 +713,16 @@ impl Mcu {
         if !reachable {
             return false;
         }
+        // The label names the SIGNAL's binding, so it travels with it. Cleared
+        // instead, the user loses the name they typed; left behind, it strands
+        // on a pad that no longer carries the signal and reappears on whatever
+        // is bound there next.
+        let label = self
+            .find_pin(from)
+            .map(|p| p.custom_label.clone())
+            .unwrap_or_default();
         if let Some(p) = self.find_pin_mut(from) {
+            p.custom_label.clear();
             p.selected_function = PinFunction::Unset;
             // An armed edge belonged to the pad as an INPUT; the pad is now
             // unassigned, and a stale edge would arm a pin nothing drives.
@@ -705,6 +730,7 @@ impl Mcu {
         }
         if let Some(p) = self.find_pin_mut(to) {
             p.selected_function = func;
+            p.custom_label = label;
         }
         // A group is a set of PAD numbers, so a signal that changes pad drops
         // out of its device unless the set is rewritten here. This is the only
@@ -748,6 +774,11 @@ impl Mcu {
         for pin in pins {
             if let Some(p) = self.find_pin_mut(pin) {
                 p.selected_function = PinFunction::Unset;
+                // Freeing a pad drops its user label - the same rule
+                // `apply_pin_function` states on its `Unset` branch. This path
+                // wrote the pin directly and skipped it, so a removed module's
+                // pin name came back on the next binding for that pad.
+                p.custom_label.clear();
             }
         }
         self.modules.retain(|m| m.id != id);
@@ -1261,6 +1292,13 @@ impl Mcu {
         for pin in self.iter_all_pins_mut() {
             if !pin.reserved {
                 pin.selected_function = PinFunction::Unset;
+                // The label goes with the function, the rule
+                // `apply_pin_function` states and enforces on its own `Unset`
+                // branch. Left behind, the name the user typed survived a total
+                // wipe and came back on the next binding for that pad - and, on
+                // project open (where this is the clean slate before the saved
+                // pins are applied), leaked from one project into the next.
+                pin.custom_label.clear();
             }
         }
         self.selected_pin = None;
@@ -1518,6 +1556,35 @@ impl Mcu {
         // pins, so only an explicit Remove takes it away.
         self.modules
             .retain(|m| m.kind.is_custom() || wanted.contains_key(&(m.kind, m.instance())));
+
+        // Every bit of view state keyed on a module ID has to die with the
+        // module — and here, before the loop below mints new ones.
+        //
+        // `free_module_id` walks up from `modules.len() + 1`, so an id a removal
+        // frees is the VERY NEXT one handed out. A survivor therefore does not
+        // merely go stale, it lands on an unrelated new module: its staged
+        // Init-API is applied to something the user never staged it for, its box
+        // comes up already selected, and an armed remove-confirm pulses a
+        // stranger red.
+        //
+        // This is the only place a derived module dies, and it runs every frame
+        // from the canvas — so it is the one place that cannot be skipped by a
+        // panel being collapsed or a tab being elsewhere.
+        let live: std::collections::BTreeSet<&str> =
+            self.modules.iter().map(|m| m.id.as_str()).collect();
+        let dead = |id: &Option<String>| id.as_deref().is_some_and(|i| !live.contains(i));
+        let (drop_confirm, drop_selected) = (
+            dead(&self.module_remove_confirm),
+            dead(&self.selected_module),
+        );
+        self.pending_module_styles
+            .retain(|id, _| live.contains(id.as_str()));
+        if drop_confirm {
+            self.module_remove_confirm = None;
+        }
+        if drop_selected {
+            self.selected_module = None;
+        }
 
         // A custom module's wires mirror its own pin list (which the config
         // panel edits), so rebuild them here — the canvas then draws them with
@@ -2617,6 +2684,207 @@ mod device_groups {
             (9.0, 9.0),
             "and display's box has not moved"
         );
+    }
+
+    /// `free_module_id` hands a freed id straight to the next module, so every
+    /// bit of view state keyed on one has to die WITH the module. A survivor
+    /// does not go stale — it lands on a stranger.
+    #[test]
+    fn every_bit_keyed_on_a_dead_modules_id_is_retired_with_it() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let m = mcu.modules[0].clone();
+        let tx = m.pin_for(ModuleSignal::Tx).expect("a TX pad");
+        mcu.selected_module = Some(m.id.clone());
+        mcu.module_remove_confirm = Some(m.id.clone());
+        mcu.pending_module_styles.insert(
+            m.id.clone(),
+            (
+                crate::panels::mcu_module::modules::ApiStyle::Native,
+                crate::panels::mcu_module::modules::AsyncBusMode::Blocking,
+            ),
+        );
+
+        // Re-purpose a bus pad: `reconcile_modules` drops the module.
+        mcu.apply_pin_function(tx, PinFunction::Unset);
+        assert!(mcu.modules.is_empty(), "the module really is gone");
+
+        assert!(mcu.selected_module.is_none(), "no box is called out");
+        assert!(
+            mcu.module_remove_confirm.is_none(),
+            "no question is pending"
+        );
+        assert!(
+            mcu.pending_module_styles.is_empty(),
+            "and nothing is staged for a module that does not exist"
+        );
+    }
+
+    /// …and a LIVE module keeps every one of them.
+    #[test]
+    fn a_live_modules_state_is_left_alone() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let id = mcu.modules[0].id.clone();
+        mcu.selected_module = Some(id.clone());
+        mcu.module_remove_confirm = Some(id.clone());
+        mcu.reconcile_modules();
+        assert_eq!(mcu.selected_module.as_deref(), Some(id.as_str()));
+        assert_eq!(mcu.module_remove_confirm.as_deref(), Some(id.as_str()));
+    }
+
+    /// A pad freed by ANY route starts clean — the rule `apply_pin_function`
+    /// states on its `Unset` branch, which two other routes used to skip.
+    #[test]
+    fn a_pad_freed_by_any_route_loses_the_name_typed_on_it() {
+        let named = |mcu: &mut Mcu, p: usize| {
+            mcu.apply_pin_function(p, PinFunction::GpioOutput);
+            if let Some(x) = mcu.find_pin_mut(p) {
+                x.custom_label = "led".into();
+            }
+        };
+        let label = |mcu: &Mcu, p: usize| mcu.find_pin(p).expect("the pad").custom_label.clone();
+
+        // Reset all pins.
+        let mut mcu = pico();
+        named(&mut mcu, 7);
+        mcu.reset_all_pins();
+        assert_eq!(label(&mcu, 7), "", "the total wipe wipes the name too");
+
+        // Removing the module that held the pad.
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let m = mcu.modules[0].clone();
+        let tx = m.pin_for(ModuleSignal::Tx).expect("a TX pad");
+        if let Some(x) = mcu.find_pin_mut(tx) {
+            x.custom_label = "radar".into();
+        }
+        mcu.remove_module(&m.id);
+        assert_eq!(label(&mcu, tx), "", "the freed bus pad starts clean");
+    }
+
+    /// Moving a signal takes its NAME with it. The label names the binding, so
+    /// clearing it loses what the user typed and leaving it strands the name on
+    /// a pad that no longer carries the signal.
+    #[test]
+    fn moving_a_signal_carries_its_name_to_the_new_pad() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let m = mcu.modules[0].clone();
+        let tx = m.pin_for(ModuleSignal::Tx).expect("a TX pad");
+        let want = mcu.find_pin(tx).expect("the pad").selected_function.clone();
+        let dest = mcu
+            .iter_all_pins()
+            .find(|p| {
+                p.number != tx
+                    && !p.reserved
+                    && p.available_functions.contains(&want)
+                    && p.selected_function == PinFunction::Unset
+            })
+            .map(|p| p.number)
+            .expect("a second TX pad");
+        if let Some(x) = mcu.find_pin_mut(tx) {
+            x.custom_label = "radar".into();
+        }
+
+        assert!(mcu.move_pin_function(tx, dest));
+
+        assert_eq!(mcu.find_pin(dest).expect("dest").custom_label, "radar");
+        assert_eq!(
+            mcu.find_pin(tx).expect("source").custom_label,
+            "",
+            "and it does not stay behind"
+        );
+    }
+
+    /// "Reset pins" is the most destructive act the panel offers, and Ctrl+Z has
+    /// to bring it back. The snapshot covers exactly what the reset throws away:
+    /// every pin's function and label, and every module.
+    #[test]
+    fn resetting_every_pin_can_be_undone() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let m = mcu.modules[0].clone();
+        let tx = m.pin_for(ModuleSignal::Tx).expect("a TX pad");
+        let spare = mcu
+            .iter_all_pins()
+            .map(|p| p.number)
+            .find(|n| !m.connections.iter().any(|c| c.mcu_pin == *n))
+            .expect("a free pad");
+        mcu.apply_pin_function(spare, PinFunction::GpioOutput);
+        if let Some(p) = mcu.find_pin_mut(spare) {
+            p.custom_label = "led".into();
+        }
+        let before: Vec<PinFunction> = mcu
+            .iter_all_pins()
+            .map(|p| p.selected_function.clone())
+            .collect();
+
+        mcu.push_module_undo("Reset pins".to_owned());
+        mcu.reset_all_pins();
+        assert!(
+            mcu.iter_all_pins()
+                .all(|p| p.reserved || p.selected_function == PinFunction::Unset),
+            "the reset really did clear them"
+        );
+
+        assert_eq!(mcu.undo_modules().as_deref(), Some("Reset pins"));
+
+        let after: Vec<PinFunction> = mcu
+            .iter_all_pins()
+            .map(|p| p.selected_function.clone())
+            .collect();
+        assert_eq!(after, before, "every pin came back");
+        assert_eq!(
+            mcu.find_pin(spare).expect("the spare pad").custom_label,
+            "led",
+            "and so did its name"
+        );
+        assert_eq!(mcu.modules.len(), 1);
+        assert_eq!(mcu.modules[0].pin_for(ModuleSignal::Tx), Some(tx));
+    }
+
+    /// Folding a module's config from the list drops the white border its box
+    /// wears on the canvas — and touches nothing else.
+    #[test]
+    fn folding_a_config_stops_the_canvas_calling_that_box_out() {
+        let mut mcu = pico();
+        mcu.selected_module = Some("usart1".into());
+        mcu.selected_pin = Some(7);
+
+        mcu.config_collapsed("usart1");
+
+        assert!(mcu.selected_module.is_none());
+        assert_eq!(
+            mcu.selected_pin,
+            Some(7),
+            "the pin selection is not its business"
+        );
+    }
+
+    /// Folding ONE config says nothing about another.
+    #[test]
+    fn folding_someone_elses_config_leaves_the_selection_alone() {
+        let mut mcu = pico();
+        mcu.selected_module = Some("usart1".into());
+        mcu.config_collapsed("spi0");
+        assert_eq!(mcu.selected_module.as_deref(), Some("usart1"));
+    }
+
+    /// A device lit only because its module was selected goes quiet with it —
+    /// `active_device` derives, so there is no second thing to clear.
+    #[test]
+    fn folding_a_config_also_quiets_the_device_it_lit() {
+        let mut mcu = pico();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let m = mcu.modules[0].clone();
+        mcu.join_group_module(&m, "radar");
+        mcu.selected_module = Some(m.id.clone());
+        assert_eq!(mcu.active_device(), Some("radar"));
+
+        mcu.config_collapsed(&m.id);
+
+        assert_eq!(mcu.active_device(), None);
     }
 
     /// A pad added under a padded spelling of a device's name joins THAT device
