@@ -971,12 +971,30 @@ pub fn async_is_esp(family: &str) -> bool {
 
 /// Whether an RTIC project can be generated for `family`.
 ///
-/// Narrow on purpose. RTIC 2 only has cortex-m backends, which rules out the
-/// RISC-V ESP parts outright; and the generated interrupt tasks are written
-/// against `stm32f1xx-hal`'s `ExtiPin` trait (`make_interrupt_source`,
-/// `trigger_on_edge`, `clear_interrupt_pending_bit`), which the embassy-stm32
-/// families do not expose. Widening this means writing those task bodies for
-/// another HAL, not flipping a flag.
+/// Narrow on purpose, for two reasons — neither of which is "RTIC cannot do it".
+///
+/// This used to claim RTIC 2 had cortex-m backends only, which is false: rtic
+/// 2.3 ships `riscv-esp32c3-backend` and `riscv-esp32c6-backend` alongside the
+/// four thumbv ones. The C3 is one of exactly two chips RTIC names outright.
+///
+/// The real obstacle on ESP is WHOSE peripherals they are. That backend is
+/// built on the PAC — it pulls `dep:esp32c3` and works with
+/// `esp32c3::{Interrupt, Peripherals}` — while every line this IDE generates for
+/// ESP is `esp-hal`. Both want to own the same silicon, and `#[rtic::app(device
+/// = esp32c3)]` wants the PAC's `Peripherals`. Reconciling that is the work, not
+/// flipping this flag.
+///
+/// On the embassy-stm32 families the obstacle is different: the generated
+/// interrupt tasks are written against `stm32f1xx-hal`'s `ExtiPin` trait
+/// (`make_interrupt_source`, `trigger_on_edge`, `clear_interrupt_pending_bit`),
+/// which those families do not expose — so widening there means writing the task
+/// bodies for another HAL.
+///
+/// For preemptive tasks on ESP specifically there is already a cheaper answer
+/// that needs none of this: a raised [`TaskPriority`] puts the task on its own
+/// `esp_rtos::embassy::InterruptExecutor`.
+///
+/// [`TaskPriority`]: crate::panels::mcu_module::pins::logic::pin::TaskPriority
 pub fn rtic_supported(family: &str) -> bool {
     family == "stm32f1"
 }

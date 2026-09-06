@@ -203,7 +203,41 @@ fn apply_renames(
 /// `calculate_mcu_state_hash`, which sees the edit on this same frame and
 /// regenerates main.rs. There is no pin file and no config file to re-sync,
 /// because a group owns neither.
-pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
+/// The `Devices:` label and its `+ Device` button, for the panel's TOP BAR.
+///
+/// Split out of [`device_roster`] so the two things that CREATE something sit
+/// together: `+ Add module` and `+ Device` are now one gesture apart on the same
+/// bar, instead of one being on the bar and the other at the head of the list
+/// below it.
+///
+/// It applies the act here rather than handing one back, because the bar is
+/// drawn BEFORE the list and the list is drawn only while the panel is open —
+/// a request parked for the roster would be dropped on the frame it is most
+/// likely to be made, with the panel still collapsed. The caller opens the panel
+/// and tells the roster to unfold the new row; both follow from the `true`.
+///
+/// Returns whether a device was created.
+pub(super) fn device_add_button(ui: &mut egui::Ui, mcu: &mut Mcu) -> bool {
+    ui.label(
+        egui::RichText::new("Devices:")
+            .size(12.0)
+            .color(egui::Color32::from_rgb(150, 150, 160)),
+    );
+    let clicked = ui
+        .button(egui::RichText::new(format!("{} Device", ph::PLUS)).size(11.0))
+        .on_hover_text(
+            "Gather the pads of one board part — a sensor's bus and its spare \
+             interrupt line — under one name.\n\nA device claims nothing: it \
+             renames no binding and moves no pin. It marks the pads on the \
+             diagram and writes one comment into the generated file.",
+        )
+        .clicked();
+    apply_act(mcu, clicked.then_some(Act::New))
+}
+
+/// `just_added`: the bar's `+ Device` created a device on THIS frame, so its
+/// row is unfolded — the name field it needs is not drawn on a folded row.
+pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu, just_added: bool) {
     // Editable copies. A `TextEdit` needs a `&mut String` and the group list is
     // read all through the loop, so the names are edited here and written back
     // in one pass at the end.
@@ -246,26 +280,6 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
     // on is the frame the merge is owed — see `apply_renames`.
     let mut focused: Vec<bool> = vec![false; names.len()];
     let mut lost: Vec<bool> = vec![false; names.len()];
-
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Devices:")
-                .size(12.0)
-                .color(egui::Color32::from_rgb(150, 150, 160)),
-        );
-        if ui
-            .button(egui::RichText::new(format!("{} Device", ph::PLUS)).size(11.0))
-            .on_hover_text(
-                "Gather the pads of one board part — a sensor's bus and its spare \
-                 interrupt line — under one name.\n\nA device claims nothing: it \
-                 renames no binding and moves no pin. It marks the pads on the \
-                 diagram and writes one comment into the generated file.",
-            )
-            .clicked()
-        {
-            act = Some(Act::New);
-        }
-    });
 
     if mcu.groups.is_empty() {
         ui.label(
@@ -500,7 +514,12 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
         &still_asking,
     );
     let rows_before = names_before.len();
-    let was_new = apply_act(mcu, act);
+    // Two ways a row can need unfolding, and only one of them still arrives as
+    // an `Act`: the `+ Device` button moved to the top bar and applies its own,
+    // so on that path the caller reports it. The `Act::New` arm stays live
+    // rather than being deleted — `apply_act` is the one place a device is
+    // created, and a second creator would be a second set of rules.
+    let was_new = apply_act(mcu, act) || just_added;
     if names != names_before {
         // Asked about a name that is about to stop existing.
         mcu.device_remove_confirm = None;

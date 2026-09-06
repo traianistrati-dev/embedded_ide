@@ -927,6 +927,9 @@ impl AppIde {
                     // A module added from the palette: its config is opened, and
                     // a collapsed panel opens with it.
                     let mut open_after_add: Option<String> = None;
+                    // `+ Device` on the bar created one: the roster below unfolds
+                    // its row so the name can be typed straight away.
+                    let mut device_added = false;
                     // "Choose pins..." was clicked: the dialog is seeded AFTER
                     // this block, because seeding reads `mcu` and the panel
                     // still holds it borrowed here.
@@ -1290,6 +1293,25 @@ impl AppIde {
                                         },
                                     );
 
+                                // The device roster's two controls, immediately
+                                // right of `+ Add module`. They used to head the
+                                // LIST below, which put the panel's two "make
+                                // something" gestures on different rows and hid
+                                // one of them whenever the panel was collapsed to
+                                // its bar.
+                                ui.add_space(6.0);
+                                if super::device_groups::device_add_button(ui, mcu) {
+                                    // Same rule the palette follows: creating
+                                    // from a collapsed bar means "I want to set
+                                    // this up", so the panel opens on the new
+                                    // row. Without this the click would appear to
+                                    // do nothing — and the roster, which is what
+                                    // unfolds that row, is not drawn at all while
+                                    // the panel is shut.
+                                    collapsed = false;
+                                    device_added = true;
+                                }
+
                                 if mcu.can_undo_modules() {
                                      ui.separator();
                                     let hover = format!(
@@ -1587,7 +1609,9 @@ impl AppIde {
                                                     //    borrows it for the rest
                                                     //    of the closure.
                                                     super::device_groups::device_roster(
-                                                        ui, mcu,
+                                                        ui,
+                                                        mcu,
+                                                        device_added,
                                                     );
                                                     ui.add_space(4.0);
                                                     ui.separator();
