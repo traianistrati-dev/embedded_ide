@@ -429,12 +429,17 @@ fn runtime_view(
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(e)
-                            .monospace()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(230, 130, 120)),
-                    );
+                    // Same card as the static view above: a probe that won't
+                    // open (`[PROBE_OPEN_FAILED]`) is the failure this path hits
+                    // most, and it has a fix that the raw chain doesn't name.
+                    if !crate::failure_hint::show_card(ui, e, |_| {}) {
+                        ui.label(
+                            egui::RichText::new(e)
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(230, 130, 120)),
+                        );
+                    }
                 });
         }
         FlameState::Done(res) => {

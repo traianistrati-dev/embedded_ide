@@ -286,11 +286,6 @@ fn apply_file_move(
     let old_path = old_path.clone();
     let fname = base_name(&old_path).to_string();
 
-    if let Some(reason) = generated_file_reason(&old_path) {
-        set_tree_notice(ui.ctx(), format!("Can't move `{fname}` — {reason}."));
-        return;
-    }
-
     let new_path = if target_folder.is_empty() {
         fname.clone()
     } else {
@@ -299,11 +294,12 @@ fn apply_file_move(
     if new_path == old_path {
         return; // dropped into its current folder — nothing to do
     }
-    if user_src_files.iter().any(|(p, _)| p == &new_path) {
-        set_tree_notice(
-            ui.ctx(),
-            format!("`{fname}` already exists in that folder — rename one first."),
-        );
+    if let Err(reason) = validate_move(&old_path, &new_path, |cand| {
+        user_src_files
+            .iter()
+            .any(|(p, _)| p.eq_ignore_ascii_case(cand))
+    }) {
+        set_tree_notice(ui.ctx(), reason);
         return;
     }
 
@@ -312,9 +308,90 @@ fn apply_file_move(
     if let Some(parent) = new_dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::rename(&old_dest, &new_dest);
+    // Reported rather than swallowed, and the in-memory path is left alone on
+    // failure: the old `let _ =` moved the path in memory whether or not the
+    // disk agreed, and the two then drifted until the next full write.
+    if let Err(e) = std::fs::rename(&old_dest, &new_dest) {
+        set_tree_notice(ui.ctx(), format!("Could not move `{fname}` — {e}"));
+        return;
+    }
     user_src_files[idx].0 = new_path;
     *save_needed = true;
+}
+
+/// Validate a file move, or explain the refusal.
+///
+/// Shares the shape of [`validate_rename`] because a move IS a rename of the
+/// leading directory, and every trap is the same one: a case-insensitive
+/// filesystem, a destination the pin sync owns, and `src/main.rs`, which is
+/// GENERATED and so never appears in `user_src_files` for `taken` to find.
+pub(crate) fn validate_move(
+    old_path: &str,
+    new_path: &str,
+    taken: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    let fname = base_name(old_path);
+    if let Some(reason) = generated_file_reason(old_path) {
+        return Err(format!("Can't move `{fname}` - {reason}."));
+    }
+    // Checked on the DESTINATION too. The source guard alone let a file be
+    // dropped INTO `src/pins/`, where a name matching `pin*.rs` is swept out of
+    // the tree by the next pin sync - the file simply disappears.
+    if let Some(reason) = generated_file_reason(new_path) {
+        return Err(format!("Can't move `{fname}` there - {reason}."));
+    }
+    // The destination FOLDER can be auto-managed even when the file name is
+    // innocent: a declaration written into `src/pins/mod.rs` lands inside the
+    // GENERATED markers and the next pin sync wipes it.
+    if let Some(reason) = generated_folder_reason(parent_of_path(new_path)) {
+        return Err(format!("Can't move `{fname}` there - {reason}."));
+    }
+    // Crossing a crate boundary changes which CRATE owns the module, so no
+    // re-export can keep the old paths working (the re-export would need a
+    // dependency edge pointing back the way it came). Refused rather than
+    // half-done.
+    if crate_of(old_path) != crate_of(new_path) {
+        return Err(format!(
+            "`{fname}` would move between crates - copy it instead, then delete the original."
+        ));
+    }
+    // A crate root is not a module that can be re-parented, and `mod.rs` names
+    // its FOLDER - moving either one unhooks a whole crate or subtree with no
+    // declaration anywhere to fix up.
+    let stem = fname.trim_end_matches(".rs");
+    if matches!(stem, "lib" | "main") && parent_of_path(old_path).ends_with("src") {
+        return Err(format!("`{fname}` is a crate root - it cannot be moved."));
+    }
+    if stem == "mod" {
+        return Err(
+            "`mod.rs` takes its name from its folder - move the folder instead.".to_owned(),
+        );
+    }
+    if new_path.eq_ignore_ascii_case("src/main.rs") || taken(new_path) {
+        return Err(format!(
+            "`{fname}` already exists in that folder - rename one first."
+        ));
+    }
+    Ok(())
+}
+
+/// The parent folder of a project-root-relative path (`""` at the root).
+fn parent_of_path(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[..i],
+        None => "",
+    }
+}
+
+/// Which crate a project-root-relative path belongs to: `None` for the firmware
+/// crate (`src/…`), otherwise the library directory that owns it.
+fn crate_of(path: &str) -> Option<&str> {
+    match path.split_once('/') {
+        Some((SRC_ROOT, _)) => None,
+        Some((lib, _)) => Some(lib),
+        // A file at the project root belongs to the firmware crate's manifest.
+        None => None,
+    }
 }
 
 /// Move folder `src` (and everything under it) into `target_folder`: refuse
@@ -358,12 +435,30 @@ fn apply_folder_move(
     if new_path == *src {
         return; // already in that folder
     }
-    let collides = user_src_folders.iter().any(|f| f == &new_path)
-        || user_src_files.iter().any(|(p, _)| p == &new_path);
+    // Case-insensitive, like the file paths: on Windows `Drivers` and `drivers`
+    // are one directory, so an exact compare would call the name free and then
+    // let `fs::rename` merge them.
+    let collides = user_src_folders
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(&new_path))
+        || user_src_files
+            .iter()
+            .any(|(p, _)| p.eq_ignore_ascii_case(&new_path));
     if collides {
         set_tree_notice(
             ui.ctx(),
             format!("`{name}/` already exists in that folder — rename one first."),
+        );
+        return;
+    }
+    // Same crate rule as a file move: crossing the boundary re-homes every
+    // module inside the folder into another crate, and no re-export can bridge
+    // that. Newly reachable now that a drop onto a library folder is applied at
+    // all — it used to be discarded before this ran.
+    if crate_of(src) != crate_of(&new_path) {
+        set_tree_notice(
+            ui.ctx(),
+            format!("`{name}/` would move between crates — copy it instead."),
         );
         return;
     }
@@ -373,7 +468,12 @@ fn apply_folder_move(
     if let Some(parent) = new_dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::rename(&old_dest, &new_dest);
+    // Reported, not swallowed: the path rewrite below must not happen when the
+    // directory did not actually move.
+    if let Err(e) = std::fs::rename(&old_dest, &new_dest) {
+        set_tree_notice(ui.ctx(), format!("Could not move `{name}/` — {e}"));
+        return;
+    }
 
     let old_prefix = format!("{src}/");
     for f in user_src_folders.iter_mut() {
@@ -910,6 +1010,7 @@ pub fn show_project_tree(
     // Set when a file row carrying the RED error badge is clicked; the app
     // scrolls the editor to that file's first error instead of its top.
     goto_error: &mut Option<ProjectFileId>,
+    move_to_folder: &mut Option<String>,
     // A validated file rename for the app to perform (see `RenameRequest`).
     rename_request: &mut Option<RenameRequest>,
 ) {
@@ -1121,6 +1222,7 @@ pub fn show_project_tree(
                     clip_copy,
                     clip_paste,
                     goto_error,
+                    move_to_folder,
                     renaming_folder,
                     workspace_dir,
                     project_dir,
@@ -1161,18 +1263,8 @@ pub fn show_project_tree(
                 move_request = Some(((*p).clone(), SRC_ROOT.to_owned()));
             }
 
-            // Apply a drag-drop move now that the tree closure's borrows have ended.
-            if let Some((item, target)) = move_request.take() {
-                apply_move(
-                    ui,
-                    &item,
-                    &target,
-                    user_src_files,
-                    user_src_folders,
-                    workspace_dir,
-                    save_needed,
-                );
-            }
+            // (The move itself is applied AFTER the libraries section — see the
+            // note at the single `apply_move` call site below.)
 
             src_ch.header_response.context_menu(|ui| {
                 if ui
@@ -1478,6 +1570,7 @@ pub fn show_project_tree(
                         clip_copy,
                         clip_paste,
                         goto_error,
+                        move_to_folder,
                         renaming_folder,
                         workspace_dir,
                         project_dir,
@@ -1654,6 +1747,7 @@ pub fn show_project_tree(
                             clip_copy,
                             clip_paste,
                             goto_error,
+                            move_to_folder,
                             renaming_folder,
                             workspace_dir,
                             project_dir,
@@ -1726,6 +1820,24 @@ pub fn show_project_tree(
                 }
             }
         });
+
+    // ── Apply a drag-drop move ───────────────────────────────────────────────
+    // Here, and NOT inside the project scroll area where it used to sit: the
+    // libraries section renders after that closure, so a drop onto a folder
+    // inside a library crate set `move_request` when its only reader had
+    // already run. The request then died with the frame — no move, no notice,
+    // no way to tell it had been ignored.
+    if let Some((item, target)) = move_request.take() {
+        apply_move(
+            ui,
+            &item,
+            &target,
+            user_src_files,
+            user_src_folders,
+            workspace_dir,
+            save_needed,
+        );
+    }
 
     // ── Apply the file-row signals ───────────────────────────────────────────
     // Once, after EVERY section: the indices are positions in `user_src_files`,
@@ -1908,6 +2020,7 @@ fn render_tree_node(
     clip_copy: &mut Option<clipboard::CopyRequest>,
     clip_paste: &mut Option<clipboard::PasteRequest>,
     goto_error: &mut Option<ProjectFileId>,
+    move_to_folder: &mut Option<String>,
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     project_dir: Option<&std::path::Path>,
@@ -1957,6 +2070,7 @@ fn render_tree_node(
                     open_reference,
                     clip_copy,
                     goto_error,
+                    move_to_folder,
                     can_duplicate,
                     &full_path,
                     project_dir,
@@ -2102,6 +2216,7 @@ fn render_tree_node(
                             clip_copy,
                             clip_paste,
                             goto_error,
+                            move_to_folder,
                             renaming_folder,
                             workspace_dir,
                             project_dir,
@@ -2416,6 +2531,8 @@ fn user_file_row(
     // Set when a row carrying the RED error badge is clicked: the app then
     // scrolls the editor to that file's first error instead of its top.
     goto_error: &mut Option<ProjectFileId>,
+    // Set by "Move to folder…"; the app opens the destination dialog.
+    move_to_folder: &mut Option<String>,
     can_duplicate: bool,
     // Project-root-relative path of this file + the saved project folder, for
     // the Show-in-Explorer / Copy-path entries.
@@ -2533,6 +2650,16 @@ fn user_file_row(
                 ui.close();
             }
             copy_menu_item(ui, clipboard::ClipKind::File, rel_path, clip_copy);
+            // Dragging can only reach a folder that is currently on screen, and
+            // it cannot say what the move implies. This can.
+            if ui
+                .button(menu_label(ph::FOLDER_OPEN, "Move to folder…", ICON_FOLDER))
+                .on_hover_text("Move this file into another folder of the same crate")
+                .clicked()
+            {
+                *move_to_folder = Some(rel_path.to_owned());
+                ui.close();
+            }
             ui.separator();
             if ui
                 .button(menu_label(ph::COLUMNS, "Open beside editor", ICON_VIEW))

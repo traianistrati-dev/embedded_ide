@@ -263,6 +263,11 @@ $ALL_CASES = @(
     # `Pull::Up` and `Pull::Down` differ from `Pull::None` only in the variant
     # named, and the variants are checked by esp-hal - one of each per runtime
     # proves the CALL compiles, which is all this matrix can say.
+    # A task lifted off the shared executor onto its own InterruptExecutor.
+    # The unit tests assert on the emitted TEXT; only this compiles it, which is
+    # what checks that `InterruptExecutor<1>`, `sw_int.software_interrupt1` and
+    # `Priority::Priority2` are things esp-rtos and esp-hal actually have.
+    @{ n = "ESP32-C3 preemptive task";     t = "emit_esp32c3_project";       e = @{ EIDE_ESP_RUNTIME = "async"; EIDE_ESP_IRQ = "rising"; EIDE_ESP_TASK_PRIO = "high" }; q = $true; fam = "esp" }
     @{ n = "ESP32-C3 input Pull::Up";      t = "emit_esp32c3_project";       e = @{ EIDE_ESP_RUNTIME = "blocking"; EIDE_ESP_PULL = "up" }; q = $true; fam = "esp" }
     @{ n = "ESP32-C3 async Pull::Down";    t = "emit_esp32c3_project";       e = @{ EIDE_ESP_RUNTIME = "async"; EIDE_ESP_PULL = "down" }; q = $true; fam = "esp" }
     # The harness wires ONE LEDC channel by default, so the two cases above only

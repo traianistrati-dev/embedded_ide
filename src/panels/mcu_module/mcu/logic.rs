@@ -1064,7 +1064,7 @@ impl Mcu {
         // view preference: it changes the generated code on the RTIC runtime.
         let irqs: std::collections::BTreeMap<usize, _> = self
             .iter_all_pins()
-            .filter_map(|p| p.irq.map(|e| (p.number, e)))
+            .filter_map(|p| p.irq.map(|e| (p.number, (e, p.irq_priority))))
             .collect();
         let irq = mcu_config::irq_section(&irqs);
         if !irq.is_empty() {
@@ -1175,7 +1175,11 @@ impl Mcu {
         // generated before the mode was selectable.
         let modes = mcu_config::parse_iomode(text);
         for pin in self.iter_all_pins_mut() {
-            pin.irq = irqs.get(&pin.number).copied();
+            // The priority rides with the edge; a pin the file does not arm
+            // keeps the default, so an older project loads exactly as before.
+            let armed = irqs.get(&pin.number).copied();
+            pin.irq = armed.map(|(e, _)| e);
+            pin.irq_priority = armed.map(|(_, p)| p).unwrap_or_default();
             pin.io_mode = modes.get(&pin.number).copied();
         }
         // A freshly loaded project has NO staged edits: pending == applied.

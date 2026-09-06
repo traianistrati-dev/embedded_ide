@@ -1942,7 +1942,7 @@ mod emit_for_manual_compile {
         // Only the Async runtime builds it — into a task that awaits the edge —
         // so this is where that compiles or does not.
         if let Ok(e) = std::env::var("EIDE_ESP_IRQ") {
-            use crate::panels::mcu_module::pins::logic::pin::Edge;
+            use crate::panels::mcu_module::pins::logic::pin::{Edge, TaskPriority};
             let edge = match e.as_str() {
                 "falling" => Edge::Falling,
                 "both" => Edge::Both,
@@ -1952,8 +1952,22 @@ mod emit_for_manual_compile {
                 .iter_all_pins()
                 .find(|p| p.selected_function == PinFunction::GpioInput)
                 .map(|p| p.number);
+            // `EIDE_ESP_TASK_PRIO=high|critical` raises that task off the
+            // shared executor onto its own InterruptExecutor. This is the ONLY
+            // place the emitted `StaticCell<InterruptExecutor<N>>` +
+            // `start(Priority::…)` is put in front of a real esp-rtos: the unit
+            // tests assert on TEXT, and text cannot tell us the const generic,
+            // the software-interrupt field and the Priority variant all exist.
+            let prio = match std::env::var("EIDE_ESP_TASK_PRIO").as_deref() {
+                Ok("high") => TaskPriority::High,
+                Ok("critical") => TaskPriority::Critical,
+                _ => TaskPriority::Normal,
+            };
             match num.and_then(|n| mcu.find_pin_mut(n)) {
-                Some(p) => p.irq = Some(edge),
+                Some(p) => {
+                    p.irq = Some(edge);
+                    p.irq_priority = prio;
+                }
                 None => println!("[{chip}] no input pin to arm"),
             }
         }

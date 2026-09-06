@@ -21,7 +21,7 @@ use super::clock::model::Stm32f1Clock;
 use super::clock::persist as clock_persist;
 use super::mcu::{AutoBuild, Runtime};
 use super::modules::{ApiStyle, VirtualModule};
-use crate::panels::mcu_module::pins::logic::pin::{Edge, GpioMode};
+use crate::panels::mcu_module::pins::logic::pin::{Edge, GpioMode, TaskPriority};
 
 const MODULES_HEADER: &str = "@modules";
 const CLOCK_HEADER: &str = "@clock";
@@ -419,14 +419,21 @@ pub fn parse_groups(text: &str) -> Vec<PinGroup> {
 /// The `@irq` section — one `num=Edge` per interrupt-enabled input pin — or ""
 /// when none are armed, so a project that uses no interrupts round-trips without
 /// the section at all.
-pub fn irq_section(irqs: &std::collections::BTreeMap<usize, Edge>) -> String {
+pub fn irq_section(irqs: &std::collections::BTreeMap<usize, (Edge, TaskPriority)>) -> String {
     if irqs.is_empty() {
         return String::new();
     }
     let mut s = String::from(IRQ_HEADER);
     s.push('\n');
-    for (num, e) in irqs {
-        s.push_str(&format!("{num}={}\n", e.as_token()));
+    for (num, (e, prio)) in irqs {
+        // Written only when it is NOT the default, so every project saved
+        // before task priorities existed round-trips byte for byte, and an
+        // unprioritised pin keeps the shorter line.
+        if *prio == TaskPriority::default() {
+            s.push_str(&format!("{num}={}\n", e.as_token()));
+        } else {
+            s.push_str(&format!("{num}={},{}\n", e.as_token(), prio.as_token()));
+        }
     }
     s
 }
@@ -534,16 +541,28 @@ pub fn parse_iomode(text: &str) -> std::collections::BTreeMap<usize, GpioMode> {
 }
 
 /// Parse `@irq` back into `pin -> Edge`; malformed lines are skipped.
-pub fn parse_irq(text: &str) -> std::collections::BTreeMap<usize, Edge> {
+pub fn parse_irq(text: &str) -> std::collections::BTreeMap<usize, (Edge, TaskPriority)> {
     let mut map = std::collections::BTreeMap::new();
     let Some(body) = section_body(text, IRQ_HEADER) else {
         return map;
     };
     for line in body.lines() {
-        if let Some((n, e)) = line.trim().split_once('=') {
-            if let (Ok(num), Some(edge)) = (n.trim().parse::<usize>(), Edge::from_token(e)) {
-                map.insert(num, edge);
-            }
+        let Some((n, rest)) = line.trim().split_once('=') else {
+            continue;
+        };
+        // The priority is OPTIONAL: `7=rising` - every project written before
+        // this existed - reads as Normal. An unrecognised token also falls back
+        // to Normal rather than dropping the line: losing the interrupt
+        // entirely is a far worse answer to a typo than losing its urgency.
+        let (edge_tok, prio_tok) = match rest.split_once(',') {
+            Some((e, prio)) => (e, Some(prio)),
+            None => (rest, None),
+        };
+        if let (Ok(num), Some(edge)) = (n.trim().parse::<usize>(), Edge::from_token(edge_tok)) {
+            let prio = prio_tok
+                .and_then(TaskPriority::from_token)
+                .unwrap_or_default();
+            map.insert(num, (edge, prio));
         }
     }
     map
@@ -1251,5 +1270,73 @@ mod labels_section_tests {
     fn a_line_without_a_pin_number_is_dropped() {
         let text = "@labels\nPC13=led\n=orphan\n13=real\n";
         assert_eq!(parse_labels(text), map(&[(13, "real")]));
+    }
+}
+
+#[cfg(test)]
+mod irq_priority_round_trip {
+    use super::{irq_section, parse_irq};
+    use crate::panels::mcu_module::pins::logic::pin::{Edge, TaskPriority};
+    use std::collections::BTreeMap;
+
+    fn map(v: &[(usize, Edge, TaskPriority)]) -> BTreeMap<usize, (Edge, TaskPriority)> {
+        v.iter().map(|(n, e, p)| (*n, (*e, *p))).collect()
+    }
+
+    /// A file written before priorities existed reads back unchanged.
+    ///
+    /// This is the property that matters most: every project on disk today has
+    /// the short form, and none of them may change meaning.
+    #[test]
+    fn an_old_file_reads_as_normal() {
+        let got = parse_irq("@irq\n7=Rising\n9=Both\n");
+        assert_eq!(
+            got,
+            map(&[
+                (7, Edge::Rising, TaskPriority::Normal),
+                (9, Edge::Both, TaskPriority::Normal)
+            ])
+        );
+    }
+
+    /// ...and is written back in the SAME short form, byte for byte.
+    #[test]
+    fn a_normal_priority_adds_nothing_to_the_line() {
+        let text = irq_section(&map(&[(7, Edge::Rising, TaskPriority::Normal)]));
+        assert!(text.contains("7=Rising\n"), "{text}");
+        assert!(!text.contains(','), "no priority on a default line: {text}");
+    }
+
+    /// A raised priority survives the round trip.
+    #[test]
+    fn a_raised_priority_round_trips() {
+        let want = map(&[
+            (3, Edge::Falling, TaskPriority::Critical),
+            (7, Edge::Rising, TaskPriority::Normal),
+            (9, Edge::Both, TaskPriority::High),
+        ]);
+        assert_eq!(parse_irq(&irq_section(&want)), want);
+    }
+
+    /// A typo in the priority keeps the INTERRUPT and loses only the urgency.
+    ///
+    /// Dropping the line would silently disarm a pin the user armed - a far
+    /// worse outcome than falling back to Normal.
+    #[test]
+    fn a_bad_priority_token_keeps_the_edge() {
+        let got = parse_irq("@irq\n7=Rising,Urgent\n");
+        assert_eq!(got, map(&[(7, Edge::Rising, TaskPriority::Normal)]));
+    }
+
+    /// A malformed EDGE is still skipped - there is no interrupt to keep.
+    #[test]
+    fn a_bad_edge_is_still_skipped() {
+        assert!(parse_irq("@irq\n7=Sideways,High\n").is_empty());
+    }
+
+    /// No armed pins, no section - unchanged behaviour.
+    #[test]
+    fn nothing_armed_writes_no_section() {
+        assert!(irq_section(&BTreeMap::new()).is_empty());
     }
 }

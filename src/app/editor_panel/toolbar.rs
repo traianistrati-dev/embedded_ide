@@ -496,7 +496,7 @@ impl AppIde {
     /// firmware's call stack via probe-rs (see `crate::flamegraph`). Attach only
     /// (no flash) — the firmware must already be running. No-op without a chip.
     pub(crate) fn start_flame(&mut self) {
-        let Some((project, _toolchain)) = self.selected_build_cfg() else {
+        let Some((project, toolchain)) = self.selected_build_cfg() else {
             return;
         };
         let build_dir = crate::workspace::dir();
@@ -514,6 +514,7 @@ impl AppIde {
                     project.target.clone(),
                     project.probe_chip.clone(),
                     self.selected_probe.clone(),
+                    toolchain,
                     400, // sample count — a few seconds of halt-sampling
                     Arc::clone(&self.flame_state),
                     self.egui_ctx.clone(),

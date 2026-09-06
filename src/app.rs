@@ -40,6 +40,8 @@ mod project_panel;
 
 mod file_rename;
 
+mod move_file_dialog;
+
 mod tree_clipboard;
 
 mod mcu_panel;
@@ -1845,6 +1847,8 @@ pub struct AppIde {
     /// A tree file rename waiting on rust-analyzer's `willRenameFiles` answer
     /// (see `app::file_rename`). The file has NOT moved yet while this is set.
     pending_rename: Option<file_rename::PendingRename>,
+    /// Open "Move to folder…" dialog, if any.
+    move_file_dialog: Option<move_file_dialog::MoveFileDialog>,
     /// Open "Extract to library crate" dialog, if any.
     extract_crate: Option<extract_crate_dialog::ExtractCrateDialog>,
     /// Open "Clone a library from git" dialog, if any.
@@ -2292,6 +2296,7 @@ impl AppIde {
                 persisted.tree_split_ratio.clamp(0.15, 0.85)
             },
             pending_rename: None,
+            move_file_dialog: None,
             extract_crate: None,
             clone_library_dialog: None,
             clone_project_dialog: None,
@@ -3383,6 +3388,14 @@ impl AppIde {
             let new_toml = project_gen::ensure_exti_feature(
                 &new_toml,
                 self.generated_code.contains("embassy_stm32::exti"),
+            );
+            // `static_cell`, when a raised task priority put an interrupt
+            // executor in the generated code. Read off that code for the same
+            // reason as the line above.
+            let new_toml = project_gen::ensure_task_priority_deps(
+                &new_toml,
+                self.generated_code.contains("InterruptExecutor"),
+                &sources,
             );
             // The CYW43 radio, on a Pico W / Pico 2 W whose WL_LED is driven.
             // Gated on the pin rather than on the board, because a W board with
@@ -4626,6 +4639,10 @@ impl eframe::App for AppIde {
         // A confirmed tree rename. Not applied by the tree: renaming a `.rs`
         // file asks rust-analyzer to rewrite `mod` / `use` / path references
         // FIRST, which only works while the old path still exists.
+        // "Move to folder…" on a file row → the destination dialog.
+        if let Some(path) = signals.move_to_folder {
+            self.move_file_dialog = Some(move_file_dialog::MoveFileDialog::new(path));
+        }
         if let Some(req) = signals.rename_request {
             self.begin_file_rename(&ui.ctx().clone(), req);
         }
@@ -4974,6 +4991,7 @@ impl eframe::App for AppIde {
         self.show_git_restore_all_dialog(ui);
         self.show_git_switch_dialog(ui);
         self.show_git_delete_branch_dialog(ui);
+        self.show_move_file_dialog(ui);
         self.show_extract_crate_dialog(ui);
         self.show_clone_library_dialog(ui);
         self.show_clone_project_dialog(ui);

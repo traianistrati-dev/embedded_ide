@@ -5,6 +5,63 @@ use super::super::pin_function::PinFunction;
 pub const PIN_FONT_SIZE: f32 = 10.0;
 pub const PIN_ROUNDING: f32 = 0.0;
 
+/// How urgently an armed pin's task runs, relative to the others.
+///
+/// On ESP the async runtime is COOPERATIVE: every task shares one executor and
+/// runs to its next `await`. A task marked above `Normal` is spawned on its own
+/// `InterruptExecutor` instead - an executor bound to a hardware interrupt
+/// priority - so it PREEMPTS the tasks below it.
+///
+/// Only two levels above normal, and that is a hardware fact, not a taste: each
+/// interrupt executor costs one software interrupt, and `esp_rtos::start` has
+/// already taken one for its scheduler. Two covers "this must not wait" and
+/// "this must not wait for THAT either", and leaves one spare.
+///
+/// Tasks at the SAME level do not preempt each other - they share one executor
+/// and stay cooperative, exactly as they are today.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TaskPriority {
+    /// The shared thread-mode executor - today's behaviour, and the default.
+    #[default]
+    Normal,
+    High,
+    Critical,
+}
+
+impl TaskPriority {
+    /// Token persisted in `mcu.config` `@irq`, appended after the edge.
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::High => "High",
+            Self::Critical => "Critical",
+        }
+    }
+
+    pub fn from_token(t: &str) -> Option<Self> {
+        match t.trim().to_ascii_lowercase().as_str() {
+            "normal" => Some(Self::Normal),
+            "high" => Some(Self::High),
+            "critical" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+
+    /// Label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::High => "High",
+            Self::Critical => "Critical",
+        }
+    }
+
+    /// Every level, lowest first - for a picker.
+    pub fn all() -> [Self; 3] {
+        [Self::Normal, Self::High, Self::Critical]
+    }
+}
+
 /// Which edge of an input pin raises an interrupt.
 ///
 /// `None` on a pin (the default) means "read it by polling" — the common case,
@@ -180,6 +237,10 @@ pub struct Pin {
     /// RTIC backend; ignored by the other runtimes, which do not wire the NVIC.
     /// Persisted in `mcu.config` (`@irq`).
     pub irq: Option<Edge>,
+    /// How urgently this pin's task runs - see [`TaskPriority`]. Persisted on
+    /// the same `@irq` line, after the edge, so a project written before this
+    /// existed reads back unchanged.
+    pub irq_priority: TaskPriority,
     /// Drive / pull mode of a GPIO In/Out pin — `None` = the backend's default
     /// (floating input, push-pull output). Chosen from the mode list under the
     /// function in the chip, persisted in `mcu.config` (`@iomode`), and rendered

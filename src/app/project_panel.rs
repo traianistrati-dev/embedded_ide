@@ -54,6 +54,8 @@ pub(super) struct ProjectPanelSignals {
     /// does NOT move the file itself: the module-reference rewrite has to run
     /// while the old path still exists.
     pub rename_request: Option<crate::project_tree::gui::RenameRequest>,
+    /// "Move to folder…" was picked on a file row; the app opens the dialog.
+    pub move_to_folder: Option<String>,
 }
 
 impl AppIde {
@@ -189,6 +191,7 @@ impl AppIde {
         let mut clip_paste: Option<crate::project_tree::clipboard::PasteRequest> = None;
         let mut goto_error: Option<crate::app::ProjectFileId> = None;
         let mut rename_request: Option<crate::project_tree::gui::RenameRequest> = None;
+        let mut move_to_folder: Option<String> = None;
 
         // Collapsed: the panel is not built at all, so the editor and the MCU
         // zone take the width back. This function still RUNS, because it is
@@ -432,6 +435,7 @@ impl AppIde {
                                 &mut clip_copy,
                                 &mut clip_paste,
                                 &mut goto_error,
+                                &mut move_to_folder,
                                 &mut rename_request,
                             );
                         }
@@ -469,6 +473,7 @@ impl AppIde {
             clip_paste,
             goto_error,
             rename_request,
+            move_to_folder,
         }
     }
 }

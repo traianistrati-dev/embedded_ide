@@ -51,7 +51,7 @@ fn connector(
     painter.line_segment([to, to - head * (rot.inverse() * dir)], stroke);
 }
 use crate::panels::mcu_module::codegen::{pin_binding, sanitize_label};
-use crate::panels::mcu_module::pins::logic::pin::Edge;
+use crate::panels::mcu_module::pins::logic::pin::{Edge, TaskPriority};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 
@@ -535,6 +535,35 @@ pub fn draw_io_arrows(
                                 pick(ui, Some(Edge::Rising), "Rising edge");
                                 pick(ui, Some(Edge::Falling), "Falling edge");
                                 pick(ui, Some(Edge::Both), "Both edges");
+
+                                // Priority is only a question once there IS a
+                                // task: an unarmed pin has nothing to schedule.
+                                if pin.irq.is_some() {
+                                    ui.separator();
+                                    ui.label(
+                                        egui::RichText::new("Task priority")
+                                            .size(10.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    for p in TaskPriority::all() {
+                                        if ui
+                                            .selectable_label(pin.irq_priority == p, p.label())
+                                            .clicked()
+                                        {
+                                            pin.irq_priority = p;
+                                            ui.close();
+                                        }
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Above Normal runs on its own interrupt \
+                                             executor and preempts the rest. Tasks sharing \
+                                             one level stay cooperative. ESP async only.",
+                                        )
+                                        .size(9.0)
+                                        .color(egui::Color32::from_gray(140)),
+                                    );
+                                }
                             },
                         )
                         .response

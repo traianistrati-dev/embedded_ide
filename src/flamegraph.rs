@@ -109,11 +109,14 @@ impl FlameState {
 /// Build `--release`, attach via `probe-rs dap-server`, and collect `n_samples`
 /// stack samples on a background thread. The firmware must already be running on
 /// the target (attach, no flash). Result / progress land in `state`.
+#[allow(clippy::too_many_arguments)]
 pub fn start_flame(
     project_dir: PathBuf,
     target: String,
     chip: String,
     probe: Option<String>,
+    // Which probes could drive this chip at all - see `probe::pick_probe`.
+    toolchain: crate::panels::mcu_module::ToolchainKind,
     n_samples: usize,
     state: Arc<Mutex<FlameState>>,
     ctx: eframe::egui::Context,
@@ -129,6 +132,7 @@ pub fn start_flame(
             &target,
             &chip,
             probe.as_deref(),
+            &toolchain,
             n_samples,
             &state,
             &ctx,
@@ -142,15 +146,26 @@ pub fn start_flame(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     project_dir: &std::path::Path,
     target: &str,
     chip: &str,
     probe: Option<&str>,
+    toolchain: &crate::panels::mcu_module::ToolchainKind,
     n_samples: usize,
     state: &Arc<Mutex<FlameState>>,
     ctx: &eframe::egui::Context,
 ) -> Result<FlameResult, String> {
+    // Resolve the probe FIRST: `probe-rs dap-server` is non-interactive, so
+    // with two probes attached and no `probe` field it refuses to choose and
+    // the attach fails - as the bare word "cancelled", after a full release
+    // build has already been paid for.
+    let probe = match crate::probe::selector(probe) {
+        Some(sel) => sel,
+        None => crate::probe::pick_probe(&crate::probe::list_probes()?, toolchain)?,
+    };
+
     let elf = build_elf(project_dir, target)?;
 
     // Spawn the DAP server.
@@ -193,7 +208,11 @@ fn run(
         })
     });
     // Kill the server whatever happens next.
-    let result = sample_over_dap(port, &elf, chip, probe, n_samples, state, ctx);
+    // probe-rs writes its own diagnostics to the DAP console, not to stderr
+    // ("Log output ... will be written to the Debug Console"), so the session
+    // collects them here - that is where the reason for a failure lives.
+    let console = Arc::new(Mutex::new(Vec::<String>::new()));
+    let result = sample_over_dap(port, &elf, chip, &probe, &console, n_samples, state, ctx);
     let _ = server.kill();
     let _ = server.wait();
     if let Some(h) = drain {
@@ -203,20 +222,54 @@ fn run(
     // (probe-rs logs the real reason there).
     result.map_err(|e| {
         let log = log.lock().unwrap();
-        let tail: Vec<&str> = log
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .rev()
-            .take(4)
-            .collect();
-        if tail.is_empty() {
-            e
-        } else {
-            let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-            format!("{e}\n\nprobe-rs dap-server:\n{tail}")
+        let console = console.lock().unwrap();
+        // The console first: it carries the sentence, stderr only the banner.
+        let console_tail = tail_of(console.iter().map(String::as_str), 6);
+        let server_tail = tail_of(log.lines(), 4);
+        // A probe that enumerates but won't open, or a probe-rs crash, has an
+        // explanation card with the two or three things that actually fix it —
+        // worth far more than the raw chain. Everything probe-rs said is fed to
+        // the taggers, because the sentence arrives on the console, not in `e`.
+        let everything = format!(
+            "{e}\n{}\n{}",
+            console_tail.join("\n"),
+            server_tail.join("\n")
+        );
+        if let Some(tagged) = crate::failure_hint::probe_rs_panic(&everything)
+            .map(|d| crate::failure_hint::probe_rs_panic_message(&d))
+            .or_else(|| {
+                crate::failure_hint::probe_open_failure(&everything)
+                    .map(|d| crate::failure_hint::probe_open_message(&d))
+            })
+        {
+            return tagged;
         }
+        let mut out = e;
+        for (title, lines) in [
+            ("probe-rs console:", console_tail),
+            ("probe-rs dap-server:", server_tail),
+        ] {
+            if !lines.is_empty() {
+                out = format!("{out}\n\n{title}\n{}", lines.join("\n"));
+            }
+        }
+        out
     })
+}
+
+/// The last `n` non-empty lines, trimmed and back in order — both failure
+/// tails want this and neither wants the blank lines probe-rs pads with.
+fn tail_of<'a>(lines: impl Iterator<Item = &'a str>, n: usize) -> Vec<&'a str> {
+    let mut kept: Vec<&str> = lines
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .take(n)
+        .collect();
+    kept.reverse();
+    kept
 }
 
 /// `cargo build --release --message-format=json`, return the ELF path.
@@ -257,11 +310,14 @@ fn build_elf(project_dir: &std::path::Path, target: &str) -> Result<PathBuf, Str
 
 /// Connect to the DAP server, attach, and run the pause/stackTrace/continue
 /// sampling loop.
+#[allow(clippy::too_many_arguments)]
 fn sample_over_dap(
     port: u16,
     elf: &std::path::Path,
     chip: &str,
-    probe: Option<&str>,
+    // Already resolved to ONE probe by `run` - never "let probe-rs choose".
+    probe: &str,
+    console: &Arc<Mutex<Vec<String>>>,
     n_samples: usize,
     state: &Arc<Mutex<FlameState>>,
     ctx: &eframe::egui::Context,
@@ -288,19 +344,20 @@ fn sample_over_dap(
         "initialize",
         json!({"adapterID": "probe-rs"}),
     )?;
-    wait_response(&mut stream, "initialize")?;
-    let mut launch = json!({
+    wait_response(&mut stream, "initialize", console)?;
+    let launch = json!({
         "chip": chip,
+        "probe": probe,
         "connectUnderReset": false,
         "flashingConfig": { "flashingEnabled": false },
         "coreConfigs": [{ "coreIndex": 0, "programBinary": elf.to_string_lossy() }],
+        // Without this probe-rs stays at its default level and says less about
+        // why an attach failed.
+        "consoleLogLevel": "Console",
     });
-    if let Some(p) = crate::probe::selector(probe) {
-        launch["probe"] = json!(p);
-    }
     send(&mut stream, &mut seq, "attach", launch)?;
     // The `initialized` event tells us to finish configuration.
-    wait_event(&mut stream, "initialized")?;
+    wait_event(&mut stream, "initialized", console)?;
     send(&mut stream, &mut seq, "configurationDone", json!({}))?;
 
     *state.lock().unwrap() = FlameState::Sampling(0, n_samples);
@@ -318,7 +375,7 @@ fn sample_over_dap(
             "pause",
             json!({"threadId": thread_id.max(1)}),
         )?;
-        let stopped = wait_event(&mut stream, "stopped")?;
+        let stopped = wait_event(&mut stream, "stopped", console)?;
         if let Some(t) = stopped["body"]["threadId"].as_i64() {
             thread_id = t;
         }
@@ -328,7 +385,7 @@ fn sample_over_dap(
             "stackTrace",
             json!({"threadId": thread_id.max(1), "startFrame": 0, "levels": 32}),
         )?;
-        let st = wait_response(&mut stream, "stackTrace")?;
+        let st = wait_response(&mut stream, "stackTrace", console)?;
         if let Some(stack) = frames_of(&st) {
             if !stack.is_empty() {
                 samples.push(stack);
@@ -422,15 +479,23 @@ fn read_msg(stream: &mut TcpStream) -> Option<Value> {
     serde_json::from_slice(&body).ok()
 }
 
-/// Read messages until a successful RESPONSE to `command` arrives.
-fn wait_response(stream: &mut TcpStream, command: &str) -> Result<Value, String> {
+/// Read messages until a successful RESPONSE to `command` arrives, keeping any
+/// `output` event seen on the way (that is probe-rs's own log).
+fn wait_response(
+    stream: &mut TcpStream,
+    command: &str,
+    console: &Arc<Mutex<Vec<String>>>,
+) -> Result<Value, String> {
     for _ in 0..200 {
         let msg =
             read_msg(stream).ok_or_else(|| format!("dap-server closed waiting for {command}"))?;
+        collect_output(&msg, console);
         if msg["type"] == "response" && msg["command"] == command {
             if msg["success"].as_bool() == Some(false) {
-                let m = msg["message"].as_str().unwrap_or("request failed");
-                return Err(format!("{command}: {m}"));
+                return Err(format!(
+                    "{command}: {}",
+                    crate::debugger::response_error(&msg)
+                ));
             }
             return Ok(msg);
         }
@@ -438,24 +503,47 @@ fn wait_response(stream: &mut TcpStream, command: &str) -> Result<Value, String>
     Err(format!("no response to {command}"))
 }
 
+/// Park an `output` event's text in the session console.
+fn collect_output(msg: &Value, console: &Arc<Mutex<Vec<String>>>) {
+    if msg["type"] != "event" || msg["event"] != "output" {
+        return;
+    }
+    let Some(text) = msg["body"]["output"].as_str() else {
+        return;
+    };
+    let mut c = console.lock().unwrap();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        c.push(line.to_owned());
+    }
+    // A long session must not grow this without bound; only the tail is used.
+    let len = c.len();
+    if len > 200 {
+        c.drain(..len - 200);
+    }
+}
+
 /// Read messages until EVENT `event` arrives. A FAILED response to a pending
 /// request (e.g. `attach` when the probe/target isn't there) is surfaced with
 /// its message rather than skipped — otherwise the server just closes and the
 /// real reason is lost as a bare "closed waiting for 'initialized'".
-fn wait_event(stream: &mut TcpStream, event: &str) -> Result<Value, String> {
+fn wait_event(
+    stream: &mut TcpStream,
+    event: &str,
+    console: &Arc<Mutex<Vec<String>>>,
+) -> Result<Value, String> {
     for _ in 0..200 {
         let msg =
             read_msg(stream).ok_or_else(|| format!("dap-server closed waiting for '{event}'"))?;
+        collect_output(&msg, console);
         if msg["type"] == "event" && msg["event"] == event {
             return Ok(msg);
         }
         if msg["type"] == "response" && msg["success"].as_bool() == Some(false) {
             let cmd = msg["command"].as_str().unwrap_or("request");
-            let m = msg["message"]
-                .as_str()
-                .or_else(|| msg["body"]["error"]["format"].as_str())
-                .unwrap_or("request failed");
-            return Err(format!("{cmd} failed: {m}"));
+            return Err(format!(
+                "{cmd} failed: {}",
+                crate::debugger::response_error(&msg)
+            ));
         }
     }
     Err(format!("no '{event}' event"))

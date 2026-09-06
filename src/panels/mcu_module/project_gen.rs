@@ -1275,6 +1275,33 @@ fn toggle_hal_feature(line: &str, feature: &str, add: bool) -> String {
     }
 }
 
+/// `static_cell`, for the interrupt executors a raised task priority emits.
+///
+/// An `InterruptExecutor::start` takes `&'static mut self`, so the executor is
+/// held in a `StaticCell` — a crate the project may not otherwise use.
+///
+/// Driven by the GENERATED CODE rather than by the pins, the same rule as
+/// [`ensure_exti_feature`]: if codegen did not emit an executor — no raised
+/// task, or a pin refused for some other reason — the manifest must not claim a
+/// crate nothing imports.
+///
+/// Removal is safe to leave to [`ensure_dep`]: it never drops a crate the
+/// sources still reference, so a project using `static_cell` for a
+/// `BufferedUart` keeps it when the last raised priority goes away.
+pub fn ensure_task_priority_deps(
+    cargo_toml: &str,
+    uses_interrupt_executor: bool,
+    sources: &[&str],
+) -> String {
+    ensure_dep(
+        cargo_toml,
+        "static_cell",
+        uses_interrupt_executor,
+        "static_cell = \"2\"",
+        sources,
+    )
+}
+
 /// Toggle the `exti` feature on the `embassy-stm32` line.
 ///
 /// `embassy_stm32::exti` is behind a plain Cargo feature, so an armed input pin

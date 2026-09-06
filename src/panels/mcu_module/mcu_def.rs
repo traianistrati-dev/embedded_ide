@@ -86,6 +86,8 @@ impl PinDef {
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
             irq: None,
+            irq_priority: crate::panels::mcu_module::pins::logic::pin::model::TaskPriority::default(
+            ),
             io_mode: None,
             af: self.af.clone(),
             fn_owner: self.fn_owner.clone(),

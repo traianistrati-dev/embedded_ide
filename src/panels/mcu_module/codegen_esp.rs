@@ -48,7 +48,7 @@ use super::modules::{
     SpiModuleConfig, TimerModuleConfig, TouchModuleConfig, UsartDirection, UsartModuleConfig,
     UsbModuleConfig,
 };
-use super::pins::logic::pin::{Edge, GpioMode, Pin};
+use super::pins::logic::pin::{Edge, GpioMode, Pin, TaskPriority};
 use super::pins::logic::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -137,15 +137,79 @@ impl EspRuntime {
     }
 }
 
+/// Which spawner a task of `prio` is launched on.
+///
+/// `spawner` is the thread-mode executor `#[esp_rtos::main]` hands in - the one
+/// every task used to share. The raised tiers each have their own.
+fn spawner_for(prio: TaskPriority) -> &'static str {
+    match prio {
+        TaskPriority::Normal => "spawner",
+        TaskPriority::High => "spawner_high",
+        TaskPriority::Critical => "spawner_critical",
+    }
+}
+
+/// The software interrupt and hardware priority backing each raised tier.
+///
+/// `software_interrupt0` is NOT here: `esp_rtos::start` already took it for the
+/// scheduler, and handing it out twice would be a runtime fight over one
+/// peripheral. That is also why there are two tiers and not eight.
+///
+/// The hardware priorities are 2 and 3 rather than 1 and 2: priority 1 is where
+/// ordinary driver interrupts sit, so a "High" task that shared it would not
+/// reliably preempt anything.
+fn tier_hardware(prio: TaskPriority) -> Option<(u8, &'static str, &'static str)> {
+    match prio {
+        TaskPriority::Normal => None,
+        TaskPriority::High => Some((1, "Priority2", "EXECUTOR_HIGH")),
+        TaskPriority::Critical => Some((2, "Priority3", "EXECUTOR_CRITICAL")),
+    }
+}
+
+/// The `InterruptExecutor` statics and their start-up, for every raised tier
+/// that is actually used.
+///
+/// Emitted only for tiers with a task on them: a project that never raises a
+/// priority generates exactly what it generated before this existed, down to
+/// the byte. That is deliberate - the feature must be invisible until asked
+/// for, because it costs a software interrupt and an executor each time.
+///
+/// `StaticCell` because `InterruptExecutor::start` takes `&'static mut self`:
+/// the executor has to outlive `main`, and this is the borrow-checker-honest
+/// way to say so.
+fn priority_executors(armed: &[(&Pin, Edge, TaskPriority)]) -> String {
+    let mut out = String::new();
+    for prio in [TaskPriority::High, TaskPriority::Critical] {
+        if !armed.iter().any(|(_, _, p)| *p == prio) {
+            continue;
+        }
+        let Some((swi, hw, stat)) = tier_hardware(prio) else {
+            continue;
+        };
+        let spawner = spawner_for(prio);
+        out.push_str(&format!(
+            "    // {label} tasks run on their own interrupt executor, so they \
+             preempt\n    // everything below them. Tasks sharing one tier stay \
+             cooperative.\n\
+             \x20   static {stat}: StaticCell<InterruptExecutor<{swi}>> = StaticCell::new();\n\
+             \x20   let {ex} = {stat}.init(InterruptExecutor::new(sw_int.software_interrupt{swi}));\n\
+             \x20   let {spawner} = {ex}.start(Priority::{hw});\n",
+            label = prio.label(),
+            ex = format!("executor_{}", prio.label().to_ascii_lowercase()),
+        ));
+    }
+    out
+}
+
 /// The inputs the user armed with an interrupt edge, in pin order.
 ///
 /// Inputs ONLY: an edge on an output is not a thing, and the picker only offers
 /// it on `GpioInput` for the same reason.
-fn irq_inputs<'a>(configured: &[&'a Pin]) -> Vec<(&'a Pin, Edge)> {
+fn irq_inputs<'a>(configured: &[&'a Pin]) -> Vec<(&'a Pin, Edge, TaskPriority)> {
     configured
         .iter()
         .filter(|p| p.selected_function == PinFunction::GpioInput)
-        .filter_map(|p| p.irq.map(|e| (*p, e)))
+        .filter_map(|p| p.irq.map(|e| (*p, e, p.irq_priority)))
         .collect()
 }
 
@@ -183,12 +247,12 @@ fn irq_static(p: &Pin) -> String {
 ///
 /// The statics are unavoidable: an interrupt handler takes no arguments and
 /// cannot borrow a local, so the pin has to live somewhere it can reach.
-fn irq_handler_items(armed: &[(&Pin, Edge)]) -> String {
+fn irq_handler_items(armed: &[(&Pin, Edge, TaskPriority)]) -> String {
     if armed.is_empty() {
         return String::new();
     }
     let mut out = String::new();
-    for (p, _) in armed {
+    for (p, _, _) in armed {
         out.push_str(&format!(
             "/// {name} — parked here so the interrupt handler can reach it.\n\
              static {s}: Mutex<RefCell<Option<Input<'static>>>> = Mutex::new(RefCell::new(None));\n",
@@ -205,7 +269,7 @@ fn irq_handler_items(armed: &[(&Pin, Edge)]) -> String {
     out.push_str("#[esp_hal::handler]\n");
     out.push_str("fn gpio_irq() {\n");
     out.push_str("    critical_section::with(|cs| {\n");
-    for (p, edge) in armed {
+    for (p, edge, _) in armed {
         out.push_str(&format!(
             "        if let Some(pin) = {s}.borrow_ref_mut(cs).as_mut() {{\n\
              \x20           if pin.is_interrupt_set() {{\n\
@@ -230,9 +294,9 @@ fn irq_handler_items(armed: &[(&Pin, Edge)]) -> String {
 /// The task OWNS its pin. That is the honest shape: `wait_for_*` takes
 /// `&mut self`, so the pin cannot also be read from `main` without a mutex, and
 /// a task that borrows nothing is a task the user can freely edit.
-fn irq_tasks(armed: &[(&Pin, Edge)]) -> String {
+fn irq_tasks(armed: &[(&Pin, Edge, TaskPriority)]) -> String {
     let mut out = String::new();
-    for (p, edge) in armed {
+    for (p, edge, _) in armed {
         let var = esp_binding(p);
         out.push_str(&format!(
             "/// {name} — wakes on a {label} edge. The task owns the pin.\n\
@@ -616,9 +680,24 @@ fn make_gen_section(
     let has_irq = configured
         .iter()
         .any(|p| p.selected_function == PinFunction::GpioInput && p.irq.is_some());
+    let has_raised_priority = configured.iter().any(|p| {
+        p.selected_function == PinFunction::GpioInput
+            && p.irq.is_some()
+            && p.irq_priority != TaskPriority::Normal
+    });
     let use_block = build_use_block(
-        has_output, has_input, has_adc, has_uart, has_spi, has_i2c, has_pwm, has_rmt, has_pcnt,
-        has_irq, runtime,
+        has_output,
+        has_input,
+        has_adc,
+        has_uart,
+        has_spi,
+        has_i2c,
+        has_pwm,
+        has_rmt,
+        has_pcnt,
+        has_irq,
+        has_raised_priority,
+        runtime,
     );
 
     // ── fn main() body ────────────────────────────────────────────────────────
@@ -709,14 +788,21 @@ fn make_gen_section(
         body.push('\n');
         body.push_str("    // ── GPIO interrupts ──\n");
         if runtime == EspRuntime::Async {
-            for (p, _) in &armed {
+            body.push_str(&priority_executors(&armed));
+            for (p, _, prio) in &armed {
                 let var = esp_binding(p);
                 // The shape embassy-executor 0.10 (macros 0.8) settled on: the
                 // TASK returns `Result<SpawnToken, SpawnError>` and `spawn`
                 // returns `()`. It was the other way round one version earlier,
                 // so a version bump is worth re-checking here. The `unwrap`
                 // cannot fire: one task function, one spawn, a pool of one.
-                body.push_str(&format!("    spawner.spawn({var}_irq({var}).unwrap());\n"));
+                // WHICH spawner is the whole feature: `spawner` is the shared
+                // thread-mode executor every task used to land on, while a
+                // raised task goes to an interrupt executor that preempts it.
+                body.push_str(&format!(
+                    "    {}.spawn({var}_irq({var}).unwrap());\n",
+                    spawner_for(*prio)
+                ));
             }
         } else {
             // ONE registration for the whole chip: `set_interrupt_handler` is on
@@ -724,7 +810,7 @@ fn make_gen_section(
             body.push_str("    let mut io = Io::new(peripherals.IO_MUX);\n");
             body.push_str("    io.set_interrupt_handler(gpio_irq);\n");
             body.push_str("    critical_section::with(|cs| {\n");
-            for (p, edge) in &armed {
+            for (p, edge, _) in &armed {
                 let var = esp_binding(p);
                 body.push_str(&format!(
                     "        {var}.listen(Event::{});\n",
@@ -1031,6 +1117,17 @@ fn make_gen_section(
     } else {
         irq_handler_items(&armed)
     };
+    // The SHARED spawner is named only when a task actually lands on it.
+    //
+    // Not `!tasks.is_empty()`: a task at a raised priority is spawned on its own
+    // interrupt executor, so a project where EVERY armed pin is raised has tasks
+    // and still never touches `spawner` — which put an unused-variable warning
+    // on a line inside the generated block, exactly the case `entry_with` was
+    // written to avoid.
+    let spawns_on_shared = runtime == EspRuntime::Async
+        && armed
+            .iter()
+            .any(|(_, _, prio)| *prio == TaskPriority::Normal);
     format!(
         "{GEN_BEGIN}\n\
          {use_block}\
@@ -1038,7 +1135,7 @@ fn make_gen_section(
          {entry}\
          {body}\
          {GEN_END}\n",
-        entry = runtime.entry_with(!tasks.is_empty()),
+        entry = runtime.entry_with(spawns_on_shared),
     )
 }
 
@@ -1054,7 +1151,7 @@ fn make_default_gen_section(clock: &ClockConfig, chip: &str, runtime: EspRuntime
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n",
         use_block = build_use_block(
-            false, false, false, false, false, false, false, false, false, false, runtime,
+            false, false, false, false, false, false, false, false, false, false, false, runtime,
         ),
         entry = runtime.entry(),
         init = esp_init_line(clock, chip),
@@ -1077,9 +1174,19 @@ fn build_use_block(
     // Any input armed with an interrupt edge — the blocking path needs a static
     // per pin and the `Io` that carries the one handler.
     has_irq: bool,
+    // Any armed input above `Normal` - the three imports an interrupt executor
+    // needs. Conditional, so a project that never raises one imports nothing new
+    // and its `use` block is byte-identical to before.
+    has_raised_priority: bool,
     runtime: EspRuntime,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
+
+    if has_raised_priority && runtime == EspRuntime::Async {
+        lines.push("use esp_hal::interrupt::Priority;".to_owned());
+        lines.push("use esp_rtos::embassy::InterruptExecutor;".to_owned());
+        lines.push("use static_cell::StaticCell;".to_owned());
+    }
 
     // Entry-point imports first (`Spawner`, the timer + software interrupt the
     // scheduler start consumes) — none on the blocking path.
@@ -3493,6 +3600,140 @@ mod tests {
             .uses()
             .is_empty()
         );
+    }
+
+    // ── Preemptive task priorities ───────────────────────────────────────────
+
+    /// An armed input at `prio`.
+    fn prio_pin(name: &str, prio: TaskPriority) -> Pin {
+        let mut p = pwm_pin(name, PinFunction::GpioInput);
+        p.irq = Some(Edge::Rising);
+        p.irq_priority = prio;
+        p
+    }
+
+    fn prio_code(pins: &[Pin]) -> String {
+        let refs: Vec<&Pin> = pins.iter().collect();
+        esp_main(&refs, EspRuntime::Async)
+    }
+
+    /// The whole point: a raised task is spawned on an INTERRUPT executor, not
+    /// on the shared one, so it preempts everything below it.
+    #[test]
+    fn a_raised_task_gets_its_own_interrupt_executor() {
+        let code = prio_code(&[prio_pin("GPIO0", TaskPriority::High)]);
+        assert!(
+            code.contains("InterruptExecutor<1>"),
+            "the High tier owns software interrupt 1: {code}"
+        );
+        assert!(code.contains("Priority::Priority2"), "{code}");
+        assert!(
+            code.contains("spawner_high.spawn("),
+            "it must not land on the shared spawner: {code}"
+        );
+        // The explanatory comment is `\`-continued in the emitter, and this
+        // file has shipped a RUN OF SPACES through that before. Reading it back
+        // whole is the guard.
+        assert!(
+            code.contains("so they preempt"),
+            "the emitted comment broke across its continuation: {code}"
+        );
+    }
+
+    /// A project that raises nothing generates what it always did.
+    ///
+    /// The feature costs a software interrupt and an executor, so it stays
+    /// invisible until asked for.
+    #[test]
+    fn an_unraised_project_is_unchanged() {
+        let code = prio_code(&[prio_pin("GPIO0", TaskPriority::Normal)]);
+        assert!(code.contains("spawner.spawn("), "{code}");
+        for absent in ["InterruptExecutor", "StaticCell", "spawner_high"] {
+            assert!(!code.contains(absent), "{absent} leaked in: {code}");
+        }
+    }
+
+    /// The two tiers take DIFFERENT software interrupts and different hardware
+    /// priorities — sharing either would defeat the point.
+    #[test]
+    fn the_two_priority_tiers_do_not_collide() {
+        let code = prio_code(&[
+            prio_pin("GPIO0", TaskPriority::High),
+            prio_pin("GPIO1", TaskPriority::Critical),
+        ]);
+        assert!(code.contains("InterruptExecutor<1>"), "{code}");
+        assert!(code.contains("InterruptExecutor<2>"), "{code}");
+        assert!(code.contains("Priority::Priority2"), "{code}");
+        assert!(code.contains("Priority::Priority3"), "{code}");
+        // Never 0: `esp_rtos::start` already took software interrupt 0 for the
+        // scheduler, and handing it out twice is a fight over one peripheral.
+        assert!(
+            !code.contains("InterruptExecutor<0>"),
+            "software interrupt 0 belongs to the scheduler: {code}"
+        );
+    }
+
+    /// Two tasks on the SAME tier share one executor — one static, one start.
+    #[test]
+    fn one_tier_makes_one_executor_however_many_tasks() {
+        let code = prio_code(&[
+            prio_pin("GPIO0", TaskPriority::High),
+            prio_pin("GPIO1", TaskPriority::High),
+        ]);
+        assert_eq!(code.matches("InterruptExecutor::new").count(), 1, "{code}");
+        assert_eq!(code.matches("spawner_high.spawn(").count(), 2, "{code}");
+    }
+
+    /// The executor is started BEFORE anything is spawned on it.
+    #[test]
+    fn the_executor_starts_before_its_tasks() {
+        let code = prio_code(&[prio_pin("GPIO0", TaskPriority::High)]);
+        let start = code.find(".start(Priority::").expect("started");
+        let spawn = code.find("spawner_high.spawn(").expect("spawned");
+        assert!(start < spawn, "spawning onto an unstarted executor: {code}");
+    }
+
+    /// A project whose every task is raised must not name the shared spawner.
+    ///
+    /// It has tasks, so the old `!tasks.is_empty()` said "name it" — but they
+    /// all went to interrupt executors, leaving an unused-variable warning on a
+    /// line inside the generated block that the reader cannot edit away. The
+    /// real compile caught this; the text assertions did not.
+    #[test]
+    fn an_all_raised_project_does_not_name_the_shared_spawner() {
+        let code = prio_code(&[prio_pin("GPIO0", TaskPriority::High)]);
+        assert!(
+            code.contains("async fn main(_spawner: Spawner)"),
+            "nothing spawns on the shared executor: {code}"
+        );
+    }
+
+    /// One Normal task among raised ones DOES use the shared spawner.
+    #[test]
+    fn a_mixed_project_still_names_the_shared_spawner() {
+        let code = prio_code(&[
+            prio_pin("GPIO0", TaskPriority::High),
+            prio_pin("GPIO1", TaskPriority::Normal),
+        ]);
+        assert!(
+            code.contains("async fn main(spawner: Spawner)"),
+            "the Normal task lands on it: {code}"
+        );
+        assert!(code.contains("spawner.spawn("), "{code}");
+        assert!(code.contains("spawner_high.spawn("), "{code}");
+    }
+
+    /// The imports appear only when an executor is emitted.
+    #[test]
+    fn the_executor_imports_follow_the_feature() {
+        let code = prio_code(&[prio_pin("GPIO0", TaskPriority::Critical)]);
+        for need in [
+            "use esp_hal::interrupt::Priority;",
+            "use esp_rtos::embassy::InterruptExecutor;",
+            "use static_cell::StaticCell;",
+        ] {
+            assert!(code.contains(need), "missing {need}: {code}");
+        }
     }
 }
 

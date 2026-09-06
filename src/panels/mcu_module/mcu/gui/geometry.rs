@@ -456,6 +456,7 @@ mod tests {
                         selected_function: PinFunction::Unset,
                         custom_label: String::new(),
                         irq: None,
+                        irq_priority: Default::default(),
                         io_mode: None,
                         af: Vec::new(),
                         fn_owner: Vec::new(),

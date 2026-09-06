@@ -9,6 +9,7 @@
 //! probe-rs expects — no reconstruction from our own USB scan.
 
 use crate::build::no_window;
+use crate::panels::mcu_module::ToolchainKind;
 use crate::terminal::{LineKind, TerminalState};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -42,6 +43,63 @@ pub fn selector(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+/// Whether a probe of `kind` (as `probe-rs list` reports it — "ST-LINK",
+/// "EspJtag", "JLink", "CMSIS-DAP", …) can drive the project chip's toolchain,
+/// the same gate the Flash tab applies to programmers. ARM chips use SWD probes
+/// (ST-Link / J-Link / CMSIS-DAP); ESP chips use the built-in USB-JTAG (or a
+/// J-Link in JTAG mode). SDCC / 8051 isn't a probe-rs target at all.
+pub fn probe_compatible(kind: &str, toolchain: &ToolchainKind) -> bool {
+    let k = kind.to_ascii_lowercase();
+    let is_jlink = k.contains("jlink") || k.contains("j-link");
+    let is_arm_swd =
+        k.contains("st-link") || k.contains("stlink") || k.contains("cmsis") || is_jlink;
+    let is_esp_jtag = k.contains("esp") || k.contains("jtag");
+    match toolchain {
+        ToolchainKind::RustEmbedded => is_arm_swd,
+        ToolchainKind::EspRust => is_esp_jtag || is_jlink,
+        ToolchainKind::SdccC => false,
+    }
+}
+
+/// Resolve "Auto" to ONE probe selector, for the paths that cannot leave the
+/// choice to probe-rs.
+///
+/// `probe-rs dap-server` runs **non-interactive**: given no `probe` and more
+/// than one attached, it does not pick — it fails outright, and the failure
+/// reaches us as the bare word "cancelled" (see
+/// [`crate::debugger::response_error`]). So Auto is resolved here instead,
+/// where the chip's toolchain already says which probes could drive it at all:
+/// with an ST-Link and an ESP built-in JTAG plugged in, an ESP project has
+/// exactly one candidate and "Auto" can mean what the user expects. Only a
+/// genuine tie is handed back, naming the probes.
+pub fn pick_probe(probes: &[ProbeInfo], toolchain: &ToolchainKind) -> Result<String, String> {
+    let usable: Vec<&ProbeInfo> = probes
+        .iter()
+        .filter(|p| probe_compatible(&p.kind, toolchain))
+        .collect();
+    match usable.len() {
+        1 => Ok(usable[0].selector.clone()),
+        0 if probes.is_empty() => Err("no debug probe found — plug one in and press Scan".into()),
+        0 => Err(format!(
+            "none of the attached probes can drive this chip: {}",
+            probes
+                .iter()
+                .map(|p| format!("{} ({})", p.name, p.kind))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        _ => Err(format!(
+            "several probes can drive this chip — pick one in the Probe list \
+             instead of Auto: {}",
+            usable
+                .iter()
+                .map(|p| format!("{} ({})", p.name, p.kind))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 /// Run `probe-rs list` and parse the connected probes. `Ok(vec![])` when none
@@ -500,5 +558,114 @@ STM32F1 Series
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_compatible_tests {
+    use super::{ToolchainKind, probe_compatible};
+
+    #[test]
+    fn arm_chips_accept_swd_probes_not_esp_jtag() {
+        let arm = ToolchainKind::RustEmbedded;
+        // Exact strings `probe-rs list` prints for these probes.
+        assert!(probe_compatible("ST-LINK", &arm));
+        assert!(probe_compatible("JLink", &arm));
+        assert!(probe_compatible("CMSIS-DAP", &arm));
+        // The ESP built-in USB-JTAG can't debug an ARM chip.
+        assert!(!probe_compatible("EspJtag", &arm));
+    }
+
+    #[test]
+    fn esp_chips_accept_jtag_not_stlink() {
+        let esp = ToolchainKind::EspRust;
+        assert!(probe_compatible("EspJtag", &esp));
+        assert!(probe_compatible("JLink", &esp)); // J-Link JTAG works on ESP too
+        assert!(!probe_compatible("ST-LINK", &esp));
+        assert!(!probe_compatible("CMSIS-DAP", &esp));
+    }
+
+    #[test]
+    fn sdcc_has_no_probe_rs_target() {
+        let sdcc = ToolchainKind::SdccC;
+        assert!(!probe_compatible("ST-LINK", &sdcc));
+        assert!(!probe_compatible("EspJtag", &sdcc));
+    }
+}
+
+#[cfg(test)]
+mod pick_probe_tests {
+    use super::{ProbeInfo, ToolchainKind, pick_probe};
+
+    fn probe(name: &str, kind: &str, selector: &str) -> ProbeInfo {
+        ProbeInfo {
+            name: name.into(),
+            kind: kind.into(),
+            selector: selector.into(),
+        }
+    }
+
+    /// The case that sent the user here: an ST-Link and an ESP32-C3 plugged in
+    /// at once. probe-rs refuses to choose; the toolchain leaves one candidate.
+    #[test]
+    fn an_esp_project_ignores_the_st_link_next_to_it() {
+        let attached = [
+            probe("STLink V2", "ST-LINK", "0483:3748"),
+            probe("ESP JTAG", "EspJtag", "303a:1001:50:78:7D:62:33:A4"),
+        ];
+        assert_eq!(
+            pick_probe(&attached, &ToolchainKind::EspRust).unwrap(),
+            "303a:1001:50:78:7D:62:33:A4"
+        );
+    }
+
+    /// …and the mirror image, so the filter is not just "prefer the ESP one".
+    #[test]
+    fn an_arm_project_ignores_the_esp_jtag_next_to_it() {
+        let attached = [
+            probe("STLink V2", "ST-LINK", "0483:3748"),
+            probe("ESP JTAG", "EspJtag", "303a:1001:AA"),
+        ];
+        assert_eq!(
+            pick_probe(&attached, &ToolchainKind::RustEmbedded).unwrap(),
+            "0483:3748"
+        );
+    }
+
+    #[test]
+    fn one_probe_needs_no_filtering_at_all() {
+        let attached = [probe("ESP JTAG", "EspJtag", "303a:1001:AA")];
+        assert_eq!(
+            pick_probe(&attached, &ToolchainKind::EspRust).unwrap(),
+            "303a:1001:AA"
+        );
+    }
+
+    /// A real tie is NOT guessed: picking the wrong one of two ST-Links wastes
+    /// a run against someone else's board.
+    #[test]
+    fn two_candidates_are_handed_back_by_name() {
+        let attached = [
+            probe("STLink V2", "ST-LINK", "0483:3748"),
+            probe("STLink V3", "ST-LINK", "0483:374e"),
+        ];
+        let err = pick_probe(&attached, &ToolchainKind::RustEmbedded).unwrap_err();
+        assert!(err.contains("STLink V2"), "{err}");
+        assert!(err.contains("STLink V3"), "{err}");
+        assert!(err.contains("Probe list"), "{err}");
+    }
+
+    /// An ST-Link alone cannot drive an ESP: say THAT, not "no probe found".
+    #[test]
+    fn the_wrong_kind_alone_says_which_probes_are_attached() {
+        let attached = [probe("STLink V2", "ST-LINK", "0483:3748")];
+        let err = pick_probe(&attached, &ToolchainKind::EspRust).unwrap_err();
+        assert!(err.contains("STLink V2"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_bench_says_so() {
+        let err = pick_probe(&[], &ToolchainKind::EspRust).unwrap_err();
+        assert!(err.contains("no debug probe"), "{err}");
     }
 }

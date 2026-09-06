@@ -374,7 +374,7 @@ impl AppIde {
     /// when the attribute was redundant - it missed the whole reason it exists,
     /// `#[path = "impl_a.rs"] mod imp;`, where the module is `imp` and the file
     /// is `impl_a.rs`.
-    fn path_attr_targets(&self, path: &str) -> bool {
+    pub(super) fn path_attr_targets(&self, path: &str) -> bool {
         let target = path.rsplit('/').next().unwrap_or(path);
         self.project_tree
             .user_src_files
@@ -390,7 +390,7 @@ impl AppIde {
     /// merely begins the same way - renaming `radar.rs` must not be blocked by
     /// an unrelated `radar_io/`. The trailing slash is what makes it a folder
     /// test rather than a prefix test.
-    fn owns_module_dir(&self, path: &str) -> bool {
+    pub(super) fn owns_module_dir(&self, path: &str) -> bool {
         let dir = format!("{}/", path.trim_end_matches(".rs"));
         self.project_tree
             .user_src_files

@@ -14,6 +14,8 @@ impl Pin {
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
             irq: None,
+            irq_priority: crate::panels::mcu_module::pins::logic::pin::model::TaskPriority::default(
+            ),
             io_mode: None,
             af: Vec::new(),
             fn_owner: Vec::new(),
@@ -34,6 +36,8 @@ impl Pin {
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
             irq: None,
+            irq_priority: crate::panels::mcu_module::pins::logic::pin::model::TaskPriority::default(
+            ),
             io_mode: None,
             af: Vec::new(),
             fn_owner: Vec::new(),
@@ -50,6 +54,8 @@ impl Pin {
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
             irq: None,
+            irq_priority: crate::panels::mcu_module::pins::logic::pin::model::TaskPriority::default(
+            ),
             io_mode: None,
             af: Vec::new(),
             fn_owner: Vec::new(),

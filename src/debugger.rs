@@ -1123,6 +1123,44 @@ fn spawn_dap_reader(
     });
 }
 
+/// The human-readable reason a failed DAP response carries.
+///
+/// probe-rs sets `message` to the literal **"cancelled"** on EVERY failure — it
+/// is a predefined token from the DAP spec, not a description — and puts the
+/// real sentence in `body.error.format`. That field is itself a TEMPLATE whose
+/// `{placeholders}` are filled from `body.error.variables`, and probe-rs uses
+/// exactly one: `format: "{response_message}"`. So reading either `message` or
+/// a bare `format` gave the user "cancelled" or "{response_message}" — the
+/// actual cause ("Multiple probes were found", "no probes were found", "the
+/// target is not responding") was on the wire the whole time and thrown away.
+pub(crate) fn response_error(msg: &Value) -> String {
+    let err = &msg["body"]["error"];
+    if let Some(fmt) = err["format"].as_str() {
+        let mut out = fmt.to_owned();
+        if let Some(vars) = err["variables"].as_object() {
+            for (name, value) in vars {
+                if let Some(value) = value.as_str() {
+                    out = out.replace(&format!("{{{name}}}"), value);
+                }
+            }
+        }
+        let out = out.trim();
+        // Only if a placeholder was left unfilled is this worse than `message`.
+        if !out.is_empty() && !out.starts_with('{') {
+            return out.to_owned();
+        }
+    }
+    match msg["message"].as_str() {
+        // "cancelled" is the placeholder, never the reason - saying it back to
+        // the user reads as "you cancelled this", which nobody did.
+        Some(m) if !m.is_empty() && m != "cancelled" => m.to_owned(),
+        _ => format!(
+            "{} failed without a reason (see the log)",
+            msg["command"].as_str().unwrap_or("request")
+        ),
+    }
+}
+
 fn handle_response(
     msg: &Value,
     cfg: &Arc<SessionCfg>,
@@ -1140,11 +1178,7 @@ fn handle_response(
     let ok = msg["success"].as_bool().unwrap_or(false);
 
     if !ok {
-        let err = msg["message"]
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| msg["body"]["error"]["format"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| format!("{} failed", msg["command"].as_str().unwrap_or("request")));
+        let err = response_error(msg);
         // A watch that can't be resolved (out of scope, unsupported expression)
         // is normal — show it on the row, don't spam the console.
         if let Pending::Watch(i) = kind {
@@ -1588,6 +1622,72 @@ fn rel_of(path: &str, project_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact shape probe-rs sends on a failure: `message` is the DAP token
+    /// "cancelled", and the sentence is a `{response_message}` template filled
+    /// from `variables`. Reading either field raw is what turned every failed
+    /// attach into the word "cancelled".
+    #[test]
+    fn a_failed_response_reports_probe_rs_own_sentence() {
+        let msg = json!({
+            "type": "response", "command": "attach", "success": false,
+            "message": "cancelled",
+            "body": { "error": {
+                "id": 0,
+                "format": "{response_message}",
+                "variables": { "response_message":
+                    "Multiple probes were found. Please specify one with the --probe argument." },
+                "showUser": true,
+            }},
+        });
+        assert_eq!(
+            response_error(&msg),
+            "Multiple probes were found. Please specify one with the --probe argument."
+        );
+    }
+
+    /// A `format` with no placeholders is already the message.
+    #[test]
+    fn a_plain_format_is_used_as_it_stands() {
+        let msg = json!({
+            "type": "response", "command": "launch", "success": false,
+            "message": "cancelled",
+            "body": { "error": { "format": "The debug probe could not be opened." } },
+        });
+        assert_eq!(response_error(&msg), "The debug probe could not be opened.");
+    }
+
+    /// No error body: fall back to `message` — but never to "cancelled", which
+    /// reads as "you cancelled this" when nobody did.
+    #[test]
+    fn the_cancelled_placeholder_is_never_shown_as_the_reason() {
+        let bare = json!({
+            "type": "response", "command": "attach", "success": false,
+            "message": "cancelled",
+        });
+        let out = response_error(&bare);
+        assert!(!out.contains("cancelled"), "{out}");
+        assert!(out.contains("attach"), "{out}");
+
+        // A server that DOES describe the failure in `message` is believed.
+        let spoken = json!({
+            "type": "response", "command": "pause", "success": false,
+            "message": "core is not halted",
+        });
+        assert_eq!(response_error(&spoken), "core is not halted");
+    }
+
+    /// An unfilled placeholder is worse than nothing — don't print braces.
+    #[test]
+    fn an_unresolved_template_falls_through_to_the_message() {
+        let msg = json!({
+            "type": "response", "command": "attach", "success": false,
+            "message": "cancelled",
+            "body": { "error": { "format": "{response_message}" } },
+        });
+        let out = response_error(&msg);
+        assert!(!out.contains('{'), "{out}");
+    }
 
     /// Live watch reads memory over DAP, which ships it base64-encoded, and
     /// only ADDRESS rows can be read while the target runs.
