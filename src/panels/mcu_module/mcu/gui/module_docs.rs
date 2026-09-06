@@ -322,6 +322,8 @@ pub const ALL_DOCS: &[(&str, &str)] = &[
     ("TIMER_AUTO_OUTPUT_ENABLE", TIMER_AUTO_OUTPUT_ENABLE),
     ("SKIP_F1_SERIAL", SKIP_F1_SERIAL),
     ("SKIP_USART_BUF_TX_ONLY", SKIP_USART_BUF_TX_ONLY),
+    ("SKIP_USART_BUF_RP_DMA", SKIP_USART_BUF_RP_DMA),
+    ("SKIP_I2C_TIMEOUT_RP", SKIP_I2C_TIMEOUT_RP),
     ("SKIP_SPI_BIT_ORDER", SKIP_SPI_BIT_ORDER),
     ("SKIP_SPI_ROLE", SKIP_SPI_ROLE),
     ("SKIP_TOUCH_SLEEP", SKIP_TOUCH_SLEEP),
@@ -1420,6 +1422,19 @@ pub const SKIP_USART_BUF_TX_ONLY: &str = "A TX-only DMA link has no buffer at al
                                           controller sends straight from the slice you hand it, \
                                           so there is nothing to size. Give the link a receiving \
                                           half and the row comes back.";
+
+pub const SKIP_USART_BUF_RP_DMA: &str = "Only the buffered transport has a buffer on this chip. \
+                                         embassy-rp's DMA `Uart` reads straight into the slice \
+                                         you pass `read`, with no ring behind it - there is \
+                                         nothing to size, and the row used to size a buffer that \
+                                         was never allocated. Switch the transport to buffered \
+                                         and it comes back.";
+
+pub const SKIP_I2C_TIMEOUT_RP: &str = "embassy-rp's I2C takes no timeout. Its `Config` carries \
+                                       the frequency alone, and a transfer that hangs on a \
+                                       stretched clock hangs - the row was a control with \
+                                       nothing to pass it to. On an STM32 the timeout is part of \
+                                       embassy-stm32's own `Config`.";
 
 pub const SKIP_SPI_BIT_ORDER: &str = "Only the async path can set it: stm32f1xx-hal's blocking \
                                       SPI takes no bit-order argument, so the row would be a \

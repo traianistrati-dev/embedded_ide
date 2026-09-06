@@ -3020,7 +3020,22 @@ impl AppIde {
 
     // ── Frame initialization (frame state, LSP, MCU synchronization) ───────────
     /// Calculate a hash of the MCU state (pins + clock + modules) for change detection
-    fn calculate_mcu_state_hash(&self, mcu: &Mcu) -> u64 {
+    /// Everything about the chip that CODEGEN reads, folded into one number.
+    ///
+    /// `init_frame` regenerates main.rs, every `src/pins/configs/*.rs` and the
+    /// dependency scan when this changes, and does nothing at all when it does
+    /// not. So the rule for what belongs here is exact, and it cuts both ways:
+    ///
+    /// * a value the emitters read and this misses is a control that silently
+    ///   does nothing — the user ticks it and the project never changes, until
+    ///   something unrelated happens to move the hash;
+    /// * a value the emitters never read but this hashes is a full regeneration
+    ///   that emits byte-identical output — and if it is something the user
+    ///   DRAGS, that is one regeneration per frame of the gesture.
+    ///
+    /// Takes no receiver: it reads nothing but `mcu`, and that is also what
+    /// puts it under test, which is how the two misses below were pinned down.
+    fn calculate_mcu_state_hash(mcu: &Mcu) -> u64 {
         let mut hasher = DefaultHasher::new();
 
         // Hash all pins
@@ -3037,6 +3052,14 @@ impl AppIde {
 
         // Hash clock config
         format!("{:?}", mcu.clock).hash(&mut hasher);
+        // ...and whether the Clock tab is allowed to drive it at all.
+        // `keep_manual_clock` (family.rs) reads this on all three STM32 paths:
+        // with it set, the fenced clock block in main.rs is left exactly as the
+        // user wrote it. Unhashed, unticking "Write the clock by hand" changed
+        // nothing — the tab went back to being editable and the block it was
+        // supposed to take back stayed hand-written, which is the opposite of
+        // what the checkbox promises.
+        mcu.clock_manual.hash(&mut hasher);
 
         // Hash the runtime — flipping Blocking⇄Async re-targets the backend
         // (async entry) and the embassy deps, so it must trigger regeneration.
@@ -3056,6 +3079,14 @@ impl AppIde {
         // generated project until something else happened to bump the hash.
         format!("{:?}", mcu.watchdog).hash(&mut hasher);
 
+        // Comparators, for exactly the same reason and from the same tab.
+        // `family.rs` passes `settings: &mcu.comp` into the emitter, and the
+        // value round-trips through `@comp` in mcu.config — so it is persisted
+        // codegen input in every sense, and it was the one such value this
+        // number did not see. Ticking COMP1 wrote no `configs/comp1.rs` and
+        // changed no line of main.rs.
+        format!("{:?}", mcu.comp).hash(&mut hasher);
+
         // Device groups. A group changes no binding and no init call - but it
         // does write `device_comment` into the generated main.rs, so renaming or
         // refilling one has to regenerate. Without this the roster would edit a
@@ -3072,7 +3103,14 @@ impl AppIde {
             module.id.hash(&mut hasher);
             module.kind.hash(&mut hasher);
             module.name.hash(&mut hasher);
-            format!("{:?}{:?}", module.pos.0, module.pos.1).hash(&mut hasher);
+            // NOT `module.pos`. It is documented as "top-left position on the
+            // Pins canvas (used by the GUI phase)" and nothing under `codegen/`
+            // reads it — it is persisted through `@modules` at save time, which
+            // does not go through this hash at all. Hashing it meant that
+            // dragging a box regenerated main.rs, every `src/pins/configs/*.rs`
+            // and the whole Cargo dependency scan on EVERY FRAME of the drag,
+            // to emit the same bytes each time. The gesture stuttered on a chip
+            // with a few modules, and that was the entire effect.
             // Parameters (baud, mode, …) and pin wiring feed `config_files()`
             // — they must bump the hash, or the hash-gated regeneration in
             // `init_frame` would miss a module edit and keep emitting the old
@@ -3127,16 +3165,9 @@ impl AppIde {
         // frame — full codegen of every configs/*.rs plus Cargo.toml dep
         // checks, just to no-op compare — which, under spinner-driven
         // continuous repaint, was a big share of the per-frame CPU cost.
-        // The Native runtime binds every GPIO raw, so the GPIO In/Out choice is
-        // not live there — snap the stored value to Native BEFORE hashing, so the
-        // (locked) selector shows what the build does and the now-unused
-        // `embedded-hal` is dropped in the same pass. Idempotent.
-        if let Some(m) = &mut self.mcu {
-            m.normalize_gpio_api();
-        }
         let mut mcu_changed = false;
         if let Some(mcu) = &self.mcu {
-            let current_hash = self.calculate_mcu_state_hash(mcu);
+            let current_hash = Self::calculate_mcu_state_hash(mcu);
             if current_hash != self.mcu_state_hash {
                 // Store the hash even when main.rs comes out identical —
                 // otherwise this branch (and `update_main_rs`) re-runs every
@@ -5484,5 +5515,107 @@ mod definition_word_tests {
         let line = "// ăăă\nx";
         let line = line.lines().next().expect("first line");
         assert_eq!(word_ranges(line, "ăăă"), [(3, 6)]);
+    }
+}
+
+/// What the regeneration hash must see, and what it must not.
+///
+/// The two directions are one test suite because they are one rule: the hash is
+/// exactly the codegen inputs. Anything the emitters read and this misses is a
+/// dead control; anything they never read and this hashes is a full regeneration
+/// for nothing.
+#[cfg(test)]
+mod the_state_hash_is_the_codegen_inputs {
+    use super::AppIde;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::comparator::{CompConfig, Hysteresis};
+    use crate::panels::mcu_module::mcu::Mcu;
+    use crate::panels::mcu_module::modules::ModuleKind;
+
+    fn chip(id: &str) -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu()
+    }
+
+    fn h(mcu: &Mcu) -> u64 {
+        AppIde::calculate_mcu_state_hash(mcu)
+    }
+
+    /// `family.rs` passes `settings: &mcu.comp` into the emitter, so ticking a
+    /// comparator is codegen input. Unhashed, the Configuration tab wrote the
+    /// setting into `mcu.config` and no line of the project ever changed.
+    #[test]
+    fn a_comparator_reaches_the_generated_project() {
+        let mut mcu = chip("stm32f103c8t6");
+        let before = h(&mcu);
+        mcu.comp.insert(1, CompConfig::default());
+        assert_ne!(before, h(&mcu), "ticking COMP1 regenerates");
+
+        let with_default = h(&mcu);
+        mcu.comp.insert(
+            1,
+            CompConfig {
+                hysteresis: Hysteresis::Mv70,
+                ..CompConfig::default()
+            },
+        );
+        assert_ne!(
+            with_default,
+            h(&mcu),
+            "and so does changing one of its fields"
+        );
+    }
+
+    /// `keep_manual_clock` reads this on all three STM32 paths and it decides
+    /// whether the fenced clock block in main.rs is rewritten or left alone -
+    /// which is the whole meaning of the checkbox.
+    #[test]
+    fn taking_the_clock_back_by_hand_regenerates() {
+        let mut mcu = chip("stm32f103c8t6");
+        let before = h(&mcu);
+        mcu.clock_manual = !mcu.clock_manual;
+        assert_ne!(before, h(&mcu), "ticking it regenerates");
+        mcu.clock_manual = !mcu.clock_manual;
+        assert_eq!(before, h(&mcu), "and unticking it regenerates back");
+    }
+
+    /// A module box's place on the canvas is not code.
+    ///
+    /// It was hashed, so a drag ran the whole codegen pass - main.rs, every
+    /// `src/pins/configs/*.rs`, the Cargo dependency scan - on every frame of
+    /// the gesture, to emit identical bytes each time.
+    #[test]
+    fn dragging_a_module_box_regenerates_nothing() {
+        let mut mcu = chip("stm32f103c8t6");
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        let before = h(&mcu);
+        for (i, m) in mcu.modules.iter_mut().enumerate() {
+            m.pos = (37.0 + i as f32, -12.5);
+        }
+        assert_eq!(before, h(&mcu), "the boxes moved, the project did not");
+    }
+
+    /// The guard against the opposite mistake: the parts of a module that a
+    /// drag does NOT touch still move the hash.
+    ///
+    /// Changing the baud rate leaves every pin, id, name and connection exactly
+    /// as it was, so this fails the moment `module.config` stops being hashed -
+    /// which is what makes it a real guard rather than a restatement of the pin
+    /// hashing above.
+    #[test]
+    fn retuning_a_module_still_regenerates() {
+        use crate::panels::mcu_module::modules::ModuleConfig;
+        let mut mcu = chip("stm32f103c8t6");
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let before = h(&mcu);
+        match &mut mcu.modules[0].config {
+            ModuleConfig::Usart(c) => c.baud_rate = 230_400,
+            other => panic!("a USART module: {other:?}"),
+        }
+        assert_ne!(before, h(&mcu), "the baud rate reaches configs/usart1.rs");
     }
 }

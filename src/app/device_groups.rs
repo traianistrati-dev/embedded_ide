@@ -501,25 +501,6 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
     );
     let rows_before = names_before.len();
     let was_new = apply_act(mcu, act);
-    // The roster got shorter or longer, so every row below the change now holds
-    // a fold bit that belonged to a different device. Re-seat them by NAME - the
-    // identity everything else in this file uses.
-    if mcu.groups.len() != rows_before {
-        for (gi, g) in mcu.groups.iter().enumerate() {
-            let want = folds
-                .iter()
-                .find(|(n, _)| n.trim() == g.name.trim())
-                .map(|(_, o)| *o)
-                .unwrap_or(false);
-            let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(),
-                egui::Id::new(("device_row", gi)),
-                want,
-            );
-            st.set_open(want);
-            st.store(ui.ctx());
-        }
-    }
     if names != names_before {
         // Asked about a name that is about to stop existing.
         mcu.device_remove_confirm = None;
@@ -534,8 +515,38 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
     if !focused.iter().any(|f| *f) {
         sweep_duplicate_names(mcu);
     }
+
+    // The roster got shorter or longer, so every row below the change now holds
+    // a fold bit that belonged to a different device: the fold state is keyed on
+    // the row INDEX, and the rows moved. Re-seat them by NAME - the identity
+    // everything else in this file uses.
+    //
+    // Placed here, at the end, and not beside `apply_act` where it started.
+    // THREE things above can shorten the roster and only one of them was
+    // covered: `apply_act` removes a device, `apply_renames` merges one onto a
+    // taken name (`rename_group` -> `groups.remove(idx)`), and
+    // `sweep_duplicate_names` loops that same merge. So typing an existing name
+    // onto a row merged the two and then sprang the row below open, showing the
+    // pads of a device the user had deliberately folded shut.
+    //
+    // A row whose name is not in `folds` cannot be identified - it was renamed
+    // to something new this frame - and comes up folded, which is what a row
+    // nobody asked about should be.
+    if let Some(want) = reseated_folds(&folds, &mcu.groups, rows_before) {
+        for (gi, open) in want.into_iter().enumerate() {
+            let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                egui::Id::new(("device_row", gi)),
+                open,
+            );
+            st.set_open(open);
+            st.store(ui.ctx());
+        }
+    }
+
     // A device the user has just created is unfolded, so its name can be typed
-    // straight away — folded, the field it needs is not there.
+    // straight away — folded, the field it needs is not there. AFTER the
+    // re-seat, which would otherwise fold the brand-new row shut.
     if was_new {
         let gi = mcu.groups.len().saturating_sub(1);
         let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(
@@ -546,6 +557,38 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu) {
         st.set_open(true);
         st.store(ui.ctx());
     }
+}
+
+/// Which rows should come back open, once the roster has changed shape.
+///
+/// `folds` is `(name as drawn, open)` per row from BEFORE the mutations, so a
+/// device is followed by name through however many rows moved above it.
+///
+/// `None` when the roster is the same length it was: then no row moved, every
+/// index still means what it meant, and rewriting the state would only be a
+/// chance to get it wrong.
+fn reseated_folds(
+    folds: &[(String, bool)],
+    groups: &[crate::panels::mcu_module::mcu_config::PinGroup],
+    rows_before: usize,
+) -> Option<Vec<bool>> {
+    if groups.len() == rows_before {
+        return None;
+    }
+    Some(
+        groups
+            .iter()
+            .map(|g| {
+                folds
+                    .iter()
+                    .find(|(n, _)| n.trim() == g.name.trim())
+                    .map(|(_, o)| *o)
+                    // Renamed to something new this frame, so it cannot be
+                    // followed - and a row nobody asked about comes up folded.
+                    .unwrap_or(false)
+            })
+            .collect(),
+    )
 }
 
 /// Carry out what the roster's controls asked for.
@@ -621,6 +664,60 @@ mod tests {
             .find(|d| d.id == "rp2040_pico")
             .expect("built-in Pico")
             .build_mcu()
+    }
+
+    /// A merge moves every row below it up, and the fold bits are keyed on the
+    /// row INDEX - so they have to follow the devices, not stay where they are.
+    ///
+    /// The re-seat used to run beside `apply_act` only, and `apply_renames` and
+    /// `sweep_duplicate_names` merge rows AFTER that. Typing an existing name
+    /// onto a row therefore merged the two and sprang the row below open,
+    /// showing the pads of a device the user had deliberately folded shut.
+    #[test]
+    fn a_merge_carries_each_fold_bit_to_the_row_its_device_landed_on() {
+        let folds = vec![
+            ("radar".to_owned(), true),
+            ("imu".to_owned(), true),
+            ("leds".to_owned(), false),
+        ];
+        // `imu` was renamed onto `radar`, so the two merged and `leds` moved up.
+        let after = vec![group("radar", &[1, 2]), group("leds", &[3])];
+        let want = super::reseated_folds(&folds, &after, 3).expect("the roster got shorter");
+        assert_eq!(want, vec![true, false], "leds stays shut where it landed");
+    }
+
+    /// A roster that did not change shape is left entirely alone.
+    #[test]
+    fn a_plain_rename_does_not_touch_the_fold_bits() {
+        let folds = vec![("radar".to_owned(), true), ("imu".to_owned(), false)];
+        let after = vec![group("radar2", &[1]), group("imu", &[2])];
+        assert!(
+            super::reseated_folds(&folds, &after, 2).is_none(),
+            "same length, so no row moved"
+        );
+    }
+
+    /// A device added at the end does not disturb the ones above it.
+    #[test]
+    fn a_new_row_leaves_the_others_where_they_were() {
+        let folds = vec![("radar".to_owned(), true), ("leds".to_owned(), false)];
+        let after = vec![
+            group("radar", &[1]),
+            group("leds", &[2]),
+            group("dev3", &[]),
+        ];
+        let want = super::reseated_folds(&folds, &after, 2).expect("the roster grew");
+        assert_eq!(want, vec![true, false, false]);
+    }
+
+    /// Names are matched the way every other comparison in this file matches
+    /// them - trimmed - so a device typed with padding is still followed.
+    #[test]
+    fn padding_does_not_lose_a_devices_fold_bit() {
+        let folds = vec![("  radar ".to_owned(), true), ("imu".to_owned(), false)];
+        let after = vec![group("radar", &[1])];
+        let want = super::reseated_folds(&folds, &after, 2).expect("shorter");
+        assert_eq!(want, vec![true]);
     }
 
     /// Renaming one device onto another's name merges the two — and touches

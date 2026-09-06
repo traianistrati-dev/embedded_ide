@@ -324,6 +324,15 @@ fn module_details_ui(
     ui.label(
         egui::RichText::new(if mcu.can_add_module(m.kind) {
             "Another one can still be added."
+        } else if mcu.has_free_instance(m.kind) {
+            // `can_add_module` says no for TWO different reasons, and this used
+            // to report both as exhausted instances - sending the reader to
+            // remove a module when the thing in the way was a pad.
+            //
+            // Ahead of `is_single_instance` for the same reason
+            // `add_module_block_reason` asks in this order: a spent pad is what
+            // is in the way whether the chip has one of these or six.
+            "The peripheral is free, but its pins are assigned elsewhere."
         } else if m.kind.is_single_instance() {
             "The chip has only this one."
         } else {
@@ -347,10 +356,49 @@ const CHOOSE_PINS_HINT: &str = "Pick the peripheral instance and every pad yours
 /// Out here for the same reason as [`add_module_hint`]: these sentences are
 /// longer than `max_width`, and inline they take the whole panel function out
 /// of rustfmt's reach.
-fn add_module_block_reason(kind: ModuleKind, hw_only: Option<&'static str>) -> &'static str {
+/// Whether module `id`'s config should be open, one frame after a click on the
+/// canvas hit `clicked`'s box.
+///
+/// A click on the CANVAS means "show me this one": every other config closes, so
+/// the right column holds exactly the module whose box was hit. Several at once
+/// is a deliberate act, and the list is where you do it.
+///
+/// The clicked one FOLLOWS `canvas_selected` rather than toggling itself. The
+/// canvas has already decided what the click means - it toggles
+/// `mcu.selected_module`, and a box is drawn white because its config is
+/// showing, so a second, independent toggle here only agreed with it while the
+/// two happened to start in step. Nothing guarantees that: `open_after_add` opens a
+/// config without selecting anything, so adding a module and then clicking its
+/// box to inspect it CLOSED the config that was already open and lit the box
+/// instead.
+fn config_open_after_click(id: &str, clicked: &str, canvas_selected: Option<&str>) -> bool {
+    id == clicked && canvas_selected == Some(id)
+}
+
+fn add_module_block_reason(
+    kind: ModuleKind,
+    hw_only: Option<&'static str>,
+    // The chip still hosts an instance no module holds — so what stands in the
+    // way is the PADS, not the peripheral.
+    free_instance: bool,
+) -> &'static str {
     if let Some(why) = hw_only {
         // The silicon has it; no driver in this HAL can reach it.
         why
+    } else if free_instance {
+        // `can_add_module` says no for two different reasons and this said only
+        // one of them, so a chip with a free instance whose pads were spent sent
+        // the reader off to remove a module that was not in the way.
+        //
+        // Asked FIRST, ahead of the instance count. It used to sit last, behind
+        // `is_single_instance`, which made it unreachable for exactly the seven
+        // kinds that have one instance - and those are the ones where "remove a
+        // module to free it" is worst advice, because on a chip with no USB
+        // module at all it named a module that does not exist. What decides the
+        // wording is what is IN THE WAY, and a spent pad is in the way whether
+        // the chip has one of these or six.
+        "the peripheral is free, but the pins it needs are assigned to other functions — free one \
+         on the Pins canvas"
     } else if kind.is_single_instance() {
         "this chip has only one such peripheral and it's already used"
     } else {
@@ -1043,32 +1091,12 @@ impl AppIde {
                                 // exhausted kind stays visible but disabled with
                                 // the reason — a button that silently vanishes
                                 // is more confusing than one that explains.
-                                //
-                                // Collected BEFORE the menu, never inside it: a
-                                // menu closure runs only while the menu is OPEN,
-                                // so `any_supported` computed in there would read
-                                // false on every other frame and flash the "this
-                                // chip offers no interface" notice below.
-                                let offered: Vec<ModuleKind> = ModuleKind::ALL
-                                    .into_iter()
-                                    // A peripheral the silicon HAS but no driver
-                                    // can reach is kept and shown disabled, with
-                                    // the reason — same as an exhausted one. It
-                                    // used to vanish, which reads as a bug to
-                                    // anyone holding the chip's datasheet.
-                                    .filter(|k| {
-                                        mcu.supports_module(*k)
-                                            || mcu.hardware_only_reason(*k).is_some()
-                                    })
-                                    .collect();
-                                let any_supported = !offered.is_empty();
                                 // One dropdown instead of up to twenty-four
                                 // buttons. The row used to be a wall of `+ …`
                                 // that pushed everything else off the bar on a
                                 // chip with many peripherals — and every one of
                                 // them does the same thing.
-                                if any_supported {
-                                    ui.menu_button(
+                                ui.menu_button(
                                         egui::RichText::new(format!(
                                             "{} Add module {}",
                                             ph::PLUS,
@@ -1079,6 +1107,36 @@ impl AppIde {
                                             // A floor, so the items do not stagger to each
                                             // label's own width.
                                             ui.set_min_width(190.0);
+                                            // Collected INSIDE the closure, which
+                                            // runs only while the menu is OPEN —
+                                            // the same rule the pad preview one
+                                            // level down already follows. Outside,
+                                            // the chip was asked about all
+                                            // twenty-four kinds on every repaint
+                                            // of the MCU tab, with the menu shut
+                                            // and even with this whole panel
+                                            // collapsed to its bar.
+                                            //
+                                            // It used to be out there to keep an
+                                            // `any_supported` gate from flickering.
+                                            // That gate could never be false:
+                                            // `ModuleKind::ALL` contains `Custom`,
+                                            // and `supports_module` answers true
+                                            // for it on every chip.
+                                            let offered: Vec<ModuleKind> = ModuleKind::ALL
+                                                .into_iter()
+                                                // A peripheral the silicon HAS but
+                                                // no driver can reach is kept and
+                                                // shown disabled, with the reason —
+                                                // same as an exhausted one. It used
+                                                // to vanish, which reads as a bug to
+                                                // anyone holding the chip's
+                                                // datasheet.
+                                                .filter(|k| {
+                                                    mcu.supports_module(*k)
+                                                        || mcu.hardware_only_reason(*k).is_some()
+                                                })
+                                                .collect();
                                             for kind in offered {
                                                 let hw_only = mcu.hardware_only_reason(kind);
                                                 // Feasibility only. The pad
@@ -1123,7 +1181,11 @@ impl AppIde {
                                                 if !can_add {
                                                     ui.add_enabled(false, egui::Button::new(text))
                                                         .on_disabled_hover_text(
-                                                            add_module_block_reason(kind, hw_only),
+                                                            add_module_block_reason(
+                                                                kind,
+                                                                hw_only,
+                                                                mcu.has_free_instance(kind),
+                                                            ),
                                                         );
                                                     continue;
                                                 }
@@ -1227,16 +1289,6 @@ impl AppIde {
                                             }
                                         },
                                     );
-                                } else {
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "this chip's pins offer no USART / SPI / I2C / CAN / USB interface",
-                                        )
-                                        .size(11.0)
-                                        .italics()
-                                        .color(egui::Color32::from_gray(130)),
-                                    );
-                                }
 
                                 if mcu.can_undo_modules() {
                                      ui.separator();
@@ -1278,6 +1330,12 @@ impl AppIde {
                             // TOGGLE its list entry this frame (expand if closed,
                             // collapse if open), then it's user-controlled again.
                             let to_open = mcu.expand_module.take();
+                            // What the CANVAS decided that click means. Clicking
+                            // a box toggles its selection, and a box is white
+                            // because its config is showing - so this, not a
+                            // second toggle down in the loop, is what the config
+                            // has to follow.
+                            let canvas_selected = mcu.selected_module.clone();
                             // Clicking a module box on the canvas has to REACH
                             // something: with the panel put away, the request
                             // would be taken here and quietly dropped, and the
@@ -1553,23 +1611,14 @@ impl AppIde {
                                                         } else if let Some(t) =
                                                             to_open.as_deref()
                                                         {
-                                                            // A click on the CANVAS
-                                                            // means "show me this
-                                                            // one": every other
-                                                            // config closes, so the
-                                                            // right column holds
-                                                            // exactly the module
-                                                            // whose box was hit.
-                                                            // Several at once is a
-                                                            // deliberate act, and
-                                                            // the list is where you
-                                                            // do it.
-                                                            if t == m.id {
-                                                                let now = st.is_open();
-                                                                st.set_open(!now);
-                                                            } else {
-                                                                st.set_open(false);
-                                                            }
+                                                            st.set_open(
+                                                                config_open_after_click(
+                                                                    &m.id,
+                                                                    t,
+                                                                    canvas_selected
+                                                                        .as_deref(),
+                                                                ),
+                                                            );
                                                         }
                                                         let open = st.is_open();
                                                         st.store(ui.ctx());
@@ -1657,16 +1706,42 @@ impl AppIde {
                                     // removing it) takes its details with it,
                                     // rather than leaving a column describing
                                     // something no longer on screen.
+                                    // The config column's REAL floor. Its rows are
+                                    // a label beside a ComboBox or a fixed-width
+                                    // `TextEdit`, and neither shrinks below its
+                                    // own desired width whatever rect it is handed
+                                    // - a column asked for less does not get
+                                    // smaller, it overflows and eats the pane's
+                                    // share. The old 120 floor was a width nothing
+                                    // in there could honour, so on a narrow zone
+                                    // the pane was allocated whatever was left
+                                    // after the overflow: a ~60 px shred of
+                                    // one-word-per-line text.
+                                    const CFG_MIN_W: f32 = 215.0;
+                                    // Narrower than this a pane says less than the
+                                    // space it costs, so it is not opened at all -
+                                    // the (i) button stays unlit rather than
+                                    // lighting up over a sliver.
+                                    const INFO_MIN_W: f32 = 180.0;
+                                    let room = ui.available_width();
+                                    // Read by the (i) button as well as by the
+                                    // pane. Gating only the pane made the button
+                                    // a switch that lit up, changed its tooltip
+                                    // to "Hide the details pane", and opened
+                                    // nothing - and since the id it wrote is
+                                    // persisted, it stayed lit across frames.
+                                    let info_fits = room - CFG_MIN_W >= INFO_MIN_W;
                                     let info_for = info_id
                                         .clone()
-                                        .filter(|id| open_ids.iter().any(|o| o == id));
+                                        .filter(|id| open_ids.iter().any(|o| o == id))
+                                        .filter(|_| info_fits);
                                     let info_w = if info_for.is_some() {
-                                        (ui.available_width() * 0.40).clamp(220.0, 420.0)
+                                        (room * 0.40).clamp(INFO_MIN_W, 420.0)
                                     } else {
                                         0.0
                                     };
                                     let cfg_size = egui::vec2(
-                                        (ui.available_width() - info_w).max(120.0),
+                                        (room - info_w).max(CFG_MIN_W),
                                         ui.available_height(),
                                     );
                                     let out = ui
@@ -1741,27 +1816,47 @@ impl AppIde {
                                                             egui::Align::Center,
                                                         ),
                                                         |ui| {
-                                                            let showing = info_id.as_deref()
-                                                                == Some(m.id.as_str());
-                                                            if ui
-                                                                .selectable_label(
-                                                                    showing,
-                                                                    egui::RichText::new(ph::INFO)
+                                                            let showing = info_fits
+                                                                && info_id.as_deref()
+                                                                    == Some(m.id.as_str());
+                                                            ui.add_enabled_ui(
+                                                                info_fits,
+                                                                |ui| {
+                                                                    let r = ui.selectable_label(
+                                                                        showing,
+                                                                        egui::RichText::new(
+                                                                            ph::INFO,
+                                                                        )
                                                                         .size(14.0)
                                                                         .color(mod_color),
-                                                                )
-                                                                .on_hover_text(if showing {
-                                                                    "Hide the details pane"
-                                                                } else {
-                                                                    "What this module holds and \
-                                                                     where its pins land in the \
-                                                                     generated code"
-                                                                })
-                                                                .clicked()
-                                                            {
-                                                                info_toggle =
-                                                                    Some(m.id.clone());
-                                                            }
+                                                                    );
+                                                                    let r = if info_fits {
+                                                                        r.on_hover_text(
+                                                                            if showing {
+                                                                                "Hide the details \
+                                                                                 pane"
+                                                                            } else {
+                                                                                "What this module \
+                                                                                 holds and where \
+                                                                                 its pins land in \
+                                                                                 the generated \
+                                                                                 code"
+                                                                            },
+                                                                        )
+                                                                    } else {
+                                                                        r.on_disabled_hover_text(
+                                                                            "There is no room for \
+                                                                             the details pane \
+                                                                             here — widen the MCU \
+                                                                             zone to open one",
+                                                                        )
+                                                                    };
+                                                                    if r.clicked() {
+                                                                        info_toggle =
+                                                                            Some(m.id.clone());
+                                                                    }
+                                                                },
+                                                            );
                                                         },
                                                     );
                                                 });
@@ -2072,11 +2167,26 @@ impl AppIde {
                     if expand_clicked {
                         body_h = self.vmod_list_h.clamp(60.0, body_cap);
                         if let Some(mcu) = &mut self.mcu {
-                            mcu.collapse_modules = true;
+                            mcu.all_configs_collapsed();
                         }
                         ui.ctx().request_repaint();
                     }
-                    self.vmod_open_sig = open_sig;
+                    // Only a frame that actually DREW the configs knows which are
+                    // open. A collapsed frame draws none, so storing 0 here made
+                    // the next re-open look like "the set of open configs
+                    // changed" and re-fit the panel to 45% of the zone - in the
+                    // same frame the user was dragging its top border up from the
+                    // bar, so a small panel could not be re-established by
+                    // dragging at all.
+                    //
+                    // Guarding the STORE and not the test that reads it is what
+                    // keeps "add a module from the collapsed bar" working: that
+                    // path needs the signature to change from the preserved one
+                    // to the preserved one plus the new module, which it still
+                    // does.
+                    if !collapsed {
+                        self.vmod_open_sig = open_sig;
+                    }
                     self.vmod_collapsed = collapsed;
                     self.vmod_body_h = body_h;
                     self.vmod_info_id = info_id;
@@ -2879,7 +2989,28 @@ impl AppIde {
             // Native runtime GPIO is forced raw regardless. Edits the STAGED
             // `pending_gpio_api`.
             let gpio_ok = native_ok && mcu.pending_runtime != Runtime::Native;
-            let portable_sel = mcu.pending_gpio_api == ApiStyle::Portable;
+            // What the two cards SHOW. While the Native runtime is staged they
+            // are dead and GPIO binds raw whatever this field holds, so Native
+            // is what they show - derived here rather than written into
+            // `pending_gpio_api`.
+            //
+            // Writing it is what `normalize_gpio_api` used to do, and it staged
+            // a second change nobody could have made: the bar read "2 staged
+            // changes - Runtime: Blocking -> Native AND GPIO In/Out: Portable ->
+            // Native", with the GPIO cards greyed out. Applying then made it
+            // permanent, so going back to Blocking afterwards left GPIO on
+            // Native - the bridge the user never chose to leave, gone for good.
+            //
+            // Nothing downstream needed the write: every emitter reads
+            // `gpio_native()`, which is already `is_native() || gpio_api ==
+            // Native`, and the `embedded-hal` dependency follows the io.rs that
+            // comes out of it.
+            let shown = if gpio_ok {
+                mcu.pending_gpio_api
+            } else {
+                ApiStyle::Native
+            };
+            let portable_sel = shown == ApiStyle::Portable;
             if runtime_card(
                 ui,
                 portable_sel && native_ok,
@@ -2894,7 +3025,7 @@ impl AppIde {
                 mcu.pending_gpio_api = ApiStyle::Portable;
             }
             ui.add_space(6.0);
-            let native_gpio_sel = mcu.pending_gpio_api == ApiStyle::Native;
+            let native_gpio_sel = shown == ApiStyle::Native;
             if runtime_card(
                 ui,
                 native_gpio_sel && native_ok,
@@ -2996,7 +3127,7 @@ impl AppIde {
     /// regenerates until the user **Applies** the pending Runtime / GPIO /
     /// per-module choices. Nothing is drawn when there's no staged change.
     fn runtime_apply_bar(ui: &mut egui::Ui, mcu: &mut crate::panels::mcu_module::mcu::Mcu) {
-        if !mcu.style_dirty() {
+        if !mcu.apply_bar_visible() {
             return;
         }
         let diff = mcu.style_diff_summary();
@@ -3605,4 +3736,140 @@ fn runtime_details(ui: &mut egui::Ui, salt: &str, points: &[(&str, &str)], examp
                 });
         }
     });
+}
+
+/// What the palette SAYS when it greys an entry out.
+///
+/// The wording is the whole value of a disabled row: it is the only thing that
+/// tells the reader where to go and undo the blockage.
+#[cfg(test)]
+mod the_greyed_entry_names_what_is_in_the_way {
+    use super::add_module_block_reason;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::mcu::Mcu;
+    use crate::panels::mcu_module::modules::ModuleKind;
+    use crate::panels::mcu_module::pins::PinFunction;
+
+    fn f103() -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu()
+    }
+
+    /// A chip with one USB, no USB module, and its two pads spent on GPIO.
+    ///
+    /// Nothing is wired to USB, so "remove one to free it" names a module that
+    /// does not exist and sends the reader looking for it. The pads are what is
+    /// in the way, and the pads are on the Pins canvas.
+    #[test]
+    fn spent_pads_are_named_even_on_a_chip_with_one_of_the_peripheral() {
+        let mut mcu = f103();
+        let kind = ModuleKind::GenericInterfaceUsb;
+        assert!(kind.is_single_instance(), "the F103 has one USB");
+        assert!(mcu.can_add_module(kind), "and it is free to start with");
+
+        // Every pad USB could use goes to plain GPIO.
+        let (required, _) = kind.signals();
+        for &sig in required {
+            let want = sig.pin_function(1);
+            let pads: Vec<usize> = mcu
+                .iter_all_pins()
+                .filter(|p| p.available_functions.contains(&want))
+                .map(|p| p.number)
+                .collect();
+            for n in pads {
+                if let Some(p) = mcu.find_pin_mut(n) {
+                    p.selected_function = PinFunction::GpioOutput;
+                }
+            }
+        }
+
+        assert!(!mcu.can_add_module(kind), "so it can no longer be added");
+        assert!(
+            mcu.has_free_instance(kind),
+            "but the peripheral itself is untouched"
+        );
+        assert!(
+            mcu.modules.is_empty(),
+            "and there is no module anywhere to remove"
+        );
+
+        let why = add_module_block_reason(kind, None, mcu.has_free_instance(kind));
+        assert!(
+            why.contains("Pins canvas"),
+            "it points at the pads: {why:?}"
+        );
+        assert!(
+            !why.contains("already used") && !why.contains("remove one"),
+            "and does not send the reader after a module: {why:?}"
+        );
+    }
+
+    /// With the peripheral genuinely held, the wording goes back to naming it.
+    #[test]
+    fn a_held_single_instance_peripheral_is_still_reported_as_held() {
+        let mut mcu = f103();
+        let kind = ModuleKind::GenericInterfaceUsb;
+        assert!(mcu.add_module(kind), "wire the chip's only USB");
+        assert!(!mcu.has_free_instance(kind));
+        let why = add_module_block_reason(kind, None, mcu.has_free_instance(kind));
+        assert!(
+            why.contains("only one such peripheral"),
+            "the chip has one and it is taken: {why:?}"
+        );
+    }
+
+    /// A peripheral no driver can reach beats both - the reader cannot do
+    /// anything about pads or modules there.
+    #[test]
+    fn a_hardware_only_peripheral_says_so_first() {
+        let why = add_module_block_reason(
+            ModuleKind::GenericInterfaceUsb,
+            Some("the HAL has no driver for it"),
+            true,
+        );
+        assert_eq!(why, "the HAL has no driver for it");
+    }
+}
+
+/// One click on a module box, two things that must agree about it.
+#[cfg(test)]
+mod the_canvas_and_the_list_agree_about_one_click {
+    use super::config_open_after_click;
+
+    /// The config the click SELECTED opens — and stays open however it came to
+    /// be open before, which is the case the old blind toggle got wrong: a
+    /// config `open_after_add` had just unfolded read as "open, so close it".
+    #[test]
+    fn the_clicked_box_shows_its_config() {
+        assert!(config_open_after_click(
+            "usart_1",
+            "usart_1",
+            Some("usart_1")
+        ));
+    }
+
+    /// Clicking a selected box again deselects it on the canvas, so its config
+    /// closes with it - the two halves of one switch.
+    #[test]
+    fn clicking_it_again_closes_the_config() {
+        assert!(!config_open_after_click("usart_1", "usart_1", None));
+    }
+
+    /// Every other config closes, whatever the canvas selected.
+    #[test]
+    fn every_other_config_closes() {
+        assert!(!config_open_after_click(
+            "spi_2",
+            "usart_1",
+            Some("usart_1")
+        ));
+        assert!(!config_open_after_click("spi_2", "usart_1", None));
+        assert!(
+            !config_open_after_click("spi_2", "usart_1", Some("spi_2")),
+            "a selection the click did not make does not keep a config open"
+        );
+    }
 }

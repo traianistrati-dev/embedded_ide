@@ -158,13 +158,16 @@ impl AppIde {
             // restored clock drives the regenerated chain). Older projects
             // without that file fall back to the legacy `@modules` / `@clock`
             // comment markers that used to live in main.rs.
-            match std::fs::read_to_string(root.join(mcu_config::FILE_NAME)) {
-                Ok(cfg) => {
+            // Kept, not just consumed: `@labels` has to be applied further down,
+            // after `apply_saved_pins` has done its `reset_all_pins`.
+            let cfg_text = std::fs::read_to_string(root.join(mcu_config::FILE_NAME)).ok();
+            match &cfg_text {
+                Some(cfg) => {
                     if let Some(mcu) = &mut self.mcu {
-                        mcu.apply_mcu_config(&cfg);
+                        mcu.apply_mcu_config(cfg);
                     }
                 }
-                Err(_) => {
+                None => {
                     use crate::panels::mcu_module::clock::persist as clock_persist;
                     if let Some(clock) = clock_persist::parse_from_source(&source) {
                         if let Some(mcu) = &mut self.mcu {
@@ -188,6 +191,14 @@ impl AppIde {
                     // Restore the per-pin user labels (the `_<label>` suffix on a
                     // binding) — after apply_saved_pins, which would clear them.
                     mcu.apply_saved_pin_labels(&codegen::parse_pin_labels(&source));
+                    // `@labels` LAST, and it wins: it holds the free text the
+                    // user typed, where the binding suffix above holds only what
+                    // survived being turned into a Rust identifier. A project
+                    // saved before the section existed has none, and keeps the
+                    // recovered-from-main.rs labels it always had.
+                    if let Some(cfg) = &cfg_text {
+                        mcu.apply_config_pin_labels(cfg);
+                    }
                     // Rebuild generated_code from the restored pin state while
                     // keeping the user's loop body from the existing file.
                     self.generated_code = mcu.update_main_rs(&source);

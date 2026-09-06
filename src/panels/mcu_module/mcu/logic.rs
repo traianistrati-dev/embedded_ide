@@ -235,15 +235,50 @@ impl Mcu {
         {
             return false;
         }
-        let (required, optional) = kind.signals();
-        autowire::pick_pins(
-            self,
-            &Default::default(),
-            &Default::default(),
-            required,
-            optional,
-        )
-        .is_some()
+        let (required, _optional) = kind.signals();
+        // STATIC, as the doc above says: what the silicon has, not what is
+        // wired. Asked dynamically - which is what `pick_pins` answers - a kind
+        // whose every candidate pad the user had spent on another function left
+        // the palette entirely, with no row and no reason. That is the one thing
+        // the palette promises never to do; a blocked kind stays visible and
+        // `add_module_block_reason` says why.
+        //
+        // The optional signals are not consulted and cannot change the answer:
+        // each is added only `if let Some(pin)`, so it can extend a wiring but
+        // never prevent one (`an_optional_signal_cannot_make_a_wiring_fail`).
+        autowire::any_wiring_static(self, &Default::default(), required)
+    }
+
+    /// Whether the chip still hosts an instance of `kind` that no module holds.
+    ///
+    /// The question that separates the two ways [`Self::can_add_module`] can say
+    /// no. Both used to be reported as "every instance is already wired to a
+    /// module", which on a chip with a free instance whose pads were spent named
+    /// the wrong thing to go and fix.
+    ///
+    /// Asked STATICALLY, because "free" here is about the PERIPHERAL, not about
+    /// its pads: an instance nothing holds is free even when every pad it could
+    /// use carries something else.
+    pub fn has_free_instance(&self, kind: crate::panels::mcu_module::modules::ModuleKind) -> bool {
+        use crate::panels::mcu_module::modules::autowire;
+        if kind.is_custom() {
+            return true;
+        }
+        // A single-instance peripheral is free exactly when nothing holds it.
+        // The instance LOOP cannot answer this one: `pin_function` ignores the
+        // instance for such a kind, so every index from 1 up looks like another
+        // copy of the same peripheral and the search would always find one.
+        if kind.is_single_instance() {
+            return !self.modules.iter().any(|m| m.kind == kind);
+        }
+        let (required, _optional) = kind.signals();
+        let used_instances: std::collections::HashSet<u8> = self
+            .modules
+            .iter()
+            .filter(|m| m.kind == kind)
+            .map(|m| m.instance())
+            .collect();
+        autowire::any_wiring_static(self, &used_instances, required)
     }
 
     /// Could another `kind` be added RIGHT NOW — i.e. are there still free pins
@@ -381,6 +416,30 @@ impl Mcu {
         if chosen.is_empty() {
             return false;
         }
+        // The peripheral itself has to be free, not just its pads.
+        //
+        // Same doctrine as the pad check below, for the same reason: this is
+        // public and the "Choose pins..." dialog holds its instance across
+        // frames while the palette behind it keeps adding modules. Writing the
+        // pads anyway would succeed at the pin level and then
+        // `reconcile_modules` would fold them into the module that already
+        // holds the instance - no new module appears, and the user's existing
+        // CAN1 quietly grows a second TX and a second RX.
+        //
+        // Asked through `module_signal_of`, which is the mapping
+        // `reconcile_modules` itself uses, so this predicts exactly what it
+        // would do. That matters for CAN/USB/TOUCH and the other indexless
+        // kinds, where the caller's `inst` and the model's are two different
+        // numbers.
+        if let Some((kind, model_inst, _)) = chosen.first().and_then(|(sig, _)| {
+            crate::panels::mcu_module::modules::module_signal_of(&sig.pin_function(inst))
+        }) && self
+            .modules
+            .iter()
+            .any(|m| m.kind == kind && m.instance() == model_inst)
+        {
+            return false;
+        }
         let formable = chosen.iter().all(|(sig, pin)| {
             let want = sig.pin_function(inst);
             self.find_pin(*pin).is_some_and(|p| {
@@ -467,6 +526,23 @@ impl Mcu {
         }
     }
 
+    /// The list folded EVERY config away at once.
+    ///
+    /// [`Self::config_collapsed`] for all of them, and it has to do the same two
+    /// things for the same reason: a box is drawn white BECAUSE its config is
+    /// showing, so closing the configs has to put the selection out with them.
+    ///
+    /// A function rather than the one assignment it started as, because
+    /// `collapse_modules` alone is only HALF of what the canvas means by this.
+    /// The panel's expand caret set that half and left the other, so reopening
+    /// the panel came back with every config folded and a box on the diagram
+    /// still picked out in white, with nothing open to say why - and the only
+    /// way back was to click that box twice.
+    pub fn all_configs_collapsed(&mut self) {
+        self.collapse_modules = true;
+        self.selected_module = None;
+    }
+
     /// The one place the canvas drops what it is pointing at.
     ///
     /// One function and not three assignments, because there are now three
@@ -474,9 +550,8 @@ impl Mcu {
     /// leaves the canvas lit for something the user has stopped looking at.
     pub fn clear_canvas_selection(&mut self) {
         self.selected_pin = None;
-        self.selected_module = None;
         self.selected_device = None;
-        self.collapse_modules = true;
+        self.all_configs_collapsed();
     }
 
     /// The group a MODULE belongs to: the one holding any of its pads.
@@ -1011,7 +1086,45 @@ impl Mcu {
             }
             s.push_str(&iomode);
         }
+        // Per-pin user labels (`@labels`). The label used to have no store of
+        // its own - it was recovered from the `_<label>` suffix on the generated
+        // binding, which is a Rust identifier, so "Status LED" came back
+        // "status_led" and a pin with no binding kept nothing at all.
+        let labels: std::collections::BTreeMap<usize, String> = self
+            .iter_all_pins()
+            .filter(|p| !p.custom_label.trim().is_empty())
+            .map(|p| (p.number, p.custom_label.clone()))
+            .collect();
+        let labels = mcu_config::labels_section(&labels);
+        if !labels.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&labels);
+        }
         s
+    }
+
+    /// Restore the per-pin user labels from `@labels`.
+    ///
+    /// Deliberately NOT part of [`Self::apply_mcu_config`], which runs before
+    /// `apply_saved_pins` so the restored clock can drive the regenerated
+    /// chain, and `apply_saved_pins` opens with `reset_all_pins`, which clears
+    /// every label. This has to land after that, and after the lossy binding-derived
+    /// labels it supersedes, so it is its own call at its own point in the
+    /// sequence.
+    ///
+    /// A pin the section names but this chip does not have is skipped, the same
+    /// as every other restore here.
+    pub fn apply_config_pin_labels(&mut self, text: &str) {
+        let labels = crate::panels::mcu_module::mcu_config::parse_labels(text);
+        for (num, label) in labels {
+            if let Some(pin) = self.find_pin_mut(num)
+                && !pin.reserved
+            {
+                pin.custom_label = label;
+            }
+        }
     }
 
     /// Restore virtual modules + clock from an `mcu.config` file on project open.
@@ -1046,6 +1159,10 @@ impl Mcu {
             self.clock_manual = manual;
         }
         // Manual in/out field positions (`@iopins`) — missing = all auto-placed.
+        //
+        // `@labels` is NOT read here: this runs before `apply_saved_pins`, whose
+        // `reset_all_pins` would clear every label it restored. It has its own
+        // entry point, `apply_config_pin_labels`, called later in the sequence.
         self.io_pin_pos = mcu_config::parse_iopins(text);
         self.groups = mcu_config::parse_groups(text);
         self.watchdog = mcu_config::parse_watchdog(text);
@@ -1112,6 +1229,25 @@ impl Mcu {
         })
     }
 
+    /// Whether the staged-changes bar should be drawn — and the one place the
+    /// question it asks is retired.
+    ///
+    /// A pending confirm only means anything while the bar is there to show it,
+    /// and this is the ONLY path on which the bar goes away. The three places
+    /// that used to clear the flag are all buttons INSIDE the bar (Discard,
+    /// Confirm & apply, Cancel), so none of them is on it: undoing the staged
+    /// change by hand — setting an Init API back to what it was un-dirties the
+    /// state — hid the bar with the confirm still armed, and the next staged
+    /// change brought it back already asking "Apply will regenerate … Confirm &
+    /// apply?" about something the user had just typed and never submitted.
+    pub fn apply_bar_visible(&mut self) -> bool {
+        let dirty = self.style_dirty();
+        if !dirty {
+            self.pending_apply_confirm = false;
+        }
+        dirty
+    }
+
     /// Human-readable lines of what an Apply would change (for the confirm
     /// prompt). Empty when nothing is staged.
     pub fn style_diff_summary(&self) -> Vec<String> {
@@ -1139,10 +1275,14 @@ impl Mcu {
             if api != cur_api {
                 out.push(format!("{name} init: {cur_api:?} -> {api:?}"));
             }
+            // Neither serial config HAS an `async_mode` - `module_style` reports
+            // a constant `Blocking` for both - so there is no such change to
+            // describe.
             if asyncm != cur_async
                 && !matches!(
                     m.config,
                     crate::panels::mcu_module::modules::ModuleConfig::Usart(_)
+                        | crate::panels::mcu_module::modules::ModuleConfig::Lpuart(_)
                 )
             {
                 let lbl = |x: AsyncBusMode| match x {
@@ -2169,6 +2309,105 @@ mod module_support_tests {
         assert!(!mcu.can_add_module(kind), "but none are free any more");
     }
 
+    /// …and the same when the pads are spent on ANOTHER function, which is the
+    /// case the test above cannot reach: `add_module` leaves the pads carrying
+    /// the peripheral's own signals, the one value the dynamic candidate filter
+    /// still accepts. A kind whose every candidate pad the user assigned
+    /// elsewhere used to leave the palette entirely — no row, no reason.
+    #[test]
+    fn spending_a_kinds_pads_elsewhere_keeps_it_in_the_palette() {
+        let mut mcu = create_stm32f103c8tx();
+        let kind = ModuleKind::GenericInterfaceUsb;
+        assert!(mcu.supports_module(kind) && mcu.can_add_module(kind));
+
+        // The only two pads USB could use, given to something else.
+        let pads: Vec<usize> = mcu
+            .iter_all_pins()
+            .filter(|p| {
+                p.available_functions.contains(&PinFunction::UsbDm)
+                    || p.available_functions.contains(&PinFunction::UsbDp)
+            })
+            .map(|p| p.number)
+            .collect();
+        assert!(!pads.is_empty(), "the fixture has USB pads");
+        for p in pads {
+            mcu.apply_pin_function(p, PinFunction::GpioOutput);
+        }
+
+        assert!(
+            mcu.supports_module(kind),
+            "the chip still HAS the peripheral, so the palette still shows it"
+        );
+        assert!(
+            !mcu.can_add_module(kind),
+            "but it cannot be wired right now"
+        );
+    }
+
+    /// The two ways `can_add_module` says no are told apart, so the greyed
+    /// entry names the thing that is actually in the way.
+    #[test]
+    fn a_free_instance_with_spent_pads_is_not_reported_as_exhausted() {
+        let mut mcu = create_stm32f103c8tx();
+        let kind = ModuleKind::GenericInterfaceUsart;
+        assert!(mcu.has_free_instance(kind), "nothing is wired yet");
+
+        // Every USART pad on the chip, given to something else. No module holds
+        // an instance, so every instance is still FREE - only its pads are gone.
+        let pads: Vec<usize> = mcu
+            .iter_all_pins()
+            .filter(|p| {
+                p.available_functions
+                    .iter()
+                    .any(|f| matches!(f, PinFunction::UsartTx { .. } | PinFunction::UsartRx { .. }))
+            })
+            .map(|p| p.number)
+            .collect();
+        assert!(!pads.is_empty());
+        for p in pads {
+            mcu.apply_pin_function(p, PinFunction::GpioOutput);
+        }
+
+        assert!(!mcu.can_add_module(kind), "it cannot be added");
+        assert!(
+            mcu.has_free_instance(kind),
+            "…but not because the instances are taken - none of them is"
+        );
+    }
+
+    /// A module HOLDING every instance is the other answer, and it must stay
+    /// distinguishable from the one above.
+    #[test]
+    fn holding_every_instance_reports_no_free_instance() {
+        let mut mcu = create_stm32f103c8tx();
+        let kind = ModuleKind::GenericInterfaceUsb; // single-instance
+        assert!(mcu.has_free_instance(kind));
+        assert!(mcu.add_module(kind));
+        assert!(
+            !mcu.has_free_instance(kind),
+            "the only instance is wired to a module"
+        );
+    }
+
+    /// Wiring every instance of a multi-instance kind is the OTHER answer, and
+    /// the one the instance loop has to give: nothing is left to skip to.
+    #[test]
+    fn wiring_every_instance_leaves_none_free() {
+        let mut mcu = create_stm32f103c8tx();
+        let kind = ModuleKind::GenericInterfaceUsart;
+        assert!(mcu.has_free_instance(kind));
+        // Take them until the chip refuses.
+        while mcu.add_module(kind) {}
+        assert!(
+            mcu.modules.iter().filter(|m| m.kind == kind).count() > 1,
+            "the fixture really has several USARTs"
+        );
+        assert!(
+            !mcu.has_free_instance(kind),
+            "every instance is held by a module"
+        );
+    }
+
     /// The palette can never lie: whatever `can_add_module` promises,
     /// `add_module` delivers — driven to exhaustion across every kind.
     #[test]
@@ -2197,7 +2436,14 @@ use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode, ModuleConfig};
 /// reports `Blocking`; non-bus kinds report the defaults.
 pub fn module_style(config: &ModuleConfig) -> (ApiStyle, AsyncBusMode) {
     match config {
-        ModuleConfig::Usart(c) => (c.api_style, AsyncBusMode::Blocking),
+        // LPUART is its own peripheral but shares `UsartModuleConfig`, so it has
+        // an `api_style` like the rest - and its config panel draws the same
+        // "Init API" row. Missing from here, `style_dirty` compared the staged
+        // value against a hardcoded `Portable` and `set_module_style` wrote
+        // nothing, so the row could be moved, the Apply bar lit up, and Apply
+        // left the value exactly where it was: a bar that could never be
+        // cleared and a control that could never take effect.
+        ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => (c.api_style, AsyncBusMode::Blocking),
         ModuleConfig::Spi(c) => (c.api_style, c.async_mode),
         ModuleConfig::I2c(c) => (c.api_style, c.async_mode),
         _ => (ApiStyle::Portable, AsyncBusMode::Blocking),
@@ -2207,7 +2453,7 @@ pub fn module_style(config: &ModuleConfig) -> (ApiStyle, AsyncBusMode) {
 /// Write a staged `(api_style, async_mode)` into a bus module's config.
 fn set_module_style(config: &mut ModuleConfig, api: ApiStyle, async_mode: AsyncBusMode) {
     match config {
-        ModuleConfig::Usart(c) => c.api_style = api,
+        ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => c.api_style = api,
         ModuleConfig::Spi(c) => {
             c.api_style = api;
             c.async_mode = async_mode;
@@ -2217,6 +2463,244 @@ fn set_module_style(config: &mut ModuleConfig, api: ApiStyle, async_mode: AsyncB
             c.async_mode = async_mode;
         }
         _ => {}
+    }
+}
+
+/// The staged Init-API / async-mode pair, and the two functions that move it.
+///
+/// `module_style` reads it out of a config and `set_module_style` writes it
+/// back; the Apply bar is the only thing that calls either, and a config
+/// neither of them knows about is a control the user can move and never apply.
+/// The Apply bar and the question it asks live and die together.
+/// A pin's user label goes out with the project and comes back the same.
+#[cfg(test)]
+mod a_pin_name_survives_a_save {
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::mcu::Mcu;
+    use crate::panels::mcu_module::pins::PinFunction;
+
+    fn f103() -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu()
+    }
+
+    /// The pad the label is on, whatever the chip numbers it.
+    fn a_gpio(mcu: &Mcu) -> usize {
+        mcu.iter_all_pins()
+            .find(|p| !p.reserved && p.available_functions.contains(&PinFunction::GpioOutput))
+            .map(|p| p.number)
+            .expect("an output-capable pad")
+    }
+
+    /// "Status LED" is not an identifier, and the binding suffix was the only
+    /// store: `sanitize_label` lowercased it and folded the space, so it came
+    /// back "status_led" every time the project was opened.
+    #[test]
+    fn a_name_with_capitals_and_a_space_comes_back_intact() {
+        let mut mcu = f103();
+        let pad = a_gpio(&mcu);
+        {
+            let p = mcu.find_pin_mut(pad).expect("the pad");
+            p.selected_function = PinFunction::GpioOutput;
+            p.custom_label = "Status LED".into();
+        }
+        let cfg = mcu.mcu_config_text();
+
+        // A fresh chip, as a project load gets it.
+        let mut reopened = f103();
+        reopened.apply_mcu_config(&cfg);
+        reopened.apply_saved_pins(&[]); // the `reset_all_pins` a load runs
+        reopened.apply_config_pin_labels(&cfg);
+
+        assert_eq!(
+            reopened.find_pin(pad).expect("the pad").custom_label,
+            "Status LED"
+        );
+    }
+
+    /// A pad with no FUNCTION has no binding, so it had nowhere to keep a name.
+    ///
+    /// This is how a Custom module's pads are named — in its own box, before
+    /// they are given a function — so those names simply did not survive a save,
+    /// and the module's `applied_sig` came back disagreeing with the field
+    /// beside it.
+    #[test]
+    fn an_unset_pad_keeps_its_name_too() {
+        let mut mcu = f103();
+        let pad = a_gpio(&mcu);
+        mcu.find_pin_mut(pad).expect("the pad").custom_label = "spare".into();
+        assert_eq!(
+            mcu.find_pin(pad).expect("the pad").selected_function,
+            PinFunction::Unset,
+            "no function, so no `let` line to hide the name in"
+        );
+
+        let cfg = mcu.mcu_config_text();
+        let mut reopened = f103();
+        reopened.apply_mcu_config(&cfg);
+        reopened.apply_saved_pins(&[]);
+        reopened.apply_config_pin_labels(&cfg);
+
+        assert_eq!(
+            reopened.find_pin(pad).expect("the pad").custom_label,
+            "spare"
+        );
+    }
+
+    /// A project that never named a pin writes no section, so it round-trips
+    /// exactly as it did before the section existed.
+    #[test]
+    fn an_unnamed_project_is_unchanged() {
+        let mcu = f103();
+        assert!(
+            !mcu.mcu_config_text().contains("@labels"),
+            "nothing named, nothing written"
+        );
+    }
+
+    /// A label for a pad this chip does not have is skipped, like every other
+    /// restore here — a config file is something the user can edit.
+    #[test]
+    fn a_label_for_an_unknown_pad_is_skipped() {
+        let mut mcu = f103();
+        mcu.apply_config_pin_labels("@labels\n99999=ghost\n");
+        assert!(
+            mcu.iter_all_pins().all(|p| p.custom_label.is_empty()),
+            "nothing was named"
+        );
+    }
+}
+
+#[cfg(test)]
+mod the_confirm_does_not_outlive_the_bar {
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::mcu::Mcu;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+
+    fn f103() -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu()
+    }
+
+    /// Staging a change, arming the confirm, then undoing the change BY HAND -
+    /// which is neither Discard nor Cancel, and so cleared nothing.
+    #[test]
+    fn undoing_a_staged_change_by_hand_disarms_the_confirm() {
+        let mut mcu = f103();
+        mcu.pending_runtime = Runtime::Native;
+        assert!(mcu.apply_bar_visible(), "the bar is up");
+
+        // The user clicks Apply; the bar swaps to the confirm prompt.
+        mcu.pending_apply_confirm = true;
+
+        // ...and then puts the runtime back where it was instead of answering.
+        mcu.pending_runtime = mcu.runtime;
+        assert!(!mcu.apply_bar_visible(), "so the bar goes away");
+        assert!(!mcu.pending_apply_confirm, "and takes its question with it");
+
+        // The next staged change opens on the prompt, not mid-confirm.
+        mcu.pending_runtime = Runtime::Native;
+        assert!(mcu.apply_bar_visible());
+        assert!(!mcu.pending_apply_confirm);
+    }
+
+    /// Staging the Native runtime is ONE change, and the bar says one.
+    ///
+    /// It used to say two. `normalize_gpio_api` ran every frame and forced
+    /// `pending_gpio_api` to Native whenever the Native runtime was staged, so
+    /// the bar read "2 staged changes - Runtime: Blocking -> Native AND GPIO
+    /// In/Out: Portable -> Native" with the GPIO cards greyed out, i.e. a change
+    /// the user had no way to make. Applying it then wrote `gpio_api = Native`
+    /// for good, so going back to Blocking afterwards left GPIO bound raw.
+    ///
+    /// The forcing is gone: `gpio_native()` is already `is_native() || gpio_api
+    /// == Native`, so every emitter was covered without it, and the System tab
+    /// DERIVES what its two locked cards show.
+    #[test]
+    fn staging_the_native_runtime_is_one_change_not_two() {
+        let mut mcu = f103();
+        mcu.pending_runtime = Runtime::Native;
+        let diff = mcu.style_diff_summary();
+        assert_eq!(diff.len(), 1, "one staged change: {diff:?}");
+        assert!(diff[0].starts_with("Runtime:"), "and it is the runtime");
+        assert!(
+            !diff.iter().any(|d| d.contains("GPIO")),
+            "nothing about GPIO, which the user cannot even click here: {diff:?}"
+        );
+    }
+
+    /// While something IS staged the confirm is left exactly as it was - this
+    /// is a retirement, not a reset that would swallow the click that armed it.
+    #[test]
+    fn an_armed_confirm_survives_while_the_bar_is_up() {
+        let mut mcu = f103();
+        mcu.pending_runtime = Runtime::Native;
+        mcu.pending_apply_confirm = true;
+        assert!(mcu.apply_bar_visible());
+        assert!(mcu.pending_apply_confirm, "still asking");
+    }
+}
+
+#[cfg(test)]
+mod a_staged_style_has_to_reach_the_config {
+    use super::{module_style, set_module_style};
+    use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode, ModuleKind};
+
+    /// Every config that HAS an `api_style` field must be reachable.
+    ///
+    /// The field list comes from the `Debug` derive, so this follows the structs
+    /// rather than a list written beside them - which is how LPUART came to be
+    /// missing. It shares `UsartModuleConfig` with USART, so it has the field
+    /// and its panel draws the "Init API" row, but both functions fell through
+    /// to the catch-all arm: `style_dirty` compared the staged value against a
+    /// hardcoded `Portable` and stayed true for ever, so the Apply bar could
+    /// never be cleared and the setting never took.
+    #[test]
+    fn every_config_with_an_init_api_can_be_staged_and_applied() {
+        let mut with_api = 0usize;
+        for kind in ModuleKind::ALL {
+            let mut cfg = kind.default_config(1);
+            let has_api = format!("{cfg:?}").contains("api_style");
+            let has_async = format!("{cfg:?}").contains("async_mode");
+            with_api += usize::from(has_api);
+
+            set_module_style(&mut cfg, ApiStyle::Native, AsyncBusMode::AsyncDma);
+            let (api, asyncm) = module_style(&cfg);
+
+            assert_eq!(
+                has_api,
+                api == ApiStyle::Native,
+                "{kind:?}: has an api_style field: {has_api}, applied: {api:?}"
+            );
+            assert_eq!(
+                has_async,
+                asyncm == AsyncBusMode::AsyncDma,
+                "{kind:?}: has an async_mode field: {has_async}, applied: {asyncm:?}"
+            );
+        }
+        assert_eq!(with_api, 4, "USART, LPUART, SPI and I2C");
+    }
+
+    /// An LPUART specifically, end to end - the case that could not be applied.
+    #[test]
+    fn an_lpuart_init_api_applies() {
+        use crate::panels::mcu_module::modules::ModuleConfig;
+        let mut cfg = ModuleKind::GenericInterfaceLpuart.default_config(1);
+        assert_eq!(module_style(&cfg).0, ApiStyle::Portable, "the default");
+
+        set_module_style(&mut cfg, ApiStyle::Native, AsyncBusMode::Blocking);
+
+        assert_eq!(module_style(&cfg).0, ApiStyle::Native, "and it took");
+        match &cfg {
+            ModuleConfig::Lpuart(c) => assert_eq!(c.api_style, ApiStyle::Native),
+            other => panic!("an LPUART config: {other:?}"),
+        }
     }
 }
 
@@ -2860,6 +3344,53 @@ mod device_groups {
             Some(7),
             "the pin selection is not its business"
         );
+    }
+
+    /// Closing EVERY config takes the white border with them, exactly as
+    /// closing one does.
+    ///
+    /// The panel's expand caret set `collapse_modules` on its own, which is only
+    /// half of it: the panel came back with every config folded and a box on the
+    /// canvas still picked out in white, and the only way to clear it was to
+    /// click that box twice.
+    #[test]
+    fn closing_every_config_stops_the_canvas_calling_any_box_out() {
+        let mut mcu = pico();
+        mcu.selected_module = Some("usart1".into());
+        mcu.selected_pin = Some(7);
+        mcu.selected_device = Some("radar".into());
+
+        mcu.all_configs_collapsed();
+
+        assert!(mcu.collapse_modules, "the list is told to fold them");
+        assert!(mcu.selected_module.is_none(), "and the box goes unlit");
+        assert_eq!(
+            mcu.selected_pin,
+            Some(7),
+            "a selected PIN is not a config and is left alone"
+        );
+        assert_eq!(
+            mcu.selected_device.as_deref(),
+            Some("radar"),
+            "and neither is a selected device"
+        );
+    }
+
+    /// Clicking empty canvas still drops all three selections — it is the wider
+    /// gesture, and it is built on the narrower one.
+    #[test]
+    fn clicking_empty_canvas_drops_every_selection() {
+        let mut mcu = pico();
+        mcu.selected_module = Some("usart1".into());
+        mcu.selected_pin = Some(7);
+        mcu.selected_device = Some("radar".into());
+
+        mcu.clear_canvas_selection();
+
+        assert!(mcu.collapse_modules);
+        assert!(mcu.selected_module.is_none());
+        assert!(mcu.selected_pin.is_none());
+        assert!(mcu.selected_device.is_none());
     }
 
     /// Folding ONE config says nothing about another.

@@ -118,16 +118,6 @@ impl Mcu {
     /// dependency be dropped. Idempotent; called every frame from `init_frame`.
     /// Both the applied and the staged value follow, so the locked selector
     /// updates the moment Native is picked (before Apply).
-    pub fn normalize_gpio_api(&mut self) {
-        use crate::panels::mcu_module::modules::ApiStyle;
-        if self.is_native() {
-            self.gpio_api = ApiStyle::Native;
-        }
-        if self.pending_is_native() {
-            self.pending_gpio_api = ApiStyle::Native;
-        }
-    }
-
     /// Build a brand-new `src/main.rs` (called when the MCU type is first
     /// selected or reset). Dispatches on `self.family` + `self.runtime`; families
     /// without a registered backend produce an empty file.
@@ -1847,13 +1837,24 @@ mod tests {
         );
     }
 
-    /// The Native runtime binds every GPIO raw, so the GPIO api must not be left
-    /// reading "Portable": the System tab locks that selector, and a stale value
-    /// both misreports the build and keeps `embedded-hal` looking needed. User
-    /// report: switching Runtime to Native left the choice on Portable, so the
-    /// dependency lingered until the GPIO selector happened to be touched.
+    /// The Native runtime binds every GPIO raw, so no io.rs bridge is emitted
+    /// and `embedded-hal` stops being needed — WITHOUT the stored GPIO choice
+    /// being overwritten.
+    ///
+    /// It used to be overwritten, by a `normalize_gpio_api` that snapped both
+    /// `gpio_api` and `pending_gpio_api` to Native so the (locked) selector
+    /// would read right. That was two bugs wearing one coat. The staged half
+    /// put a change into the Apply bar that nobody could have made — the GPIO
+    /// cards are greyed out while Native is staged — and applying it made the
+    /// applied half permanent, so switching back to Blocking afterwards left
+    /// GPIO on Native for good.
+    ///
+    /// Nothing downstream ever needed the write: `gpio_native()` is
+    /// `is_native() || gpio_api == Native`, every emitter goes through it, and
+    /// the dependency scan follows the io.rs that comes out of it. The System
+    /// tab derives what the locked cards show.
     #[test]
-    fn native_runtime_snaps_gpio_api_to_native() {
+    fn the_native_runtime_binds_gpio_raw_without_eating_the_choice() {
         use super::super::mock_mcu;
         use crate::panels::mcu_module::mcu::model::Runtime;
         use crate::panels::mcu_module::modules::ApiStyle;
@@ -1861,37 +1862,34 @@ mod tests {
         let mut mcu = mock_mcu::create_stm32f103c8tx();
         mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
         assert_eq!(mcu.gpio_api, ApiStyle::Portable, "default");
-
-        // Blocking: the choice is live and untouched.
-        mcu.normalize_gpio_api();
-        assert_eq!(
-            mcu.gpio_api,
-            ApiStyle::Portable,
-            "Blocking keeps the choice"
+        assert!(!mcu.gpio_native(), "Blocking + Portable: the bridge is on");
+        assert!(
+            mcu.config_files().iter().any(|(n, _)| n == "io.rs"),
+            "so io.rs is emitted"
         );
 
-        // Native: snapped, and no io.rs bridge is emitted any more.
         mcu.runtime = Runtime::Native;
         mcu.pending_runtime = Runtime::Native;
-        mcu.normalize_gpio_api();
-        assert_eq!(
-            mcu.gpio_api,
-            ApiStyle::Native,
-            "applied value follows the runtime"
-        );
-        assert_eq!(
-            mcu.pending_gpio_api,
-            ApiStyle::Native,
-            "the STAGED value follows too, so the locked selector shows it"
+
+        assert!(
+            mcu.gpio_native(),
+            "Native binds raw whatever the field says"
         );
         assert!(
             !mcu.config_files().iter().any(|(n, _)| n == "io.rs"),
             "no io.rs on the Native runtime — so `embedded-hal` is no longer needed"
         );
-        // Idempotent.
-        let before = (mcu.gpio_api, mcu.pending_gpio_api);
-        mcu.normalize_gpio_api();
-        assert_eq!((mcu.gpio_api, mcu.pending_gpio_api), before);
+        assert_eq!(
+            (mcu.gpio_api, mcu.pending_gpio_api),
+            (ApiStyle::Portable, ApiStyle::Portable),
+            "and the choice the user made is still theirs"
+        );
+
+        // Back to Blocking: the bridge they never left comes back.
+        mcu.runtime = Runtime::Blocking;
+        mcu.pending_runtime = Runtime::Blocking;
+        assert!(!mcu.gpio_native());
+        assert!(mcu.config_files().iter().any(|(n, _)| n == "io.rs"));
     }
 
     /// The GPIO api toggle switches the binding shape AND the io.rs emission:

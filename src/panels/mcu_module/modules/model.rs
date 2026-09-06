@@ -302,6 +302,10 @@ impl ModuleKind {
     /// `true` for peripherals that exist only once on the chip and whose pin
     /// functions carry no instance index, so the per-instance guard can't stop
     /// a second module from grabbing the alternate pins.
+    /// Checked against `module_signal_of` by
+    /// `autowire::the_instance_space_matches_the_model` - a kind is on this
+    /// list exactly when its pin functions drop the instance index. The two
+    /// were written apart and drifted (QSPI), so they are no longer allowed to.
     pub fn is_single_instance(self) -> bool {
         matches!(
             self,
@@ -319,6 +323,14 @@ impl ModuleKind {
                 // One touch controller; the number on its pin functions is the
                 // CHANNEL, not an instance.
                 | ModuleKind::GenericInterfaceTouch
+                // One QUADSPI - `module_signal_of` says so in as many words
+                // ("The QUADSPI is single-instance, so every pad joins module
+                // 1") and fixes the instance at 1. This list disagreed, so the
+                // palette offered QSPI0..QSPI17 and, when the one QUADSPI was
+                // taken, blamed it on exhausted instances rather than saying
+                // the chip has only the one. The number on its pin functions is
+                // the BANK, not an instance.
+                | ModuleKind::GenericInterfaceQspi
         )
     }
 
@@ -702,6 +714,28 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::UsbDp => (GenericInterfaceUsb, 1, UsbDp),
         _ => return None,
     })
+}
+
+/// The word lengths this chip's UART can actually be set to.
+///
+/// Nine is an STM32 thing — its USART really does have a 9-bit word length. No
+/// other backend here has one:
+///
+/// * the RP's PL011 tops out at eight (`rp_hal_common::uart::DataBits` is
+///   `Five..=Eight`, and `embassy_rp::uart::DataBits` is `DataBits5..=DataBits8`);
+/// * so does the ESP (`esp_hal::uart::DataBits` is `_5..=_8`) — where the
+///   generator was quietly rounding a 9 down to `_8`, so the panel said nine and
+///   the wire carried eight.
+///
+/// The panel offers what the chip has, the same rule
+/// [`UsartDirection::options_for`] follows for the direction beside it.
+pub fn usart_data_bits(family: &str) -> &'static [u8] {
+    use crate::panels::mcu_module::codegen::{family as fam, rp};
+    if fam::is_esp(family) || rp::is_rp(family) {
+        &[8]
+    } else {
+        &[8, 9]
+    }
 }
 
 /// One terminal of a module that wires to an MCU pin.

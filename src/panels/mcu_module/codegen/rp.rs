@@ -21,6 +21,7 @@ use super::common::{
 };
 use super::family::FamilyBackend;
 use crate::panels::mcu_module::mcu::Mcu;
+use crate::panels::mcu_module::modules::UsartModuleConfig;
 use crate::panels::mcu_module::pins::PinFunction;
 use crate::panels::mcu_module::pins::logic::pin::GpioMode;
 use crate::panels::mcu_module::pins::logic::pin::model::Edge;
@@ -634,14 +635,99 @@ pub fn needs_async_usart(mcu: &Mcu) -> bool {
     })
 }
 
-fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)], hz: u32) -> String {
+/// The wire frame from the Virtual Module, as `rp2040-hal` spells it.
+///
+/// `UartConfig::new(baudrate, data_bits, parity, stop_bits)` — note the parity
+/// is an `Option`, which is why "None" here is the absence of a parity bit and
+/// not a variant called None.
+///
+/// The whole frame used to be hardcoded `DataBits::Eight, None, StopBits::One`,
+/// so the three combos in the Virtual Module changed nothing on this chip: set
+/// 8-E-2 in the panel, save, and the board still sent 8-N-1 while the panel went
+/// on showing Even/2. The peer sees framing errors and nothing in the IDE
+/// disagrees with it.
+///
+/// Nine data bits is not reachable: the PL011 has no 9-bit word length, and the
+/// panel no longer offers one here (`usart_data_bits`). It maps to eight rather
+/// than being refused, because a project saved on an STM32 and re-targeted at a
+/// Pico has to open.
+fn blocking_frame(hal: &str, cfg: Option<&UsartModuleConfig>) -> (String, String, String) {
+    use crate::panels::mcu_module::modules::{Parity, StopBits};
+    let d = UsartModuleConfig::new(0);
+    let c = cfg.unwrap_or(&d);
+    let bits = match c.data_bits {
+        5 => "Five",
+        6 => "Six",
+        7 => "Seven",
+        _ => "Eight",
+    };
+    let parity = match c.parity {
+        Parity::None => "None".to_owned(),
+        Parity::Even => format!("Some({hal}::uart::Parity::Even)"),
+        Parity::Odd => format!("Some({hal}::uart::Parity::Odd)"),
+    };
+    let stop = match c.stop_bits {
+        StopBits::One => "One",
+        StopBits::Two => "Two",
+    };
+    (
+        format!("{hal}::uart::DataBits::{bits}"),
+        parity,
+        format!("{hal}::uart::StopBits::{stop}"),
+    )
+}
+
+/// The same frame as `embassy_rp` spells it — a plain `Parity` enum rather than
+/// an `Option`, and the variants carry their own prefixes.
+fn async_frame(cfg: Option<&UsartModuleConfig>) -> (String, String, String) {
+    use crate::panels::mcu_module::modules::{Parity, StopBits};
+    let d = UsartModuleConfig::new(0);
+    let c = cfg.unwrap_or(&d);
+    let bits = match c.data_bits {
+        5 => "DataBits5",
+        6 => "DataBits6",
+        7 => "DataBits7",
+        _ => "DataBits8",
+    };
+    let parity = match c.parity {
+        Parity::None => "ParityNone",
+        Parity::Even => "ParityEven",
+        Parity::Odd => "ParityOdd",
+    };
+    let stop = match c.stop_bits {
+        StopBits::One => "STOP1",
+        StopBits::Two => "STOP2",
+    };
+    (
+        format!("embassy_rp::uart::DataBits::{bits}"),
+        format!("embassy_rp::uart::Parity::{parity}"),
+        format!("embassy_rp::uart::StopBits::{stop}"),
+    )
+}
+
+fn bus_config_file(
+    hal: &str,
+    kind: &str,
+    n: u8,
+    pads: &[(&str, u8)],
+    hz: u32,
+    frame: Option<&UsartModuleConfig>,
+) -> String {
     let mut o = String::new();
     o.push_str("// <<< GENERATED>>>\n");
     o.push_str(
         "// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.\n",
     );
     match kind {
-        "uart" => o.push_str(&format!("pub const BAUDRATE: u32 = {hz};\n")),
+        "uart" => {
+            let (bits, parity, stop) = blocking_frame(hal, frame);
+            o.push_str(&format!("pub const BAUDRATE: u32 = {hz};\n"));
+            // In the GENERATED block, so `init` below stays the user's to edit
+            // while these keep following the Virtual Module.
+            o.push_str(&format!(
+                "pub const DATA_BITS: {hal}::uart::DataBits = {bits};\npub const PARITY: Option<{hal}::uart::Parity> = {parity};\npub const STOP_BITS: {hal}::uart::StopBits = {stop};\n"
+            ));
+        }
         "spi" => o.push_str(&format!("pub const SPI_HZ: u32 = {hz};\n")),
         _ => o.push_str(&format!("pub const I2C_HZ: u32 = {hz};\n")),
     }
@@ -672,7 +758,7 @@ fn bus_config_file(hal: &str, kind: &str, n: u8, pads: &[(&str, u8)], hz: u32) -
                 "/// UART{n} on GP{tx} (TX) and GP{rx} (RX), at BAUDRATE.\npub fn init(\n    uart: {hal}::pac::UART{n},\n    tx: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{tx}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    rx: {hal}::gpio::Pin<{hal}::gpio::bank0::Gpio{rx}, {hal}::gpio::FunctionNull, {hal}::gpio::PullDown>,\n    resets: &mut {hal}::pac::RESETS,\n    peri_freq: {hal}::fugit::HertzU32,\n) -> Handle {{\n"
             ));
             o.push_str(&format!(
-                "    {hal}::uart::UartPeripheral::new(uart, (tx.into_function(), rx.into_function()), resets)\n        .enable(\n            {hal}::uart::UartConfig::new(\n                {hal}::fugit::HertzU32::Hz(BAUDRATE),\n                {hal}::uart::DataBits::Eight,\n                None,\n                {hal}::uart::StopBits::One,\n            ),\n            peri_freq,\n        )\n        .unwrap()\n}}\n"
+                "    {hal}::uart::UartPeripheral::new(uart, (tx.into_function(), rx.into_function()), resets)\n        .enable(\n            {hal}::uart::UartConfig::new(\n                {hal}::fugit::HertzU32::Hz(BAUDRATE),\n                DATA_BITS,\n                PARITY,\n                STOP_BITS,\n            ),\n            peri_freq,\n        )\n        .unwrap()\n}}\n"
             ));
         }
         "spi" => {
@@ -909,6 +995,8 @@ impl FamilyBackend for RpBackend {
         // file: `init` names every pad in its signature, so half a bus has no
         // signature to write.
         let hal = hal_crate(&mcu.family);
+        // The USART modules, so each uart file can carry its own wire frame.
+        let ucfgs = crate::panels::mcu_module::modules::usart_configs(&mcu.modules);
         for (kind, roles, pins) in [
             ("uart", &["tx", "rx"][..], uart_pins(mcu)),
             ("spi", &["sck", "mosi", "miso"][..], spi_pins(mcu)),
@@ -920,9 +1008,10 @@ impl FamilyBackend for RpBackend {
                     .filter_map(|r| role_of(&pins, i, r).map(|n| (*r, n)))
                     .collect();
                 if pads.len() == roles.len() {
+                    let frame = (kind == "uart").then(|| ucfgs.get(&i)).flatten();
                     out.push((
                         format!("{kind}{i}.rs"),
-                        bus_config_file(hal, kind, i, &pads, bus_speed(mcu, kind, i)),
+                        bus_config_file(hal, kind, i, &pads, bus_speed(mcu, kind, i), frame),
                     ));
                 }
             }
@@ -2454,8 +2543,9 @@ fn async_bus_lines(mcu: &Mcu) -> (String, String, String, Vec<super::dma_map::Dm
             continue;
         };
         let hz = bus_speed(mcu, "uart", i);
+        let (bits, parity, stop) = async_frame(ucfgs.get(&i));
         o.push_str(&format!(
-            "    let mut ucfg{i} = embassy_rp::uart::Config::default();\n    // From the Virtual Module, not a default: a bus at the wrong speed\n    // is met as garbage on the wire, never as a message.\n    ucfg{i}.baudrate = {hz};\n"
+            "    let mut ucfg{i} = embassy_rp::uart::Config::default();\n    // From the Virtual Module, not a default: a bus at the wrong speed\n    // is met as garbage on the wire, never as a message - and neither is one\n    // at the wrong frame. All four used to be left on embassy's defaults, so\n    // the three frame combos in the panel changed nothing here.\n    ucfg{i}.baudrate = {hz};\n    ucfg{i}.data_bits = {bits};\n    ucfg{i}.parity = {parity};\n    ucfg{i}.stop_bits = {stop};\n"
         ));
         // The binding NAME is the same on both transports, and so is the
         // keep-alive: user code below GEN_END refers to `uart{i}` and must not
@@ -2930,6 +3020,183 @@ impl FamilyBackend for AsyncRpBackend {
             async_section(mcu).trim_end_matches('\n'),
             retarget_pristine_tail(&existing[end..], true)
         )
+    }
+}
+
+/// The three wire-frame settings reach the generated project.
+///
+/// They are the UART itself — data bits, parity, stop bits — so the panel drew
+/// them on every chip. This backend read none of them: the blocking template
+/// hardcoded `DataBits::Eight, None, StopBits::One` and the async one set the
+/// baud rate and left the rest on embassy's defaults. Set 8-E-2 in the Virtual
+/// Module, save, and the board sent 8-N-1 while the panel went on showing
+/// Even/2 — the peer sees framing errors and nothing in the IDE disagrees.
+#[cfg(test)]
+mod the_wire_frame_reaches_the_board {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::modules::{ModuleConfig, Parity, StopBits, UsartMode};
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    /// A Pico with UART0 on GP0/GP1, through the reconciler so the module and
+    /// its config really exist.
+    fn pico(
+        runtime: Runtime,
+        edit: impl FnOnce(&mut crate::panels::mcu_module::modules::UsartModuleConfig),
+    ) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2040_pico")
+            .expect("built-in Pico")
+            .build_mcu();
+        mcu.runtime = runtime;
+        for p in mcu.iter_all_pins_mut() {
+            match p.name.as_str() {
+                "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                _ => {}
+            }
+        }
+        mcu.reconcile_modules();
+        let mut edit = Some(edit);
+        for m in &mut mcu.modules {
+            if let ModuleConfig::Usart(c) = &mut m.config
+                && let Some(f) = edit.take()
+            {
+                f(c);
+            }
+        }
+        mcu
+    }
+
+    fn uart0(mcu: &super::Mcu) -> String {
+        mcu.config_files()
+            .into_iter()
+            .find(|(n, _)| n == "uart0.rs")
+            .map(|(_, c)| c)
+            .expect("a uart0.rs")
+    }
+
+    /// Blocking: the frame lands in the GENERATED consts, so `init` below stays
+    /// the user's to edit while the values keep following the module.
+    #[test]
+    fn the_blocking_config_file_carries_the_frame() {
+        let mcu = pico(Runtime::Blocking, |c| {
+            c.parity = Parity::Even;
+            c.stop_bits = StopBits::Two;
+        });
+        let src = uart0(&mcu);
+        assert!(
+            src.contains("pub const PARITY: Option<rp2040_hal::uart::Parity> = Some(rp2040_hal::uart::Parity::Even);"),
+            "the parity is emitted:\n{src}"
+        );
+        assert!(
+            src.contains(
+                "pub const STOP_BITS: rp2040_hal::uart::StopBits = rp2040_hal::uart::StopBits::Two;"
+            ),
+            "and the stop bits:\n{src}"
+        );
+        assert!(
+            src.contains("DATA_BITS,\n                PARITY,\n                STOP_BITS,"),
+            "and `UartConfig::new` takes them rather than three literals:\n{src}"
+        );
+        assert!(
+            !src.contains("DataBits::Eight,\n                None,"),
+            "the hardcoded frame is gone:\n{src}"
+        );
+    }
+
+    /// No parity is the ABSENCE of the option, not a variant called None —
+    /// `UartConfig::new` takes `Option<Parity>`, and rp-hal's `Parity` has two
+    /// variants, `Odd` and `Even`. A `Parity::None` would not compile.
+    #[test]
+    fn no_parity_is_the_absent_option() {
+        for (parity, want) in [
+            (Parity::None, "None"),
+            (Parity::Even, "Some(rp2040_hal::uart::Parity::Even)"),
+            (Parity::Odd, "Some(rp2040_hal::uart::Parity::Odd)"),
+        ] {
+            let src = uart0(&pico(Runtime::Blocking, |c| c.parity = parity));
+            assert!(
+                src.contains(&format!(
+                    "pub const PARITY: Option<rp2040_hal::uart::Parity> = {want};"
+                )),
+                "{parity:?} is emitted as {want}:\n{src}"
+            );
+        }
+        for (stop, want) in [(StopBits::One, "One"), (StopBits::Two, "Two")] {
+            let src = uart0(&pico(Runtime::Blocking, |c| c.stop_bits = stop));
+            assert!(
+                src.contains(&format!(
+                    "pub const STOP_BITS: rp2040_hal::uart::StopBits = rp2040_hal::uart::StopBits::{want};"
+                )),
+                "{stop:?} is emitted as {want}:\n{src}"
+            );
+        }
+    }
+
+    /// Async: the whole `Config`, not just the baud rate.
+    ///
+    /// Every variant, not one of them. embassy-rp spells all three enums
+    /// differently from rp-hal — `ParityEven` against `Even`, `STOP2` against
+    /// `Two`, `DataBits8` against `Eight` — so a name copied across from the
+    /// blocking template does not compile, and checking a single arm would let
+    /// the other two be copied.
+    #[test]
+    fn the_async_main_carries_the_frame() {
+        for (parity, want) in [
+            (Parity::None, "ParityNone"),
+            (Parity::Even, "ParityEven"),
+            (Parity::Odd, "ParityOdd"),
+        ] {
+            let src = pico(Runtime::Async, |c| {
+                c.mode = UsartMode::Buffered;
+                c.parity = parity;
+            })
+            .fresh_main_rs();
+            assert!(
+                src.contains(&format!("ucfg0.parity = embassy_rp::uart::Parity::{want};")),
+                "{parity:?} is emitted as {want}:\n{src}"
+            );
+        }
+        for (stop, want) in [(StopBits::One, "STOP1"), (StopBits::Two, "STOP2")] {
+            let src = pico(Runtime::Async, |c| {
+                c.mode = UsartMode::Buffered;
+                c.stop_bits = stop;
+            })
+            .fresh_main_rs();
+            assert!(
+                src.contains(&format!(
+                    "ucfg0.stop_bits = embassy_rp::uart::StopBits::{want};"
+                )),
+                "{stop:?} is emitted as {want}:\n{src}"
+            );
+        }
+        let src = pico(Runtime::Async, |c| c.mode = UsartMode::Buffered).fresh_main_rs();
+        assert!(
+            src.contains("ucfg0.data_bits = embassy_rp::uart::DataBits::DataBits8;"),
+            "and the word length:\n{src}"
+        );
+    }
+
+    /// Nine bits is an STM32 word length; the PL011 has none. A project
+    /// re-targeted at a Pico emits the widest the chip has rather than a name
+    /// that does not exist in either HAL.
+    #[test]
+    fn a_nine_bit_word_becomes_the_widest_the_chip_has() {
+        let blocking = uart0(&pico(Runtime::Blocking, |c| c.data_bits = 9));
+        assert!(
+            blocking.contains("DataBits::Eight"),
+            "no `DataBits::Nine` in rp-hal:\n{blocking}"
+        );
+        let asynchronous = pico(Runtime::Async, |c| {
+            c.mode = UsartMode::Buffered;
+            c.data_bits = 9;
+        })
+        .fresh_main_rs();
+        assert!(
+            asynchronous.contains("DataBits::DataBits8"),
+            "nor in embassy-rp:\n{asynchronous}"
+        );
     }
 }
 

@@ -177,6 +177,14 @@ impl AddModulePick {
         // `reconcile_modules` would fold the new pads into the module that
         // already holds the instance, and the user would get no new module and
         // a second TX row on their old one.
+        //
+        // Comparing the two numbers is only sound because they are drawn from
+        // one place. `self.instance` comes from `autowire`, `m.instance()` from
+        // `module_signal_of`, and for the seven indexless kinds those used to
+        // disagree by construction - autowire said CAN0, the model said CAN1,
+        // and this read "free" every single frame. `autowire::instance_space`
+        // now takes the number from `module_signal_of` for exactly those kinds,
+        // so the two agree on every kind rather than on most of them.
         let instance_taken = self
             .modules_of_this_kind(mcu)
             .any(|inst| inst == self.instance);
@@ -196,18 +204,30 @@ impl AddModulePick {
             .map(|m| m.instance())
     }
 
-    /// Move to a still-free peripheral when the seeded one was taken.
+    /// Move to a still-usable peripheral when the seeded one stopped being one.
     ///
     /// The pads follow, because the pads of USART1 are not the pads of USART3.
     /// When nothing is free `is_formable` says so and `Add` is refused.
+    ///
+    /// A peripheral stops being usable for TWO reasons, and this used to notice
+    /// only the first: another MODULE took it, or its pads were simply assigned
+    /// on the canvas while the dialog stood open. In the second case the dialog
+    /// stayed on USART1 with both its rows pinned to pads that now read GPIO,
+    /// printed "nothing free is left to move to" and greyed out `Add` - on a
+    /// chip where USART2 and USART3 were untouched.
+    ///
+    /// Both reasons are now one question, asked of the helper that already
+    /// answers it: is this instance still among the ones the chip can form and
+    /// no module holds?
     fn drop_taken_instance(&mut self, mcu: &Mcu, used: &HashSet<usize>) {
-        if !self.modules_of_this_kind(mcu).any(|i| i == self.instance) {
+        let (required, _) = self.kind.signals();
+        let held: HashSet<u8> = self.modules_of_this_kind(mcu).collect();
+        let free = autowire::instances_for(mcu, used, &held, required);
+        if free.contains(&self.instance) {
             return;
         }
-        let taken: HashSet<u8> = self.modules_of_this_kind(mcu).collect();
-        let (required, _) = self.kind.signals();
-        if let Some(free) = autowire::instances_for(mcu, used, &taken, required).first() {
-            self.instance = *free;
+        if let Some(first) = free.first() {
+            self.instance = *first;
             self.reseed_for_instance(mcu, used);
         }
     }
@@ -242,9 +262,25 @@ impl AddModulePick {
 /// instance from whatever chip was loaded then. Cheaper and more honest to
 /// cancel it than to try to keep it alive across a project load.
 pub fn belongs_to(pick: &AddModulePick, mcu: &Mcu) -> bool {
-    pick.required
-        .iter()
-        .all(|&(_, pad)| mcu.find_pin(pad).is_some())
+    // Pad NUMBERS were the whole test, and they are small dense integers on
+    // every chip in the catalogue - so an ESP32 TOUCH dialog left open across a
+    // project load "still described" an STM32F103, which has no touch
+    // controller at all. Measured over the bundled chips the number test
+    // answered yes for 433 of 552 cross-chip pairs.
+    //
+    // What actually has to hold is what the dialog PROMISES: every row's pad is
+    // one this silicon can put that signal on. That subsumes "the chip hosts
+    // the peripheral" - a dialog whose every required row is satisfiable IS a
+    // wiring this chip can form - so it is the whole test rather than half of
+    // one. `available_functions` is a property of the package, not of what the
+    // user has assigned, so it stays true while the dialog is used normally: a
+    // pad taken since it opened is `drop_taken_pads`' job, not a reason to
+    // cancel.
+    pick.required.iter().all(|&(sig, pad)| {
+        let want = sig.pin_function(pick.instance);
+        mcu.find_pin(pad)
+            .is_some_and(|p| p.available_functions.contains(&want))
+    })
 }
 
 /// Draw one frame of the dialog. Mutates `pick` in place; the caller commits.
@@ -798,5 +834,205 @@ mod the_peripheral_can_be_taken_too {
         if unknown {
             assert!(!belongs_to(&pick, &other), "cancelled, not re-used");
         }
+    }
+}
+
+/// The seven peripherals whose pin functions carry no instance index.
+///
+/// CAN, USB, QSPI, TOUCH, LCD_CAM, CAM and the two halves of PARL_IO. Every
+/// check in this file keys on the instance number, so a kind where the dialog
+/// and the model disagreed about it broke all of them at once.
+#[cfg(test)]
+mod a_peripheral_without_an_index {
+    use super::*;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::modules::module_signal_of;
+
+    fn chip(id: &str) -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu()
+    }
+
+    /// The dialog names the peripheral the model is going to create.
+    ///
+    /// It used to offer CAN0..CAN17 on a chip with one CAN, and whichever one
+    /// was showing, the module that appeared was called CAN1.
+    #[test]
+    fn the_picker_offers_the_one_instance_that_exists() {
+        let mcu = chip("stm32f103c8t6");
+        for kind in [
+            ModuleKind::GenericInterfaceCan,
+            ModuleKind::GenericInterfaceUsb,
+        ] {
+            let (required, _) = kind.signals();
+            let insts = autowire::instances_for(&mcu, &HashSet::new(), &HashSet::new(), required);
+            assert_eq!(insts.len(), 1, "{kind:?} has one instance: {insts:?}");
+
+            // And it is the number the model will use, so the dropdown's label
+            // and the module's name are the same string.
+            let pick = AddModulePick::seed(&mcu, kind).expect("seeded");
+            assert_eq!(pick.instance, insts[0]);
+            let want = pick.required[0].0.pin_function(pick.instance);
+            let (_, model_inst, _) = module_signal_of(&want).expect("a module signal");
+            assert_eq!(
+                pick.instance,
+                model_inst,
+                "{kind:?}: the dialog says {}{}, the model builds {}{model_inst}",
+                kind.short(),
+                pick.instance,
+                kind.short()
+            );
+        }
+    }
+
+    /// Confirming a second dialog does not fold its pads into the first module.
+    ///
+    /// The stale-instance guard compared the dialog's 0 against the model's 1,
+    /// so it read "free" whatever the project held. `Add` stayed enabled, and
+    /// pressing it grew the existing CAN1 a second TX and a second RX instead
+    /// of reporting that the chip has only one CAN.
+    #[test]
+    fn a_taken_indexless_peripheral_refuses_a_second_module() {
+        let mut mcu = chip("stm32f103c8t6");
+        let kind = ModuleKind::GenericInterfaceCan;
+        let mut pick = AddModulePick::seed(&mcu, kind).expect("seeded");
+
+        // The palette behind the open dialog takes the chip's only CAN.
+        assert!(mcu.add_module(kind), "one-click added it");
+        assert_eq!(mcu.modules.len(), 1);
+        let before: Vec<usize> = mcu.modules[0]
+            .connections
+            .iter()
+            .map(|c| c.mcu_pin)
+            .collect();
+
+        let used: HashSet<usize> = before.iter().copied().collect();
+        pick.drop_taken_instance(&mcu, &used);
+        pick.drop_taken_pads(&mcu, &used);
+        assert!(
+            !pick.is_formable(&mcu, &used),
+            "the chip has one CAN and a module holds it"
+        );
+
+        // And if the panel ignored that, the model would not grow the module.
+        mcu.add_module_wired(pick.instance, &pick.wiring());
+        assert_eq!(mcu.modules.len(), 1, "no second CAN appeared");
+        let after: Vec<usize> = mcu.modules[0]
+            .connections
+            .iter()
+            .map(|c| c.mcu_pin)
+            .collect();
+        assert_eq!(after, before, "and the first one did not grow");
+    }
+
+    /// Seeding is refused once the single peripheral is spoken for, so the
+    /// dialog cannot even open onto a dead end.
+    #[test]
+    fn seeding_is_refused_once_the_only_instance_is_held() {
+        let mut mcu = chip("stm32f103c8t6");
+        let kind = ModuleKind::GenericInterfaceCan;
+        assert!(AddModulePick::seed(&mcu, kind).is_some(), "free at first");
+        assert!(mcu.add_module(kind));
+        assert!(
+            AddModulePick::seed(&mcu, kind).is_none(),
+            "and not once the chip's only CAN is held"
+        );
+    }
+}
+
+/// A peripheral can be lost to the CANVAS, not only to another module.
+#[cfg(test)]
+mod pads_spent_on_the_canvas {
+    use super::*;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::pins::PinFunction;
+
+    fn chip(id: &str) -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu()
+    }
+
+    /// The dialog moves to another USART instead of dead-ending on the first.
+    ///
+    /// `drop_taken_instance` only ever asked whether a MODULE held the
+    /// instance. Assigning USART1's pads to GPIO on the canvas left the dialog
+    /// pinned to USART1, both rows on pads that now read GPIO, printing
+    /// "nothing free is left to move to" on a chip with two untouched USARTs.
+    #[test]
+    fn a_peripheral_whose_pads_went_to_gpio_is_released() {
+        let mut mcu = chip("stm32f103c8t6");
+        let kind = ModuleKind::GenericInterfaceUsart;
+        let mut pick = AddModulePick::seed(&mcu, kind).expect("seeded");
+        let seeded = pick.instance;
+
+        // Every pad USART1 could use goes to plain GPIO on the canvas.
+        let (required, _) = kind.signals();
+        for &sig in required {
+            for pad in autowire::eligible(&mcu, &HashSet::new(), sig, seeded) {
+                if let Some(p) = mcu.find_pin_mut(pad) {
+                    p.selected_function = PinFunction::GpioOutput;
+                }
+            }
+        }
+
+        let used = HashSet::new();
+        pick.drop_taken_instance(&mcu, &used);
+        pick.drop_taken_pads(&mcu, &used);
+        assert_ne!(pick.instance, seeded, "it moved off the spent peripheral");
+        assert!(pick.is_formable(&mcu, &used), "and Add is offered again");
+        assert!(mcu.add_module_wired(pick.instance, &pick.wiring()));
+        assert_eq!(mcu.modules.len(), 1, "a real module came out of it");
+    }
+
+    /// `belongs_to` has to answer for the CHIP, not for the pad numbers.
+    ///
+    /// Pad numbers are small dense integers on every built-in, so "all these
+    /// numbers exist" passed for 433 of 552 cross-chip pairs - and a TOUCH
+    /// dialog opened on an ESP32 survived a project load onto an STM32F103,
+    /// which has no touch controller.
+    #[test]
+    fn a_dialog_does_not_survive_onto_a_chip_without_the_peripheral() {
+        let esp = chip("esp32");
+        let kind = ModuleKind::GenericInterfaceTouch;
+        assert!(
+            esp.supports_module(kind),
+            "the ESP32 is the chip with the touch controller"
+        );
+        let pick = AddModulePick::seed(&esp, kind).expect("seeded on the ESP32");
+        assert!(
+            belongs_to(&pick, &esp),
+            "it belongs to the chip it came from"
+        );
+
+        let f1 = chip("stm32f103c8t6");
+        assert!(
+            !f1.supports_module(kind),
+            "the F103 has no touch controller"
+        );
+        assert!(
+            !belongs_to(&pick, &f1),
+            "so the dialog is cancelled rather than re-used"
+        );
+    }
+
+    /// Assigning a pad the dialog is showing does NOT cancel the dialog - the
+    /// row moves. `belongs_to` asks about the silicon, and the silicon did not
+    /// change.
+    #[test]
+    fn taking_a_pad_does_not_cancel_the_dialog() {
+        let mut mcu = chip("stm32f103c8t6");
+        let pick = AddModulePick::seed(&mcu, ModuleKind::GenericInterfaceUsart).expect("seeded");
+        for (_, pad) in pick.wiring() {
+            if let Some(p) = mcu.find_pin_mut(pad) {
+                p.selected_function = PinFunction::GpioOutput;
+            }
+        }
+        assert!(belongs_to(&pick, &mcu), "same chip, so it stays open");
     }
 }

@@ -50,6 +50,47 @@ const MAX_COMBOS: usize = 512;
 /// not have yields an empty candidate list and is skipped before any work.
 const MAX_INSTANCE: u8 = 17;
 
+/// The instance numbers worth trying for a peripheral with these signals.
+///
+/// Usually `0..=MAX_INSTANCE`, because the index rides along in the pin
+/// function: `ModuleSignal::Tx.pin_function(3)` is `PinFunction::UsartTx(3)`,
+/// a different function from `UsartTx(0)`, so each instance really does ask
+/// the chip a different question.
+///
+/// Eight kinds are not like that. CAN, USB, QSPI, TOUCH, LCD_CAM, CAM and the
+/// two halves of PARL_IO have exactly one instance on the silicon, and their
+/// pin functions carry NO index at all (`ModuleSignal::CanTx =>
+/// PinFunction::CanTx`; the numbers on QSPI's are the BANK and the LANE), so
+/// all eighteen numbers asked the identical question and all eighteen
+/// answered yes. The consequences were visible in three places at once:
+///
+/// * the "Choose pins..." Peripheral dropdown listed CAN0 through CAN17 on a
+///   chip with one CAN;
+/// * whichever of them was showing, the module that appeared was called CAN1,
+///   because `module_signal_of` - the other half of the same mapping - fixes
+///   the instance for these kinds;
+/// * and since the dialog's `instance` was 0 while the model's was 1, the
+///   dialog's "is this peripheral already taken" guard compared two numbers
+///   that could never be equal, so it always read "free". Confirming a second
+///   time then folded the new pads into the existing module.
+///
+/// So: ask whether the index survives the mapping, and when it does not, take
+/// the single instance from [`module_signal_of`] - the ONE table that decides
+/// it. Derived rather than listed, because a list here and a match over there
+/// is exactly the shape that drifted.
+fn instance_space(required: &[ModuleSignal]) -> Vec<u8> {
+    let all = || (0u8..=MAX_INSTANCE).collect::<Vec<u8>>();
+    let Some(&sig) = required.first() else {
+        return all();
+    };
+    if sig.pin_function(0) != sig.pin_function(1) {
+        return all();
+    }
+    crate::panels::mcu_module::modules::module_signal_of(&sig.pin_function(0))
+        .map(|(_, inst, _)| vec![inst])
+        .unwrap_or_default()
+}
+
 /// How good one candidate wiring is — **lower is better on every field**, and
 /// the fields are compared in declaration order (that is what `derive(Ord)`
 /// gives us), so this is the ranking, top priority first:
@@ -151,8 +192,20 @@ pub(crate) fn eligible(
 /// asks this thousands of times per instance, for every palette entry, on every
 /// frame the menu is open - building a forty-element Vec each time to keep
 /// eight of it was measurably a third of that frame.
-fn eligible_capped(mcu: &Mcu, taken: &HashSet<usize>, sig: ModuleSignal, inst: u8) -> Vec<usize> {
-    eligible_for_limited(mcu, taken, &sig.pin_function(inst), MAX_PER_SIGNAL)
+fn eligible_capped(
+    mcu: &Mcu,
+    taken: &HashSet<usize>,
+    sig: ModuleSignal,
+    inst: u8,
+    ignore_current: bool,
+) -> Vec<usize> {
+    eligible_for_limited(
+        mcu,
+        taken,
+        &sig.pin_function(inst),
+        MAX_PER_SIGNAL,
+        ignore_current,
+    )
 }
 
 /// [`eligible_for`] that stops after `limit` pads.
@@ -161,12 +214,18 @@ fn eligible_for_limited(
     taken: &HashSet<usize>,
     want: &PinFunction,
     limit: usize,
+    // `true` asks what the SILICON has, ignoring what each pad currently
+    // carries — the question "does this chip host this peripheral at all",
+    // which must not change as the user assigns pins.
+    ignore_current: bool,
 ) -> Vec<usize> {
     mcu.iter_all_pins()
         .filter(|p| !p.reserved && !taken.contains(&p.number))
         .filter(|p| {
             p.available_functions.contains(want)
-                && (p.selected_function == *want || p.selected_function == PinFunction::Unset)
+                && (ignore_current
+                    || p.selected_function == *want
+                    || p.selected_function == PinFunction::Unset)
         })
         .map(|p| p.number)
         .take(limit)
@@ -399,7 +458,7 @@ pub fn pick_pins(
     // Reused across combinations instead of reallocated per candidate.
     let mut chosen: Vec<(ModuleSignal, usize)> = Vec::new();
 
-    for inst in 0u8..=MAX_INSTANCE {
+    for inst in instance_space(required) {
         if used_instances.contains(&inst) {
             continue;
         }
@@ -408,7 +467,7 @@ pub fn pick_pins(
         // eighteen of those for every two or three real ones. Collecting all
         // four lists before looking at any of them scanned the chip three times
         // over for nothing, on most iterations of this loop.
-        let Some(lists) = signal_lists(mcu, used, required, inst) else {
+        let Some(lists) = signal_lists(mcu, used, required, inst, false) else {
             continue; // this instance can't satisfy some required signal
         };
 
@@ -507,7 +566,8 @@ pub fn instances_for(
     used_instances: &HashSet<u8>,
     required: &[ModuleSignal],
 ) -> Vec<u8> {
-    (0u8..=MAX_INSTANCE)
+    instance_space(required)
+        .into_iter()
         .filter(|inst| {
             !used_instances.contains(inst)
                 && !required.is_empty()
@@ -525,10 +585,11 @@ fn signal_lists(
     used: &HashSet<usize>,
     required: &[ModuleSignal],
     inst: u8,
+    ignore_current: bool,
 ) -> Option<Vec<Vec<usize>>> {
     let mut lists = Vec::with_capacity(required.len());
     for &sig in required {
-        let l = eligible_capped(mcu, used, sig, inst);
+        let l = eligible_capped(mcu, used, sig, inst, ignore_current);
         if l.is_empty() {
             return None;
         }
@@ -559,11 +620,40 @@ pub fn any_wiring(
     used_instances: &HashSet<u8>,
     required: &[ModuleSignal],
 ) -> bool {
-    for inst in 0u8..=MAX_INSTANCE {
+    wiring_exists(mcu, used, used_instances, required, false)
+}
+
+/// Whether the SILICON could carry this peripheral at all, on some instance no
+/// module holds — ignoring what each pad currently carries.
+///
+/// The question the palette asks to decide whether a kind belongs in the menu.
+/// It has to be static: asked dynamically, a kind whose every candidate pad the
+/// user had spent on something else left the menu entirely — no row, no reason —
+/// which is the one thing the palette promises never to do. A supported-but-
+/// blocked kind stays visible and says why.
+///
+/// The same search as [`any_wiring`], one flag apart, deliberately not a second
+/// copy of the rules.
+pub fn any_wiring_static(
+    mcu: &Mcu,
+    used_instances: &HashSet<u8>,
+    required: &[ModuleSignal],
+) -> bool {
+    wiring_exists(mcu, &HashSet::new(), used_instances, required, true)
+}
+
+fn wiring_exists(
+    mcu: &Mcu,
+    used: &HashSet<usize>,
+    used_instances: &HashSet<u8>,
+    required: &[ModuleSignal],
+    ignore_current: bool,
+) -> bool {
+    for inst in instance_space(required) {
         if used_instances.contains(&inst) {
             continue;
         }
-        let Some(lists) = signal_lists(mcu, used, required, inst) else {
+        let Some(lists) = signal_lists(mcu, used, required, inst, ignore_current) else {
             continue;
         };
         let mut found: Vec<Vec<usize>> = Vec::new();
@@ -616,7 +706,7 @@ pub fn pick_partners(
     // search was written to remove.
     let lists: Vec<Vec<usize>> = partners
         .iter()
-        .map(|want| eligible_for_limited(mcu, &taken, want, MAX_PER_SIGNAL))
+        .map(|want| eligible_for_limited(mcu, &taken, want, MAX_PER_SIGNAL, false))
         .collect();
     // A partner with nowhere to go is dropped, not a reason to wire nothing:
     // the old first-fit assigned what it could, and so does this.
@@ -1071,7 +1161,7 @@ mod the_pads_the_search_may_reach {
         // ...and the search still keeps to its budget, because MAX_COMBOS is
         // sized for it.
         assert_eq!(
-            eligible_capped(&mcu, &none, ModuleSignal::Tx, 0).len(),
+            eligible_capped(&mcu, &none, ModuleSignal::Tx, 0, false).len(),
             MAX_PER_SIGNAL
         );
     }
@@ -1296,7 +1386,13 @@ mod reference_search {
         sig: ModuleSignal,
         inst: u8,
     ) -> Vec<usize> {
-        eligible_for_limited(mcu, taken, &sig.pin_function(inst), REF_MAX_PER_SIGNAL)
+        eligible_for_limited(
+            mcu,
+            taken,
+            &sig.pin_function(inst),
+            REF_MAX_PER_SIGNAL,
+            false,
+        )
     }
 
     fn score(
@@ -1359,7 +1455,11 @@ mod reference_search {
         let sides = side_map(mcu);
         let mut best: Option<(Score, u8, Vec<(ModuleSignal, usize)>)> = None;
 
-        for inst in 0u8..=MAX_INSTANCE {
+        // Shared with the real search on purpose. This oracle exists to
+        // check the RANKING; which instances exist is a fact about the pin
+        // model, and a second hand-written copy of it here would only ever
+        // test that the two copies were typed the same way.
+        for inst in super::instance_space(required) {
             if used_instances.contains(&inst) {
                 continue;
             }
@@ -1491,5 +1591,72 @@ mod the_fast_search_matches_the_reference {
             }
         }
         assert!(cases > 300, "the sweep really ran: {cases} cases");
+    }
+}
+
+/// The instance space is a fact about the pin model, so it is checked against
+/// the pin model rather than against a list.
+#[cfg(test)]
+mod the_instance_space_matches_the_model {
+    use super::instance_space;
+    use crate::panels::mcu_module::modules::{ModuleKind, module_signal_of};
+
+    /// Every kind whose pin functions drop the index gets exactly one instance,
+    /// and it is the one `module_signal_of` hands the module built from those
+    /// pads. Every other kind keeps the full range.
+    ///
+    /// Written as a sweep over `ModuleKind::ALL` rather than a list of the
+    /// seven, because a list here would be the third copy of a fact that
+    /// already drifted between the first two.
+    #[test]
+    fn an_indexless_kind_has_one_instance_and_it_is_the_models() {
+        let mut indexless = 0usize;
+        for kind in ModuleKind::ALL {
+            let (required, _) = kind.signals();
+            let Some(&sig) = required.first() else {
+                continue; // Custom wires nothing
+            };
+            let space = instance_space(required);
+            if sig.pin_function(0) != sig.pin_function(1) {
+                assert_eq!(
+                    space.len(),
+                    18,
+                    "{kind:?} carries its index, so every instance is a real question"
+                );
+                continue;
+            }
+            indexless += 1;
+            assert_eq!(space.len(), 1, "{kind:?} has one instance: {space:?}");
+            let (model_kind, model_inst, _) =
+                module_signal_of(&sig.pin_function(0)).expect("a module signal");
+            assert_eq!(model_kind, kind, "{kind:?} maps back to itself");
+            assert_eq!(
+                space[0], model_inst,
+                "{kind:?}: autowire says {space:?}, the model says {model_inst}"
+            );
+        }
+        assert_eq!(
+            indexless, 8,
+            "CAN, USB, QSPI, TOUCH, LCD_CAM, CAM and the two PARL_IO halves"
+        );
+    }
+
+    /// And `is_single_instance` - the flag the panel's wording keys on - names
+    /// the same seven. The two are written apart, so they are checked together.
+    #[test]
+    fn is_single_instance_names_the_same_kinds() {
+        for kind in ModuleKind::ALL {
+            let (required, _) = kind.signals();
+            let Some(&sig) = required.first() else {
+                continue;
+            };
+            let indexless = sig.pin_function(0) == sig.pin_function(1);
+            assert_eq!(
+                indexless,
+                kind.is_single_instance(),
+                "{kind:?}: indexless={indexless}, is_single_instance={}",
+                kind.is_single_instance()
+            );
+        }
     }
 }

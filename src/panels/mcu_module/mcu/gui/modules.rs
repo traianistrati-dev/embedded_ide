@@ -4414,7 +4414,18 @@ pub fn module_config_ui(
                     if tx_only_dma {
                         out.skip("RX/TX buffer", docs::SKIP_USART_BUF_TX_ONLY);
                     }
-                    if is_async && !tx_only_dma {
+                    // `buf_len` reaches the RP backend in exactly one place —
+                    // the BUFFERED branch, which allocates the two `StaticCell`
+                    // rings. Its DMA `Uart` reads into the caller's slice and
+                    // has no ring at all, so the row sized a buffer that was
+                    // never allocated while its own hover promised a circular
+                    // one that stops bytes being lost.
+                    let rp = crate::panels::mcu_module::codegen::rp::is_rp(family);
+                    let rp_dma = rp && cfg.mode == UsartMode::Dma;
+                    if rp_dma {
+                        out.skip("RX DMA buffer", docs::SKIP_USART_BUF_RP_DMA);
+                    }
+                    if is_async && !tx_only_dma && !rp_dma {
                         let dma = cfg.mode == UsartMode::Dma;
                         // The label AND the sentence both turn on the transport
                         // — the field means two different things, and the pane
@@ -4457,11 +4468,19 @@ pub fn module_config_ui(
                     }
                     out.field("Data bits", docs::USART_DATA_BITS);
                     ui.label("Data bits");
+                    // Nine bits is an STM32 word length. The RP's PL011 and the
+                    // ESP's UART both stop at eight, and the ESP generator was
+                    // rounding a 9 down to `_8` in silence - the panel said nine
+                    // and the wire carried eight.
+                    let widths = crate::panels::mcu_module::modules::usart_data_bits(family);
+                    if !widths.contains(&cfg.data_bits) {
+                        cfg.data_bits = widths[0];
+                    }
                     egui::ComboBox::from_id_salt("databits")
                         .selected_text(cfg.data_bits.to_string())
                         .show_ui(ui, |ui| {
-                            for d in [8u8, 9] {
-                                ui.selectable_value(&mut cfg.data_bits, d, d.to_string());
+                            for d in widths {
+                                ui.selectable_value(&mut cfg.data_bits, *d, d.to_string());
                             }
                         });
                     ui.end_row();
@@ -6144,7 +6163,17 @@ pub fn module_config_ui(
                     // Async only: `embassy_time::Duration` needs embassy-stm32's
                     // `time` feature, which only the async dependency line pulls
                     // in (through `time-driver-any`).
-                    if is_async {
+                    //
+                    // ...and embassy-STM32's, specifically. The gate was a bare
+                    // `is_async`, so it fired on every async chip that is not an
+                    // ESP — the RP included, where `embassy_rp::i2c::Config`
+                    // carries the frequency and nothing else. `timeout_ms` is
+                    // read by one emitter, and it is embassy-stm32's.
+                    let rp_i2c = crate::panels::mcu_module::codegen::rp::is_rp(family);
+                    if is_async && rp_i2c {
+                        out.skip("Timeout", docs::SKIP_I2C_TIMEOUT_RP);
+                    }
+                    if is_async && !rp_i2c {
                         out.field("Timeout", docs::I2C_TIMEOUT);
                         ui.label("Timeout");
                         ui.horizontal(|ui| {
@@ -7367,6 +7396,113 @@ mod tests {
         ("esp32c3", true, false),
         ("rp2040", true, false),
     ];
+
+    /// A row is drawn only where the backend can pass its value to something.
+    ///
+    /// Three rows failed that on an RP: the wire frame (drawn everywhere,
+    /// consumed only by the two STM32 emitters), the RX DMA buffer (`buf_len`
+    /// reaches the RP through its BUFFERED branch alone) and the I2C timeout
+    /// (read by exactly one emitter, embassy-stm32's).
+    ///
+    /// The frame was fixed by making the RP emit it; the other two by saying
+    /// they are not there, with the reason.
+    mod a_row_the_backend_cannot_use {
+        use super::*;
+        use crate::panels::mcu_module::modules::{I2cModuleConfig, ModuleConfig, UsartMode};
+
+        fn skipped_of(out: &ConfigOut) -> Vec<&str> {
+            out.skipped_fields()
+                .iter()
+                .map(|f| f.label.as_str())
+                .collect()
+        }
+
+        /// The DMA transport has no buffer on an RP, and the pane says so
+        /// instead of offering a size for one.
+        #[test]
+        fn the_rx_dma_buffer_is_absent_on_an_rp_and_explains_itself() {
+            let out = drive_usart("rp2040", true, false, false, |c| c.mode = UsartMode::Dma);
+            assert!(
+                !labels_of(&out).contains(&"RX DMA buffer"),
+                "no row: {:?}",
+                labels_of(&out)
+            );
+            assert!(
+                skipped_of(&out).contains(&"RX DMA buffer"),
+                "and it is explained: {:?}",
+                skipped_of(&out)
+            );
+        }
+
+        /// The buffered transport DOES allocate two rings there, so the row is
+        /// real and stays.
+        #[test]
+        fn the_buffered_transport_keeps_its_buffer_row_on_an_rp() {
+            let out = drive_usart("rp2040", true, false, false, |c| {
+                c.mode = UsartMode::Buffered
+            });
+            assert!(labels_of(&out).contains(&"RX/TX buffer"));
+        }
+
+        /// And an STM32 keeps the DMA row, which its emitter reads.
+        #[test]
+        fn an_stm32_keeps_the_rx_dma_buffer_row() {
+            let out = drive_usart("stm32g0", true, false, false, |c| c.mode = UsartMode::Dma);
+            assert!(labels_of(&out).contains(&"RX DMA buffer"));
+        }
+
+        fn i2c_labels(family: &str, is_async: bool) -> (Vec<String>, Vec<String>) {
+            let out = drive(
+                ModuleKind::GenericInterfaceI2c,
+                ModuleConfig::I2c(I2cModuleConfig::new(1)),
+                family,
+                is_async,
+                false,
+                false,
+            );
+            (
+                out.fields()
+                    .expect("the I2C arm marks itself documented")
+                    .iter()
+                    .map(|f| f.label.clone())
+                    .collect(),
+                out.skipped_fields()
+                    .iter()
+                    .map(|f| f.label.clone())
+                    .collect(),
+            )
+        }
+
+        /// `embassy_rp::i2c::Config` carries the frequency and nothing else.
+        #[test]
+        fn the_i2c_timeout_is_absent_on_an_rp_and_explains_itself() {
+            let (drawn, skipped) = i2c_labels("rp2040", true);
+            assert!(!drawn.iter().any(|l| l == "Timeout"), "no row: {drawn:?}");
+            assert!(
+                skipped.iter().any(|l| l == "Timeout"),
+                "and it is explained: {skipped:?}"
+            );
+        }
+
+        /// An async STM32 keeps it — `config.timeout` is embassy-stm32's own.
+        #[test]
+        fn an_async_stm32_keeps_the_i2c_timeout() {
+            let (drawn, _) = i2c_labels("stm32g0", true);
+            assert!(drawn.iter().any(|l| l == "Timeout"), "{drawn:?}");
+        }
+
+        /// Nine data bits is an STM32 word length. Neither the RP's PL011 nor
+        /// the ESP's UART has one, and the ESP generator was rounding a 9 down
+        /// to `_8` without saying so.
+        #[test]
+        fn nine_data_bits_is_offered_only_where_the_chip_has_it() {
+            use crate::panels::mcu_module::modules::usart_data_bits;
+            assert_eq!(usart_data_bits("stm32g0"), &[8, 9]);
+            assert_eq!(usart_data_bits("stm32f1"), &[8, 9]);
+            assert_eq!(usart_data_bits("rp2040"), &[8]);
+            assert_eq!(usart_data_bits("esp32c3"), &[8]);
+        }
+    }
 
     /// The four wire settings exist on every chip and every runtime — they are
     /// the UART itself, not a HAL feature — so no cell may lose them.

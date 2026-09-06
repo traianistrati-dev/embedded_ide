@@ -38,6 +38,7 @@ const IOMODE_HEADER: &str = "@iomode";
 const GROUPS_HEADER: &str = "@groups";
 const WATCHDOG_HEADER: &str = "@watchdog";
 const COMP_HEADER: &str = "@comp";
+const LABELS_HEADER: &str = "@labels";
 
 /// The `@autobuild` section text (or "" for the default `Check`) — appended by
 /// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
@@ -443,6 +444,77 @@ pub fn iomode_section(modes: &std::collections::BTreeMap<usize, GpioMode>) -> St
         s.push_str(&format!("{num}={}\n", m.as_token()));
     }
     s
+}
+
+/// The `@labels` section — one `num=free text` per pin the user has named.
+///
+/// # Why this exists at all
+///
+/// A pin's name had no store of its own. Its only record was the generated
+/// binding: `pin_binding` appends `sanitize_label(custom_label)` to the variable
+/// name and `parse_pin_labels` reads that suffix back out of main.rs. Two things
+/// fall out of that, and both were real:
+///
+/// * the round-trip is LOSSY, because the suffix has to be a Rust identifier.
+///   "Status LED" is written as `pc13_out_status_led` and comes back
+///   `status_led` — the user's capitals and space, gone on the next open;
+/// * a pin with no binding has nowhere to keep a name at all. A Custom module's
+///   pads are named in its own box before they are given a function, so those
+///   names simply did not survive a save — and the module's `applied_sig`, which
+///   records the label it last generated for, came back disagreeing with the
+///   field beside it, so the module read as "changed" with nothing changed.
+///
+/// # Shape
+///
+/// `num=label`, the number FIRST and the split on the FIRST `=` — the same
+/// decision `@groups` makes, for the same two reasons. A label is free text, so
+/// it can contain `=`; and [`section_body`] ends a section at the first line
+/// starting with `@`, so a label must never be able to start one.
+///
+/// Keyed on the pin NUMBER rather than its name, which is the identity the rest
+/// of `mcu.config` uses: pin names carry vendor tags (`PB3 (JTDO-TRACESWO)`) and
+/// are not stable across a re-import.
+///
+/// Empty when no pin is named, so a project that never used the field
+/// round-trips without the section.
+pub fn labels_section(labels: &std::collections::BTreeMap<usize, String>) -> String {
+    let named: Vec<(&usize, &String)> = labels
+        .iter()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .collect();
+    if named.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(LABELS_HEADER);
+    s.push('\n');
+    for (num, label) in named {
+        s.push_str(&format!("{num}={}\n", label.trim()));
+    }
+    s
+}
+
+/// Read `@labels` back. A line whose pin number does not parse is dropped.
+pub fn parse_labels(text: &str) -> std::collections::BTreeMap<usize, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(body) = section_body(text, LABELS_HEADER) else {
+        return map;
+    };
+    for line in body.lines() {
+        // The FIRST `=` only: everything after it is the label, `=` included.
+        let Some((num, label)) = line.split_once('=') else {
+            continue;
+        };
+        let Ok(num) = num.trim().parse::<usize>() else {
+            continue;
+        };
+        // Only the padding the panel field allows is trimmed; the interior is
+        // whatever the user typed.
+        let label = label.trim();
+        if !label.is_empty() {
+            map.insert(num, label.to_owned());
+        }
+    }
+    map
 }
 
 /// Parse `@iomode` back into `pin -> GpioMode`; malformed lines are skipped.
@@ -1116,5 +1188,68 @@ mod group_tests {
     fn a_name_starting_with_an_at_does_not_end_the_section() {
         let groups = vec![g("@radar", &[4, 5]), g("display", &[10])];
         assert_eq!(parse_groups(&groups_section(&groups)), groups);
+    }
+}
+
+#[cfg(test)]
+mod labels_section_tests {
+    use super::{labels_section, parse_labels};
+    use std::collections::BTreeMap;
+
+    fn map(pairs: &[(usize, &str)]) -> BTreeMap<usize, String> {
+        pairs.iter().map(|(n, l)| (*n, (*l).to_owned())).collect()
+    }
+
+    /// The case the binding-suffix store could not carry: capitals and a space.
+    ///
+    /// `sanitize_label` lowercases and folds every non-alphanumeric to `_`, so
+    /// "Status LED" was written into the variable name as `status_led` and came
+    /// back as `status_led` on the next open.
+    #[test]
+    fn free_text_survives_the_round_trip() {
+        let want = map(&[(13, "Status LED"), (2, "VBAT sense")]);
+        let text = labels_section(&want);
+        assert_eq!(parse_labels(&text), want);
+    }
+
+    /// A label can contain `=`, so the split is on the FIRST one only - the
+    /// same decision `@groups` makes about free-text device names.
+    #[test]
+    fn an_equals_sign_inside_a_label_is_kept() {
+        let want = map(&[(7, "Vref = 3V3")]);
+        let text = labels_section(&want);
+        assert_eq!(parse_labels(&text), want);
+    }
+
+    /// `section_body` ends a section at the first line starting with `@`, so the
+    /// number has to come first - a label may well start with one.
+    #[test]
+    fn a_label_starting_with_an_at_sign_does_not_truncate_the_section() {
+        let want = map(&[(4, "@irq handler"), (9, "later")]);
+        let text = format!("{}\n@iomode\n4=PushPull\n", labels_section(&want));
+        assert_eq!(
+            parse_labels(&text),
+            want,
+            "both labels survive, and the @iomode line after them is not one"
+        );
+    }
+
+    /// A project that never named a pin round-trips with no section at all.
+    #[test]
+    fn nothing_named_writes_nothing() {
+        assert!(labels_section(&BTreeMap::new()).is_empty());
+        assert!(labels_section(&map(&[(1, "   ")])).is_empty(), "nor blanks");
+        assert!(parse_labels("").is_empty());
+        assert!(
+            parse_labels("@modules\nx\n").is_empty(),
+            "and an old project without the section reads as unnamed"
+        );
+    }
+
+    /// A malformed line is dropped rather than guessed at.
+    #[test]
+    fn a_line_without_a_pin_number_is_dropped() {
+        let text = "@labels\nPC13=led\n=orphan\n13=real\n";
+        assert_eq!(parse_labels(text), map(&[(13, "real")]));
     }
 }
