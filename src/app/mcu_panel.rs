@@ -375,6 +375,27 @@ fn config_open_after_click(id: &str, clicked: &str, canvas_selected: Option<&str
     id == clicked && canvas_selected == Some(id)
 }
 
+/// Whether the Virtual-modules panel draws a BODY under its bar, or only the bar.
+///
+/// Three things are worth showing: virtual modules, devices, and pads that could
+/// become either. With none of them the body would be an empty box under a bar
+/// that already says what to press.
+///
+/// Pulled out of the panel because one line of it is load-bearing for a control
+/// that lives somewhere else entirely. `+ Device` sits on the BAR and creates a
+/// group there, 120-odd lines before this is evaluated — and the only reason the
+/// click is not a no-op is that `has_groups` is then true, so the roster is
+/// drawn on the same frame and can unfold the row it just made. Written inline,
+/// that dependency was invisible from the button and untestable from anywhere.
+fn panel_show_body(
+    collapsed: bool,
+    has_modules: bool,
+    has_groups: bool,
+    anything_to_group: bool,
+) -> bool {
+    !collapsed && (has_modules || has_groups || anything_to_group)
+}
+
 fn add_module_block_reason(
     kind: ModuleKind,
     hw_only: Option<&'static str>,
@@ -1041,7 +1062,21 @@ impl AppIde {
                             if !collapsed {
                                 ui.add_space(4.0);
                             }
-                            ui.horizontal(|ui| {
+                            // WRAPPED, not a plain `horizontal`. Laid out under
+                            // the app's own fonts the row now ends at ~407 px
+                            // (caret 19, "Virtual modules:" 114, "+ Add module"
+                            // 217, "Devices:" 275, "+ Device" 337, "Undo" 407)
+                            // and `MCU_MIN_W` is 420, which leaves ~388 px once
+                            // the two 8 px margins are taken — so at the narrowest
+                            // MCU zone the app allows, the tail of Undo fell
+                            // outside the clip rect and was neither drawn nor
+                            // clickable. It was ~303 px before the two device
+                            // controls joined the row.
+                            //
+                            // Wrapping costs one extra line of bar ONLY when the
+                            // zone is too narrow to hold the row, and hides
+                            // nothing; clipping silently took a control away.
+                            ui.horizontal_wrapped(|ui| {
                                 // Disclosure for the WHOLE panel, left of its
                                 // name. Collapsed it keeps only this bar, which
                                 // is the difference between a panel that can be
@@ -1314,8 +1349,21 @@ impl AppIde {
 
                                 if mcu.can_undo_modules() {
                                      ui.separator();
+                                    // Says MODULES explicitly, because `+ Device`
+                                    // now stands two widgets to its left and
+                                    // position implies coverage. It has none:
+                                    // `ModuleUndo` holds `modules` and `pins`
+                                    // only, and no roster gesture pushes a
+                                    // snapshot — so pressing this after creating
+                                    // a device silently reverts the last MODULE
+                                    // action instead, taking its pin assignments
+                                    // with it. Extending the stack to devices is
+                                    // a real change (every roster gesture would
+                                    // have to snapshot, or an Undo would clobber
+                                    // the edits made since), not a line here.
                                     let hover = format!(
-                                        "Undo: {}  (Ctrl+Z)",
+                                        "Undo: {}  (Ctrl+Z)\n\nModules only — adding, renaming or \
+                                         dissolving a device is not on this stack.",
                                         mcu.last_module_undo_label().unwrap_or("last change")
                                     );
                                     if ui
@@ -1412,8 +1460,9 @@ impl AppIde {
 
                             // A DEVICE is made of pads, not of modules: `loose_pins`
                             // exists precisely to offer the pads no module owns, and
-                            // the roster is the only place a device is created,
-                            // renamed or dissolved. Gated on modules alone, a chip
+                            // this panel is the only place a device is created
+                            // (the bar's `+ Device`), renamed or dissolved (its
+                            // roster below). Gated on modules alone, a chip
                             // whose pads are all hand-configured could not group
                             // anything, and removing the last module stranded every
                             // device that already existed.
@@ -1422,10 +1471,12 @@ impl AppIde {
                                     && p.selected_function
                                         != crate::panels::mcu_module::pins::logic::pin_function::PinFunction::Unset
                             });
-                            let show_body = !collapsed
-                                && (!mcu.modules.is_empty()
-                                    || !mcu.groups.is_empty()
-                                    || anything_to_group);
+                            let show_body = panel_show_body(
+                                collapsed,
+                                !mcu.modules.is_empty(),
+                                !mcu.groups.is_empty(),
+                                anything_to_group,
+                            );
                             if show_body {
                                 use crate::panels::mcu_module::mcu::logic::module_style;
                                 use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode};
@@ -2180,6 +2231,27 @@ impl AppIde {
                     }
                     if (self.vmod_list_h - list_h).abs() > 0.5 && list_h > 0.0 {
                         self.vmod_list_h = list_h;
+                    }
+                    // Created with `+ Device` from a bar the user had dragged
+                    // shut: open tall enough to show the roster, or the row that
+                    // was just made is below the fold and the click reads as a
+                    // no-op.
+                    //
+                    // Dragging the top border past the floor stores
+                    // `body_h = MIN_BODY_H` (60), so un-collapsing alone reopens
+                    // a 60 px body — barely two folded device rows. The two
+                    // neighbouring gestures are both already rescued from this
+                    // and by different routes: `+ Add module` through the
+                    // `vmod_open_sig` growth just above (it unfolds a config, so
+                    // the signature changes), and the caret through the block
+                    // below. `device_added` fed neither.
+                    //
+                    // Growing only, and capped like the caret's: nobody wants
+                    // the panel they just sized snapping taller than the diagram
+                    // can spare.
+                    if device_added {
+                        body_h = body_h.max(self.vmod_list_h.min(auto_cap));
+                        ui.ctx().request_repaint();
                     }
                     // Expanded with the caret button: open tall enough for the
                     // whole module list, and close every config on the way —
@@ -3895,5 +3967,43 @@ mod the_canvas_and_the_list_agree_about_one_click {
             !config_open_after_click("spi_2", "usart_1", Some("spi_2")),
             "a selection the click did not make does not keep a config open"
         );
+    }
+}
+
+/// The gate that decides whether the panel has a body at all.
+#[cfg(test)]
+mod the_panel_body_appears_when_there_is_something_in_it {
+    use super::panel_show_body;
+
+    /// The invariant `+ Device` rests on, and the one nothing else checks.
+    ///
+    /// The button is on the BAR and creates the group there; the roster that
+    /// unfolds the new row is only drawn when this says so. A bare chip — no
+    /// modules, no configured pins — therefore has to flip to `true` on the
+    /// strength of the new group alone, on the very frame it was made.
+    #[test]
+    fn a_bare_chip_shows_its_body_the_moment_a_device_exists() {
+        assert!(
+            !panel_show_body(false, false, false, false),
+            "nothing to show yet"
+        );
+        assert!(
+            panel_show_body(false, false, true, false),
+            "one device is enough - this is what makes `+ Device` not a no-op"
+        );
+    }
+
+    /// Each of the three reasons stands on its own.
+    #[test]
+    fn any_one_of_the_three_is_enough() {
+        assert!(panel_show_body(false, true, false, false), "a module");
+        assert!(panel_show_body(false, false, true, false), "a device");
+        assert!(panel_show_body(false, false, false, true), "a pad to group");
+    }
+
+    /// Collapsed outranks all three: the user asked for the bar alone.
+    #[test]
+    fn collapsed_wins_over_everything() {
+        assert!(!panel_show_body(true, true, true, true));
     }
 }

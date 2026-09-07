@@ -17,6 +17,11 @@
 //! Membership is by PAD NUMBER, never by module id — see
 //! [`PinGroup`](crate::panels::mcu_module::mcu_config::PinGroup) for why. This
 //! panel is the only place a group is created, renamed, filled or dissolved.
+//!
+//! The roster draws the rows; the `Devices:` label and the `+ Device` button
+//! that creates one live on the panel's TOP BAR, beside `+ Add module` — see
+//! [`device_add_button`]. Both are in this file, and `apply_act` is still the
+//! single place a device is created.
 
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
@@ -101,8 +106,14 @@ fn fresh_name(mcu: &Mcu) -> String {
 /// * a trash button ARMED a row — that wins outright, so arming a second row
 ///   replaces the first rather than leaving two rows asking;
 /// * Cancel;
-/// * any ACT at all — Remove took the row away, and every other act moved
-///   something the question was about;
+/// * an ACT that MOVED something — Remove took the row away, and every other
+///   act the roster carries changed the thing the question was about. Creating
+///   a device is deliberately NOT one of them: it pushes at the END, so it
+///   renames nothing and shifts no row, and the question goes on pointing at
+///   the same still-open row. (It could not reach here anyway — `+ Device`
+///   lives on the panel's top bar and applies its own act, so the roster's
+///   `act` is `None` on a creation frame. The rule and the plumbing agree, but
+///   the rule is the reason.)
 /// * the row STOPPED ASKING. A folded row draws no controls, so it may hold no
 ///   pending decision either, and a renamed one no longer answers to the name
 ///   the question was filed under.
@@ -197,12 +208,6 @@ fn apply_renames(
     }
 }
 
-/// Draw the roster.
-///
-/// Nothing is returned: a device reaches the project only through
-/// `calculate_mcu_state_hash`, which sees the edit on this same frame and
-/// regenerates main.rs. There is no pin file and no config file to re-sync,
-/// because a group owns neither.
 /// The `Devices:` label and its `+ Device` button, for the panel's TOP BAR.
 ///
 /// Split out of [`device_roster`] so the two things that CREATE something sit
@@ -235,6 +240,13 @@ pub(super) fn device_add_button(ui: &mut egui::Ui, mcu: &mut Mcu) -> bool {
     apply_act(mcu, clicked.then_some(Act::New))
 }
 
+/// Draw the roster.
+///
+/// Nothing is returned: a device reaches the project only through
+/// `calculate_mcu_state_hash`, which sees the edit on this same frame and
+/// regenerates main.rs. There is no pin file and no config file to re-sync,
+/// because a group owns neither.
+///
 /// `just_added`: the bar's `+ Device` created a device on THIS frame, so its
 /// row is unfolded — the name field it needs is not drawn on a folded row.
 pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu, just_added: bool) {
@@ -290,6 +302,8 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu, just_added: bool) 
         );
     }
 
+    // The last row's index, taken before the loop borrows `names` mutably.
+    let last_row = names.len().saturating_sub(1);
     let focus = &mut focused;
     let left = &mut lost;
     let arm = &mut arm_name;
@@ -302,11 +316,27 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu, just_added: bool) 
         // untouched; it only shifts when a device is dissolved or merged away,
         // which is rare and is the user's own doing.
         let st_id = egui::Id::new(("device_row", gi));
+        // The row the bar's `+ Device` just created, which is always the last.
+        //
+        // It has to be forced open HERE, before the row is drawn, not only in
+        // the trailing block below. While `Act::New` was applied at the END of
+        // this function the new group did not exist during this loop, so the
+        // row simply was not drawn on its creation frame and the trailing
+        // unfold was in time. Now the bar creates it first, so the loop DOES
+        // draw it — with whatever `("device_row", gi)` bit the device that last
+        // sat at this index left behind, since `load_with_default_open` returns
+        // a STORED value in preference to the default and nothing ever clears
+        // the tail indices. The row flashed folded (no name field, no `+`, no
+        // trash) for one frame, or not, depending on unrelated history.
+        let is_new_row = just_added && gi == last_row;
         let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(),
             st_id,
-            false,
+            is_new_row,
         );
+        if is_new_row {
+            st.set_open(true);
+        }
         let open = st.is_open();
         // Only an unfolded row can be asking: the trash that arms it is not
         // drawn on a folded one.
@@ -315,7 +345,7 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu, just_added: bool) 
             still_asking.push(names_before[gi].clone());
         }
         let mut toggle = false;
-        egui::Frame::new()
+        let row = egui::Frame::new()
             .fill(egui::Color32::from_rgba_unmultiplied(
                 c.r(),
                 c.g(),
@@ -494,6 +524,14 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu, just_added: bool) 
                     });
                 }
             });
+        // The list keeps its scroll offset across a collapse, and the device
+        // rows sit ABOVE the separator and the modules — so a user who had
+        // scrolled down to a module got a new row appended off the top of the
+        // viewport, and the only visible effect of the click was the module
+        // list nudging down.
+        if is_new_row {
+            row.response.scroll_to_me(Some(egui::Align::Center));
+        }
         folds.push((names_before[gi].clone(), if toggle { !open } else { open }));
         if toggle {
             st.set_open(!open);
@@ -514,12 +552,13 @@ pub(super) fn device_roster(ui: &mut egui::Ui, mcu: &mut Mcu, just_added: bool) 
         &still_asking,
     );
     let rows_before = names_before.len();
-    // Two ways a row can need unfolding, and only one of them still arrives as
-    // an `Act`: the `+ Device` button moved to the top bar and applies its own,
-    // so on that path the caller reports it. The `Act::New` arm stays live
-    // rather than being deleted — `apply_act` is the one place a device is
-    // created, and a second creator would be a second set of rules.
-    let was_new = apply_act(mcu, act) || just_added;
+    // `just_added` is NOT folded in here: the loop above already opened that
+    // row, early enough to draw it open on its own first frame. This covers
+    // only a creation through the roster's own act — which nothing does today,
+    // the `+ Device` button having moved to the bar, but `apply_act` is the one
+    // place a device is created and a second creator would be a second set of
+    // rules.
+    let was_new = apply_act(mcu, act);
     if names != names_before {
         // Asked about a name that is about to stop existing.
         mcu.device_remove_confirm = None;
@@ -974,10 +1013,48 @@ mod tests {
         );
         // Cancel.
         assert!(super::next_confirm(Some("radar"), None, true, false, &asking).is_none());
-        // Remove, or any other act on the roster.
+        // Remove, or any other act that MOVED a row. Creating a device is not
+        // one of them and cannot reach here as one — see
+        // `creating_a_device_leaves_an_armed_question_alone`.
         assert!(super::next_confirm(Some("radar"), None, false, true, &asking).is_none());
         // The row folded, or was renamed away: it no longer draws the question.
         assert!(super::next_confirm(Some("radar"), None, false, false, &[]).is_none());
+    }
+
+    /// Creating a device leaves another row's armed "remove?" question standing.
+    ///
+    /// `+ Device` used to produce an `Act::New` inside the roster, so
+    /// `next_confirm` saw `acted == true` and disarmed whatever was asking. That
+    /// was always over-broad: the rule is that an act which MOVED the row the
+    /// question is about ends it, and a creation appends — it renames nothing
+    /// and shifts no index. Now that the button lives on the panel's top bar and
+    /// applies its own act, the roster reaches `next_confirm` with
+    /// `acted == false`, and this is the behaviour that has to hold for that to
+    /// be right rather than merely different.
+    #[test]
+    fn creating_a_device_leaves_an_armed_question_alone() {
+        let mut mcu = bare_mcu();
+        mcu.groups = vec![group("radar", &[7])];
+        mcu.device_remove_confirm = Some("radar".to_owned());
+
+        assert!(super::apply_act(&mut mcu, Some(super::Act::New)));
+
+        assert_eq!(
+            mcu.device_remove_confirm.as_deref(),
+            Some("radar"),
+            "the question is untouched"
+        );
+        assert_eq!(mcu.groups.len(), 2, "and a device was created");
+        assert_eq!(
+            mcu.groups[0].name, "radar",
+            "APPENDED, so the armed row keeps its index and its name — which is \
+             the whole reason the question is still answerable"
+        );
+        assert_eq!(
+            mcu.groups[0].pins.iter().copied().collect::<Vec<_>>(),
+            vec![7],
+            "and its pads"
+        );
     }
 
     /// Arming a second row replaces the first — a single question at a time,

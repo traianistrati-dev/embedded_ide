@@ -242,10 +242,12 @@ pub fn show(
                         .color(egui::Color32::from_rgb(150, 158, 172)),
                 )
                 .on_hover_text(
-                    "The call edges shown start from the selected file's module \
-                     — selecting a package's mod.rs focuses the WHOLE package \
-                     (all interior links + its outside connections). Select \
-                     another file (tree / editor / node click) to move the focus.",
+                    "The call edges shown are the ones reaching the selected file's \
+                     module, either way round - what it calls and what calls it, out \
+                     to the Depth beside this. Selecting a package's mod.rs focuses \
+                     the WHOLE package (all interior links + its outside \
+                     connections). Select another file (tree / editor / node click) \
+                     to move the focus.",
                 );
             }
         }
@@ -315,9 +317,12 @@ pub fn show(
                 })
                 .response
                 .on_hover_text(
-                    "Depth of the displayed call tree below the focused module: \
-                     1 = its direct edges only; N = follow callees N levels \
-                     down; All = the whole tree under the selected module.",
+                    "How far from the focused module to follow the call tree, in \
+                     BOTH directions: 1 = its direct edges only (who it calls, who \
+                     calls it); N = also callees of callees and callers of callers, \
+                     N levels out; All = everything connected to it. The caller side \
+                     used to stop at one hop whatever this said, which left the \
+                     setting doing nothing on a module that mostly gets called.",
                 );
             ui.separator();
             ui.checkbox(
@@ -1022,42 +1027,12 @@ fn show_canvas(
             let x = if right_side { p.x + p.w } else { p.x };
             to_screen(x, y)
         };
-        // Downstream reach from the FOCUS SET (a single module, or a whole
-        // package when its mod.rs is selected): multi-source BFS over the
-        // node-level call graph. An edge is drawn when its SOURCE lies within
-        // `call_depth` hops of the set (level 1 = the members' own edges —
-        // which for a package means ALL its interior links plus the first
-        // exterior level), plus any edge ENTERING the set (who uses it).
-        // "All" = unbounded — the whole tree under the selection.
+        // Which edges to draw: everything within `call_depth` hops of the
+        // FOCUS SET, in EITHER direction. See `calls::visible_edges` for why
+        // both — the caller side used to be pinned at one hop, which is what
+        // made the depth control look like it only worked on `main`.
         let depth_limit = view.call_depth.unwrap_or(usize::MAX);
         let in_set = graph.focus_set(focus_node);
-        let dist: Vec<usize> = {
-            let n = graph.nodes.len();
-            let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-            for e in calls {
-                adj[e.from_node].push(e.to_node);
-            }
-            let mut dist = vec![usize::MAX; n];
-            let mut q = std::collections::VecDeque::new();
-            for (i, &member) in in_set.iter().enumerate() {
-                if member {
-                    dist[i] = 0;
-                    q.push_back(i);
-                }
-            }
-            while let Some(u) = q.pop_front() {
-                if dist[u] >= depth_limit {
-                    continue; // deep enough — don't expand further
-                }
-                for &v in &adj[u] {
-                    if dist[v] == usize::MAX {
-                        dist[v] = dist[u] + 1;
-                        q.push_back(v);
-                    }
-                }
-            }
-            dist
-        };
         // ── Candidate ROUTER (user fix: "choose the shortest path without
         //    crossing other paths") ─────────────────────────────────────────
         // For every visible edge THREE routes are scored — the direct
@@ -1066,10 +1041,8 @@ fn show_canvas(
         // edges + previously routed calls) or cutting through a node box; the
         // cheapest wins. Short edges route first so they claim the direct
         // lanes and longer ones bend around them.
-        let mut visible: Vec<&CallEdge> = calls
-            .iter()
-            .filter(|e| dist[e.from_node] < depth_limit || in_set[e.to_node])
-            .collect();
+        let mut visible: Vec<&CallEdge> =
+            super::calls::visible_edges(graph.nodes.len(), calls, &in_set, depth_limit);
         let center_dist2 = |e: &CallEdge| -> f32 {
             let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
             let dx = a.center_x() - b.center_x();

@@ -36,6 +36,79 @@ pub struct CallEdge {
     pub to_row: usize,
 }
 
+/// Which call edges to draw for a focus set, at a given depth.
+///
+/// `in_set` is the focus — one module, or a whole package when its `mod.rs` is
+/// selected (see [`ModuleGraph::focus_set`]). `depth_limit` is the toolbar's
+/// depth (`usize::MAX` for "All"). An edge is drawn when EITHER end lies within
+/// that many hops of the set: callees reached by following edges forward,
+/// callers by following them back.
+///
+/// # Why both directions
+///
+/// The caller side used to be the constant "any edge entering the set" — one
+/// hop, at every setting including "All". That left the depth control inert on
+/// any module whose picture is mostly incoming, which is most of them: a leaf
+/// has no downstream cone for the knob to govern. `main` was the module it
+/// appeared to work on, and only because `main` has no callers, so its whole
+/// picture IS the downstream cone.
+///
+/// Depth 1 is deliberately identical to the old behaviour: `up[to] < 1` means
+/// `up[to] == 0` means `to` is itself in the set, which is the old constant.
+pub fn visible_edges<'a>(
+    node_count: usize,
+    calls: &'a [CallEdge],
+    in_set: &[bool],
+    depth_limit: usize,
+) -> Vec<&'a CallEdge> {
+    let reach = |follow_callees: bool| -> Vec<usize> {
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+        for e in calls {
+            let (a, b) = if follow_callees {
+                (e.from_node, e.to_node)
+            } else {
+                (e.to_node, e.from_node)
+            };
+            // An edge naming a node the graph no longer has is dropped rather
+            // than panicking: `calls` is collected asynchronously and can be
+            // one rebuild behind the graph it is drawn against.
+            if a < node_count && b < node_count {
+                adj[a].push(b);
+            }
+        }
+        let mut dist = vec![usize::MAX; node_count];
+        let mut q = VecDeque::new();
+        for (i, &member) in in_set.iter().enumerate().take(node_count) {
+            if member {
+                dist[i] = 0;
+                q.push_back(i);
+            }
+        }
+        while let Some(u) = q.pop_front() {
+            if dist[u] >= depth_limit {
+                continue; // deep enough — don't expand further
+            }
+            for &v in &adj[u] {
+                if dist[v] == usize::MAX {
+                    dist[v] = dist[u] + 1;
+                    q.push_back(v);
+                }
+            }
+        }
+        dist
+    };
+    let down = reach(true);
+    let up = reach(false);
+    calls
+        .iter()
+        .filter(|e| {
+            e.from_node < node_count
+                && e.to_node < node_count
+                && (down[e.from_node] < depth_limit || up[e.to_node] < depth_limit)
+        })
+        .collect()
+}
+
 /// The incremental call-graph pass for one content hash of the project.
 pub struct CallPass {
     /// Content hash of the graph this pass belongs to (stale results dropped).
@@ -565,5 +638,136 @@ mod call_order_tests {
     fn out_of_range_rows_are_ignored() {
         let o = call_order(2, &[e(0, 9), e(7, 1)]);
         assert_eq!(o.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod visible_edge_tests {
+    use super::{CallEdge, visible_edges};
+
+    /// `a -> b` as a node-level edge (rows are irrelevant to the depth filter).
+    fn e(a: usize, b: usize) -> CallEdge {
+        CallEdge {
+            from_node: a,
+            from_row: 0,
+            to_node: b,
+            to_row: 0,
+        }
+    }
+
+    /// Focus on exactly one node.
+    fn only(n: usize, of: usize) -> Vec<bool> {
+        let mut v = vec![false; n];
+        v[of] = true;
+        v
+    }
+
+    /// A chain 0 -> 1 -> 2 -> 3 -> 4, focused at the far END (node 4).
+    ///
+    /// Node 4 calls nothing, so it has no downstream cone at all. Its whole
+    /// picture is who calls it, and who calls THEM - which is what the depth
+    /// now has to reach. Before the fix the caller side was the constant "any
+    /// edge entering the set", so every setting from 1 to "All" drew the same
+    /// single edge and the control was inert here.
+    #[test]
+    fn depth_walks_up_the_callers_of_a_leaf() {
+        let calls: Vec<CallEdge> = (0..4).map(|i| e(i, i + 1)).collect();
+        let set = only(5, 4);
+        let count = |d: usize| visible_edges(5, &calls, &set, d).len();
+        assert_eq!(count(1), 1, "1 = its direct callers");
+        assert_eq!(count(2), 2, "2 = callers of the callers");
+        assert_eq!(count(3), 3);
+        assert_eq!(count(usize::MAX), 4, "All = the whole chain above it");
+    }
+
+    /// The same chain focused at the START (node 0) - the `main` shape: no
+    /// callers, all cone. This ALREADY worked, and must keep working.
+    #[test]
+    fn depth_still_walks_down_the_callees() {
+        let calls: Vec<CallEdge> = (0..4).map(|i| e(i, i + 1)).collect();
+        let set = only(5, 0);
+        let count = |d: usize| visible_edges(5, &calls, &set, d).len();
+        assert_eq!(count(1), 1);
+        assert_eq!(count(2), 2);
+        assert_eq!(count(usize::MAX), 4);
+    }
+
+    /// Depth 1 is EXACTLY the old behaviour, on both sides at once.
+    ///
+    /// The old filter was `down[from] < 1 || in_set[to]`. The new one replaces
+    /// the constant with `up[to] < 1`, and `up[to] == 0` means `to` is in the
+    /// set - the same thing. This pins that, so the default view (which is
+    /// `Some(1)`) is not quietly redrawn by this change.
+    #[test]
+    fn depth_one_is_the_old_picture() {
+        // 0 -> 2, 1 -> 2, 2 -> 3, 3 -> 4, and an unrelated 5 -> 6.
+        let calls = vec![e(0, 2), e(1, 2), e(2, 3), e(3, 4), e(5, 6)];
+        let set = only(7, 2);
+        let got = visible_edges(7, &calls, &set, 1);
+        let old: Vec<&CallEdge> = calls
+            .iter()
+            .filter(|x| set[x.from_node] || set[x.to_node])
+            .collect();
+        assert_eq!(got, old, "depth 1 moved");
+        // Concretely: both callers of 2, plus 2's own edge. Not 3 -> 4.
+        assert_eq!(got.len(), 3);
+        assert!(!got.contains(&&e(3, 4)));
+    }
+
+    /// A module in the middle grows in BOTH directions at once.
+    #[test]
+    fn a_middle_module_grows_both_ways() {
+        let calls: Vec<CallEdge> = (0..4).map(|i| e(i, i + 1)).collect(); // 0->1->2->3->4
+        let set = only(5, 2);
+        let at = |d: usize| {
+            let mut v: Vec<(usize, usize)> = visible_edges(5, &calls, &set, d)
+                .iter()
+                .map(|x| (x.from_node, x.to_node))
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(at(1), vec![(1, 2), (2, 3)], "one hop each way");
+        assert_eq!(at(2), vec![(0, 1), (1, 2), (2, 3), (3, 4)], "two each way");
+    }
+
+    /// A node nothing touches contributes nothing, at any depth.
+    #[test]
+    fn an_unrelated_component_stays_out() {
+        let calls = vec![e(0, 1), e(1, 2), e(3, 4)];
+        let set = only(5, 0);
+        for d in [1usize, 2, 5, usize::MAX] {
+            let got = visible_edges(5, &calls, &set, d);
+            assert!(
+                !got.contains(&&e(3, 4)),
+                "the other component leaked in at depth {d}"
+            );
+        }
+    }
+
+    /// A package focus seeds every member at once, so its interior links are
+    /// all level 0-to-1 and appear together.
+    #[test]
+    fn a_package_focus_seeds_every_member() {
+        // 0,1,2 are the package; 3 is outside and calls into it; 4 is called.
+        let calls = vec![e(0, 1), e(1, 2), e(3, 0), e(2, 4)];
+        let set = vec![true, true, true, false, false];
+        assert_eq!(
+            visible_edges(5, &calls, &set, 1).len(),
+            4,
+            "all interior links plus the first exterior level, each way"
+        );
+    }
+
+    /// An edge naming a node the graph no longer has is dropped, not panicked
+    /// on. `calls` is collected asynchronously and can be one rebuild behind
+    /// the graph it is drawn against; indexing `adj` with a stale node id would
+    /// take the whole app down.
+    #[test]
+    fn a_stale_edge_past_the_end_is_dropped() {
+        let calls = vec![e(0, 1), e(1, 9), e(9, 0)];
+        let set = only(3, 0);
+        let got = visible_edges(3, &calls, &set, usize::MAX);
+        assert_eq!(got, vec![&e(0, 1)], "stale ids survived the filter");
     }
 }
