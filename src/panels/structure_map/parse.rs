@@ -106,33 +106,24 @@ pub struct ModuleGraph {
 }
 
 impl ModuleGraph {
-    /// The FOCUS SET for the call-edge display, as a membership mask. A plain
-    /// module focuses itself alone; a PACKAGE ROOT focuses the whole package
-    /// subtree — the root plus every `pkg::…` descendant — so the diagram shows
-    /// all interior links of the package at once, plus its outside connections.
-    ///
-    /// A package root is a `mod.rs` OR an extracted library's `lib.rs`: the
-    /// crate root is a facade of `pub mod` declarations with no symbols of its
-    /// own, so without this, selecting `mw_radar` focused a node that has
-    /// nothing to draw and the whole library looked inert.
-    pub fn focus_set(&self, focus: usize) -> Vec<bool> {
-        let mut set = vec![false; self.nodes.len()];
-        let Some(node) = self.nodes.get(focus) else {
-            return set;
-        };
-        set[focus] = true;
-        let is_package_root =
-            node.file_rel.ends_with("/mod.rs") || node.file_rel.ends_with("/lib.rs");
-        if is_package_root && !node.path.is_empty() {
-            let prefix = format!("{}::", node.path);
-            for (i, n) in self.nodes.iter().enumerate() {
-                if n.path.starts_with(&prefix) {
-                    set[i] = true;
-                }
-            }
-        }
-        set
-    }
+    // The call-edge focus is the SELECTED NODE, and nothing else.
+    //
+    // There used to be a `focus_set` here returning a membership MASK, because
+    // a `mod.rs` / `lib.rs` focused its whole package subtree: the argument was
+    // that a facade of `pub mod` declarations has nothing of its own to draw,
+    // so focusing it alone looked inert.
+    //
+    // It was removed. Expanding put every package member at hop 0, so all the
+    // package's interior wiring was level 1 and the depth control could not
+    // trim it - selecting one library root drew twenty modules' worth of edges
+    // at the lowest setting. Worse, the toolbar label decided "is this a
+    // package root?" with its OWN rule (`mod.rs` only, where the focus used
+    // `mod.rs` or `lib.rs`), so a library root focused twenty modules while the
+    // toolbar named one and nothing on screen said otherwise.
+    //
+    // A facade now shows no call edges, which is the truth: it has no code, so
+    // it makes no calls. The old behaviour hid that by drawing other modules'
+    // calls under its name.
 }
 
 /// `"foo/bar.rs"` → `"foo::bar"`, `"foo/mod.rs"` → `"foo"`, `"utils.rs"` → `"utils"`.
@@ -919,25 +910,6 @@ fn main() {
         let cm = g.nodes.iter().position(|n| n.name == "cortex_m").unwrap();
         assert!(g.deps.contains(&(0, cm)));
         assert!(g.nodes[cm].is_external && g.nodes[cm].symbols.is_empty());
-    }
-
-    /// Selecting a package's `mod.rs` focuses the whole subtree; a plain file
-    /// focuses only itself.
-    #[test]
-    fn focus_set_expands_package_roots() {
-        let (main_rs, files) = sample(); // pins/{mod,configs/{mod,usart1}} + mw_radar/…
-        let g = build_graph(&main_rs, &files);
-        let idx = |p: &str| g.nodes.iter().position(|n| n.path == p).unwrap();
-
-        // pins/mod.rs → pins + configs + usart1, NOT mw_radar or main.
-        let set = g.focus_set(idx("pins"));
-        assert!(set[idx("pins")] && set[idx("pins::configs")] && set[idx("pins::configs::usart1")]);
-        assert!(!set[idx("mw_radar")] && !set[0]);
-
-        // A leaf file focuses itself alone.
-        let set = g.focus_set(idx("pins::configs::usart1"));
-        assert_eq!(set.iter().filter(|&&b| b).count(), 1);
-        assert!(set[idx("pins::configs::usart1")]);
     }
 
     /// Call sites inside `impl` methods must attribute to the implemented

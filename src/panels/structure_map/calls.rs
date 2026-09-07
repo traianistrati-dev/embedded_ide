@@ -38,11 +38,10 @@ pub struct CallEdge {
 
 /// Which call edges to draw for a focus set, at a given depth.
 ///
-/// `in_set` is the focus — one module, or a whole package when its `mod.rs` is
-/// selected (see [`ModuleGraph::focus_set`]). `depth_limit` is the toolbar's
-/// depth (`usize::MAX` for "All"). An edge is drawn when EITHER end lies within
-/// that many hops of the set: callees reached by following edges forward,
-/// callers by following them back.
+/// `focus` is the selected module - the ONE node the depth is measured from.
+/// `depth_limit` is the toolbar's depth (`usize::MAX` for "All"). An edge is
+/// drawn when either end lies within that many hops of it: callees reached by
+/// following edges forward, callers by following them back.
 ///
 /// # Why both directions
 ///
@@ -54,13 +53,13 @@ pub struct CallEdge {
 /// picture IS the downstream cone.
 ///
 /// Depth 1 is deliberately identical to the old behaviour: `up[to] < 1` means
-/// `up[to] == 0` means `to` is itself in the set, which is the old constant.
-pub fn visible_edges<'a>(
+/// `up[to] == 0` means `to` IS the focus, which is the old constant.
+pub fn visible_edges(
     node_count: usize,
-    calls: &'a [CallEdge],
-    in_set: &[bool],
+    calls: &[CallEdge],
+    focus: usize,
     depth_limit: usize,
-) -> Vec<&'a CallEdge> {
+) -> Vec<&CallEdge> {
     let reach = |follow_callees: bool| -> Vec<usize> {
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); node_count];
         for e in calls {
@@ -78,11 +77,9 @@ pub fn visible_edges<'a>(
         }
         let mut dist = vec![usize::MAX; node_count];
         let mut q = VecDeque::new();
-        for (i, &member) in in_set.iter().enumerate().take(node_count) {
-            if member {
-                dist[i] = 0;
-                q.push_back(i);
-            }
+        if focus < node_count {
+            dist[focus] = 0;
+            q.push_back(focus);
         }
         while let Some(u) = q.pop_front() {
             if dist[u] >= depth_limit {
@@ -655,13 +652,6 @@ mod visible_edge_tests {
         }
     }
 
-    /// Focus on exactly one node.
-    fn only(n: usize, of: usize) -> Vec<bool> {
-        let mut v = vec![false; n];
-        v[of] = true;
-        v
-    }
-
     /// A chain 0 -> 1 -> 2 -> 3 -> 4, focused at the far END (node 4).
     ///
     /// Node 4 calls nothing, so it has no downstream cone at all. Its whole
@@ -672,8 +662,7 @@ mod visible_edge_tests {
     #[test]
     fn depth_walks_up_the_callers_of_a_leaf() {
         let calls: Vec<CallEdge> = (0..4).map(|i| e(i, i + 1)).collect();
-        let set = only(5, 4);
-        let count = |d: usize| visible_edges(5, &calls, &set, d).len();
+        let count = |d: usize| visible_edges(5, &calls, 4, d).len();
         assert_eq!(count(1), 1, "1 = its direct callers");
         assert_eq!(count(2), 2, "2 = callers of the callers");
         assert_eq!(count(3), 3);
@@ -685,8 +674,7 @@ mod visible_edge_tests {
     #[test]
     fn depth_still_walks_down_the_callees() {
         let calls: Vec<CallEdge> = (0..4).map(|i| e(i, i + 1)).collect();
-        let set = only(5, 0);
-        let count = |d: usize| visible_edges(5, &calls, &set, d).len();
+        let count = |d: usize| visible_edges(5, &calls, 0, d).len();
         assert_eq!(count(1), 1);
         assert_eq!(count(2), 2);
         assert_eq!(count(usize::MAX), 4);
@@ -702,11 +690,10 @@ mod visible_edge_tests {
     fn depth_one_is_the_old_picture() {
         // 0 -> 2, 1 -> 2, 2 -> 3, 3 -> 4, and an unrelated 5 -> 6.
         let calls = vec![e(0, 2), e(1, 2), e(2, 3), e(3, 4), e(5, 6)];
-        let set = only(7, 2);
-        let got = visible_edges(7, &calls, &set, 1);
+        let got = visible_edges(7, &calls, 2, 1);
         let old: Vec<&CallEdge> = calls
             .iter()
-            .filter(|x| set[x.from_node] || set[x.to_node])
+            .filter(|x| x.from_node == 2 || x.to_node == 2)
             .collect();
         assert_eq!(got, old, "depth 1 moved");
         // Concretely: both callers of 2, plus 2's own edge. Not 3 -> 4.
@@ -718,9 +705,8 @@ mod visible_edge_tests {
     #[test]
     fn a_middle_module_grows_both_ways() {
         let calls: Vec<CallEdge> = (0..4).map(|i| e(i, i + 1)).collect(); // 0->1->2->3->4
-        let set = only(5, 2);
         let at = |d: usize| {
-            let mut v: Vec<(usize, usize)> = visible_edges(5, &calls, &set, d)
+            let mut v: Vec<(usize, usize)> = visible_edges(5, &calls, 2, d)
                 .iter()
                 .map(|x| (x.from_node, x.to_node))
                 .collect();
@@ -731,32 +717,50 @@ mod visible_edge_tests {
         assert_eq!(at(2), vec![(0, 1), (1, 2), (2, 3), (3, 4)], "two each way");
     }
 
+    /// A crate root does not drag its siblings' wiring in with it.
+    ///
+    /// The reported bug, in miniature. Node 0 is a library root; 1, 2 and 3 are
+    /// its modules, they call each other, and they all call the root. Focusing
+    /// the root at depth 1 must show the three edges that TOUCH it - not the
+    /// traffic between 1, 2 and 3.
+    ///
+    /// It used to. `focus_set` put every `pkg::…` member in the focus, so all
+    /// the interior links sat at hop 0 and appeared at the lowest setting; the
+    /// toolbar meanwhile named one module, because it decided "package root?"
+    /// by its own narrower rule. Twenty modules' worth of edges arrived under
+    /// one module's name.
+    #[test]
+    fn a_crate_root_does_not_pull_in_its_members_wiring() {
+        let interior = [e(1, 2), e(2, 3), e(3, 1)];
+        let touching = [e(1, 0), e(2, 0), e(3, 0)];
+        let calls: Vec<CallEdge> = interior.iter().chain(&touching).copied().collect();
+
+        let got = visible_edges(4, &calls, 0, 1);
+        assert_eq!(got.len(), 3, "depth 1 on the root drew {got:?}");
+        for x in &interior {
+            assert!(
+                !got.contains(&x),
+                "interior edge {x:?} leaked in at depth 1"
+            );
+        }
+        for x in &touching {
+            assert!(got.contains(&x), "edge {x:?} onto the root is missing");
+        }
+        // They are not gone forever - one more hop is what asks for them.
+        assert_eq!(visible_edges(4, &calls, 0, 2).len(), 6);
+    }
+
     /// A node nothing touches contributes nothing, at any depth.
     #[test]
     fn an_unrelated_component_stays_out() {
         let calls = vec![e(0, 1), e(1, 2), e(3, 4)];
-        let set = only(5, 0);
         for d in [1usize, 2, 5, usize::MAX] {
-            let got = visible_edges(5, &calls, &set, d);
+            let got = visible_edges(5, &calls, 0, d);
             assert!(
                 !got.contains(&&e(3, 4)),
                 "the other component leaked in at depth {d}"
             );
         }
-    }
-
-    /// A package focus seeds every member at once, so its interior links are
-    /// all level 0-to-1 and appear together.
-    #[test]
-    fn a_package_focus_seeds_every_member() {
-        // 0,1,2 are the package; 3 is outside and calls into it; 4 is called.
-        let calls = vec![e(0, 1), e(1, 2), e(3, 0), e(2, 4)];
-        let set = vec![true, true, true, false, false];
-        assert_eq!(
-            visible_edges(5, &calls, &set, 1).len(),
-            4,
-            "all interior links plus the first exterior level, each way"
-        );
     }
 
     /// An edge naming a node the graph no longer has is dropped, not panicked
@@ -766,8 +770,7 @@ mod visible_edge_tests {
     #[test]
     fn a_stale_edge_past_the_end_is_dropped() {
         let calls = vec![e(0, 1), e(1, 9), e(9, 0)];
-        let set = only(3, 0);
-        let got = visible_edges(3, &calls, &set, usize::MAX);
+        let got = visible_edges(3, &calls, 0, usize::MAX);
         assert_eq!(got, vec![&e(0, 1)], "stale ids survived the filter");
     }
 }

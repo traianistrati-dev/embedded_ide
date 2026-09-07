@@ -230,24 +230,21 @@ pub fn show(
         // Whose calls are shown (follows the selected file; main by default).
         if view.show_calls {
             if let Some(node) = graph.nodes.get(focus_node) {
-                // A package root (mod.rs) focuses its whole subtree.
-                let label = if node.file_rel.ends_with("/mod.rs") {
-                    format!("· calls of {}::*", node.name)
-                } else {
-                    format!("· calls of {}", node.name)
-                };
+                // Always this one module: the focus never silently widens to
+                // a package, so the name here is the whole truth.
+                let label = format!("· calls of {}", node.name);
                 ui.label(
                     egui::RichText::new(label)
                         .size(10.5)
                         .color(egui::Color32::from_rgb(150, 158, 172)),
                 )
                 .on_hover_text(
-                    "The call edges shown are the ones reaching the selected file's \
-                     module, either way round - what it calls and what calls it, out \
-                     to the Depth beside this. Selecting a package's mod.rs focuses \
-                     the WHOLE package (all interior links + its outside \
-                     connections). Select another file (tree / editor / node click) \
-                     to move the focus.",
+                    "The call edges shown are the ones reaching the selected \
+                     file's module, either way round - what it calls and \
+                     what calls it, out to the Depth beside this. Always \
+                     that ONE module: selecting a mod.rs no longer widens \
+                     the focus to its whole package. Select another file \
+                     (tree / editor / node click) to move the focus.",
                 );
             }
         }
@@ -1032,7 +1029,6 @@ fn show_canvas(
         // both — the caller side used to be pinned at one hop, which is what
         // made the depth control look like it only worked on `main`.
         let depth_limit = view.call_depth.unwrap_or(usize::MAX);
-        let in_set = graph.focus_set(focus_node);
         // ── Candidate ROUTER (user fix: "choose the shortest path without
         //    crossing other paths") ─────────────────────────────────────────
         // For every visible edge THREE routes are scored — the direct
@@ -1042,7 +1038,7 @@ fn show_canvas(
         // cheapest wins. Short edges route first so they claim the direct
         // lanes and longer ones bend around them.
         let mut visible: Vec<&CallEdge> =
-            super::calls::visible_edges(graph.nodes.len(), calls, &in_set, depth_limit);
+            super::calls::visible_edges(graph.nodes.len(), calls, focus_node, depth_limit);
         let center_dist2 = |e: &CallEdge| -> f32 {
             let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
             let dx = a.center_x() - b.center_x();
