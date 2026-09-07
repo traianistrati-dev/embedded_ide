@@ -600,9 +600,9 @@ impl AppIde {
         galley: &egui::text::Galley,
         display_code: &str,
         rel_path: &str,
-    ) {
+    ) -> Vec<(u32, f32)> {
         if self.ed.usages.rel_path != rel_path || self.ed.usages.computed_for_text != display_code {
-            return;
+            return Vec::new();
         }
 
         const PILL_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(40, 58, 76, 220);
@@ -614,6 +614,16 @@ impl AppIde {
         // borrow ends.
         let mut clicked: Option<usize> = None;
         let mut pill_rects: std::collections::HashMap<usize, egui::Rect> = Default::default();
+        // Right edge of each pill, keyed by 1-BASED source line, for the inline
+        // diagnostic message drawn later in the same frame — it used to start at
+        // end-of-line + 16 and land on top of the pill, which starts at + 14.
+        //
+        // Returned rather than stored: `show_usages_overlay` and the diagnostics
+        // overlay are both reached from one `show_code_view` frame, so a value
+        // that cannot outlive that frame is exactly what is wanted. A field on
+        // `EditorState` would have needed a "clear it before every read" rule
+        // that nothing enforces.
+        let mut pill_edges: Vec<(u32, f32)> = Vec::new();
         {
             let total_chars = display_code.chars().count();
             let painter = ui.painter().with_clip_rect(clip);
@@ -662,6 +672,12 @@ impl AppIde {
                     PILL_FG,
                 );
                 pill_rects.insert(i, rect);
+                // The key is the same 1-based line that produced `eol_ci` above.
+                // Deriving it again from `sel_line` would invite the off-by-one
+                // that the three overlays' three different line bases make so
+                // easy — and one that fails silently, as a message that simply
+                // does not move.
+                pill_edges.push((item.sel_line + 1, rect.right()));
 
                 let resp = ui.interact(
                     rect,
@@ -695,6 +711,7 @@ impl AppIde {
                 None => self.ed.usages.open_popup = None, // pill scrolled off-screen
             }
         }
+        pill_edges
     }
 
     /// The floating "References to `name`" popup anchored below a pill; each

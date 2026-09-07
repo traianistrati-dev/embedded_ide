@@ -79,6 +79,13 @@ impl AppIde {
         // rather than left half-wired.
         slot: crate::app::EditorSlot,
         owner_file: ProjectFileId,
+        // (1-based line, right edge) of every "N refs" pill drawn earlier in
+        // THIS frame, so the inline diagnostic message can step around them
+        // instead of painting through them. Empty whenever the usages overlay
+        // did not run — folded, no LSP path, or the analysis not yet caught up
+        // with the buffer — and an empty list simply restores the old position,
+        // which is the right one when there is no pill to dodge.
+        pill_edges: &[(u32, f32)],
         // F8 / Shift+F8: step to the next / previous error of this file.
         // `Some(true)` = forwards. Consumed in `show_code_view`, where
         // `editor_kbd_active` decides which of the two editors owns the
@@ -908,6 +915,7 @@ impl AppIde {
                 copy_requested,
                 highlight,
                 def_line,
+                pill_edges,
             );
         }
 

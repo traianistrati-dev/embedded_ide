@@ -1356,6 +1356,17 @@ impl AppIde {
         // they are skipped for that frame rather than lied to. The fade and
         // underline marks are unaffected: they went into the layout already
         // translated (`fold_map.map_ranges`).
+        // Where each "N refs" pill ended, for the inline diagnostic message that
+        // is drawn much later (via `handle_editor_completion`) and used to paint
+        // straight through them.
+        //
+        // A LOCAL, not a field: both producer and consumer are reached from this
+        // one function, so "these coordinates die with this frame's galley" is a
+        // language guarantee here instead of a rule someone has to remember. It
+        // is declared OUTSIDE the fold guard on purpose — the pills are skipped
+        // while folded but the messages are not, and an empty list is exactly
+        // what the message should see then.
+        let mut pill_edges: Vec<(u32, f32)> = Vec::new();
         if !folded {
             // Highlight every occurrence of the word the user selected
             // (double-click / Ctrl+Shift+Left/Right). Painted here — while
@@ -1415,7 +1426,7 @@ impl AppIde {
             // "N refs" indicator + popup on every used item (unused ones were
             // already faded by the highlighter, above, via `dead_ranges`).
             if let Some(rel) = &usages_rel_path {
-                self.show_usages_overlay(
+                pill_edges = self.show_usages_overlay(
                     ui,
                     editor_resp.galley_pos,
                     editor_clip,
@@ -1967,6 +1978,7 @@ impl AppIde {
                 pin_pulse,
                 slot,
                 displayed_file,
+                &pill_edges,
                 err_step,
             );
         }

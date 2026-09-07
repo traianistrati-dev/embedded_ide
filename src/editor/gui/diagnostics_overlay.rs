@@ -58,6 +58,54 @@ pub fn show_line_band(
     );
 }
 
+/// The inline message's font. Monospace, which is what lets one glyph's advance
+/// size any message (see `char_w` in the overlay).
+fn msg_font() -> egui::FontId {
+    egui::FontId::monospace(10.5)
+}
+
+/// Gap kept between a line's "N refs" pill and the inline message after it.
+const PILL_GAP: f32 = 10.0;
+
+/// Where the inline message starts: after this line's pill when there is one,
+/// and never before the position it would have taken on its own.
+///
+/// `max`, not "pill_right + gap", because a pill can be narrower than the
+/// message's own 16 px indent — moving the message LEFT to hug a short pill
+/// would be a second bug wearing the first one's clothes.
+pub(crate) fn inline_message_x(base_x: f32, pill_right: Option<f32>) -> f32 {
+    match pill_right {
+        Some(right) => base_x.max(right + PILL_GAP),
+        None => base_x,
+    }
+}
+
+/// `text` cut to what fits in `avail` pixels at `char_w` per character, or
+/// `None` when so little room is left that a stub would say nothing.
+///
+/// Monospace, so the character count is exact rather than a guess. The cut keeps
+/// a trailing `…`; the caller already uses that character to mean "there is
+/// more", so a width-elided message reads as truncated and not as broken.
+pub(crate) fn fit_to_width(text: &str, avail: f32, char_w: f32) -> Option<String> {
+    if char_w <= 0.0 {
+        return Some(text.to_owned());
+    }
+    // Below this the message is a couple of letters and an ellipsis, which is
+    // noise on top of the code; the hover tooltip and the error list still carry
+    // the full text.
+    const MIN_CHARS: usize = 8;
+    let fits = (avail / char_w).floor().max(0.0) as usize;
+    if text.chars().count() <= fits {
+        return Some(text.to_owned());
+    }
+    if fits < MIN_CHARS {
+        return None;
+    }
+    let mut out: String = text.chars().take(fits - 1).collect();
+    out.push('…');
+    Some(out)
+}
+
 pub fn show_diagnostics_overlay(
     ui: &mut egui::Ui,
     galley_pos: egui::Pos2,
@@ -76,6 +124,10 @@ pub fn show_diagnostics_overlay(
     // this project file) — drawn with a translucent yellow band, like the
     // Definition tab.
     def_line: Option<u32>,
+    // `pill_edges`: (1-BASED line, right edge in screen x) of every "N refs"
+    // pill the usages overlay painted earlier in this same frame. The inline
+    // message steps around them; see [`inline_message_x`].
+    pill_edges: &[(u32, f32)],
 ) {
     let total_chars = display_code.chars().count();
 
@@ -122,6 +174,14 @@ pub fn show_diagnostics_overlay(
     // Lines that already drew an inline message — a line can carry several
     // diagnostics, but a second message would overlap the first, so show one.
     let mut msg_lines: Vec<u32> = Vec::new();
+
+    // One measurement for the whole pass. The message font is monospace, so a
+    // single glyph's advance sizes every message; measuring inside the loop laid
+    // out an "M" once per diagnostic per frame for the same answer.
+    let char_w = painter
+        .layout_no_wrap("M".to_owned(), msg_font(), egui::Color32::WHITE)
+        .size()
+        .x;
 
     // ── Per-diagnostic: underline + inline message + tooltip ──────────────
     for (di, diag) in diags.iter().enumerate() {
@@ -207,7 +267,14 @@ pub fn show_diagnostics_overlay(
         // Only one inline message per line (a second would overlap the first).
         if same_row_eol && !msg_lines.contains(&diag.line) {
             msg_lines.push(diag.line);
-            let msg_x = gp.x + loc_eol.min.x + 16.0;
+            // Start after this line's "N refs" pill when it has one. The pill
+            // begins at end-of-line + 14 and the message at + 16, so before this
+            // the message was painted straight through it.
+            let pill_right = pill_edges
+                .iter()
+                .find(|(line, _)| *line == diag.line)
+                .map(|(_, right)| *right);
+            let msg_x = inline_message_x(gp.x + loc_eol.min.x + 16.0, pill_right);
             // First line only, then cap length — a multi-line message rendered
             // raw would draw extra rows and overlap the code below it.
             let headline = diag.headline();
@@ -217,13 +284,26 @@ pub fn show_diagnostics_overlay(
             } else {
                 short_msg
             };
-            painter.text(
-                egui::pos2(msg_x, sy_mid),
-                egui::Align2::LEFT_CENTER,
-                &short_msg,
-                egui::FontId::monospace(10.5),
-                msg_color,
-            );
+            // Fit what is left of the row, rather than running off the edge.
+            //
+            // The message never had a right-edge rule and was already cut mid-word
+            // by the clip; stepping around the pill spends more of the same room,
+            // so it now elides deliberately and keeps the ellipsis the 72-char cap
+            // above already uses as the "there is more" signal.
+            //
+            // Deliberately NOT the clamp `show_inlay_hint` uses below: that one
+            // right-ALIGNS its text against the clip edge, which is right for a
+            // short ghost type and wrong here — it would drag a 450 px message
+            // hundreds of pixels left, over the code of the line it annotates.
+            if let Some(fitted) = fit_to_width(&short_msg, clip.right() - 4.0 - msg_x, char_w) {
+                painter.text(
+                    egui::pos2(msg_x, sy_mid),
+                    egui::Align2::LEFT_CENTER,
+                    &fitted,
+                    msg_font(),
+                    msg_color,
+                );
+            }
         }
 
         // ── Hover tooltip (full message + docs link) ──────────────────────
@@ -348,4 +428,87 @@ pub fn show_inlay_hint(
         font,
         color,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PILL_GAP, fit_to_width, inline_message_x};
+
+    /// No pill on the line: the message keeps the position it always had. This
+    /// is the common case — most lines carry no "N refs" indicator at all.
+    #[test]
+    fn a_line_without_a_pill_is_left_where_it_was() {
+        assert_eq!(inline_message_x(300.0, None), 300.0);
+    }
+
+    /// The reported bug: the pill starts at end-of-line + 14 and the message at
+    /// + 16, so the message was painted through it. It now clears the pill's
+    /// real right edge by the requested gap.
+    #[test]
+    fn a_message_clears_the_pill_by_the_full_gap() {
+        let pill_right = 352.0;
+        let x = inline_message_x(300.0, Some(pill_right));
+        assert_eq!(x, pill_right + PILL_GAP);
+        assert!(x - pill_right >= 10.0, "at least 10px, as asked");
+    }
+
+    /// `max`, not `pill_right + gap` outright. A "1 ref" pill can end LEFT of
+    /// where the message would have started on its own, and moving the message
+    /// backwards to hug it would be a new bug wearing the old one's clothes.
+    #[test]
+    fn a_short_pill_never_drags_the_message_backwards() {
+        assert_eq!(inline_message_x(500.0, Some(120.0)), 500.0);
+    }
+
+    #[test]
+    fn a_message_that_fits_is_not_touched() {
+        assert_eq!(
+            fit_to_width("never used", 400.0, 6.0).as_deref(),
+            Some("never used")
+        );
+    }
+
+    /// Cut to the room that is left, keeping the ellipsis the 72-char cap
+    /// already uses — so a width-elided message reads as truncated, not broken.
+    #[test]
+    fn a_message_too_wide_is_elided_to_what_fits() {
+        let long = "fields `normal`, `night`, and `max` are never read";
+        let out = fit_to_width(long, 60.0, 6.0).expect("10 chars is plenty of room");
+        assert_eq!(out.chars().count(), 10);
+        assert!(out.ends_with('…'));
+        assert!(long.starts_with(&out[..out.len() - '…'.len_utf8()]));
+    }
+
+    /// A sliver of room says nothing worth the pixels; the hover tooltip and the
+    /// error list still carry the whole message.
+    #[test]
+    fn too_little_room_draws_nothing_rather_than_a_stub() {
+        assert_eq!(fit_to_width("mismatched types", 30.0, 6.0), None);
+    }
+
+    /// A degenerate font measurement must not divide by zero or silently blank
+    /// every message in the editor.
+    #[test]
+    fn a_zero_width_measurement_falls_back_to_the_whole_text() {
+        assert_eq!(
+            fit_to_width("mismatched types", 100.0, 0.0).as_deref(),
+            Some("mismatched types")
+        );
+    }
+
+    /// Counted in CHARACTERS: rustc quotes identifiers, and a byte cut would
+    /// panic in the middle of one the user named in Romanian.
+    #[test]
+    fn a_non_ascii_message_survives_the_cut() {
+        let msg = "cannot find value `măsurători` in this scope";
+        let out = fit_to_width(msg, 90.0, 6.0).expect("15 chars fit");
+        assert_eq!(out.chars().count(), 15);
+    }
+
+    /// Negative room (the pill pushed the message past the clip edge) must be
+    /// treated as no room, not as a huge one via a wrapped cast.
+    #[test]
+    fn no_room_at_all_is_not_mistaken_for_unlimited_room() {
+        assert_eq!(fit_to_width("mismatched types", -200.0, 6.0), None);
+    }
 }
