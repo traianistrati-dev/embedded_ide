@@ -26,6 +26,21 @@ use egui::text_edit::TextEditOutput;
 // the LSP debounce (3 s after typing stops, or on Project Save — see
 // `app::init_frame`), so their positions no longer lag behind active typing.
 
+/// Whether the inline overlay draws `severity`, given the two toolbar switches.
+///
+/// The split is error / not-error, and NOT `Error | Info` as it once was. That
+/// old rule meant the non-error half was never really drawn: warnings and hints
+/// were discarded outright, and rust-analyzer publishes almost nothing at
+/// severity `Info` — it reports lints as `Warning` and weak lints as `Hint`. So
+/// the editor showed errors and nothing else, and no switch admitted it.
+fn wanted_inline(severity: lsp::DiagSeverity, show_errors: bool, show_info: bool) -> bool {
+    if severity.is_error() {
+        show_errors
+    } else {
+        show_info
+    }
+}
+
 impl AppIde {
     /// Apply/trigger LSP completion and draw diagnostics, after the editor.
     ///
@@ -804,7 +819,10 @@ impl AppIde {
         // bounded by `editor_clip`, and the two highlight bands arrive as
         // parameters from the view's own state — nothing was ever specific to
         // the main one.
-        if lsp_file_tracked && self.inline_errors_enabled {
+        // Two independent halves of ONE overlay: errors, and everything that is
+        // not an error. Either switch on its own is reason to build it.
+        let (show_errors, show_info) = (self.inline_errors_enabled, self.inline_info_enabled);
+        if lsp_file_tracked && (show_errors || show_info) {
             // Only draw the inline overlay when RA holds the CURRENT text for the
             // displayed file (per-file, not a global check). With pending edits
             // the diagnostics are stale — their line/col cling to a row that was
@@ -836,14 +854,16 @@ impl AppIde {
                         let flycheck_stale = lsp.flycheck_stale();
                         diags_for_file(&lsp.diagnostics, rel)
                             .into_iter()
-                            // Inline overlay shows only errors and info; warnings +
-                            // hints are left to the bottom diagnostics panel.
-                            .filter(|d| {
-                                matches!(
-                                    d.severity,
-                                    lsp::DiagSeverity::Error | lsp::DiagSeverity::Info
-                                )
-                            })
+                            // One toolbar switch per half.
+                            //
+                            // This used to read `Error | Info`, which meant the
+                            // non-error half was effectively never drawn:
+                            // warnings and hints were dropped outright, and
+                            // rust-analyzer publishes almost nothing at
+                            // severity `Info` — lints come through as `Warning`
+                            // and weak lints as `Hint`. So the editor showed
+                            // errors and nothing else, with no switch saying so.
+                            .filter(|d| wanted_inline(d.severity, show_errors, show_info))
                             .filter(|d| {
                                 d.source == "rust-analyzer"
                                     || d.is_rustc_error_code()
@@ -1182,8 +1202,49 @@ fn render_doc(ui: &mut egui::Ui, md: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_is_gone, mod_declared_in, order_by_prefix};
-    use crate::lsp::CompletionItem;
+    use super::{line_is_gone, mod_declared_in, order_by_prefix, wanted_inline};
+    use crate::lsp::{CompletionItem, DiagSeverity};
+
+    /// The bug this guards: a warning is the MOST common non-error diagnostic
+    /// rust-analyzer publishes, and the old `Error | Info` rule dropped it. With
+    /// the info switch on, every non-error severity has to reach the editor.
+    #[test]
+    fn the_info_switch_covers_every_severity_that_is_not_an_error() {
+        for sev in [
+            DiagSeverity::Warning,
+            DiagSeverity::Info,
+            DiagSeverity::Hint,
+        ] {
+            assert!(
+                wanted_inline(sev, false, true),
+                "{sev:?} must be drawn when inline info is on"
+            );
+        }
+    }
+
+    /// The two switches are independent: neither half can turn the other on or
+    /// off. That is the whole point of there being two buttons.
+    #[test]
+    fn the_two_switches_do_not_reach_into_each_other() {
+        // Errors only.
+        assert!(wanted_inline(DiagSeverity::Error, true, false));
+        assert!(!wanted_inline(DiagSeverity::Warning, true, false));
+        // Info only.
+        assert!(!wanted_inline(DiagSeverity::Error, false, true));
+        assert!(wanted_inline(DiagSeverity::Warning, false, true));
+    }
+
+    #[test]
+    fn both_off_draws_nothing_at_all() {
+        for sev in [
+            DiagSeverity::Error,
+            DiagSeverity::Warning,
+            DiagSeverity::Info,
+            DiagSeverity::Hint,
+        ] {
+            assert!(!wanted_inline(sev, false, false), "{sev:?} leaked through");
+        }
+    }
 
     /// The unlinked-file detector: every accepted `mod` declaration shape
     /// counts, comments and other modules don't.

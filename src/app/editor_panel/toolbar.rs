@@ -602,7 +602,28 @@ impl AppIde {
     /// the editor (copied verbatim by the Copy button).
     pub(super) fn show_editor_toolbar(&mut self, ui: &mut egui::Ui, display_code: &str) {
         ui.horizontal(|ui| {
-            ui.heading("Code Editor");
+            // The open file IS this panel's title. "Code Editor" named the panel
+            // the user is already looking at; the path is the one thing here
+            // that changes, and it used to sit in the middle of the right-hand
+            // button group where nothing anchored it.
+            let open_label = match self.selected_file {
+                ProjectFileId::UserFile(i) => self
+                    .project_tree
+                    .user_src_files
+                    .get(i)
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| "src/???".to_string()),
+                other => other.label().to_string(),
+            };
+            // Heading size, resolved from the STYLE rather than hardcoded, so a
+            // theme change moves the title with everything else.
+            let heading_size = egui::TextStyle::Heading.resolve(ui.style()).size;
+            ui.label(
+                egui::RichText::new(elide_path_left(&open_label, PATH_MAX_CHARS))
+                    .size(heading_size)
+                    .color(egui::Color32::from_rgb(120, 160, 200)),
+            )
+            .on_hover_text(&open_label);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // ── Collapse / expand the Project tree (far-right panel) ──
                 // Deliberately a DIFFERENT glyph from the MCU toggle beside it:
@@ -747,6 +768,38 @@ impl AppIde {
 
                 ui.add_space(4.0);
 
+                // ── Inline warnings / info / hints toggle ─────────────
+                // The other half of the same overlay. Its own button because
+                // the two are wanted at different moments — errors while
+                // getting a build to pass, the rest while tidying up.
+                //
+                // Covers every severity that is NOT an error, not just
+                // `Info`: rust-analyzer publishes lints as `Warning` and weak
+                // lints as `Hint`, and hardly ever uses `Info` at all, so a
+                // button wired to `Info` alone would look broken.
+                let info_btn = ui.selectable_label(
+                    self.inline_info_enabled,
+                    egui::RichText::new(format!("{} Info", ph::INFO))
+                        .size(11.0)
+                        .color(if self.inline_info_enabled {
+                            egui::Color32::from_rgb(80, 140, 215)
+                        } else {
+                            egui::Color32::GRAY
+                        }),
+                );
+                if info_btn.clicked() {
+                    self.inline_info_enabled = !self.inline_info_enabled;
+                }
+                info_btn.on_hover_text(if self.inline_info_enabled {
+                    "Inline info: ON — warnings, hints and informational messages                      are drawn in the editor alongside the errors.
+Click to hide                      them (they stay in the Cargo Check / rust-analyzer tabs)."
+                } else {
+                    "Inline info: OFF — only errors are marked in the editor.
+                     Click to show warnings and hints inline too."
+                });
+
+                ui.add_space(4.0);
+
                 // ── Inferred-type hint toggle ─────────────────────────
                 // Show/hide the ghost type on the cursor's untyped `let` line
                 // (Tab inserts it). OFF also disables the Tab accept.
@@ -847,29 +900,76 @@ impl AppIde {
                     status_widget.on_hover_text(detail);
                 }
 
-                ui.add_space(8.0);
-                // Show which file is open
-                let open_label = match self.selected_file {
-                    ProjectFileId::UserFile(i) => self
-                        .project_tree
-                        .user_src_files
-                        .get(i)
-                        .map(|(name, _)| name.clone())
-                        .unwrap_or_else(|| "src/???".to_string()),
-                    other => other.label().to_string(),
-                };
-                // Matched to the "Code Editor" heading at the other end of the
-                // row, so the two anchors of the toolbar read at the same
-                // weight. Resolved from the STYLE rather than hardcoded: the
-                // heading is `ui.heading`, so a theme change moves both
-                // together instead of silently splitting them apart.
-                let heading_size = egui::TextStyle::Heading.resolve(ui.style()).size;
-                ui.label(
-                    egui::RichText::new(&open_label)
-                        .size(heading_size)
-                        .color(egui::Color32::from_rgb(120, 160, 200)),
-                );
             });
         });
+    }
+}
+
+/// Longest path drawn in the title before it is shortened.
+///
+/// The title now shares one row with the whole right-hand button group, so an
+/// unbounded path grows until the two overlap. At the heading's 14 px this is
+/// roughly a third of a comfortably-sized editor panel.
+const PATH_MAX_CHARS: usize = 46;
+
+/// `path` shortened from the LEFT, never past `max` characters.
+///
+/// The head is what gives way, because the tail is what identifies the file:
+/// `src/mw_radar/read_report.rs` becomes `…/mw_radar/read_report.rs`. Cutting
+/// from the right instead would leave every file in a deep folder looking
+/// identical, which is the opposite of what a title is for.
+fn elide_path_left(path: &str, max: usize) -> String {
+    let n = path.chars().count();
+    if n <= max {
+        return path.to_string();
+    }
+    // `max - 1` leaves room for the ellipsis, so the result is exactly `max`.
+    let tail: String = path.chars().skip(n - (max - 1)).collect();
+    format!("…{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PATH_MAX_CHARS, elide_path_left};
+
+    #[test]
+    fn a_short_path_is_left_alone() {
+        assert_eq!(
+            elide_path_left("src/main.rs", PATH_MAX_CHARS),
+            "src/main.rs"
+        );
+    }
+
+    /// The FILE NAME is what a title has to keep. Cutting from the right would
+    /// turn every file in one folder into the same title.
+    #[test]
+    fn a_long_path_loses_its_head_and_keeps_its_name() {
+        let long = "src/mw_radar/protocol/frames/decoding/read_report.rs";
+        let out = elide_path_left(long, 30);
+        assert!(out.starts_with('…'), "cut from the left: {out}");
+        assert!(out.ends_with("read_report.rs"), "the name survives: {out}");
+        assert_eq!(out.chars().count(), 30, "and it fits exactly");
+    }
+
+    /// Counted in CHARACTERS: a byte cut would panic mid-`ă` on a path the user
+    /// named in Romanian, and slicing a title is not worth a crash.
+    #[test]
+    fn a_non_ascii_path_survives_the_cut() {
+        let long = "src/măsurători/înregistrări/frecvență_semnal_radar.rs";
+        let out = elide_path_left(long, 24);
+        assert_eq!(out.chars().count(), 24);
+        assert!(out.ends_with(".rs"));
+    }
+
+    /// The boundary: exactly at the cap nothing is touched, one past it is cut.
+    #[test]
+    fn the_cap_is_inclusive() {
+        let at = "a".repeat(PATH_MAX_CHARS);
+        assert_eq!(elide_path_left(&at, PATH_MAX_CHARS), at);
+        let over = "a".repeat(PATH_MAX_CHARS + 1);
+        assert_eq!(
+            elide_path_left(&over, PATH_MAX_CHARS).chars().count(),
+            PATH_MAX_CHARS
+        );
     }
 }

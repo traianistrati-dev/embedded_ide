@@ -1211,6 +1211,11 @@ struct PersistedState {
     /// `false` must mean the ON behaviour, so older state keeps it enabled.
     #[serde(default)]
     esp_monitor_no_auto: bool,
+    /// User turned OFF the inline warnings / info / hints. Stored inverted for
+    /// the same reason as `hide_diff_line_bg`: serde's `false` default has to
+    /// mean the ON behaviour, so older state keeps them shown.
+    #[serde(default)]
+    hide_inline_info: bool,
 }
 
 impl PersistedState {
@@ -1429,6 +1434,18 @@ pub struct AppIde {
     /// `true` by default. When off, the bottom-panel Cargo Check / rust-analyzer
     /// tabs still list everything — only the in-editor overlay is suppressed.
     inline_errors_enabled: bool,
+    /// Companion switch for the NON-error half of the same overlay: warnings,
+    /// info and hints.
+    ///
+    /// Separate from `inline_errors_enabled` because the two are wanted at
+    /// different times — errors while fixing a build, warnings while tidying up
+    /// — and before this existed the non-error half had no switch at all: the
+    /// call site allowed `Error | Info` and dropped warnings and hints on the
+    /// floor, while rust-analyzer publishes almost nothing at severity `Info`
+    /// (it uses `Warning` for lints and `Hint` for weak ones). The net effect
+    /// was that nothing informational ever appeared in the editor, and no
+    /// button admitted it.
+    inline_info_enabled: bool,
     /// Show the export/save result message until this deadline. Time-based
     /// (not a frame countdown): frame cadence varies from 60+ FPS to the 4 FPS
     /// activity watchdog, so counting frames made the message's lifetime
@@ -2288,6 +2305,7 @@ impl AppIde {
             tree_width: 0.0,
             diag_collapsed: persisted.diag_collapsed,
             diff_line_bg: !persisted.hide_diff_line_bg,
+            inline_info_enabled: !persisted.hide_inline_info,
             // 0.0 = absent from an older build's state; clamp keeps a corrupt
             // value from collapsing one half to nothing.
             tree_split_ratio: if persisted.tree_split_ratio <= 0.0 {
@@ -4178,6 +4196,7 @@ impl eframe::App for AppIde {
             diag_collapsed: self.diag_collapsed,
             tree_split_ratio: self.tree_split_ratio,
             hide_diff_line_bg: !self.diff_line_bg,
+            hide_inline_info: !self.inline_info_enabled,
             esp_monitor_no_auto: !self.esp_monitor_auto,
         };
         // Never write buffers that have no folder to be restored onto (see
