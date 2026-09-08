@@ -996,6 +996,8 @@ pub fn show_project_tree(
     // `(crate dir, is_rename)` when a library's pen / trash icon is clicked;
     // the caller opens the confirmation dialog.
     library_action: &mut Option<(String, bool)>,
+    // Set when "Publish…" is picked on a library; the app opens the dialog.
+    publish_lib: &mut Option<String>,
     // Set to a DETACHED lib's dir when its "Add to workspace" button is clicked.
     add_to_workspace: &mut Option<String>,
     // Set to a member lib's dir when its "Detach" button is clicked.
@@ -1618,6 +1620,17 @@ pub fn show_project_tree(
                     }
                     ui.separator();
                     copy_menu_item(ui, clipboard::ClipKind::Library, lib, clip_copy);
+                    if ui
+                        .button(menu_label(ph::UPLOAD_SIMPLE, "Publish…", ICON_LIBRARY))
+                        .on_hover_text(
+                            "Check what a registry would refuse, fill in the missing Cargo.toml \
+                             fields, rehearse with a dry run, and publish.",
+                        )
+                        .clicked()
+                    {
+                        *publish_lib = Some(lib.clone());
+                        ui.close();
+                    }
                     ui.separator();
                     if ui
                         .button(menu_label(ph::PENCIL_SIMPLE, "Rename library…", ICON_EDIT))
@@ -1795,6 +1808,17 @@ pub fn show_project_tree(
                         }
                         ui.separator();
                         copy_menu_item(ui, clipboard::ClipKind::Library, lib, clip_copy);
+                        if ui
+                            .button(menu_label(ph::UPLOAD_SIMPLE, "Publish…", ICON_LIBRARY))
+                            .on_hover_text(
+                                "Check what a registry would refuse, fill in the missing Cargo.toml \
+                                 fields, rehearse with a dry run, and publish.",
+                            )
+                            .clicked()
+                        {
+                            *publish_lib = Some(lib.clone());
+                            ui.close();
+                        }
                         ui.separator();
                         if ui
                             .button(menu_label(ph::PENCIL_SIMPLE, "Rename library…", ICON_EDIT))

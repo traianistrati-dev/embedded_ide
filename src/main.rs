@@ -34,6 +34,8 @@ pub mod probe;
 pub mod probe_flash;
 pub mod profile;
 pub mod project_tree;
+pub mod publish;
+pub mod publish_target;
 pub mod recent;
 pub mod required_tools;
 pub mod reveal;

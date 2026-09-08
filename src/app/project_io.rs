@@ -46,6 +46,7 @@ impl AppIde {
         // Same reason: the dialog holds a project-root-RELATIVE path, which
         // means a different file once another project is loaded.
         self.move_file_dialog = None;
+        self.publish_dialog = None;
         self.renaming_file = None;
         self.renaming_folder = None;
         self.new_src_name = None;

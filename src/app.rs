@@ -42,6 +42,8 @@ mod file_rename;
 
 mod move_file_dialog;
 
+mod publish_dialog;
+
 mod tree_clipboard;
 
 mod mcu_panel;
@@ -1866,6 +1868,8 @@ pub struct AppIde {
     pending_rename: Option<file_rename::PendingRename>,
     /// Open "Move to folder…" dialog, if any.
     move_file_dialog: Option<move_file_dialog::MoveFileDialog>,
+    /// Open "Publish…" dialog for a library crate, if any.
+    publish_dialog: Option<publish_dialog::PublishDialog>,
     /// Open "Extract to library crate" dialog, if any.
     extract_crate: Option<extract_crate_dialog::ExtractCrateDialog>,
     /// Open "Clone a library from git" dialog, if any.
@@ -2315,6 +2319,7 @@ impl AppIde {
             },
             pending_rename: None,
             move_file_dialog: None,
+            publish_dialog: None,
             extract_crate: None,
             clone_library_dialog: None,
             clone_project_dialog: None,
@@ -4659,6 +4664,18 @@ impl eframe::App for AppIde {
         // file asks rust-analyzer to rewrite `mod` / `use` / path references
         // FIRST, which only works while the old path still exists.
         // "Move to folder…" on a file row → the destination dialog.
+        // "Publish…" on a library → the check-and-rehearse dialog.
+        if let Some(dir) = signals.publish_lib {
+            let manifest = self
+                .project_tree
+                .user_src_files
+                .iter()
+                .find(|(p, _)| *p == format!("{dir}/Cargo.toml"))
+                .map(|(_, c)| c.clone())
+                .unwrap_or_default();
+            let targets = self.publish_targets();
+            self.publish_dialog = Some(publish_dialog::PublishDialog::new(dir, &manifest, targets));
+        }
         if let Some(path) = signals.move_to_folder {
             self.move_file_dialog = Some(move_file_dialog::MoveFileDialog::new(path));
         }
@@ -5011,6 +5028,7 @@ impl eframe::App for AppIde {
         self.show_git_switch_dialog(ui);
         self.show_git_delete_branch_dialog(ui);
         self.show_move_file_dialog(ui);
+        self.show_publish_dialog(ui);
         self.show_extract_crate_dialog(ui);
         self.show_clone_library_dialog(ui);
         self.show_clone_project_dialog(ui);

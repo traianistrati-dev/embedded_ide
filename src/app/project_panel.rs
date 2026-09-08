@@ -56,6 +56,8 @@ pub(super) struct ProjectPanelSignals {
     pub rename_request: Option<crate::project_tree::gui::RenameRequest>,
     /// "Move to folder…" was picked on a file row; the app opens the dialog.
     pub move_to_folder: Option<String>,
+    /// "Publish…" was picked on a library; the app opens the publish dialog.
+    pub publish_lib: Option<String>,
 }
 
 impl AppIde {
@@ -192,6 +194,7 @@ impl AppIde {
         let mut goto_error: Option<crate::app::ProjectFileId> = None;
         let mut rename_request: Option<crate::project_tree::gui::RenameRequest> = None;
         let mut move_to_folder: Option<String> = None;
+        let mut publish_lib: Option<String> = None;
 
         // Collapsed: the panel is not built at all, so the editor and the MCU
         // zone take the width back. This function still RUNS, because it is
@@ -429,6 +432,7 @@ impl AppIde {
                                 &mut clone_library,
                                 &mut clone_project,
                                 &mut library_action,
+                                &mut publish_lib,
                                 &mut add_to_workspace,
                                 &mut detach_from_workspace,
                                 &mut open_reference,
@@ -474,6 +478,7 @@ impl AppIde {
             goto_error,
             rename_request,
             move_to_folder,
+            publish_lib,
         }
     }
 }
