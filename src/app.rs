@@ -1912,6 +1912,10 @@ pub struct AppIde {
     /// A Save requested from somewhere other than the toolbar (the exit
     /// prompt); OR-ed into `save_clicked` for one frame.
     request_save: bool,
+    /// The reverse publish gate has already said so. Latched, because the
+    /// hold re-arms `request_save` every frame and the notice it raises
+    /// lives in a single slot the tree reads earlier in the same frame.
+    save_held: bool,
     /// The dependency fingerprint (`project_gen::deps_fingerprint`) at the last
     /// Save / project load. When a Save finds it changed — a library was
     /// added/edited/removed in Cargo.toml, by the user or the codegen — the IDE
@@ -2336,6 +2340,7 @@ impl AppIde {
             new_prompt: false,
             new_after_save: false,
             request_save: false,
+            save_held: false,
             last_saved_deps: None,
             project_name: persisted.project_name,
             project_dir: saved_project_dir.clone(),
@@ -4242,6 +4247,11 @@ impl eframe::App for AppIde {
         // Same for espflash: an orphan keeps the serial port open, and the next
         // flash then fails to claim it ("Access is denied").
         self.esp_monitor.stop();
+        // And the cargo behind a Publish window. Dropping `AppIde` drops only
+        // this side of its `Arc`; `Child`'s own `Drop` detaches rather than
+        // kills, so a rehearsal or an upload would carry on with the IDE gone,
+        // holding cargo's package-cache lock and reporting to nothing.
+        self.close_publish_dialog();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -4666,15 +4676,35 @@ impl eframe::App for AppIde {
         // "Move to folder…" on a file row → the destination dialog.
         // "Publish…" on a library → the check-and-rehearse dialog.
         if let Some(dir) = signals.publish_lib {
-            let manifest = self
-                .project_tree
-                .user_src_files
-                .iter()
-                .find(|(p, _)| *p == format!("{dir}/Cargo.toml"))
-                .map(|(_, c)| c.clone())
-                .unwrap_or_default();
-            let targets = self.publish_targets();
-            self.publish_dialog = Some(publish_dialog::PublishDialog::new(dir, &manifest, targets));
+            // The window is not modal, so the tree stays clickable while cargo
+            // runs. Replacing the dialog there would orphan that run: the
+            // streaming thread holds its own handle, so it would keep going
+            // invisibly, and the fresh window would offer a second `Publish`
+            // on a crate already mid-upload.
+            if self.publish_running() {
+                crate::project_tree::gui::set_tree_notice(
+                    ui.ctx(),
+                    // Not "a publish": the same flag is set by the rehearsal.
+                    // And not "close that window" either - closing it KILLS a
+                    // real upload, which is the opposite of advice.
+                    "A cargo run from the publish window is still going - wait for it to finish."
+                        .to_owned(),
+                );
+            } else {
+                let manifest = self
+                    .project_tree
+                    .user_src_files
+                    .iter()
+                    .find(|(p, _)| *p == format!("{dir}/Cargo.toml"))
+                    .map(|(_, c)| c.clone())
+                    .unwrap_or_default();
+                let targets = self.publish_targets(&dir);
+                // Not a bare assignment: the previous dialog may hold a
+                // finished-but-unreaped child.
+                self.close_publish_dialog();
+                self.publish_dialog =
+                    Some(publish_dialog::PublishDialog::new(dir, &manifest, targets));
+            }
         }
         if let Some(path) = signals.move_to_folder {
             self.move_file_dialog = Some(move_file_dialog::MoveFileDialog::new(path));
@@ -4756,7 +4786,24 @@ impl eframe::App for AppIde {
         // "New Project" → its own confirmation (chip picker) says the user files
         // are cleared, but never said WHAT would be lost — so the unsaved-changes
         // gate comes first, exactly as for Open Project.
-        if new_project_clicked && self.save_in_progress.is_none() {
+        // A project switch calls `close_publish_dialog`, which KILLS the cargo
+        // child. For a rehearsal that is free; for a real upload it is a
+        // permanent, unrepeatable action terminated mid-flight, with its window
+        // and its whole log going too - so the user is never told whether that
+        // version reached the registry. Refused instead, like re-opening the
+        // Publish window over a running one.
+        let upload_blocks_switch = self.publish_uploading();
+        if upload_blocks_switch
+            && (new_project_clicked || open_project_clicked || signals.open_recent.is_some())
+        {
+            crate::project_tree::gui::set_tree_notice(
+                ui.ctx(),
+                "An upload is running - wait for it to finish before switching projects."
+                    .to_owned(),
+            );
+        }
+
+        if new_project_clicked && self.save_in_progress.is_none() && !upload_blocks_switch {
             if self.unsaved_files().is_empty() {
                 self.begin_new_project();
             } else {
@@ -4770,14 +4817,15 @@ impl eframe::App for AppIde {
         // "Open Recent" → the folder is already known, so it skips the picker
         // (see `pick_and_open_project`) but takes the SAME unsaved gate: it is
         // just as destructive as any other open.
-        if let Some(dir) = signals.open_recent {
-            if self.save_in_progress.is_none() {
-                self.pending_open_dir = Some(dir);
-                open_project_clicked = true;
-            }
+        if let Some(dir) = signals.open_recent
+            && self.save_in_progress.is_none()
+            && !upload_blocks_switch
+        {
+            self.pending_open_dir = Some(dir);
+            open_project_clicked = true;
         }
 
-        if open_project_clicked && self.save_in_progress.is_none() {
+        if open_project_clicked && self.save_in_progress.is_none() && !upload_blocks_switch {
             if self.unsaved_files().is_empty() {
                 self.pick_and_open_project(&mut save_project_needed);
             } else {
@@ -4796,7 +4844,34 @@ impl eframe::App for AppIde {
         // toolbar button (taken so it fires exactly once).
         // `take` first: `||` short-circuits, and leaving the flag set would fire
         // a second save on the next frame.
-        let save_requested = std::mem::take(&mut self.request_save) || save_project_clicked;
+        let mut save_requested = std::mem::take(&mut self.request_save) || save_project_clicked;
+        // A save rewrites every file under the project root - the exact tree a
+        // running `cargo publish` is reading into its tarball. That upload is
+        // permanent and cannot be re-run, so the save waits for it rather than
+        // racing it. HELD, not dropped: `request_save` goes straight back on,
+        // so it happens by itself the moment cargo is done.
+        if save_requested && self.publish_uploading() {
+            self.request_save = true;
+            save_requested = false;
+            // ONCE, on the frame the hold engages. `set_tree_notice` writes a
+            // single memory slot that the tree reads much earlier in the frame,
+            // so re-arming it every frame would overwrite every other notice -
+            // a refused rename, a paste result - after it was stored and before
+            // it could ever be painted, and keep pushing its own expiry six
+            // seconds past the end of the upload.
+            if !self.save_held {
+                self.save_held = true;
+                crate::project_tree::gui::set_tree_notice(
+                    ui.ctx(),
+                    "An upload is running - cargo is reading the project folder. The save starts \
+                     when it finishes."
+                        .to_owned(),
+                );
+            }
+            ui.ctx().request_repaint();
+        } else {
+            self.save_held = false;
+        }
         // Auto-build after this Save when a library changed in Cargo.toml.
         let mut auto_build_after_save = false;
         let mut auto_build_release = false;

@@ -46,7 +46,10 @@ impl AppIde {
         // Same reason: the dialog holds a project-root-RELATIVE path, which
         // means a different file once another project is loaded.
         self.move_file_dialog = None;
-        self.publish_dialog = None;
+        // Through the closer, not a bare `None`: a cargo run started from that
+        // window would otherwise keep going against the OLD project's folder,
+        // with its only kill path gone along with the window.
+        self.close_publish_dialog();
         self.renaming_file = None;
         self.renaming_folder = None;
         self.new_src_name = None;
@@ -523,6 +526,21 @@ impl AppIde {
             self.git.state.lock().unwrap().lines.push((
                 crate::git::GitLine::Notice,
                 "[busy] save in progress — retry in a moment".into(),
+            ));
+            return;
+        }
+        // Same reason as the save gate, and worse for a branch switch: it
+        // rewrites the working tree `cargo publish` is packaging, and on
+        // success reloads the project — which closes the publish window and
+        // KILLS the upload. A real upload is permanent and cannot be repeated,
+        // so it is the one thing worth making a git op wait for. The switch
+        // confirmation cannot stand in for this: it only appears when there are
+        // unsaved changes, and an upload's own precondition is that there are
+        // none.
+        if self.publish_uploading() {
+            self.git.state.lock().unwrap().lines.push((
+                crate::git::GitLine::Notice,
+                "[busy] a crate upload is running — cargo is reading the working tree".into(),
             ));
             return;
         }

@@ -214,6 +214,33 @@ pub fn check_manifest(
 ) -> Vec<Finding> {
     let mut out = Vec::new();
 
+    // Before anything else: is this a crate at all? A manifest that does not
+    // parse, or one that is a virtual workspace with no `[package]`, has
+    // nothing to publish - and every check below would report it as a crate
+    // missing seven fields, which is the wrong sentence entirely.
+    match doc(manifest) {
+        None => {
+            out.push(Finding {
+                severity: Severity::Blocker,
+                field: None,
+                message: "Cargo.toml does not parse as TOML - fix it in the editor first."
+                    .to_owned(),
+            });
+            return out;
+        }
+        Some(d) if d.get("package").and_then(|p| p.as_table_like()).is_none() => {
+            out.push(Finding {
+                severity: Severity::Blocker,
+                field: None,
+                message: "no `[package]` table - this Cargo.toml describes a workspace, not a \
+                          crate. There is nothing here to upload."
+                    .to_owned(),
+            });
+            return out;
+        }
+        Some(_) => {}
+    }
+
     // `publish = false` is a deliberate "never upload this" and outranks
     // everything else worth saying.
     if package_field(manifest, "publish").as_deref() == Some("false") {
@@ -323,10 +350,36 @@ pub fn set_package_field(manifest: &str, key: &str, value: &str) -> Option<Strin
     } else {
         toml_edit::value(value)
     };
-    // `doc["package"]` creates the table when it is missing, which is what a
-    // manifest with no `[package]` needs anyway.
+    // `doc["package"][key] = …` would CREATE the table when it is missing, and
+    // a manifest without one is not a crate that forgot a field - it is a
+    // virtual workspace. Writing there produces `package = { description = … }`
+    // above the `[workspace]` section: a package with no `name`, which cargo
+    // then refuses to load, taking the build and rust-analyzer with it.
+    if !has_package_table(manifest) {
+        return None;
+    }
     doc["package"][key] = item;
     Some(doc.to_string())
+}
+
+/// Does the manifest parse as TOML at all?
+///
+/// Asked separately from [`has_package_table`], which answers `false` for both
+/// "does not parse" and "parses, but is a workspace" — two different problems
+/// with two different fixes, and telling a half-typed file that it describes a
+/// workspace sends the reader looking for the wrong one.
+pub fn parses(manifest: &str) -> bool {
+    doc(manifest).is_some()
+}
+
+/// Does this manifest actually describe a package?
+///
+/// A virtual workspace manifest is `[workspace]` and nothing else. It parses,
+/// it sits at `<crate>/Cargo.toml`, and every `package_field` lookup in it
+/// answers `None` exactly like a crate that is merely missing its metadata —
+/// which is why this has to be asked separately.
+pub fn has_package_table(manifest: &str) -> bool {
+    doc(manifest).is_some_and(|d| d.get("package").and_then(|p| p.as_table_like()).is_some())
 }
 
 /// Split what the user typed into list entries.
@@ -653,5 +706,59 @@ description.workspace = true
                 .iter()
                 .any(|x| x.severity == Severity::Blocker && x.message.contains("publish = false"))
         );
+    }
+
+    /// A cloned library can be a virtual workspace: `[workspace]` and nothing
+    /// else. Every `package_field` lookup in it answers `None`, exactly like a
+    /// crate that merely forgot its metadata - so without this it was reported
+    /// as a crate missing a description, and writing that description created
+    /// `package = { description = "…" }` above the `[workspace]` section: a
+    /// package with no `name`, which cargo refuses to load.
+    const VIRTUAL_WORKSPACE: &str =
+        "[workspace]\nmembers = [\"core\", \"macros\"]\nresolver = \"2\"\n";
+
+    #[test]
+    fn a_virtual_workspace_is_not_a_crate_to_publish() {
+        let out = check_manifest(VIRTUAL_WORKSPACE, |_| None);
+        assert_eq!(
+            out.len(),
+            1,
+            "one sentence, not seven missing fields: {out:?}"
+        );
+        assert_eq!(out[0].severity, Severity::Blocker);
+        assert!(
+            out[0].message.contains("[package]"),
+            "it has to name what is missing: {}",
+            out[0].message
+        );
+    }
+
+    #[test]
+    fn writing_a_field_never_invents_a_package_table() {
+        assert!(!has_package_table(VIRTUAL_WORKSPACE));
+        assert_eq!(
+            set_package_field(VIRTUAL_WORKSPACE, "description", "a radar driver"),
+            None,
+            "refused, so the manifest cannot be corrupted into a nameless package"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_manifest_says_so_rather_than_listing_missing_fields() {
+        let out = check_manifest("[package\nname = \"radar\"\n", |_| None);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(
+            out[0].message.contains("does not parse"),
+            "{}",
+            out[0].message
+        );
+    }
+
+    #[test]
+    fn a_real_package_table_is_still_recognised() {
+        assert!(has_package_table("[package]\nname = \"radar\"\n"));
+        // `[package]` written as an inline table is legal TOML and still a
+        // package - `as_table_like` is what accepts both spellings.
+        assert!(has_package_table("package = { name = \"radar\" }\n"));
     }
 }
