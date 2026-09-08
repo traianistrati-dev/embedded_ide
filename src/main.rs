@@ -40,6 +40,7 @@ pub mod recent;
 pub mod required_tools;
 pub mod reveal;
 pub mod rtt;
+pub mod rust_lex;
 pub mod serial;
 pub mod serial_bridge;
 pub mod serial_frames;

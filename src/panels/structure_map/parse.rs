@@ -210,11 +210,8 @@ pub fn build_graph(main_rs: &str, user_files: &[(String, String)]) -> ModuleGrap
     for (idx, text) in texts {
         let cur_path = nodes[idx].path.clone();
         let krate = nodes[idx].krate.clone();
-        for raw_line in text.lines() {
-            // Naive comment strip — may also cut a "://" inside a string, which
-            // only loses potential edges on that line (acceptable noise).
-            let line = raw_line.split("//").next().unwrap_or("");
-
+        let blanked = crate::rust_lex::blank_non_code(text);
+        for line in blanked.lines() {
             // `mod child;` → containment edge.
             if let Some(name) = mod_decl(line) {
                 let child_path = if cur_path.is_empty() {
@@ -372,8 +369,9 @@ pub fn add_external_nodes(graph: &mut ModuleGraph, main_rs: &str, user_files: &[
 /// span runs until the depth returns to 0 (its closing brace) — never by
 /// indentation, which real code violates (column-0 statements inside `fn
 /// main`). Items inside `impl`/`mod` blocks sit at depth ≥ 1, so the badge
-/// counts them but the symbol list skips them. Braces inside string literals
-/// can skew the depth — badge-grade accuracy, and they usually balance out.
+/// counts them but the symbol list skips them. Braces inside comments and
+/// string literals are blanked out first (`rust_lex::blank_non_code`), so they
+/// cannot skew the depth.
 fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>, Vec<(usize, usize, usize)>) {
     let mut fns = 0;
     let mut tys = 0;
@@ -389,9 +387,17 @@ fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>, Vec<(usize, usize, 
     let mut open_sym: Option<usize> = None;
     let mut open_impl: Option<(usize, Option<String>, usize)> = None;
     let mut entered_body = false;
-    for (li, raw) in text.lines().enumerate() {
-        // Naive comment strip — same trade-off as the edge scan above.
-        let line = raw.split("//").next().unwrap_or("");
+    // Comments and string literals blanked to SPACES, so the brace depth below
+    // counts only real braces while every column stays where it was (`col` is
+    // computed from the line's length).
+    //
+    // `split("//")` handled one of the three cases. The other two were not
+    // noise: a `{` inside a `/* … */` pinned the depth at >= 1 for the rest of
+    // the file, so every later item stopped being seen at depth 0 and vanished
+    // from the diagram entirely.
+    let blanked = crate::rust_lex::blank_non_code(text);
+    for (li, line) in blanked.lines().enumerate() {
+        let line: &str = line;
         let t = strip_modifiers(line.trim_start());
         let (kind, rest) = if let Some(r) = t.strip_prefix("fn ") {
             fns += 1;
@@ -671,6 +677,54 @@ mod tests {
         assert_eq!(module_path_of("foo/mod.rs"), "foo");
         assert_eq!(module_path_of("utils.rs"), "utils");
         assert_eq!(module_path_of("a/b/c.rs"), "a::b::c");
+    }
+
+    /// Names of every top-level symbol the crate-root node lists.
+    fn root_symbols(main_rs: &str) -> Vec<String> {
+        build_graph(main_rs, &[]).nodes[0]
+            .symbols
+            .iter()
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    /// The measured failure: a `{` inside a block comment pinned the brace
+    /// depth at >= 1 for the rest of the file, so nothing after it was ever
+    /// seen at depth 0 and it vanished from the diagram entirely. The comment
+    /// strip only handled `//`.
+    #[test]
+    fn a_brace_inside_a_block_comment_does_not_swallow_later_items() {
+        let src = "pub fn first() {}
+                   /* prose with an unclosed { in it */
+                   pub fn second() {}
+";
+        assert_eq!(root_symbols(src), ["first", "second"]);
+    }
+
+    /// The same for a brace inside a string literal, and for a `//` comment
+    /// that follows code on the same line (the one case the old strip caught).
+    #[test]
+    fn braces_in_strings_and_trailing_comments_do_not_skew_the_depth() {
+        let src = "pub fn first() {}
+                   pub const OPEN: &str = \"{\";
+                   pub fn second() {} // trailing }
+                   pub fn third() {}
+";
+        // `const` is not a tracked `SymKind`, so OPEN is deliberately absent —
+        // what matters is that its brace-bearing string did not hide the two
+        // functions after it.
+        assert_eq!(root_symbols(src), ["first", "second", "third"]);
+    }
+
+    /// A `fn` written inside a comment is prose, not an item — blanking must
+    /// not turn the diagram into a list of things the reader only described.
+    #[test]
+    fn an_item_written_inside_a_comment_is_not_listed() {
+        let src = "pub fn real() {}
+                   // pub fn imaginary() {}
+                   /* pub fn also_imaginary() {} */
+";
+        assert_eq!(root_symbols(src), ["real"]);
     }
 
     fn sample() -> (String, Vec<(String, String)>) {

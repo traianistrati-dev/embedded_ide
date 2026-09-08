@@ -211,13 +211,23 @@ fn next_block_open(chars: &[char], from: usize) -> Option<usize> {
 /// previous statement / block boundary (`;` `{` `}`) and skip forward over the
 /// whitespace, so the result is the first non-blank char of the construct
 /// (its keyword / attribute / doc comment). Clamps to the start of file.
+///
+/// Only a boundary that is CODE ends the scan. A `;` inside the construct's own
+/// doc comment used to stop it, and the selection then began in the middle of
+/// that comment — `/// Returns the value; see docs.` started the highlight (and
+/// the clipboard copy) at "see". Keeping the doc comment is the POINT of this
+/// function, so it has to read past the punctuation inside one.
+///
+/// This file already knows the rule — `brace_pairs` and `next_block_open` both
+/// route through [`skip_token`]. This was the one scan that did not.
 fn header_start(chars: &[char], open: usize) -> usize {
+    let mask = super::generics::code_mask(chars);
     let mut h = open;
     while h > 0 {
-        match chars[h - 1] {
-            ';' | '{' | '}' => break,
-            _ => h -= 1,
+        if mask[h - 1] && matches!(chars[h - 1], ';' | '{' | '}') {
+            break;
         }
+        h -= 1;
     }
     while h < open && chars[h].is_whitespace() {
         h += 1;
@@ -249,8 +259,12 @@ fn is_word_selection(chars: &[char], lo: usize, hi: usize) -> bool {
 /// True when the word starting at `lo` is the NAME in a block-bodied definition
 /// (`fn`/`struct`/`enum`/`trait`/`impl`/`mod`/`union` immediately before it).
 fn preceded_by_def_keyword(chars: &[char], lo: usize) -> bool {
+    // Whitespace AND comments: `fn /* why */ foo()` used to stop the walk on
+    // the `/`, read an empty keyword and refuse the definition. It failed
+    // closed, which is why nobody noticed.
+    let mask = super::generics::code_mask(chars);
     let mut i = lo;
-    while i > 0 && chars[i - 1].is_whitespace() {
+    while i > 0 && (chars[i - 1].is_whitespace() || !mask[i - 1]) {
         i -= 1;
     }
     let end = i;
@@ -510,6 +524,51 @@ mod tests {
         let line_end = src.find('\n').unwrap() + 1;
         let close = src.rfind('}').unwrap();
         assert_eq!(full_def_line(src, 0, line_end), Some((0, close)));
+    }
+
+    /// Keeping the doc comment in the selection is the point of `header_start`,
+    /// so punctuation INSIDE that comment must not end the backward scan. A `;`
+    /// in the prose used to stop it there, and the highlight \u2014 and the clipboard
+    /// copy \u2014 began in the middle of the sentence.
+    #[test]
+    fn a_semicolon_in_the_doc_comment_does_not_cut_the_header() {
+        let src = "fn a() {}\n\
+                   /// Returns the value; see docs.\n\
+                   fn foo() {\n    body();\n}";
+        let doc = src.find("/// Returns").unwrap();
+        let close = src.rfind('}').unwrap();
+        let name = src.find("foo").unwrap();
+        assert_eq!(
+            full_def_name(src, name, name + 3),
+            Some((doc, close)),
+            "the selection must start at the doc comment, not inside it"
+        );
+    }
+
+    /// The same for a brace inside the comment, and for a block comment.
+    #[test]
+    fn braces_inside_a_comment_do_not_cut_the_header() {
+        for doc_line in ["/// see fn main() {} for more", "/* a } and a { */"] {
+            let src = format!("fn a() {{}}\n{doc_line}\nfn foo() {{\n    body();\n}}");
+            let doc = src.find(doc_line).unwrap();
+            let close = src.rfind('}').unwrap();
+            let name = src.find("foo").unwrap();
+            assert_eq!(
+                full_def_name(&src, name, name + 3),
+                Some((doc, close)),
+                "{doc_line:?} cut the header scan"
+            );
+        }
+    }
+
+    /// A comment between the keyword and the name used to make the definition
+    /// unresolvable \u2014 the backward walk stopped on `/` and read an empty keyword.
+    #[test]
+    fn a_comment_between_the_keyword_and_the_name_still_resolves() {
+        let src = "fn /* why */ foo() {\n    body();\n}";
+        let close = src.rfind('}').unwrap();
+        let name = src.find("foo").unwrap();
+        assert_eq!(full_def_name(src, name, name + 3), Some((0, close)));
     }
 
     #[test]

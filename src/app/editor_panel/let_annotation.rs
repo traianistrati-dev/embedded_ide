@@ -121,28 +121,120 @@ fn keyword_at(chars: &[char], i: usize, end: usize, kw: &str) -> bool {
 /// including the continuation lines of a multi-line method chain
 /// (`let clocks = rcc.cfgr.sysclk(..)\n .freeze(..);`).
 ///
-/// The statement is found by scanning back to the previous `;` / `{` / `}`
-/// (or file start). `None` for already-typed / destructured / non-`let`
-/// statements. (Limitation: a `;`/`{`/`}` inside a string/char/comment on the
-/// initializer would cut the scan short — rare in the builder chains this
-/// targets.)
+/// The statement is found by scanning back to the previous `;` / `{` / `}` **in
+/// code** (or file start). `None` for already-typed / destructured / non-`let`
+/// statements.
+///
+/// Everything here runs against [`code_mask`](super::generics::code_mask), the
+/// scanner this codebase already uses for exactly this — see the rule stated in
+/// `fold::regions`. The version that read raw characters let the punctuation of
+/// a COMMENT decide whether the feature worked:
+///
+/// ```text
+/// let interface = I2CDisplayInterface::new(bus);
+/// // initialize the display          <- scan stops on this `/`, gives up
+/// let mut display = Ssd1306Async::new(..).into_buffered_graphics_mode();
+/// ```
+///
+/// The type hint vanished on that second `let` and Ctrl+Enter lost its
+/// re-target, while the identical statement one line up worked. A comment
+/// ending in `;`, `{` or `}` accidentally worked; one ending in `.` did not.
+/// Worse, `// set x; let y = 5 in the docs` made this return an index INSIDE the
+/// comment, so the hint was requested for the comment's line and Ctrl+Enter
+/// aimed into it.
 pub fn let_binding_pos(chars: &[char], cursor: usize) -> Option<usize> {
+    let mask = super::generics::code_mask(chars);
+    if let Some(found) = binding_from(chars, &mask, cursor) {
+        return Some(found);
+    }
+    // The caret parked just after this statement's own `;`.
+    //
+    // Worth a second look because the ghost type is drawn at END OF LINE, so
+    // that is exactly where the reader leaves the caret while hunting for it —
+    // and the plain scan walks FORWARD from the `;` into the next statement.
+    // Only tried when the forward reading found nothing, so a caret between two
+    // `let`s on one line still resolves to the following one, as before.
+    let mut j = cursor.min(chars.len());
+    while j > 0 && chars[j - 1].is_whitespace() {
+        j -= 1;
+    }
+    if j > 0 && mask[j - 1] && chars[j - 1] == ';' {
+        return binding_from(chars, &mask, j - 1);
+    }
+    None
+}
+
+/// Advance `i` past whitespace, comments and attributes — everything that can
+/// legally sit between a statement boundary and the `let` that follows it.
+///
+/// Comments are recognised through `mask`, not by re-lexing; a STRING is
+/// deliberately not skipped, because a statement that begins with one is simply
+/// not a `let` and must fail rather than let the scan run on to a later one.
+fn skip_to_statement(chars: &[char], mask: &[bool], mut i: usize) -> usize {
+    let n = chars.len();
+    loop {
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        // A comment: every one of its chars is masked out.
+        if i < n && !mask[i] && chars[i] == '/' && matches!(chars.get(i + 1), Some('/') | Some('*'))
+        {
+            while i < n && !mask[i] {
+                i += 1;
+            }
+            continue;
+        }
+        // An attribute — `#[…]` or `#![…]`. Not a comment, so the mask says
+        // nothing about it; `]` is not a statement boundary either, which is how
+        // an `#[allow(unused)]` above a `let` used to send the backward scan all
+        // the way to the enclosing brace.
+        if i < n && mask[i] && chars[i] == '#' {
+            let mut k = i + 1;
+            if chars.get(k) == Some(&'!') {
+                k += 1;
+            }
+            if chars.get(k) == Some(&'[') {
+                let mut depth = 0usize;
+                while k < n {
+                    if mask[k] && chars[k] == '[' {
+                        depth += 1;
+                    } else if mask[k] && chars[k] == ']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            k += 1;
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+        }
+        return i;
+    }
+}
+
+/// The core reading: the statement enclosing `cursor`, or `None`.
+fn binding_from(chars: &[char], mask: &[bool], cursor: usize) -> Option<usize> {
     let n = chars.len();
     let cursor = cursor.min(n);
     // Start of the enclosing statement: just after the nearest preceding
-    // statement / block boundary.
+    // boundary THAT IS CODE. A `;` inside a comment or a string is not the end
+    // of anything.
     let mut stmt_start = cursor;
-    while stmt_start > 0 && !matches!(chars[stmt_start - 1], ';' | '{' | '}') {
+    while stmt_start > 0
+        && !(mask[stmt_start - 1] && matches!(chars[stmt_start - 1], ';' | '{' | '}'))
+    {
         stmt_start -= 1;
     }
 
-    let mut i = stmt_start;
+    let mut i = skip_to_statement(chars, mask, stmt_start);
     let skip_ws = |i: &mut usize| {
         while *i < n && chars[*i].is_whitespace() {
             *i += 1;
         }
     };
-    skip_ws(&mut i);
     if !keyword_at(chars, i, n, "let") {
         return None;
     }
@@ -257,6 +349,140 @@ mod tests {
             let_binding_pos(&two.chars().collect::<Vec<_>>(), on_bar),
             Some(b)
         );
+    }
+
+    /// The reported case, verbatim. The comment on the line above used to make
+    /// the whole feature give up: no ghost type, and Ctrl+Enter lost its
+    /// re-target to the binding.
+    #[test]
+    fn a_comment_above_the_let_no_longer_hides_it() {
+        let src = "{\n\
+                   \n\
+                       let interface = I2CDisplayInterface::new(i2c_bus);\n\
+                       // initialize the display\n\
+                       let mut display = Ssd1306Async::new(interface).into_buffered_graphics_mode();\n";
+        let interface = src.find("interface").unwrap();
+        let display = src.find("display =").unwrap();
+        // The line that always worked still works.
+        assert_eq!(
+            binding_pos(src, src.find("I2CDisplayInterface").unwrap()),
+            Some(interface)
+        );
+        // ...and the one below the comment now does too, from anywhere on it.
+        assert_eq!(
+            binding_pos(src, src.find("Ssd1306Async").unwrap()),
+            Some(display)
+        );
+        assert_eq!(
+            binding_pos(src, src.find("into_buffered").unwrap()),
+            Some(display)
+        );
+    }
+
+    /// Every shape that can legally sit between a statement and the next `let`.
+    /// The old scan skipped whitespace only, so each of these hid the binding.
+    #[test]
+    fn doc_comments_block_comments_and_attributes_are_stepped_over() {
+        for lead in [
+            "// line",
+            "/// doc",
+            "//! inner",
+            "/* block */",
+            "/* nested /* deeper */ still */",
+            "#[allow(unused)]",
+            "// two\n    // comments",
+        ] {
+            let src = format!("{{\n    let a = 1;\n    {lead}\n    let d = foo();\n");
+            let d = src.find("d =").unwrap();
+            assert_eq!(
+                binding_pos(&src, src.find("foo").unwrap()),
+                Some(d),
+                "a leading {lead:?} still hides the binding"
+            );
+        }
+    }
+
+    /// The behaviour used to depend on the comment's PUNCTUATION: one ending in
+    /// `;`, `{` or `}` accidentally worked, one ending in `.` did not.
+    #[test]
+    fn a_comments_last_character_no_longer_decides_anything() {
+        for tail in [".", ";", "{", "}", ":", ")"] {
+            let src = format!("{{\n    let a = 1;\n    // init{tail}\n    let d = foo();\n");
+            let d = src.find("d =").unwrap();
+            assert_eq!(
+                binding_pos(&src, src.find("foo").unwrap()),
+                Some(d),
+                "a comment ending in {tail:?} changed the answer"
+            );
+        }
+    }
+
+    /// Worse than giving up: the old scan treated a `;` inside a comment as a
+    /// real boundary, so this returned an index pointing at the FAKE `y` inside
+    /// the comment. Both callers used that index unchecked \u2014 the hint was
+    /// requested for the comment's line and Ctrl+Enter aimed into it.
+    #[test]
+    fn a_binding_written_inside_a_comment_is_not_mistaken_for_the_real_one() {
+        let src = "{\n    // set x; let y = 5 is the docs example\n    let d = foo();\n";
+        let real = src.find("d =").unwrap();
+        let fake = src.find("y = 5").unwrap();
+        let got = binding_pos(src, src.find("foo").unwrap());
+        assert_eq!(got, Some(real));
+        assert_ne!(got, Some(fake), "pointed inside the comment");
+    }
+
+    /// A caret resting ON such a comment resolves to the REAL binding under it,
+    /// never to the fake one written inside the comment.
+    ///
+    /// Reaching the statement below is deliberate rather than incidental: a
+    /// comment sitting directly above a `let` reads as part of it, and this
+    /// function's whole contract is "from anywhere on the statement". What must
+    /// never happen \u2014 and used to \u2014 is landing inside the comment's own text.
+    #[test]
+    fn a_caret_on_a_comment_resolves_to_the_real_binding_below_it() {
+        let src = "{\n    // set x; let y = 5 example\n    let d = foo();\n";
+        let real = src.find("d =").unwrap();
+        let fake = src.find("y = 5").unwrap();
+        let got = binding_pos(src, src.find("example").unwrap());
+        assert_eq!(got, Some(real));
+        assert_ne!(got, Some(fake), "pointed inside the comment");
+    }
+
+    /// A trailing comment with no statement after it has nothing to resolve to.
+    #[test]
+    fn a_comment_with_no_binding_after_it_yields_nothing() {
+        let src = "{\n    let a = 1;\n    // set x; let y = 5 example\n}\n";
+        assert_eq!(binding_pos(src, src.find("example").unwrap()), None);
+    }
+
+    /// A `;` inside a string literal is not the end of a statement either \u2014 the
+    /// limitation the old doc comment admitted to and called rare.
+    #[test]
+    fn a_semicolon_inside_a_string_does_not_cut_the_statement() {
+        let src = "{\n    let d = parse(\"a;b\").unwrap();\n";
+        let d = src.find("d =").unwrap();
+        assert_eq!(binding_pos(src, src.find("unwrap").unwrap()), Some(d));
+    }
+
+    /// The ghost type is drawn at END OF LINE, so that is where the caret ends
+    /// up while looking for it \u2014 and a caret past the `;` used to read the NEXT
+    /// statement instead.
+    #[test]
+    fn a_caret_just_past_the_semicolon_still_finds_its_own_binding() {
+        let src = "{\n    let d = foo();\n\n    other.run();\n";
+        let d = src.find("d =").unwrap();
+        let after_semi = src.find("();").unwrap() + 3;
+        assert_eq!(binding_pos(src, after_semi), Some(d));
+    }
+
+    /// That second look must not steal a caret sitting between two bindings on
+    /// one line: the statement AFTER the `;` still wins when there is one.
+    #[test]
+    fn between_two_bindings_the_following_one_still_wins() {
+        let src = "let a = 1; let b = 2;";
+        let b = src.find("b =").unwrap();
+        let between = src.find("; let").unwrap() + 1;
+        assert_eq!(binding_pos(src, between), Some(b));
     }
 
     #[test]
