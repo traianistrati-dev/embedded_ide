@@ -50,7 +50,7 @@ impl AppIde {
             self.clear_inlay_hint();
             return None;
         };
-        let (line, _col) = lsp_cursor_pos(display_code, target);
+        let (line, col) = lsp_cursor_pos(display_code, target);
 
         // CRITICAL — we send NO `did_change` here. A did_change bumps RA's
         // document version, which (a) cancels other in-flight requests ("content
@@ -65,11 +65,16 @@ impl AppIde {
         // text) and re-request once RA catches up (next save / completion /
         // code-action sync). Ctrl+Enter still works on dirty files — it syncs
         // itself.
-        let in_sync = self
-            .lsp_state
-            .lock()
-            .unwrap()
-            .last_sent_matches(rel, display_code);
+        // One lock for all three: whether rust-analyzer holds this text, and the
+        // two facts that decide whether an earlier empty answer is worth
+        // re-asking (see `EditorState::inlay_asked_at`).
+        let (in_sync, stamp) = {
+            let lsp = self.lsp_state.lock().unwrap();
+            (
+                lsp.last_sent_matches(rel, display_code),
+                (lsp.generation, lsp.indexed),
+            )
+        };
         if !in_sync {
             self.ed.inlay_hint = None;
             self.ed.inlay_requested = None; // re-request once RA catches up
@@ -81,7 +86,8 @@ impl AppIde {
             .ed
             .inlay_requested
             .as_ref()
-            .is_some_and(|(r, l)| r == rel && *l == line);
+            .is_some_and(|(r, l, _)| r == rel && *l == line)
+            && self.ed.inlay_asked_at == stamp;
         if !already {
             let sent = {
                 let mut lsp = self.lsp_state.lock().unwrap();
@@ -93,7 +99,8 @@ impl AppIde {
                 }
             };
             if sent {
-                self.ed.inlay_requested = Some((rel.to_owned(), line));
+                self.ed.inlay_requested = Some((rel.to_owned(), line, col));
+                self.ed.inlay_asked_at = stamp;
                 // The answer is applied at frame top, before any view has drawn.
                 self.lsp_asker.inlay = slot;
                 // Drop a hint from the previous line while the new request is in
@@ -114,8 +121,17 @@ impl AppIde {
         //    response sets the flag (stale ids fall through in `handle_incoming`).
         let result = self.lsp_state.lock().unwrap().take_inlay_result();
         if let Some((_rel, line, hints)) = result {
-            // Keep the first type hint that sits on the requested line.
-            self.ed.inlay_hint = hints.into_iter().find(|h| h.line == line);
+            // The hint for the binding we ASKED about — the one whose column is
+            // nearest at-or-after the name, not merely the first on the line.
+            //
+            // rust-analyzer puts a type hint immediately after the name it
+            // belongs to, so on `let a = 1; let b = 2;` the line alone does not
+            // identify which binding a hint describes. Chaining and closure
+            // hints are switched off in `initialization_options`, but they carry
+            // the same LSP kind as type hints, so nothing in the protocol keeps
+            // a stray one out of this slot either.
+            let want_col = self.ed.inlay_requested.as_ref().map(|(_, _, c)| *c);
+            self.ed.inlay_hint = pick_hint(hints, line, want_col);
         }
 
         // 2) Apply a pending Tab accept.
@@ -137,5 +153,81 @@ impl AppIde {
         self.ed.inlay_hint = None;
         self.ed.inlay_requested = None;
         self.ed.inlay_accept_pending = false;
+    }
+}
+
+/// The hint on `line` that belongs to the binding at `want_col`.
+///
+/// Nearest at-or-after the name wins; if none sits at or after it (a hint
+/// rust-analyzer placed differently than expected), the leftmost hint on the
+/// line is used rather than none — a hint in the wrong slot is still better than
+/// the silence this whole path is fixing.
+fn pick_hint(
+    hints: Vec<crate::lsp::InlayHint>,
+    line: u32,
+    want_col: Option<u32>,
+) -> Option<crate::lsp::InlayHint> {
+    let on_line: Vec<crate::lsp::InlayHint> =
+        hints.into_iter().filter(|h| h.line == line).collect();
+    let Some(col) = want_col else {
+        return on_line.into_iter().min_by_key(|h| h.character);
+    };
+    on_line
+        .iter()
+        .filter(|h| h.character >= col)
+        .min_by_key(|h| h.character - col)
+        .cloned()
+        .or_else(|| on_line.into_iter().min_by_key(|h| h.character))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_hint;
+    use crate::lsp::InlayHint;
+
+    fn hint(line: u32, character: u32, label: &str) -> InlayHint {
+        InlayHint {
+            line,
+            character,
+            label: label.to_owned(),
+            text_edits: Vec::new(),
+        }
+    }
+
+    /// Two bindings on one line: the hint that belongs to the one we asked
+    /// about wins. Taking the first on the line handed back the wrong type with
+    /// nothing to show it was wrong.
+    #[test]
+    fn the_hint_belongs_to_the_binding_we_asked_about() {
+        // `let a = 1; let b = 2;` — names at columns 4 and 15.
+        let hints = vec![hint(7, 5, ": i32"), hint(7, 16, ": u8")];
+        assert_eq!(pick_hint(hints.clone(), 7, Some(15)).unwrap().label, ": u8");
+        assert_eq!(pick_hint(hints, 7, Some(4)).unwrap().label, ": i32");
+    }
+
+    /// Hints from other lines in the requested range are not ours.
+    #[test]
+    fn a_hint_from_another_line_is_ignored() {
+        let hints = vec![hint(8, 5, ": wrong line")];
+        assert!(pick_hint(hints, 7, Some(4)).is_none());
+    }
+
+    /// Nothing at or after the name: take what there is rather than nothing.
+    /// Silence is the failure mode this whole path exists to remove.
+    #[test]
+    fn a_hint_before_the_name_is_better_than_no_hint() {
+        let hints = vec![hint(7, 2, ": something")];
+        assert_eq!(pick_hint(hints, 7, Some(40)).unwrap().label, ": something");
+    }
+
+    #[test]
+    fn with_no_column_known_the_leftmost_hint_wins() {
+        let hints = vec![hint(7, 30, ": late"), hint(7, 5, ": early")];
+        assert_eq!(pick_hint(hints, 7, None).unwrap().label, ": early");
+    }
+
+    #[test]
+    fn an_empty_answer_stays_empty() {
+        assert!(pick_hint(Vec::new(), 7, Some(4)).is_none());
     }
 }

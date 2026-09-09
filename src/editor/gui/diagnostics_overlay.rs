@@ -421,10 +421,23 @@ pub fn show_inlay_hint(
     let max_x = (text_clip_rect.right() - text_w - 4.0).max(text_clip_rect.left());
     let x = eol_x.min(max_x);
     let y_mid = (y_top + y_bot) * 0.5;
+    // …and elide what still does not fit. The clamp above slides a long hint
+    // LEFT to keep it on screen, which is right for a short ghost type but has
+    // no floor: raising rust-analyzer's `maxLength` so real embedded types come
+    // through whole also made the label wide enough to slide across the code it
+    // annotates. Cutting is the honest end of that trade — the same treatment,
+    // and the same `…`, the inline diagnostic messages get.
+    let char_w = painter
+        .layout_no_wrap("M".to_owned(), font.clone(), color)
+        .size()
+        .x;
+    let Some(fitted) = fit_to_width(label, text_clip_rect.right() - 4.0 - x, char_w) else {
+        return;
+    };
     painter.text(
         egui::pos2(x, y_mid),
         egui::Align2::LEFT_CENTER,
-        label,
+        &fitted,
         font,
         color,
     );

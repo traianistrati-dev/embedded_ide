@@ -1915,7 +1915,8 @@ impl AppIde {
         if let ProjectFileId::UserFile(i) = displayed_file {
             if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
                 if display_code != entry.1 {
-                    // In-memory only; the debounced LSP flush (3 s idle or
+                    // In-memory only; the LSP flush (on Project Save — there is
+                    // no idle debounce, whatever older comments said, or
                     // Project Save, see app::init_frame) writes it to the
                     // workspace and notifies RA — not on every keystroke.
                     entry.1 = display_code.clone();

@@ -23,7 +23,8 @@ use egui::text_edit::TextEditOutput;
 // Only **errors and info** are drawn inline; warnings (and hints) are filtered
 // out at the call site below and remain in the bottom panel (Cargo Check /
 // rust-analyzer tabs) to keep the code view uncluttered. Diagnostics refresh on
-// the LSP debounce (3 s after typing stops, or on Project Save — see
+// a Project Save — the ONLY moment rust-analyzer is re-synced; there is no
+// idle debounce, despite what this comment claimed for a long time (see
 // `app::init_frame`), so their positions no longer lag behind active typing.
 
 /// Whether the inline overlay draws `severity`, given the two toolbar switches.
@@ -167,7 +168,9 @@ impl AppIde {
                     .memory_mut(|m| m.request_focus(editor_resp.response.id));
 
                 // Persist the change in memory so the write-back picks it up; the
-                // debounced LSP flush (3 s idle / Project Save) handles disk + RA.
+                // LSP flush on Project Save handles disk + RA. There is no idle
+                // debounce: `lsp_flush_requested` is set in exactly one place,
+                // `app.rs`, under a Save.
                 // Keyed on the OWNER: an accept driven from the Reference editor
                 // must land in ITS file, never in whatever the main editor shows.
                 if let ProjectFileId::UserFile(i) = owner_file {
@@ -835,7 +838,12 @@ impl AppIde {
             // the diagnostics are stale — their line/col cling to a row that was
             // moved or deleted, so a squiggle/message "sticks" after the bad line
             // is gone. They reappear (refreshed) once the LSP debounce re-verifies
-            // (3 s idle / Project Save). Errors that live inside `#[entry] fn main`
+            // — on the next Project Save, and ONLY then. This comment used to
+            // promise a 3-second idle re-verify; that path was deleted, so the
+            // blank window lasts until Ctrl+S. The toolbar badge beside the file
+            // name names that state, because a blank overlay and a clean file are
+            // otherwise the same zero pixels.
+            // Errors that live inside `#[entry] fn main`
             // come from cargo-check (RA can't expand the entry macro), so they
             // surface a moment after that check completes.
             let diags: Vec<lsp::LspDiagnostic> = current_rel_path

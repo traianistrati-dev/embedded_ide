@@ -195,7 +195,22 @@ pub(crate) struct EditorState {
     /// `(rel_path, 0-based line)` the last inlay request was fired for — so we
     /// re-request when the caret moves to a different `let` line, or after RA
     /// re-syncs (the request key is reset while the file is dirty).
-    pub(crate) inlay_requested: Option<(String, u32)>,
+    /// `(file, 0-based line, 0-based column of the binding NAME)` of the inlay
+    /// request in flight or already answered for the caret's line.
+    ///
+    /// The column is kept because rust-analyzer places a type hint immediately
+    /// after the name it belongs to, and a line can hold more than one `let`.
+    /// Matching on the line alone took whichever hint came first in the array.
+    pub(crate) inlay_requested: Option<(String, u32, u32)>,
+    /// `(analyzer generation, indexed)` when that request went out.
+    ///
+    /// An EMPTY answer used to latch the line for good: `inlay_requested` was
+    /// set and never cleared, so a reply that arrived while rust-analyzer was
+    /// still indexing silenced that line until the caret left it. Re-asking
+    /// every frame instead would be per-frame LSP traffic on any line whose type
+    /// genuinely cannot be inferred, so the retry is tied to the two events that
+    /// can change the answer: a restart, and the end of indexing.
+    pub(crate) inlay_asked_at: (u64, bool),
 
     /// Set when Tab is pressed while the ghost hint shows; the type is inserted
     /// at frame TOP next `init_frame` (like code actions, to dodge the revert).
@@ -272,6 +287,7 @@ impl EditorState {
             extract: editor_panel::extract_fn::ExtractFnState::default(),
             inlay_hint: None,
             inlay_requested: None,
+            inlay_asked_at: (0, false),
             inlay_accept_pending: false,
             rename_focus: false,
             find: editor_panel::find_replace::FindReplace::default(),

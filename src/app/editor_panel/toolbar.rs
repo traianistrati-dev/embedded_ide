@@ -624,6 +624,42 @@ impl AppIde {
                     .color(egui::Color32::from_rgb(120, 160, 200)),
             )
             .on_hover_text(&open_label);
+
+            // ── Analysis badge ────────────────────────────────────────────
+            // "Clean" and "not analysed since you typed" used to be the same
+            // number of pixels: zero. The inline overlay blanks whenever
+            // rust-analyzer's copy is behind the buffer, and the floating error
+            // list returns before drawing anything when it has no rows — so the
+            // one state a reader most needs named was the one nothing named.
+            //
+            // Drawn ONLY when something is off, so a healthy file stays quiet.
+            {
+                let rel = crate::editor::gui::text_pos::selected_file_rel_path(
+                    &self.selected_file,
+                    &self.project_tree.user_src_files,
+                );
+                let state = match &rel {
+                    Some(rel) => {
+                        let lsp = self.lsp_state.lock().unwrap();
+                        analysis_of(
+                            matches!(lsp.status, crate::lsp::LspStatus::Ready),
+                            lsp.is_file_open(rel),
+                            lsp.last_sent_matches(rel, display_code),
+                            lsp.diagnostics_fresh(rel),
+                        )
+                    }
+                    None => Analysis::Live,
+                };
+                if let Some((label, hover)) = analysis_badge(state) {
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(128, 132, 142)),
+                    )
+                    .on_hover_text(hover);
+                }
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // ── Collapse / expand the Project tree (far-right panel) ──
                 // Deliberately a DIFFERENT glyph from the MCU toggle beside it:
@@ -905,6 +941,61 @@ Click to hide                      them (they stay in the Cargo Check / rust-ana
     }
 }
 
+/// What the editor knows about rust-analyzer's view of the file on screen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Analysis {
+    /// rust-analyzer holds this exact text and has published for it.
+    Live,
+    /// It holds this text; the answer has not come back yet.
+    Analysing,
+    /// Its copy predates these edits — everything the editor shows about this
+    /// file is from before you typed.
+    Stale,
+    /// No analyzer for this file at all.
+    Off,
+}
+
+/// Fold the four LSP facts into one state.
+fn analysis_of(ready: bool, file_open: bool, in_sync: bool, diags_fresh: bool) -> Analysis {
+    if !ready {
+        return Analysis::Off;
+    }
+    // A file rust-analyzer has never opened has no analysis to be stale ABOUT;
+    // saying "stale" there would blame the edits for a file it never read.
+    if !file_open {
+        return Analysis::Off;
+    }
+    match (in_sync, diags_fresh) {
+        (false, _) => Analysis::Stale,
+        (true, false) => Analysis::Analysing,
+        (true, true) => Analysis::Live,
+    }
+}
+
+/// `(badge, hover)` for a state worth naming; `None` while all is well.
+///
+/// `Ctrl+S` is in the text on purpose and is the load-bearing half. A Project
+/// Save is the ONLY thing in this app that re-syncs rust-analyzer — there is no
+/// idle debounce, whatever three older comments claimed — so a reader who does
+/// not know that waits for a squiggle that is never coming.
+fn analysis_badge(a: Analysis) -> Option<(&'static str, &'static str)> {
+    match a {
+        Analysis::Live => None,
+        Analysis::Stale => Some((
+            "· analysis stale · Ctrl+S",
+            "rust-analyzer has not seen these edits. Everything the editor shows              about this file — squiggles, inline messages, the error list, types —              is from before you typed. A Project Save (Ctrl+S) is the only thing              that re-analyses.",
+        )),
+        Analysis::Analysing => Some((
+            "· analysing…",
+            "Sent to rust-analyzer; waiting for the result.",
+        )),
+        Analysis::Off => Some((
+            "· no analyzer",
+            "rust-analyzer is not running for this file, so nothing here is              analysed: no squiggles, no types, no go-to-definition.",
+        )),
+    }
+}
+
 /// Longest path drawn in the title before it is shortened.
 ///
 /// The title now shares one row with the whole right-hand button group, so an
@@ -931,6 +1022,54 @@ fn elide_path_left(path: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{PATH_MAX_CHARS, elide_path_left};
+
+    use super::{Analysis, analysis_badge, analysis_of};
+
+    /// A healthy file says nothing. The badge only earns its pixels when the
+    /// editor would otherwise be showing something untrue by omission.
+    #[test]
+    fn an_analysed_file_gets_no_badge() {
+        assert_eq!(analysis_of(true, true, true, true), Analysis::Live);
+        assert!(analysis_badge(Analysis::Live).is_none());
+    }
+
+    /// The state this whole change exists for: rust-analyzer's copy is behind,
+    /// so the overlay is blank and the error list draws nothing — previously
+    /// indistinguishable from a clean file.
+    #[test]
+    fn edits_rust_analyzer_has_not_seen_are_named() {
+        assert_eq!(analysis_of(true, true, false, true), Analysis::Stale);
+        let (label, hover) = analysis_badge(Analysis::Stale).expect("a badge");
+        assert!(label.contains("stale"));
+        // Load-bearing: a Save is the ONLY re-sync in this app, so a reader who
+        // is not told that waits for an update that never arrives.
+        assert!(
+            label.contains("Ctrl+S") && hover.contains("Ctrl+S"),
+            "the remedy has to be on the badge itself: {label:?}"
+        );
+    }
+
+    /// Saved, but the answer has not landed. Distinct from stale so that
+    /// "I pressed Ctrl+S, why does it still say stale?" has an answer.
+    #[test]
+    fn a_sent_but_unanswered_file_says_so() {
+        assert_eq!(analysis_of(true, true, true, false), Analysis::Analysing);
+        assert!(
+            analysis_badge(Analysis::Analysing)
+                .expect("a badge")
+                .0
+                .contains("analysing")
+        );
+    }
+
+    /// A file the analyzer never opened has no analysis to be stale ABOUT —
+    /// calling that "stale" would blame the user's edits for a file it never
+    /// read.
+    #[test]
+    fn a_file_the_analyzer_never_opened_is_not_called_stale() {
+        assert_eq!(analysis_of(true, false, false, false), Analysis::Off);
+        assert_eq!(analysis_of(false, true, true, true), Analysis::Off);
+    }
 
     #[test]
     fn a_short_path_is_left_alone() {

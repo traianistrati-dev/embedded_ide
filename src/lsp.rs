@@ -364,6 +364,12 @@ pub struct LspState {
     pub code_action_resolved: Option<Vec<RenameEdit>>,
     /// The request id of the pending `textDocument/definition`, if any.
     definition_req_id: Option<u64>,
+    /// `(file, 1-based line)` the last definition request asked about, so an
+    /// empty answer can be explained rather than just reported. Mirrors
+    /// `inlay_for_file` / `inlay_for_line`.
+    pub definition_for: Option<(String, u32)>,
+    /// Same, for the last code-action request (Ctrl+Enter).
+    pub code_action_for: Option<(String, u32)>,
     /// The request id of the pending `textDocument/implementation` (Ctrl+F12),
     /// if any. Its response funnels into the SAME `definition_result` slot, so
     /// the whole F12 navigation pipeline downstream serves both.
@@ -453,6 +459,8 @@ impl Default for LspState {
             code_action_resolve_received: false,
             code_action_resolved: None,
             definition_req_id: None,
+            definition_for: None,
+            code_action_for: None,
             implementation_req_id: None,
             definition_response_received: false,
             definition_result: None,
@@ -829,6 +837,7 @@ impl LspState {
         if self.sender.is_none() {
             return;
         }
+        self.code_action_for = Some((rel_path.to_owned(), line + 1));
         self.next_req_id += 1;
         let id = self.next_req_id;
         self.code_action_req_id = Some(id);
@@ -914,6 +923,7 @@ impl LspState {
         self.next_req_id += 1;
         let id = self.next_req_id;
         self.definition_req_id = Some(id);
+        self.definition_for = Some((rel_path.to_owned(), line + 1));
         self.definition_response_received = false;
         self.definition_result = None;
         let uri = format!("{}/{}", self.root_uri, rel_path);
@@ -1470,75 +1480,7 @@ fn launch(
                 },
                 "window": { "workDoneProgress": true },
             },
-            "initializationOptions": {
-                // cargo-check-on-save is ENABLED so real compiler errors
-                // (E0425 "cannot find value", type mismatches, …) show up inline
-                // after a Project Save. RA's *native* pass alone does NOT
-                // reliably publish these for nested user files, so without
-                // flycheck the editor showed no inline errors at all.
-                //
-                // The save-slowness this once caused was NOT flycheck itself but
-                // (a) a leaked serial-reader thread and (b) deleting Cargo.lock on
-                // every save, which forced a full dependency re-resolve before
-                // each check — both since fixed (Cargo.lock is now kept; see
-                // `AppIde::reset_workspace_lock`), so flycheck is a fast
-                // *incremental* check that runs asynchronously in RA (it never
-                // blocks the app's save). Triggered by the `did_save` sent from
-                // `AppIde::flush_lsp_to_workspace`.
-                "checkOnSave":  true,
-
-                // Proc-macro expansion is disabled.
-                //
-                // WHY: RA looks for the proc-macro DLL (e.g. esp_hal_procmacros-
-                // <hash>.dll) in target/debug/deps/.  The DLL only exists after a
-                // successful `cargo build`.  Our workspace deletes Cargo.lock on
-                // every project write, which changes the resolution hash, so the
-                // DLL RA cached from a previous session is no longer present.
-                // Enabling proc-macros therefore causes:
-                //   "Cannot create expander for <dll>: path not found (os error 3)"
-                // on every RA startup until the user manually runs a build.
-                //
-                // With proc-macros disabled, RA still analyses the full crate
-                // graph, provides :: completions, type inference, diagnostics, and
-                // go-to-definition — it just can't *expand* attribute macros like
-                // #[esp_hal::main].  The function body and all other code are fully
-                // analysed, so the IDE experience is not materially affected.
-                //
-                // To prevent RA from reporting a false "unresolved-proc-macro"
-                // warning on #[esp_hal::main] we suppress that diagnostic below.
-                "procMacro": { "enable": false },
-
-                "diagnostics": {
-                    "enable": true,
-                    // Suppress the "proc-macro expansion is disabled" pseudo-error
-                    // that RA emits for every attribute macro when expansion is off.
-                    // All real compiler errors (type mismatches, borrow errors, …)
-                    // are still reported through cargo-check diagnostics.
-                    "disabled": ["unresolved-proc-macro"],
-                },
-
-                // Ask RA to include full documentation text in completion
-                // responses rather than returning only a label.
-                "completion": {
-                    "fullFunctionSignatures": { "enable": true },
-                },
-
-                // Let RA read the target from .cargo/config.toml.
-                // For ESP32-C3 this is riscv32imc-unknown-none-elf, which ensures
-                // that cfg(target_arch = "riscv32") items in esp-hal are visible.
-                //
-                // `targetDir: true` → RA runs its cargo (flycheck checkOnSave +
-                // build-script probing) in its OWN `target/rust-analyzer/`
-                // directory instead of the shared `target/`. Without this, every
-                // Save's flycheck held the cargo target-dir file lock, so the
-                // Build / Clippy / Flash cargo invocations silently BLOCKED
-                // waiting for it — a main driver of the "everything gets slower
-                // after a save" degradation. Costs some extra disk space.
-                "cargo": {
-                    "noDefaultFeatures": false,
-                    "targetDir": true,
-                },
-            },
+            "initializationOptions": initialization_options(),
         }
     }).to_string());
 
@@ -2398,6 +2340,113 @@ fn parse_code_actions(result: &serde_json::Value, root_uri: &str) -> Vec<CodeAct
         .collect()
 }
 
+/// The `initializationOptions` handed to rust-analyzer at startup.
+///
+/// Its own function, and guarded by tests, because this object is where a
+/// setting quietly stops being true. `procMacro.enable` sat at `false` for
+/// months behind a comment describing a workspace behaviour that had since been
+/// fixed, and the cost was invisible from the code: a crate whose API is
+/// macro-generated simply had no types, and every editor command over such a
+/// value answered "nothing here".
+fn initialization_options() -> serde_json::Value {
+    serde_json::json!({
+
+                // cargo-check-on-save is ENABLED so real compiler errors
+                // (E0425 "cannot find value", type mismatches, …) show up inline
+                // after a Project Save. RA's *native* pass alone does NOT
+                // reliably publish these for nested user files, so without
+                // flycheck the editor showed no inline errors at all.
+                //
+                // The save-slowness this once caused was NOT flycheck itself but
+                // (a) a leaked serial-reader thread and (b) deleting Cargo.lock on
+                // every save, which forced a full dependency re-resolve before
+                // each check — both since fixed (Cargo.lock is now kept; see
+                // `AppIde::reset_workspace_lock`), so flycheck is a fast
+                // *incremental* check that runs asynchronously in RA (it never
+                // blocks the app's save). Triggered by the `did_save` sent from
+                // `AppIde::flush_lsp_to_workspace`.
+                "checkOnSave":  true,
+
+                // Proc-macro expansion is ENABLED.
+                //
+                // It was off for a long time, justified by this: our workspace
+                // deleted `Cargo.lock` on every project write, which changes the
+                // dependency resolution hash, so the expander DLL RA had cached
+                // (e.g. `esp_hal_procmacros-<hash>.dll`) was gone and startup
+                // logged "Cannot create expander for <dll>".
+                //
+                // That behaviour no longer exists. `AppIde::reset_workspace_lock`
+                // runs ONLY on project open and on a chip/toolchain change; saves
+                // keep the lock, so the hash is stable and the DLL survives.
+                //
+                // The old comment also claimed the experience was "not materially
+                // affected" with expansion off. That was wrong, and it took a user
+                // five rounds of questions to disprove: any crate whose API is
+                // GENERATED by an attribute macro is invisible to rust-analyzer
+                // without expansion. `ssd1306` builds its entire async surface
+                // (`Ssd1306Async`, `BufferedGraphicsModeAsync`) that way, so such
+                // a value's type came out `{unknown}` — no inlay hint, and then
+                // every later line touching it answered "no definition" and "no
+                // action", while the hand-written blocking API on the same screen
+                // worked perfectly.
+                //
+                // If the DLL really is missing (a project never built), RA emits
+                // `unresolved-proc-macro`, already suppressed below.
+                "procMacro": { "enable": true },
+
+                "diagnostics": {
+                    "enable": true,
+                    // Suppress the "proc-macro expansion is disabled" pseudo-error
+                    // that RA emits for every attribute macro when expansion is off.
+                    // All real compiler errors (type mismatches, borrow errors, …)
+                    // are still reported through cargo-check diagnostics.
+                    "disabled": ["unresolved-proc-macro"],
+                },
+
+                // Inlay hints. Sending NOTHING here left RA on its own defaults,
+                // whose `maxLength` is 25 — which is why a real embedded type came
+                // back as `Ssd1306<I2CInterface<BlockingI2c<…, …>>, …, …>`, with
+                // the one thing the reader wanted to know inside the elision.
+                //
+                // 120 rather than unlimited: the hint is drawn at the END of the
+                // line, so an unbounded one covers the code it annotates.
+                // Ctrl+Enter still inserts the FULL type — the hint is a preview,
+                // the assist is the answer.
+                //
+                // Chaining hints OFF: only one hint per line is ever drawn, and RA
+                // reports chaining hints with the same LSP kind as type hints, so
+                // they compete for that slot with the binding's own type.
+                "inlayHints": {
+                    "maxLength": 120,
+                    "typeHints": { "enable": true },
+                    "chainingHints": { "enable": false },
+                    "closureReturnTypeHints": { "enable": "never" },
+                },
+
+                // Ask RA to include full documentation text in completion
+                // responses rather than returning only a label.
+                "completion": {
+                    "fullFunctionSignatures": { "enable": true },
+                },
+
+                // Let RA read the target from .cargo/config.toml.
+                // For ESP32-C3 this is riscv32imc-unknown-none-elf, which ensures
+                // that cfg(target_arch = "riscv32") items in esp-hal are visible.
+                //
+                // `targetDir: true` → RA runs its cargo (flycheck checkOnSave +
+                // build-script probing) in its OWN `target/rust-analyzer/`
+                // directory instead of the shared `target/`. Without this, every
+                // Save's flycheck held the cargo target-dir file lock, so the
+                // Build / Clippy / Flash cargo invocations silently BLOCKED
+                // waiting for it — a main driver of the "everything gets slower
+                // after a save" degradation. Costs some extra disk space.
+                "cargo": {
+                    "noDefaultFeatures": false,
+                    "targetDir": true,
+                }
+    })
+}
+
 /// Parse a `textDocument/inlayHint` result (`InlayHint[]`). Only **type** hints
 /// (kind 1, or unspecified) are kept — parameter-name hints (kind 2) are
 /// dropped. `label` may be a plain string or an `InlayHintLabelPart[]` (each
@@ -3060,5 +3109,74 @@ mod log_preview_tests {
                 out.len()
             );
         }
+    }
+}
+
+/// The startup options handed to rust-analyzer — the object where a setting
+/// quietly stops being true.
+#[cfg(test)]
+mod initialization_options_guard {
+    use super::initialization_options;
+
+    /// Proc-macro expansion must stay ON.
+    ///
+    /// It was off for months behind a comment whose justification had already
+    /// been fixed elsewhere, and the damage was silent: a crate that GENERATES
+    /// its API with an attribute macro — `ssd1306` does exactly this for its
+    /// whole async surface — has no types at all for rust-analyzer. The
+    /// binding's type comes out `{unknown}`, so it gets no inlay hint, and then
+    /// every later line touching that value answers "no definition" and "no
+    /// action", while the hand-written blocking API on the same screen works.
+    /// It took five rounds of user reports to pin down.
+    ///
+    /// Turning it back off "because the expander DLL is missing" buys exactly
+    /// that again: a missing DLL only produces `unresolved-proc-macro`, which
+    /// the next test keeps suppressed.
+    #[test]
+    fn proc_macro_expansion_is_enabled() {
+        assert_eq!(
+            initialization_options()["procMacro"]["enable"],
+            serde_json::json!(true),
+            "macro-generated APIs are invisible to rust-analyzer when this is off"
+        );
+    }
+
+    /// The suppression is what makes expansion safe on a project that has never
+    /// been built, so the two settings belong together.
+    #[test]
+    fn the_missing_expander_diagnostic_stays_suppressed() {
+        let opts = initialization_options();
+        let disabled = opts["diagnostics"]["disabled"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            disabled.iter().any(|d| d == "unresolved-proc-macro"),
+            "got {disabled:?}"
+        );
+    }
+
+    /// We must send an inlay-hint length of our own: rust-analyzer's default is
+    /// 25 characters, which renders a real embedded type as
+    /// `Ssd1306<I2CInterface<BlockingI2c<…, …>>, …, …>` — with the part the
+    /// reader needs inside the elision.
+    #[test]
+    fn inlay_hints_carry_a_length_of_our_own() {
+        let max = initialization_options()["inlayHints"]["maxLength"].as_u64();
+        assert!(
+            max.is_some_and(|n| n > 25),
+            "expected more than rust-analyzer's 25-char default, got {max:?}"
+        );
+    }
+
+    /// Only ONE hint per line is ever drawn, and rust-analyzer reports chaining
+    /// hints with the same LSP kind as type hints — so a chain on the line would
+    /// compete with the binding's own type for that single slot.
+    #[test]
+    fn chaining_hints_are_off_so_they_cannot_take_the_type_slot() {
+        assert_eq!(
+            initialization_options()["inlayHints"]["chainingHints"]["enable"],
+            serde_json::json!(false)
+        );
     }
 }

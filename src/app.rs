@@ -2712,6 +2712,46 @@ impl AppIde {
         }
     }
 
+    /// Why a request that reached rust-analyzer came back with nothing, when we
+    /// can tell — appended to the "no action" / "no definition" messages.
+    ///
+    /// Those two messages are honest but useless on their own: they say what did
+    /// not happen and never why. A user spent five rounds establishing that
+    /// proc-macro expansion was off, which left a macro-generated type as
+    /// `{unknown}` — after which every command touching that value answered
+    /// "nothing here", and the editor drew a clean screen the whole time,
+    /// because the inline overlay hides diagnostics while a file is unsaved.
+    ///
+    /// Ordered by how much it explains. `line` is 1-based; `None` means we have
+    /// nothing to add and the bare message stands.
+    fn caret_silence_reason(&self, rel: &str, line: u32) -> Option<String> {
+        let lsp = self.lsp_state.lock().unwrap();
+        if !matches!(lsp.status, lsp::LspStatus::Ready) {
+            return Some("the analyzer is not running".to_owned());
+        }
+        if !lsp.indexed && !lsp.is_file_open(rel) {
+            return Some("the analyzer is still indexing this project".to_owned());
+        }
+        // An error ON this line is the likeliest cause, and the one the reader
+        // is least able to see for themselves: the inline overlay blanks while
+        // the file is dirty, so the screen can look clean while this is true.
+        let here = lsp.diagnostics.get(rel).and_then(|ds| {
+            ds.iter()
+                .find(|d| d.line == line && d.severity.is_error())
+                .map(|d| d.headline().to_owned())
+        });
+        if let Some(msg) = here {
+            let short: String = msg.chars().take(60).collect();
+            return Some(format!("there is an error on this line — {short}"));
+        }
+        // Nothing published for the file at all: RA is up but has not produced
+        // analysis for it, so "nothing at the caret" says nothing about the caret.
+        if !lsp.diagnostics.contains_key(rel) && !lsp.is_file_open(rel) {
+            return Some("the analyzer has no analysis for this file yet".to_owned());
+        }
+        None
+    }
+
     fn set_status_msg(&mut self, msg: String) {
         self.export_msg = msg;
         self.export_status_until =
@@ -3744,8 +3784,13 @@ impl AppIde {
                     // did nothing", and a just-started analyzer answers this way
                     // more often than a warm one — an empty result and a
                     // JSON-RPC error arrive in the same shape.
+                    let asked = self.lsp_state.lock().unwrap().definition_for.clone();
+                    let reason = asked
+                        .and_then(|(rel, line)| self.caret_silence_reason(&rel, line))
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default();
                     self.set_status_msg(format!(
-                        "{} No definition found for the symbol at the caret",
+                        "{} No definition found for the symbol at the caret{reason}",
                         egui_phosphor::regular::X_CIRCLE
                     ));
                 }

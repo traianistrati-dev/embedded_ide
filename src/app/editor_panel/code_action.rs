@@ -118,9 +118,18 @@ impl AppIde {
                     // is also the most COMMON outcome: rust-analyzer offers
                     // assists at a few positions, not at every caret.
                     0 if !ours => {
-                        self.set_status_msg(
-                            "Ctrl+Enter: rust-analyzer has no action at the cursor".into(),
-                        );
+                        // ...and say WHY when we can tell. "No action" alone is
+                        // true and useless: it reads the same whether the caret
+                        // is simply somewhere rust-analyzer offers nothing, or
+                        // the analyzer has no type for the expression under it.
+                        let asked = self.lsp_state.lock().unwrap().code_action_for.clone();
+                        let reason = asked
+                            .and_then(|(rel, line)| self.caret_silence_reason(&rel, line))
+                            .map(|r| format!(" ({r})"))
+                            .unwrap_or_default();
+                        self.set_status_msg(format!(
+                            "Ctrl+Enter: rust-analyzer has no action at the cursor{reason}"
+                        ));
                     }
                     1 if !ours => self.begin_code_action(actions.into_iter().next().unwrap()),
                     _ => {
