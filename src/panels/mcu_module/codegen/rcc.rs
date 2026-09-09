@@ -209,6 +209,21 @@ pub fn generic_recipe(g: &ClockGraph) -> Option<(ReadSpec, RccDescriptor)> {
 /// skeleton. Replaces the per-family `f4::clock_block` / `wba::clock_block` and
 /// the `stm_clock_block` sniffing with one dispatch.
 pub fn graph_clock_block(family: &str, clock: &ClockConfig, manual: bool) -> String {
+    graph_clock_block_for("", family, clock, manual)
+}
+
+/// The same, told WHICH PART it is generating for.
+///
+/// The part number only matters to the peripheral clock selectors, whose
+/// register block varies inside a family — see
+/// [`rcc_mux::fields_for_chip`](super::rcc_mux::fields_for_chip). Everything
+/// else is family-wide, which is why the shorter form above still exists.
+pub fn graph_clock_block_for(
+    chip: &str,
+    family: &str,
+    clock: &ClockConfig,
+    manual: bool,
+) -> String {
     // `for_codegen` applies the chip's id bindings; with none declared it
     // borrows the graph unchanged, so the emitted block is byte-identical.
     let graph = match clock {
@@ -241,7 +256,7 @@ pub fn graph_clock_block(family: &str, clock: &ClockConfig, manual: bool) -> Str
     // Per-peripheral kernel clocks: USART1SEL, I2C1SEL, ADCSEL and the rest.
     // The Clock tab has always shown these; until now nothing read them.
     let mux = match graph {
-        Some(g) => super::rcc_mux::emit_lines(g, family),
+        Some(g) => super::rcc_mux::emit_lines(g, chip, family),
         None => Vec::new(),
     };
     // The reset shortcut only applies when the chip's HW default equals this

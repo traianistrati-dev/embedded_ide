@@ -698,7 +698,7 @@ impl FamilyBackend for StmEmbassyBackend {
             section = embassy_common::make_generated_section(
                 &mcu.name,
                 &all,
-                &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
+                &rcc::graph_clock_block_for(&mcu.id, &mcu.family, &mcu.clock, mcu.clock_manual),
                 &mcu.watchdog_and_custom_inits(),
             ),
             tail = USER_TAIL,
@@ -710,7 +710,7 @@ impl FamilyBackend for StmEmbassyBackend {
         let section = embassy_common::make_generated_section(
             &mcu.name,
             &all,
-            &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
+            &rcc::graph_clock_block_for(&mcu.id, &mcu.family, &mcu.clock, mcu.clock_manual),
             &mcu.watchdog_and_custom_inits(),
         );
         let section = super::common::keep_manual_clock(existing, section, mcu.clock_manual);
@@ -849,7 +849,7 @@ fn async_section(mcu: &Mcu) -> String {
     embassy_async::make_generated_section(
         &mcu.name,
         &gpio_pins,
-        &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
+        &rcc::graph_clock_block_for(&mcu.id, &mcu.family, &mcu.clock, mcu.clock_manual),
         &periphs.init_calls,
         &periphs.dma_irqs,
         &mcu.watchdog_and_custom_inits(),

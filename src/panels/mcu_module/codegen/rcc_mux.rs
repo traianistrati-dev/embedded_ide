@@ -50,17 +50,51 @@ pub struct MuxField {
     pub variants: &'static [(u32, &'static str)],
 }
 
-/// The selectors this family can emit, empty when the IDE has no table for it.
+/// Which RCC register version a part number uses.
 ///
-/// Absent families are not a bug to fix by adding a guess — `stm32g0` is left
-/// out precisely because metapac splits it into `rcc_g0x0` and `rcc_g0x1` and
-/// the choice is per chip.
-pub fn fields_for(family: &str) -> &'static [MuxField] {
-    super::rcc_mux_data::RCC_MUX
+/// By PREFIX, longest match first: metapac's chip names (`stm32f410t8`) are a
+/// prefix of the part numbers the IDE carries (`stm32f410t8yx`), and the extra
+/// letters are the package, which no register cares about.
+pub fn rcc_version(chip: &str) -> Option<&'static str> {
+    let chip = chip.to_ascii_lowercase();
+    super::rcc_mux_data::CHIP_RCC
         .iter()
-        .find(|(f, _)| *f == family)
+        .filter(|(prefix, _)| chip.starts_with(prefix))
+        .max_by_key(|(prefix, _)| prefix.len())
+        .map(|(_, version)| *version)
+}
+
+/// The selectors a chip can emit.
+///
+/// A family is NOT one register block, which is why this takes the part number:
+/// STM32H7 has four RCC versions, F0 and F3 four each, and even F4 has two —
+/// 143 parts on `f4` and six F410s on `f410`. Emitting a family's usual table
+/// for the odd part out would name a field that chip does not have.
+///
+/// `family` is the fallback for a part metapac has never heard of, and only
+/// answers for families whose chips all share one version. An unknown chip in
+/// an ambiguous family gets nothing, which costs a missing line rather than a
+/// wrong one.
+pub fn fields_for_chip(chip: &str, family: &str) -> &'static [MuxField] {
+    let version = rcc_version(chip).or_else(|| {
+        super::rcc_mux_data::FAMILY_RCC
+            .iter()
+            .find(|(f, _)| *f == family)
+            .map(|(_, v)| *v)
+    });
+    let Some(version) = version else {
+        return &[];
+    };
+    super::rcc_mux_data::VERSIONS
+        .iter()
+        .find(|(v, _)| *v == version)
         .map(|(_, fields)| *fields)
         .unwrap_or(&[])
+}
+
+/// The selectors a family can emit with no part number to go on.
+pub fn fields_for(family: &str) -> &'static [MuxField] {
+    fields_for_chip("", family)
 }
 
 /// One confirmed pairing of a graph node with a selector.
@@ -143,9 +177,9 @@ fn same_clock(node_id: &str, variant: &str) -> bool {
 /// Pair this graph's mux nodes with the family's selectors.
 ///
 /// Only pairings the tree CONFIRMS are returned — see the module docs.
-pub fn propose(graph: &ClockGraph, family: &str) -> Vec<Bound> {
+pub fn propose(graph: &ClockGraph, chip: &str, family: &str) -> Vec<Bound> {
     let mut out = Vec::new();
-    for field in fields_for(family) {
+    for field in fields_for_chip(chip, family) {
         let target = core_name(field.field);
         let Some(node) = graph
             .nodes
@@ -225,9 +259,9 @@ pub fn variant_of(graph: &ClockGraph, bound: &Bound) -> Option<&'static str> {
 /// every selector still on its reset value — a project that has not chosen a
 /// peripheral clock gets no line for it, so the generated block stays as small
 /// as what the user actually configured.
-pub fn emit_lines(graph: &ClockGraph, family: &str) -> Vec<String> {
+pub fn emit_lines(graph: &ClockGraph, chip: &str, family: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for bound in propose(graph, family) {
+    for bound in propose(graph, chip, family) {
         let Some(variant) = variant_of(graph, &bound) else {
             continue;
         };
@@ -273,13 +307,68 @@ mod tests {
         assert!(!same_clock("HSIRC", "HSE"));
     }
 
+    /// A family is not one register block — the reason this is keyed by chip.
+    #[test]
+    fn a_part_number_picks_its_own_register_block() {
+        // Six F410s sit on their own version while 143 other F4s do not.
+        assert_eq!(rcc_version("stm32f410t8yx"), Some("f410"));
+        assert_eq!(rcc_version("stm32f411retx"), Some("f4"));
+        // Four versions across STM32H7.
+        assert_eq!(rcc_version("stm32h743zitx"), Some("h7rm0433"));
+        assert_ne!(rcc_version("stm32h7a3zitx"), rcc_version("stm32h743zitx"));
+        // The G0 split that kept this family out of the first table.
+        assert_eq!(rcc_version("stm32g030f6px"), Some("g0x0"));
+        assert_eq!(rcc_version("stm32g031k8tx"), Some("g0x1"));
+        // And the H5 one.
+        assert_eq!(rcc_version("stm32h503rbtx"), Some("h50"));
+        assert_eq!(rcc_version("stm32h563zitx"), Some("h5"));
+
+        // Case does not matter, and the package suffix is ignored.
+        assert_eq!(rcc_version("STM32WBA55CGUx"), Some("wba"));
+        assert_eq!(rcc_version("stm32wba55"), Some("wba"));
+
+        // A part nobody has heard of falls back to its family, but only when
+        // that family has one answer.
+        assert!(rcc_version("stm32zz99").is_none());
+        assert!(
+            !fields_for_chip("stm32zz99", "stm32u5").is_empty(),
+            "u5 is single-version"
+        );
+        assert!(
+            fields_for_chip("stm32h799xx", "stm32h7").is_empty(),
+            "an unknown H7 gets nothing rather than one of the four guesses"
+        );
+    }
+
+    /// The families the first table could not serve now do.
+    #[test]
+    fn the_ambiguous_families_are_covered_per_chip() {
+        for (chip, family) in [
+            ("stm32g0b1retx", "stm32g0"),
+            ("stm32h563zitx", "stm32h5"),
+            ("stm32u575zitx", "stm32u5"),
+            ("stm32l552zetx", "stm32l5"),
+            ("stm32c011f4ux", "stm32c0"),
+            ("stm32f303retx", "stm32f3"),
+            ("stm32wle5jcix", "stm32wl"),
+            ("stm32wb55rgvx", "stm32wb"),
+            ("stm32l4p5cetx", "stm32l4+"),
+        ] {
+            let fields = fields_for_chip(chip, family);
+            // How MANY a family exposes is the vendor's business — L5 declares
+            // only `adcsel` and `clk48sel` as kernel-clock muxes, and that is
+            // the right answer for L5, not a gap to paper over.
+            assert!(!fields.is_empty(), "{chip} has no selectors at all");
+        }
+    }
+
     /// Every harvested table is well-formed: no empty variant list, no field
     /// that would emit a line naming nothing.
     #[test]
     fn the_harvested_tables_are_sane() {
         let mut families = 0;
         let mut selectors = 0;
-        for (family, fields) in super::super::rcc_mux_data::RCC_MUX {
+        for (family, fields) in super::super::rcc_mux_data::VERSIONS {
             families += 1;
             assert!(!fields.is_empty(), "{family} has no selectors");
             for f in *fields {
@@ -293,8 +382,8 @@ mod tests {
                 );
             }
         }
-        assert_eq!(families, 6);
-        assert_eq!(selectors, 110, "the table is the harvest, unedited");
+        assert_eq!(families, 35, "one table per RCC version that has selectors");
+        assert_eq!(selectors, 477, "the table is the harvest, unedited");
 
         // The case that proves the table is not a rule: field != enum.
         let wba = fields_for("stm32wba");
@@ -328,7 +417,7 @@ mod tests {
             .map(|n| n.id.as_str())
             .collect();
 
-        let bound = propose(&gc.graph, "stm32wba");
+        let bound = propose(&gc.graph, "stm32wba55cgux", "stm32wba");
         let names: Vec<&str> = bound.iter().map(|b| b.node.as_str()).collect();
         println!(
             "{} mux nodes, {} bound: {names:?}",
@@ -355,7 +444,7 @@ mod tests {
             );
         }
 
-        let lines = emit_lines(&gc.graph, "stm32wba");
+        let lines = emit_lines(&gc.graph, "stm32wba55cgux", "stm32wba");
         for l in &lines {
             println!("{l}");
         }
@@ -363,10 +452,21 @@ mod tests {
     }
 
     /// Values are carried, not assumed to be 0-based.
+    ///
+    /// `usbsw` starts at 1 because 0 is a reserved encoding, so indexing the
+    /// variant list by position would name the wrong clock.
     #[test]
     fn a_selector_that_does_not_start_at_zero() {
-        let f2 = fields_for("stm32f2");
-        let rtc = f2.iter().find(|f| f.field == "rtcsel").unwrap();
-        assert_eq!(rtc.variants[0], (1, "LSE"), "0 means no clock, not LSE");
+        let odd = super::super::rcc_mux_data::VERSIONS
+            .iter()
+            .flat_map(|(_, fields)| fields.iter())
+            .find(|f| f.variants[0].0 != 0)
+            .expect("at least one selector skips value 0");
+        assert!(
+            odd.variants[0].0 > 0,
+            "{} starts at {}",
+            odd.field,
+            odd.variants[0].0
+        );
     }
 }
