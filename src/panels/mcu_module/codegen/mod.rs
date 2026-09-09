@@ -15,6 +15,8 @@ pub mod embassy_common;
 pub mod family;
 pub mod nvic;
 pub mod rcc;
+pub mod rcc_mux;
+mod rcc_mux_data;
 pub mod rcc_n6;
 pub mod rp;
 pub mod rtic;

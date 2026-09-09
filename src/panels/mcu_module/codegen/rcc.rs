@@ -238,13 +238,33 @@ pub fn graph_clock_block(family: &str, clock: &ClockConfig, manual: bool) -> Str
         Some(g) => read_rcc_values(g, &spec),
         None => spec.reset.clone(),
     };
+    // Per-peripheral kernel clocks: USART1SEL, I2C1SEL, ADCSEL and the rest.
+    // The Clock tab has always shown these; until now nothing read them.
+    let mux = match graph {
+        Some(g) => super::rcc_mux::emit_lines(g, family),
+        None => Vec::new(),
+    };
     // The reset shortcut only applies when the chip's HW default equals this
     // reset (HSI). L4/L5/U5 default to MSI, so a reset-equivalent graph must
     // still emit an explicit HSI block, not `init(Default::default())`.
-    if spec.reset_is_hw_default && values == spec.reset {
+    //
+    // A peripheral selection also disqualifies it: the buses may be at reset
+    // while USART1 has been moved to HSI, and `init(Default::default())` has
+    // nowhere to say so.
+    if spec.reset_is_hw_default && values == spec.reset && mux.is_empty() {
         return wrap(EMBASSY_RESET_INIT.to_string(), manual);
     }
-    let block = emit_rcc_block(&desc, &values);
+    let mut block = emit_rcc_block(&desc, &values);
+    if !mux.is_empty() {
+        // Spliced INSIDE the `{ use embassy_stm32::rcc; … }` scope, after the
+        // prescalers — the lines say `rcc::mux::…` and that `use` is what makes
+        // them resolve.
+        let tail = "    }\n    let p = embassy_stm32::init(config);\n";
+        if let Some(cut) = block.rfind(tail) {
+            let lines = format!("{}\n", mux.join("\n"));
+            block.insert_str(cut, &lines);
+        }
+    }
     wrap(
         if verified {
             block
@@ -1369,6 +1389,78 @@ mod tests {
         // Which in turn flips the hand-written default off, so it UPDATES.
         assert!(generates_clock_code_for("stm32h5", &clock));
         assert!(!generates_clock_code_for("stm32h5", &ClockConfig::None));
+    }
+
+    /// Peripheral kernel clocks reach `main.rs` — the whole of layer 1.
+    ///
+    /// The shipped WBA55 tree carries 21 mux nodes. Before this, every one of
+    /// them was a control the user could move and nothing downstream read.
+    #[test]
+    fn peripheral_clock_selections_reach_the_generated_block() {
+        use crate::panels::mcu_module::clock::graph::parse_clock_ron;
+
+        let ron = include_str!("../../../../assets/mcus/examples/stm32wba55_graphclock.ron");
+        let gc = parse_clock_ron(ron).expect("the shipped tree parses");
+        let block = graph_clock_block("stm32wba", &ClockConfig::Graph(gc), false);
+
+        // The three names that had to be right, and could not be guessed.
+        assert!(
+            block.contains("config.rcc.mux.usart1sel = rcc::mux::Usart1sel::PCLK2;"),
+            "{block}"
+        );
+        assert!(
+            block.contains("config.rcc.mux.usart2sel = rcc::mux::Usartsel::PCLK1;"),
+            "the enum is NOT the field capitalised:
+{block}"
+        );
+        assert!(
+            block.contains("config.rcc.mux.adcsel = rcc::mux::Adcsel::HCLK4;"),
+            "{block}"
+        );
+
+        // Placement: inside the `use embassy_stm32::rcc;` scope, before init.
+        let scope = block.find("use embassy_stm32::rcc;").expect("the scope");
+        let init = block.find("embassy_stm32::init(config)").expect("the init");
+        let mux = block.find("config.rcc.mux.").expect("a mux line");
+        assert!(
+            scope < mux && mux < init,
+            "a mux line lands out of scope:
+{block}"
+        );
+
+        // The prescalers still come first, so the block reads sources ->
+        // buses -> peripherals like the datasheet does.
+        let apb = block
+            .find("config.rcc.apb1_pre")
+            .expect("the APB1 prescaler");
+        assert!(
+            apb < mux,
+            "peripherals come after the buses:
+{block}"
+        );
+    }
+
+    /// A tree that selects a peripheral clock must not take the
+    /// `init(Default::default())` shortcut — there is nowhere in it to say so.
+    #[test]
+    fn a_peripheral_selection_defeats_the_reset_shortcut() {
+        use crate::panels::mcu_module::clock::graph::parse_clock_ron;
+
+        // With no graph at all the values ARE the reset, and the shortcut is
+        // exactly right: nothing has been configured.
+        let bare = graph_clock_block("stm32f4", &ClockConfig::None, false);
+        assert!(bare.contains("init(Default::default())"), "{bare}");
+
+        // A tree that moves a peripheral cannot use it, whatever the buses do.
+        let ron = include_str!("../../../../assets/mcus/examples/stm32wba55_graphclock.ron");
+        let gc = parse_clock_ron(ron).unwrap();
+        let block = graph_clock_block("stm32wba", &ClockConfig::Graph(gc), false);
+        assert!(block.contains("config.rcc.mux."), "{block}");
+        assert!(
+            !block.contains("init(Default::default())"),
+            "a configured peripheral cannot be expressed by the shortcut:
+{block}"
+        );
     }
 
     /// A PLL that just multiplies is a SHAPE, not a missing piece.
