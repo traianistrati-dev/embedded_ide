@@ -985,6 +985,24 @@ impl Mcu {
         };
         let mut s =
             mcu_config::serialize(&self.modules, clock.as_ref(), self.runtime, self.gpio_api);
+        // The clock tree's own state, for EVERY family. `@clock` above is
+        // written only for stm32f1 (it speaks `Stm32f1Clock`), which is why a
+        // retuned H5 or WBA used to come back at the chip's defaults on reopen:
+        // nothing had recorded that the project changed it.
+        let nodes = match &self.clock {
+            ClockConfig::Graph(gc) => crate::panels::mcu_module::clock::persist::nodes_to_block(
+                &gc.graph,
+                self.clock_defaults.as_ref(),
+            ),
+            ClockConfig::None => String::new(),
+        };
+        let nodes = mcu_config::clock_nodes_section(&nodes);
+        if !nodes.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&nodes);
+        }
         // Auto-build preference lives in its own `@autobuild` section (workflow
         // setting, not codegen config), appended here.
         let ab = mcu_config::autobuild_section(self.auto_build);
@@ -1138,6 +1156,12 @@ impl Mcu {
         }
         if let Some(c) = clock {
             self.apply_saved_clock(c);
+        }
+        // Applied AFTER the legacy `@clock`: on an F1 both describe the same
+        // tree, and this one is the authority — it records the graph itself
+        // rather than the fields the F1 struct happens to have.
+        if let Some(body) = mcu_config::parse_clock_nodes(text) {
+            self.apply_saved_clock_nodes(&body);
         }
         // Runtime lives in its own `@runtime` section; a missing one (any
         // pre-async project) restores the default Blocking.
@@ -1377,6 +1401,25 @@ impl Mcu {
         use crate::panels::mcu_module::clock::graph::stm32f1_graph;
         if let ClockConfig::Graph(gc) = &mut self.clock {
             gc.graph.adopt_states(&stm32f1_graph(&clock));
+        }
+    }
+
+    /// Restore the project's clock edits onto whatever tree this chip has.
+    ///
+    /// The family-neutral counterpart of [`apply_saved_clock`](Self::apply_saved_clock),
+    /// which can only speak `Stm32f1Clock`. Call at the same point: after the
+    /// definition's tree is installed and its defaults captured, since what is
+    /// saved is the DELTA against those defaults.
+    ///
+    /// Returns how many states were applied — a tree whose node ids have since
+    /// changed restores what it can rather than nothing.
+    pub fn apply_saved_clock_nodes(&mut self, body: &str) -> usize {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::clock::persist;
+        let saved = persist::nodes_from_block(body);
+        match &mut self.clock {
+            ClockConfig::Graph(gc) => persist::apply_nodes(&mut gc.graph, &saved),
+            ClockConfig::None => 0,
         }
     }
 

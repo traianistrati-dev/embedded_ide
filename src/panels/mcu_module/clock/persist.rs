@@ -245,3 +245,212 @@ mod tests {
         assert_eq!(parse_from_source("no markers here"), None);
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Any graph, per project — the `@clocknodes` block
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// Everything above this line speaks `Stm32f1Clock`, and the save path gated on
+// `family == "stm32f1"` — so on every OTHER chip the Clock tab was a scratchpad:
+// retune an H5's PLL, close the project, and the tree came back at the chip
+// definition's defaults with nothing to say it had ever changed. The only way to
+// keep an edit was "Save to chip", which writes the DEFINITION and so changes
+// every project using that part.
+//
+// This block is family-neutral: it records node states by id, which is the one
+// thing every graph has.
+//
+// Only the DELTA against the chip's factory tree is written. A project that has
+// not touched its clock adds nothing to `mcu.config`, and a definition that
+// later gains a better default is picked up rather than pinned over.
+
+use super::graph::model::{ClockGraph, NodeState};
+
+/// One node's state, as a self-describing token.
+///
+/// Tagged rather than bare, because `Index` and `Value` are both integers and
+/// the node's kind is not something a config file should have to be right about
+/// — a tree that changes shape must fail to match a node, not silently reinterpret
+/// its number.
+fn state_token(s: &NodeState) -> Option<String> {
+    match s {
+        // Nothing selectable: nothing to restore.
+        NodeState::Fixed => None,
+        NodeState::Unset => Some("u".into()),
+        NodeState::Index(i) => Some(format!("i{i}")),
+        NodeState::Value(v) => Some(format!("v{v}")),
+        NodeState::Source { enabled, hz } => {
+            Some(format!("s{}:{hz}", if *enabled { 1 } else { 0 }))
+        }
+    }
+}
+
+fn parse_state(tok: &str) -> Option<NodeState> {
+    // Split off the tag CHARACTER, not at the second char's index: `u` carries
+    // no payload and has no second char to split at.
+    let mut chars = tok.chars();
+    let tag = chars.next()?;
+    let rest = chars.as_str();
+    match tag {
+        'u' => Some(NodeState::Unset),
+        'i' => rest.parse().ok().map(NodeState::Index),
+        'v' => rest.parse().ok().map(NodeState::Value),
+        's' => {
+            let (on, hz) = rest.split_once(':')?;
+            Some(NodeState::Source {
+                enabled: on == "1",
+                hz: hz.parse().ok()?,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The project's clock edits: every node whose state differs from `defaults`.
+///
+/// Empty when the tree is untouched, so `mcu.config` stays byte-identical for
+/// the common case.
+pub fn nodes_to_block(graph: &ClockGraph, defaults: Option<&ClockGraph>) -> String {
+    let mut out = Vec::new();
+    for node in &graph.nodes {
+        let factory = defaults.and_then(|d| d.nodes.iter().find(|n| n.id == node.id));
+        // No defaults captured (a tree built in the editor this session) means
+        // every state is a deviation — write them all rather than lose them.
+        if factory.is_some_and(|f| f.state == node.state) {
+            continue;
+        }
+        if let Some(tok) = state_token(&node.state) {
+            out.push(format!("{}={tok}", node.id));
+        }
+    }
+    out.join("\n")
+}
+
+/// Parse a `@clocknodes` body into `(node id, state)` pairs.
+///
+/// Unparseable lines are skipped, not fatal: a config written by a later version
+/// must not cost the user the states it CAN restore.
+pub fn nodes_from_block(body: &str) -> Vec<(String, NodeState)> {
+    body.split_whitespace()
+        .filter_map(|tok| {
+            let (id, state) = tok.split_once('=')?;
+            Some((id.to_owned(), parse_state(state)?))
+        })
+        .collect()
+}
+
+/// Apply saved states onto a graph, by id.
+///
+/// A node the graph no longer has is skipped — the chip definition may have been
+/// re-imported with different names since, and a stale id is not a reason to
+/// refuse the rest.
+pub fn apply_nodes(graph: &mut ClockGraph, saved: &[(String, NodeState)]) -> usize {
+    let mut applied = 0;
+    for (id, state) in saved {
+        if let Some(node) = graph.node_mut(id) {
+            node.state = state.clone();
+            applied += 1;
+        }
+    }
+    applied
+}
+
+#[cfg(test)]
+mod node_state_tests {
+    use super::*;
+    use crate::panels::mcu_module::clock::graph::minimal_graph;
+
+    /// THE gap this closes: a non-F1 tree, retuned, surviving a save/load cycle.
+    ///
+    /// Before, `mcu.config` was written with `if self.family == "stm32f1"`, so a
+    /// retuned H5 or WBA came back at the chip's defaults with nothing recording
+    /// that the project had ever changed it.
+    #[test]
+    fn a_retuned_tree_round_trips() {
+        let factory = minimal_graph();
+        let mut project = minimal_graph();
+        // Put the PLL on HSE, wind it up, and run SYSCLK off it.
+        project.node_mut("pllsrc").unwrap().state = NodeState::Index(1);
+        project.node_mut("plln").unwrap().state = NodeState::Value(100);
+        project.node_mut("sw").unwrap().state = NodeState::Index(2);
+        project.node_mut("hse").unwrap().state = NodeState::Source {
+            enabled: true,
+            hz: 12_000_000,
+        };
+
+        let block = nodes_to_block(&project, Some(&factory));
+        // Only what CHANGED, so an untouched project adds nothing to the file.
+        assert_eq!(block.lines().count(), 4, "{block}");
+        assert!(block.contains("plln=v100"), "{block}");
+        assert!(block.contains("hse=s1:12000000"), "{block}");
+
+        // A fresh chip, as built from its definition, plus the saved delta.
+        let mut reopened = minimal_graph();
+        let applied = apply_nodes(&mut reopened, &nodes_from_block(&block));
+        assert_eq!(applied, 4);
+        assert_eq!(reopened.nodes, project.nodes, "the tree came back exactly");
+    }
+
+    /// An untouched clock must not touch the file at all.
+    #[test]
+    fn an_untouched_tree_writes_nothing() {
+        let g = minimal_graph();
+        assert!(nodes_to_block(&g, Some(&g)).is_empty());
+        // …but with no defaults captured, everything is a deviation and is kept:
+        // losing a tree built in the editor this session would be worse.
+        assert!(!nodes_to_block(&g, None).is_empty());
+    }
+
+    /// Every selectable state survives its own encoding, and `Fixed` is dropped
+    /// because there is nothing in it to restore.
+    #[test]
+    fn every_state_encodes_unambiguously() {
+        let cases = [
+            NodeState::Unset,
+            NodeState::Index(0),
+            NodeState::Index(7),
+            NodeState::Value(129),
+            NodeState::Source {
+                enabled: false,
+                hz: 32_768,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: 25_000_000,
+            },
+        ];
+        for s in &cases {
+            let tok = state_token(s).expect("selectable states encode");
+            assert_eq!(parse_state(&tok).as_ref(), Some(s), "token {tok}");
+        }
+        assert!(state_token(&NodeState::Fixed).is_none());
+
+        // `Index` and `Value` are both integers; the tag is what keeps them
+        // apart, so a tree that changes shape cannot silently reinterpret one.
+        assert_ne!(
+            state_token(&NodeState::Index(5)),
+            state_token(&NodeState::Value(5))
+        );
+    }
+
+    /// A saved id the tree no longer has costs only that id.
+    #[test]
+    fn a_stale_id_does_not_sink_the_rest() {
+        let mut g = minimal_graph();
+        let saved = nodes_from_block("sw=i2 gone_node=i1 plln=v40");
+        assert_eq!(saved.len(), 3, "it parses, even what will not apply");
+        assert_eq!(apply_nodes(&mut g, &saved), 2, "the two that still exist");
+        assert_eq!(g.node("sw").unwrap().state, NodeState::Index(2));
+        assert_eq!(g.node("plln").unwrap().state, NodeState::Value(40));
+    }
+
+    /// Garbage in a hand-edited file loses that line, not the section.
+    #[test]
+    fn an_unreadable_token_is_skipped() {
+        let saved = nodes_from_block("sw=i1 plln=nonsense noequals hse=s1:8000000");
+        assert_eq!(
+            saved.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["sw", "hse"]
+        );
+    }
+}

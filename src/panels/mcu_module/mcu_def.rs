@@ -816,6 +816,67 @@ mod tests {
         );
     }
 
+    /// The whole point of `@clocknodes`: a NON-F1 chip's clock survives being
+    /// saved and reopened.
+    ///
+    /// Until this existed the save path was gated on `family == "stm32f1"`, so
+    /// retuning an H5 and closing the project lost the lot — the tree came back
+    /// at the chip definition's defaults with nothing recording that it had ever
+    /// changed.
+    #[test]
+    fn a_non_f1_clock_survives_a_save_and_reopen() {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::clock::graph::{
+            GraphClock, minimal_graph, model::NodeState,
+        };
+
+        let mut def = stm_def();
+        def.family = "stm32h5".into();
+        def.clock = ClockDef::Graph(GraphClock {
+            graph: minimal_graph(),
+            layout: Default::default(),
+            bindings: Default::default(),
+        });
+
+        // Open the project and retune the clock: PLL off HSE, x100, SYSCLK on it.
+        let mut mcu = def.build_mcu();
+        let ClockConfig::Graph(gc) = &mut mcu.clock else {
+            panic!("the definition carries a graph");
+        };
+        gc.graph.node_mut("pllsrc").unwrap().state = NodeState::Index(1);
+        gc.graph.node_mut("plln").unwrap().state = NodeState::Value(100);
+        gc.graph.node_mut("sw").unwrap().state = NodeState::Index(2);
+        let tuned = gc.graph.clone();
+
+        let text = mcu.mcu_config_text();
+        assert!(
+            text.contains("@clocknodes"),
+            "the section is written: {text}"
+        );
+        assert!(
+            !text.contains(
+                "@clock
+"
+            ),
+            "and NOT the F1 one, which cannot describe this tree: {text}"
+        );
+
+        // Reopen: a fresh chip from the same definition, plus the saved file.
+        let mut reopened = def.build_mcu();
+        reopened.apply_mcu_config(&text);
+        let ClockConfig::Graph(back) = &reopened.clock else {
+            panic!("still a graph");
+        };
+        assert_eq!(back.graph.nodes, tuned.nodes, "the tuning came back");
+
+        // And an untouched project leaves the file alone.
+        let untouched = def.build_mcu().mcu_config_text();
+        assert!(
+            !untouched.contains("@clocknodes"),
+            "a default clock writes nothing: {untouched}"
+        );
+    }
+
     /// A declared clock is never overridden by the family fallback.
     #[test]
     fn a_declared_clock_wins_over_the_family_fallback() {

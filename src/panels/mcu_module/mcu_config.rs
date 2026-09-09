@@ -32,6 +32,7 @@ const STRICT_HEADER: &str = "@strict";
 const DEBUGBUILD_HEADER: &str = "@debugbuild";
 const ROTATION_HEADER: &str = "@rotation";
 const CLOCK_MANUAL_HEADER: &str = "@clockmanual";
+const CLOCK_NODES_HEADER: &str = "@clocknodes";
 const IOPINS_HEADER: &str = "@iopins";
 const IRQ_HEADER: &str = "@irq";
 const IOMODE_HEADER: &str = "@iomode";
@@ -282,6 +283,35 @@ pub fn rotation_section(rotated: bool) -> String {
 /// hand-written-clock switch. In `mcu.config` rather than the view-state file
 /// because it CHANGES THE GENERATED CODE, so it belongs in Git with the rest of
 /// the project's configuration. Appended like `@autobuild`.
+/// The `@clocknodes` section — the project's clock edits for ANY family, as
+/// `node=state` tokens.
+///
+/// Separate from `@clock`, which speaks `Stm32f1Clock` and is written only for
+/// STM32F1. That section stays exactly as it was so existing projects keep
+/// loading; this one carries what it never could — the state of a tree with a
+/// shape the F1 struct has no field for.
+///
+/// Empty body writes no section, so an untouched clock leaves the file alone.
+pub fn clock_nodes_section(body: &str) -> String {
+    if body.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{CLOCK_NODES_HEADER}
+{}
+",
+            body.trim_end()
+        )
+    }
+}
+
+/// The raw `@clocknodes` body, for
+/// [`clock::persist::nodes_from_block`](crate::panels::mcu_module::clock::persist::nodes_from_block)
+/// to parse. This module carries the section; the format belongs to the clock.
+pub fn parse_clock_nodes(text: &str) -> Option<String> {
+    section_body(text, CLOCK_NODES_HEADER).filter(|b| !b.trim().is_empty())
+}
+
 pub fn clock_manual_section(manual: bool) -> String {
     if manual {
         format!(
@@ -792,6 +822,49 @@ mod tests {
         let t = iopins_section(&m);
         assert!(t.starts_with("@iopins\n"), "{t}");
         assert_eq!(parse_iopins(&t), m);
+    }
+
+    /// The `@clocknodes` section carries a tree no `Stm32f1Clock` could
+    /// describe, and does not disturb the sections around it.
+    #[test]
+    fn clock_nodes_section_round_trips() {
+        let body = "pllsrc=i1
+plln=v100
+hse=s1:12000000";
+        let section = clock_nodes_section(body);
+        assert!(section.starts_with(
+            "@clocknodes
+"
+        ));
+
+        // Sitting between two other sections, it neither swallows nor leaks.
+        let text = format!(
+            "{}
+{}{}",
+            strict_section(true),
+            section,
+            clock_manual_section(true)
+        );
+        assert_eq!(parse_clock_nodes(&text).as_deref(), Some(body));
+        assert_eq!(parse_clock_manual(&text), Some(true));
+
+        // An untouched clock writes no section, so the file is unchanged.
+        assert!(clock_nodes_section("").is_empty());
+        assert!(
+            clock_nodes_section(
+                "   
+ "
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            parse_clock_nodes(
+                "@strict
+on
+"
+            ),
+            None
+        );
     }
 
     #[test]
