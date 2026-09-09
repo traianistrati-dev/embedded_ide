@@ -327,8 +327,9 @@ impl AppIde {
             } else {
                 // Sync gate per symbol: RA must hold THIS text, or the symbol
                 // positions (and the reply's site lines) would be stale. Never
-                // a did_change (version bumps cancel other requests and
-                // re-trigger flycheck) — but a file RA hasn't opened AT ALL
+                // a did_change (version bumps cancel other requests — they do
+                // NOT re-trigger flycheck, which only a `did_save` starts) —
+                // but a file RA hasn't opened AT ALL
                 // (fresh app start: docs only open on Save/completion) is
                 // seeded with did_open: a FIRST open bumps nothing, cancels
                 // nothing, runs no flycheck. Open-but-EDITED files wait for

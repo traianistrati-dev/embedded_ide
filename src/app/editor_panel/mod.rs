@@ -45,6 +45,7 @@ pub(super) mod fold;
 mod fold_ui;
 mod format;
 mod generics;
+mod idle_sync;
 mod inlay_hint;
 mod let_annotation;
 mod move_lines;
@@ -1021,6 +1022,17 @@ impl AppIde {
             &displayed_file,
             &self.project_tree.user_src_files,
         );
+        // Idle re-sync: hand rust-analyzer this view's text once typing has
+        // paused, so the inline overlay and the inferred-type hint come back
+        // without a Ctrl+S. Placed BEFORE the usages pass below and before
+        // `handle_editor_completion`, and on a shorter timer than either: a
+        // version bump must never cancel the very requests this sync enables.
+        if let Some(rel) = &usages_rel_path {
+            if is_rust_file {
+                self.tick_idle_sync(ui.ctx(), rel, &display_code);
+            }
+        }
+
         // Unused imports, computed ONCE and handed to both the fade below and
         // the pulse further down, so the two can never disagree about what is
         // unused. rust-analyzer does not report this lint natively — it arrives

@@ -53,13 +53,26 @@ impl AppIde {
         let (line, col) = lsp_cursor_pos(display_code, target);
 
         // CRITICAL — we send NO `did_change` here. A did_change bumps RA's
-        // document version, which (a) cancels other in-flight requests ("content
-        // modified" / "stale code action") AND (b) re-triggers analysis, which
-        // reintroduced the slow "1-minute save" degradation. The app keeps RA
-        // sync SPARSE on purpose (flushed ONLY on Project Save — see
-        // [[lsp-verify-debounce]] / [[session-degradation-fixes]]). So the inlay
-        // path only QUERIES RA while its document already matches what's on
-        // screen (`last_sent_matches`); a plain inlayHint request does not bump
+        // document version, and every request issued against the older version
+        // is then answered "content modified" / "stale code action". Nothing
+        // wedges (each reply path clears its own id), but a lost `references`
+        // reply is recorded as "0 references", which fades live code as dead.
+        //
+        // This comment used to add a second reason — that a did_change
+        // "re-triggers analysis, which reintroduced the slow 1-minute save
+        // degradation". That was wrong twice over: the save slowness was a
+        // leaked thread plus a deleted Cargo.lock (see `initialization_options`),
+        // and the "1-minute save" was a dropped repaint wake-up. Neither
+        // involved did_change, and no cargo runs without a `did_save`. The
+        // cancellation reason above is the real one, and it is enough.
+        //
+        // Sync is no longer Save-only: `editor_panel::idle_sync` re-syncs the
+        // visible file once typing pauses, which is what lets this path find a
+        // matching document at all while you type. It waits on
+        // `any_request_in_flight`, so it cannot cancel the request below.
+        // The inlay path itself still only QUERIES RA while its document already
+        // matches what's on screen (`last_sent_matches`); a plain inlayHint
+        // request does not bump
         // the version, so it's cheap and side-effect-free. While the file is
         // dirty we hide the hint (its line/cols would be stale against RA's older
         // text) and re-request once RA catches up (next save / completion /

@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 /// pass costs one whole-crate find-all-references per symbol (serialized, see
 /// `pump_references`), so re-running it on every brief typing pause piled load
 /// onto rust-analyzer.
-const DEBOUNCE: Duration = Duration::from_millis(2500);
+pub(super) const DEBOUNCE: Duration = Duration::from_millis(2500);
 
 /// Key-space stride separating reference-request generations: the request key
 /// is `refs_run * STRIDE + item_index`, so a late response from a superseded

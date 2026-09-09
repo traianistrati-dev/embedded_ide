@@ -1154,6 +1154,30 @@ impl LspState {
     /// `true` while ANY whole-crate references search is in flight (usages pass
     /// or the Structure call-graph pass) — used to keep those passes serialized
     /// with each other, never flooding rust-analyzer with parallel searches.
+    /// `true` while rust-analyzer owes us ANY answer.
+    ///
+    /// A `textDocument/didChange` bumps the document version, and rust-analyzer
+    /// answers every request issued against the older version with "content
+    /// modified". Nothing wedges — each reply path clears its own id — but two
+    /// cancellations are silently WRONG rather than merely absent: a lost
+    /// `references` reply is recorded as "0 references", which fades live code
+    /// as dead in the usages overlay and drops a symbol's call edges from the
+    /// Structure tab for that content hash.
+    ///
+    /// So the idle re-sync waits its turn instead of interrupting.
+    pub fn any_request_in_flight(&self) -> bool {
+        self.completion_req_id.is_some()
+            || self.rename_req_id.is_some()
+            || self.will_rename_req_id.is_some()
+            || self.code_action_req_id.is_some()
+            || self.code_action_resolve_req_id.is_some()
+            || self.definition_req_id.is_some()
+            || self.implementation_req_id.is_some()
+            || self.symbols_req_id.is_some()
+            || self.inlay_req_id.is_some()
+            || self.references_busy()
+    }
+
     pub fn references_busy(&self) -> bool {
         !self.references_pending.is_empty() || !self.calls_refs_pending.is_empty()
     }

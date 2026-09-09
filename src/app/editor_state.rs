@@ -41,6 +41,12 @@ pub(crate) struct EditorState {
     pub(crate) completer: Completer,
 
     /// True when the LSP completion popup is visible.
+    /// Idle LSP re-sync (see `editor_panel::idle_sync`): the file and text hash
+    /// this view drew, and when that pair last changed.
+    ///
+    /// Per view because each editor shows its own file and settles on its own
+    /// clock; the two must not share one deadline.
+    pub(crate) idle_sync: Option<(String, u64, std::time::Instant)>,
     pub(crate) completion_open: bool,
 
     /// Transient note shown at the cursor when a completion request came back
@@ -248,6 +254,7 @@ impl EditorState {
             completer: Completer::new_with_syntax(&Syntax::rust())
                 .with_auto_indent()
                 .with_user_words(),
+            idle_sync: None,
             completion_open: false,
             completion_note: None,
             completion_sel: 0,
