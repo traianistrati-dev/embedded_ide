@@ -64,6 +64,180 @@ fn msg_font() -> egui::FontId {
     egui::FontId::monospace(10.5)
 }
 
+/// Deepest `<…>` nesting in a type label.
+fn max_depth(label: &str) -> usize {
+    let (mut d, mut best, mut prev) = (0usize, 0usize, ' ');
+    for c in label.chars() {
+        match c {
+            '<' => {
+                d += 1;
+                best = best.max(d);
+            }
+            // `->` in `impl Fn(A) -> B` is not a closing bracket.
+            '>' if prev != '-' => d = d.saturating_sub(1),
+            _ => {}
+        }
+        prev = c;
+    }
+    best
+}
+
+/// `label` with the contents of every `<…>` deeper than `depth` replaced by an
+/// ellipsis. `depth 0` collapses the outermost argument list itself.
+fn collapse_to_depth(label: &str, depth: usize) -> String {
+    let mut out = String::with_capacity(label.len());
+    let (mut d, mut skipping, mut prev) = (0usize, 0usize, ' ');
+    for c in label.chars() {
+        match c {
+            '<' => {
+                d += 1;
+                if skipping > 0 {
+                    skipping += 1;
+                } else if d > depth {
+                    // Enter the first group past the budget: emit the marker
+                    // once and swallow everything up to its match.
+                    out.push('<');
+                    out.push('…');
+                    skipping = 1;
+                } else {
+                    out.push('<');
+                }
+            }
+            '>' if prev != '-' => {
+                d = d.saturating_sub(1);
+                if skipping > 0 {
+                    skipping -= 1;
+                    if skipping == 0 {
+                        out.push('>');
+                    }
+                } else {
+                    out.push('>');
+                }
+            }
+            other => {
+                if skipping == 0 {
+                    out.push(other);
+                }
+            }
+        }
+        prev = c;
+    }
+    out
+}
+
+/// The outermost `<…>` split into its top-level arguments, as
+/// `(head, args, tail)`. `None` when the label has no generic list.
+fn split_top_args(label: &str) -> Option<(String, Vec<String>, String)> {
+    let chars: Vec<char> = label.chars().collect();
+    let open = chars.iter().position(|&c| c == '<')?;
+    let (mut d, mut close, mut prev) = (0usize, None, ' ');
+    for (i, &c) in chars.iter().enumerate().skip(open) {
+        match c {
+            '<' => d += 1,
+            '>' if prev != '-' => {
+                d -= 1;
+                if d == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        prev = c;
+    }
+    let close = close?;
+    let inner: String = chars[open + 1..close].iter().collect();
+    let mut args = Vec::new();
+    let (mut d, mut start, mut prev) = (0usize, 0usize, ' ');
+    let ic: Vec<char> = inner.chars().collect();
+    for (i, &c) in ic.iter().enumerate() {
+        match c {
+            '<' | '(' | '[' => d += 1,
+            '>' if prev != '-' => d = d.saturating_sub(1),
+            ')' | ']' => d = d.saturating_sub(1),
+            ',' if d == 0 => {
+                args.push(ic[start..i].iter().collect::<String>().trim().to_owned());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        prev = c;
+    }
+    args.push(ic[start..].iter().collect::<String>().trim().to_owned());
+    Some((
+        chars[..=open].iter().collect(),
+        args,
+        chars[close..].iter().collect(),
+    ))
+}
+
+/// Give up whole top-level arguments, LONGEST first, until it fits.
+///
+/// The rung between "collapse the nesting" and "collapse everything". Without
+/// it the ladder fell off a cliff — a 78-character form, then straight to a
+/// 15-character one, so every budget in between showed far less than it had
+/// room for.
+fn collapse_longest_args(label: &str, max_chars: usize) -> Option<String> {
+    let (head, mut args, tail) = split_top_args(label)?;
+    if args.len() < 2 {
+        return None; // nothing to choose between; the depth ladder covers it
+    }
+    let render = |a: &[String]| format!("{head}{}{tail}", a.join(", "));
+    loop {
+        let out = render(&args);
+        if out.chars().count() <= max_chars {
+            return Some(out);
+        }
+        // The longest argument that has not already been given up.
+        let victim = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a != "…")
+            .max_by_key(|(_, a)| a.chars().count())
+            .map(|(i, _)| i)?;
+        args[victim] = "…".to_owned();
+    }
+}
+
+/// A type label shortened to at most `max_chars`, by collapsing its generic
+/// arguments from the INSIDE out.
+///
+/// A blind character cut turns
+/// `Ssd1306Async<I2CInterface<I2c<'_, Async>>, DisplaySize128x32, …>` into
+/// `Ssd1306Async<I2CInterface<I2c<'_, Asy…`, which loses even the fact that the
+/// type has three parameters. Collapsing keeps the structure and gives up the
+/// detail, which is the right way round: the head is what identifies the type.
+///
+/// The most collapsed form (`Name<…>`) is short by construction, so it fits
+/// almost any budget — which is what lets the caller stop sliding the hint
+/// leftwards over the code to make room.
+pub(crate) fn shorten_type(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_owned();
+    }
+    // Least aggressive first: keep as much nesting as still fits.
+    for d in (1..max_depth(label)).rev() {
+        let s = collapse_to_depth(label, d);
+        if s.chars().count() <= max_chars {
+            return s;
+        }
+    }
+    // Then give up whole arguments rather than all of them at once.
+    let flattened = collapse_to_depth(label, 1);
+    if let Some(s) = collapse_longest_args(&flattened, max_chars) {
+        return s;
+    }
+    // Everything inside the outermost list.
+    let bare = collapse_to_depth(label, 0);
+    if bare.chars().count() <= max_chars {
+        return bare;
+    }
+    // Not even the bare head fits (a very long type NAME, or almost no room).
+    let mut out: String = label.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 /// Gap kept between a line's "N refs" pill and the inline message after it.
 const PILL_GAP: f32 = 10.0;
 
@@ -387,6 +561,14 @@ pub fn show_diagnostics_overlay(
 /// It sits after the line rather than inline after the binding name because an
 /// overlay can't reflow the real text: an inline hint painted over the ` =
 /// initializer …`, so it read as garbage (`parser:=Parser…`).
+/// Shortest inline form worth drawing. Below this the hint is a couple of
+/// letters and an ellipsis, which says less than the marker does.
+const MIN_INLINE_CHARS: usize = 12;
+
+/// Drawn at the right edge when the line leaves no room at all — hover it for
+/// the type.
+const MARKER: &str = ": …";
+
 pub fn show_inlay_hint(
     ui: &egui::Ui,
     galley_pos: egui::Pos2,
@@ -409,43 +591,164 @@ pub fn show_inlay_hint(
     // (renderColons default); render it verbatim, dimmed like an editor hint.
     let font = egui::FontId::monospace(font_size);
     let color = egui::Color32::from_rgb(150, 165, 180);
-    // Clamp X so the hint stays on-screen even when the line is long enough that
-    // its end scrolls past the right edge — otherwise the hint would be clipped
-    // and appear to be missing. Measure the label width and keep it inside the
-    // visible editor, right-aligned against the edge when the line-end is far.
-    let text_w = painter
-        .layout_no_wrap(label.to_owned(), font.clone(), color)
-        .size()
-        .x;
-    let eol_x = galley_pos.x + loc.max.x + 16.0;
-    let max_x = (text_clip_rect.right() - text_w - 4.0).max(text_clip_rect.left());
-    let x = eol_x.min(max_x);
-    let y_mid = (y_top + y_bot) * 0.5;
-    // …and elide what still does not fit. The clamp above slides a long hint
-    // LEFT to keep it on screen, which is right for a short ghost type but has
-    // no floor: raising rust-analyzer's `maxLength` so real embedded types come
-    // through whole also made the label wide enough to slide across the code it
-    // annotates. Cutting is the honest end of that trade — the same treatment,
-    // and the same `…`, the inline diagnostic messages get.
     let char_w = painter
         .layout_no_wrap("M".to_owned(), font.clone(), color)
         .size()
-        .x;
-    let Some(fitted) = fit_to_width(label, text_clip_rect.right() - 4.0 - x, char_w) else {
-        return;
+        .x
+        .max(1.0_f32);
+    let y_mid = (y_top + y_bot) * 0.5;
+    let eol_x = galley_pos.x + loc.max.x + 16.0;
+    let right = text_clip_rect.right() - 4.0;
+
+    // The hint is ANCHORED after the line and never slides left.
+    //
+    // It used to: `x = eol_x.min(clip.right() - text_w - 4)`, added so a short
+    // hint on a horizontally-scrolled line stayed visible. Once real embedded
+    // types came through whole, that clamp collapsed to the LEFT EDGE and
+    // painted a 900 px type straight across the code it was annotating. Room is
+    // made by shortening the type instead — `shorten_type` keeps the head and
+    // gives up the nesting, and its most collapsed form fits almost anything.
+    let room = ((right - eol_x) / char_w).floor().max(0.0) as usize;
+    let (text, x) = if room >= MIN_INLINE_CHARS {
+        (shorten_type(label, room), eol_x)
+    } else {
+        // No room after the line at all: it runs past the right edge. Rather
+        // than draw nothing (the type would be unreachable) or slide across the
+        // code, pin a marker at the edge — three characters of overlap instead
+        // of the whole line, and the hover below still has the full type.
+        let w = MARKER.chars().count() as f32 * char_w;
+        (MARKER.to_owned(), (right - w).max(text_clip_rect.left()))
     };
-    painter.text(
+
+    let drawn = painter.text(
         egui::pos2(x, y_mid),
         egui::Align2::LEFT_CENTER,
-        &fitted,
+        &text,
         font,
         color,
     );
+
+    // Whatever was shown, the WHOLE type is one hover away. That is the half
+    // that makes shortening acceptable: the detail is given up on screen, not
+    // lost.
+    if text != label {
+        ui.interact(
+            drawn,
+            egui::Id::new(("inlay_hint", eol_idx)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(label);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PILL_GAP, fit_to_width, inline_message_x};
+    use super::{PILL_GAP, fit_to_width, inline_message_x, shorten_type};
+
+    /// The type from the report that started this: 105 characters.
+    const REAL: &str = "Ssd1306Async<I2CInterface<I2c<'_, Async>>, DisplaySize128x32,                         BufferedGraphicsModeAsync<DisplaySize128x32>>";
+
+    #[test]
+    fn a_type_that_fits_is_untouched() {
+        assert_eq!(shorten_type(REAL, 200), REAL);
+    }
+
+    /// The point of collapsing rather than cutting: the head and the ARITY
+    /// survive. A blind character cut at 40 gives
+    /// `Ssd1306Async<I2CInterface<I2c<'_, Asyn…`, which hides that the type has
+    /// three parameters at all.
+    #[test]
+    fn collapsing_keeps_the_head_and_the_shape() {
+        let out = shorten_type(REAL, 60);
+        assert!(out.starts_with("Ssd1306Async<"), "{out}");
+        assert!(out.ends_with('>'), "still a closed generic: {out}");
+        assert!(out.contains('…'), "something was given up: {out}");
+        assert!(
+            out.chars().count() <= 60,
+            "{} chars: {out}",
+            out.chars().count()
+        );
+    }
+
+    /// Less room gives up more nesting, monotonically — never MORE detail for
+    /// less space.
+    #[test]
+    fn a_smaller_budget_never_shows_more() {
+        let mut last = usize::MAX;
+        for budget in [200, 90, 60, 40, 20] {
+            let n = shorten_type(REAL, budget).chars().count();
+            assert!(n <= budget.max(1), "budget {budget} produced {n} chars");
+            assert!(n <= last, "budget {budget} grew the label back to {n}");
+            last = n;
+        }
+    }
+
+    /// The rung between "collapse the nesting" and "collapse everything".
+    ///
+    /// Without it the ladder fell off a cliff: 78 characters at one budget, 15
+    /// at the next, so every budget in between drew a bare `Name<…>` while it
+    /// had room for three times that.
+    #[test]
+    fn a_middle_budget_gives_up_arguments_not_everything() {
+        let out = shorten_type(REAL, 55);
+        assert!(
+            out.chars().count() > 20,
+            "far more than the bare head: {out}"
+        );
+        assert!(out.chars().count() <= 55, "{out}");
+        assert!(
+            out.contains("I2CInterface") || out.contains("DisplaySize128x32"),
+            "at least one argument survives whole: {out}"
+        );
+    }
+
+    /// Arguments are given up LONGEST first, so the cheapest information goes
+    /// last.
+    #[test]
+    fn the_longest_argument_is_given_up_first() {
+        let t = "Pair<AnExtremelyLongArgumentNameHere, u8>";
+        let out = shorten_type(t, 20);
+        assert!(out.contains("u8"), "the short one survives: {out}");
+        assert!(!out.contains("AnExtremelyLong"), "{out}");
+    }
+
+    /// The most collapsed form is short by construction — that is what lets the
+    /// caller stop sliding the hint over the code to make room.
+    #[test]
+    fn the_last_resort_form_is_tiny() {
+        let out = shorten_type(REAL, 20);
+        assert!(out.chars().count() <= 20, "{out}");
+        assert!(
+            out.starts_with("Ssd1306Async"),
+            "the name always survives: {out}"
+        );
+    }
+
+    /// `->` inside `impl Fn(A) -> B` is not a closing bracket; treating it as
+    /// one unbalances the walk and mangles every type after it.
+    #[test]
+    fn an_arrow_is_not_a_closing_bracket() {
+        let t = "Map<Iter<'a, u8>, impl Fn(u8) -> u16>";
+        let out = shorten_type(t, 24);
+        assert!(out.starts_with("Map<"), "{out}");
+        assert!(out.ends_with('>'), "{out}");
+        assert_eq!(out.matches('<').count(), out.matches('>').count(), "{out}");
+    }
+
+    /// A type with no generics has nothing to collapse; it must still respect
+    /// the budget rather than overflow.
+    #[test]
+    fn a_plain_type_falls_back_to_a_cut() {
+        let out = shorten_type("AVeryLongConcreteTypeNameWithNoGenericsAtAll", 20);
+        assert_eq!(out.chars().count(), 20);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn a_non_ascii_type_survives_the_last_resort_cut() {
+        let out = shorten_type("Măsurători<Frecvență<u32>>", 8);
+        assert!(out.chars().count() <= 8, "{out}");
+    }
 
     /// No pill on the line: the message keeps the position it always had. This
     /// is the common case — most lines carry no "N refs" indicator at all.

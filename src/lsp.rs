@@ -2432,16 +2432,20 @@ fn initialization_options() -> serde_json::Value {
                 // back as `Ssd1306<I2CInterface<BlockingI2c<…, …>>, …, …>`, with
                 // the one thing the reader wanted to know inside the elision.
                 //
-                // 120 rather than unlimited: the hint is drawn at the END of the
-                // line, so an unbounded one covers the code it annotates.
-                // Ctrl+Enter still inserts the FULL type — the hint is a preview,
-                // the assist is the answer.
+                // 400, not 120 and not 25: the fitting is OURS now.
+                // `diagnostics_overlay::shorten_type` collapses the generic
+                // arguments against the pixels actually left on the line, and
+                // the untouched label goes in the hover tooltip. A cap here can
+                // only throw away information before either of those sees it —
+                // rust-analyzer is guessing at a window width it cannot know.
+                // The number is a bound on the pathological case, not a layout
+                // decision.
                 //
                 // Chaining hints OFF: only one hint per line is ever drawn, and RA
                 // reports chaining hints with the same LSP kind as type hints, so
                 // they compete for that slot with the binding's own type.
                 "inlayHints": {
-                    "maxLength": 120,
+                    "maxLength": 400,
                     "typeHints": { "enable": true },
                     "chainingHints": { "enable": false },
                     "closureReturnTypeHints": { "enable": "never" },
