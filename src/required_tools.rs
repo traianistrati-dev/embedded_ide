@@ -21,6 +21,7 @@
 //! | openocd                     | RustEmbedded | Win + macOS  | all       |
 //! | objcopy                     | RustEmbedded | Yes (cargo)  | all       |
 //! | USB probe udev rules        | RustEmbedded | No (needs root) | Linux  |
+//! | USB probe driver (Zadig)    | All          | No (manual)  | Windows   |
 //! | riscv32imc-unknown-none-elf | EspRust      | Yes          | all       |
 //! | rust-src component          | EspRust      | Yes          | all       |
 //! | espflash                    | EspRust      | Yes (cargo)  | all       |
@@ -365,6 +366,11 @@ impl ToolsState {
 /// matches on it to offer "Generate rules…" — a typo there would silently drop
 /// the only action that entry has.
 pub const UDEV_RULES_TOOL: &str = "USB probe udev rules";
+
+/// Catalog name of the Windows USB-driver entry - the counterpart of
+/// [`UDEV_RULES_TOOL`], since the two answer the same question ("can this
+/// machine OPEN a debug probe?") through completely different machinery.
+pub const PROBE_DRIVER_TOOL: &str = "USB probe driver (Zadig)";
 
 /// Pick the value for the host OS. Everything that is not Windows or macOS is
 /// treated as Linux — the other unixes this could run on use the same package
@@ -828,11 +834,11 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
         status: ToolStatus::Unknown,
     });
 
-    // ── Linux-only: access to the hardware ───────────────────────────────────
-    // Neither of these is a program to install — they are PERMISSIONS, and they
-    // are the number-one reason flashing "doesn't work" on a Linux box that has
-    // every tool present. Windows solves the same problem with drivers (WinUSB /
-    // Zadig) and macOS needs nothing at all, so both entries are Linux-only.
+    // ── Access to the hardware ───────────────────────────────────────────────
+    // None of these is a program to install: they are PERMISSIONS on Linux and a
+    // DRIVER REGISTRATION on Windows, and they are the number-one reason
+    // flashing "doesn't work" on a machine that already has every tool present.
+    // macOS asks for neither, so it gets no entry here at all.
     if cfg!(target_os = "linux") {
         tools.push(RequiredTool {
             name: UDEV_RULES_TOOL,
@@ -875,6 +881,45 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             install_cmd: None, // needs root, and takes effect only after re-login
             install_args: &[],
             manual_url: "https://wiki.archlinux.org/title/Users_and_groups",
+            status: ToolStatus::Unknown,
+        });
+    }
+
+    if cfg!(target_os = "windows") {
+        tools.push(RequiredTool {
+            name: PROBE_DRIVER_TOOL,
+            description:
+                "WinUSB driver + device-interface GUID for debug probes (what udev rules are on Linux)",
+            // Not toolchain-gated: every chip family in this IDE is flashed and
+            // debugged through a probe, and the ESP built-in JTAG is the one
+            // that most often arrives unregistered.
+            toolchain: None,
+            only_for_target: None,
+            severity: Severity::Feature,
+            impact:
+                "Debug probes are LISTED but cannot be OPENED: RTT, Debug, Profile-Runtime and \
+                 `cargo flash` all fail with \"The selected USB device could not be opened\", \
+                 while the Probe list keeps showing the probe (enumeration never opens anything). \
+                 Zadig is a small free Windows tool that installs the generic WinUSB driver on ONE \
+                 USB interface and registers the device-interface GUID that probe-rs opens the \
+                 probe through — the binding Windows makes on its own can leave that GUID out. Run \
+                 it once per probe: Options -> List All Devices, pick the probe's DEBUG interface \
+                 (on an ESP built-in JTAG that is \"USB JTAG/serial debug unit (Interface 2)\" — \
+                 NEVER Interface 0, which is the COM port that flashing and the monitor use), \
+                 choose WinUSB, Replace Driver, then unplug and replug the board. It is undone \
+                 from Device Manager -> Update driver.",
+            // Sentinel: see `PROBE_DRIVER_CHECK` for why "is Zadig installed?"
+            // is not the question.
+            check_cmd: PROBE_DRIVER_CHECK,
+            check_args: &[],
+            check_pattern: "",
+            min_version: None,
+            // Never automatic. This replaces a device driver, needs elevation,
+            // and picking the wrong interface takes the serial port away with
+            // it — a button that could do that unattended has no business here.
+            install_cmd: None,
+            install_args: &[],
+            manual_url: "https://zadig.akeo.ie",
             status: ToolStatus::Unknown,
         });
     }
@@ -1039,6 +1084,15 @@ pub const OBJCOPY_CHECK: &str = "@objcopy-any";
 /// files on disk.
 pub const UDEV_CHECK: &str = "@udev-rules";
 
+/// Sentinel for the WinUSB registration of debug probes (Windows).
+///
+/// Nothing to spawn, and - unlike every other entry - nothing to INSTALL either:
+/// Zadig is a single portable .exe, usually run once out of a Downloads folder
+/// and then deleted. "Is Zadig present?" is therefore both unanswerable and the
+/// wrong question; whether the probes attached right now can be opened is the
+/// one that matters. See [`check_usb_probe_driver`].
+pub const PROBE_DRIVER_CHECK: &str = "@usb-probe-driver";
+
 /// Sentinel for the com0com virtual-pair driver (Windows). It installs no CLI on
 /// PATH, so "run it and see" is impossible; the driver's service key is the
 /// evidence, the same thing its own docs tell you to look for.
@@ -1123,6 +1177,54 @@ fn check_com0com() -> ToolStatus {
 #[cfg(not(windows))]
 fn check_com0com() -> ToolStatus {
     ToolStatus::Ok("n/a (not Windows)".to_string())
+}
+
+/// Can the debug probes attached RIGHT NOW actually be opened?
+///
+/// The Windows counterpart of [`check_udev_rules`], and the same lesson as
+/// `check_com0com`: probe the capability, not the installation. probe-rs opens a
+/// probe through a device-interface GUID, and a WinUSB binding Windows made by
+/// itself can carry no such GUID - the probe then LISTS but never opens, which
+/// reads as "no probe found" or "device could not be opened" everywhere it is
+/// used (see [`crate::probe::missing_device_interface_guid`]). Zadig is the fix,
+/// exactly as probe-rs' own `69-probe-rs.rules` is the fix on Linux; neither
+/// entry is named after a program you keep installed.
+fn check_usb_probe_driver() -> ToolStatus {
+    // No answer from probe-rs (not installed, crashed) means we know nothing,
+    // and `Unknown` is the one status that reports no problem - the honest
+    // result. The missing probe-rs itself has its own catalog entry.
+    let Ok(probes) = crate::probe::list_probes() else {
+        return ToolStatus::Unknown;
+    };
+    if probes.is_empty() {
+        return ToolStatus::Ok("n/a (no debug probe attached)".to_string());
+    }
+    let stuck: Vec<String> = probes
+        .iter()
+        .filter(|p| crate::probe::missing_device_interface_guid(Some(&p.selector)))
+        .map(|p| format!("{} ({})", p.name, p.selector))
+        .collect();
+    if stuck.is_empty() {
+        return ToolStatus::Ok(format!(
+            "{} probe(s) openable: {}",
+            probes.len(),
+            probes
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    // Named, because on a bench with two probes only one of them is usually
+    // broken and the other keeps working - which is exactly what makes this
+    // failure look random.
+    ToolStatus::Failed(format!(
+        "no device-interface GUID for {}: probe-rs can LIST it but not open it. Reinstall its \
+         driver with Zadig, picking that probe's DEBUG interface - on an ESP built-in JTAG that \
+         is \"USB JTAG/serial debug unit (Interface 2)\", never Interface 0, which is the COM \
+         port used for flashing and the monitor.",
+        stuck.join(", ")
+    ))
 }
 
 /// Sentinel for "can this user open a serial port?".
@@ -1476,6 +1578,9 @@ fn run_check_blocking(
     }
     if cmd == COM0COM_CHECK {
         return check_com0com();
+    }
+    if cmd == PROBE_DRIVER_CHECK {
+        return check_usb_probe_driver();
     }
     if cmd == CARGO_FEATURE_ENV_CHECK {
         return check_cargo_feature_env();
@@ -1887,6 +1992,53 @@ mod tests {
             .map(|(n, _, _)| n)
             .collect();
         assert!(names.contains(&NAME), "banner would not show it: {names:?}");
+    }
+
+    /// The Windows driver entry, wired the way the startup self-check runs it.
+    /// A typo in the sentinel would spawn `@usb-probe-driver` as a PROGRAM, come
+    /// back `Missing`, and look in the UI exactly like a real finding - the same
+    /// trap `the_catalog_entry_is_wired_to_the_check` guards for its own entry.
+    ///
+    /// The verdict itself depends on what is plugged into this machine, so the
+    /// assertion is the one thing that does not: the sentinel must REACH the
+    /// checker, whose every answer (Ok / Failed / Unknown) differs from what a
+    /// failed spawn produces.
+    #[test]
+    fn the_usb_probe_driver_entry_is_wired_to_its_check() {
+        // The dispatch is compiled on every platform, so this half runs anywhere.
+        let status = run_check_blocking(PROBE_DRIVER_CHECK, &[], "", None);
+        assert_ne!(
+            status,
+            ToolStatus::Missing,
+            "the sentinel was spawned as a program instead of reaching the checker"
+        );
+
+        #[cfg(target_os = "windows")]
+        {
+            let s = make_tools_state();
+            let s = s.lock().unwrap();
+            let t = s
+                .tools
+                .iter()
+                .find(|t| t.name == PROBE_DRIVER_TOOL)
+                .expect("the entry is in the catalog on Windows");
+            assert_eq!(t.check_cmd, PROBE_DRIVER_CHECK, "sentinel must match");
+            assert!(
+                t.install_cmd.is_none(),
+                "replacing a device driver is never a one-click action"
+            );
+            assert!(
+                !t.manual_url.is_empty(),
+                "manual entries need somewhere to go"
+            );
+            // Not toolchain-gated: an ESP project must see it, and that is the
+            // family it bites most often.
+            assert!(t.toolchain.is_none(), "every chip here is probed over USB");
+            // The one instruction that is expensive to get wrong: Interface 0 is
+            // the COM port, and replacing ITS driver takes flashing away.
+            assert!(t.impact.contains("Interface 2"), "{}", t.impact);
+            assert!(t.impact.contains("Interface 0"), "{}", t.impact);
+        }
     }
 
     /// The stray-variable entry has to reach the STARTUP BANNER, on any chip —
