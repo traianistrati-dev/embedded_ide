@@ -234,6 +234,12 @@ pub fn show_tools_tab(
                                  It may still work — update it with the button on the right.\n\n{}",
                                 row.impact
                             ),
+                            // The finding FIRST. `impact` is a fixed sentence
+                            // written before anything was probed, so it cannot
+                            // name the probe, the port or the variable this
+                            // check actually objected to — and that name is the
+                            // whole reason the check ran.
+                            ToolStatus::Failed(msg) => format!("{msg}\n\n{}", row.impact),
                             _ => row.impact.to_owned(),
                         };
                         ui.label(

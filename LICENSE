@@ -1,0 +1,49 @@
+Embedded IDE
+Copyright (c) 2026 Traian Istrati
+
+Licensed under either of
+
+  * Apache License, Version 2.0
+    (see LICENSE-APACHE, or http://www.apache.org/licenses/LICENSE-2.0)
+
+  * MIT license
+    (see LICENSE-MIT, or http://opensource.org/licenses/MIT)
+
+at your option.
+
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+
+Contribution
+------------
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
+
+
+Third-party material
+--------------------
+
+The dual license above covers this repository's own source code. Some files
+are covered by their own terms instead, and those terms travel with them:
+
+  * assets/cyw43-firmware/
+      Radio firmware, NVRAM and CLM blobs for the Infineon/Broadcom CYW43439,
+      used by the Raspberry Pi Pico W and Pico 2 W. Redistributed under the
+      Permissive Binary License, Version 1.0 — see
+      assets/cyw43-firmware/LICENSE-permissive-binary-license-1.0.txt.
+      That license permits redistribution in binary form WITHOUT
+      modification, provided the copyright notice and disclaimer are
+      reproduced, and it prohibits reverse engineering.
+
+Building this application also links Rust crates under their own permissive
+licenses, chiefly MIT and Apache-2.0. Two are worth naming:
+
+  * serialport is MPL-2.0. That is file-level copyleft: modifications to its
+    own source files must be shared under MPL-2.0, but distributing it as
+    part of a larger work under different terms is expressly permitted.
+
+  * epaint_default_fonts bundles fonts under OFL-1.1 and the Ubuntu Font
+    License 1.0. Their notices must be preserved in binary distributions.
