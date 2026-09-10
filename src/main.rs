@@ -50,6 +50,7 @@ pub mod size;
 pub mod startup;
 pub mod terminal;
 pub mod udev;
+pub mod win_driver;
 pub mod workspace;
 
 /// Guard against the tofu-square bug coming back.

@@ -192,19 +192,24 @@ pub fn missing_device_interface_guid(selector: Option<&str>) -> bool {
 }
 
 /// Where Windows keeps one key per USB device it has ever seen.
-const USB_ENUM: &str = r"HKLM\SYSTEM\CurrentControlSet\Enum\USB";
+pub(crate) const USB_ENUM: &str = r"HKLM\SYSTEM\CurrentControlSet\Enum\USB";
 
 /// One device instance under an interface key, as far as this module cares.
-struct WinUsbInstance {
+pub(crate) struct WinUsbInstance {
     /// The instance segment, e.g. `6&205b2bf0&0&0002`, lowercased.
-    id: String,
-    has_guid: bool,
+    pub(crate) id: String,
+    pub(crate) has_guid: bool,
+    /// The COM name Windows still has on file for this interface, when it has
+    /// one. A value here on a WinUSB-driven instance is the signature of a
+    /// serial port that a driver install took over: the port is gone, but the
+    /// NUMBER is remembered and comes back with it (see [`crate::win_driver`]).
+    pub(crate) port_name: Option<String>,
 }
 
 /// The `VID`/`PID` halves of a `VID:PID[:Serial]` selector, spelled the way the
 /// registry spells them. `None` unless both are four hex digits: a registry key
 /// name is built from these, and a half-parsed selector must not produce one.
-fn vid_pid(selector: &str) -> Option<(String, String)> {
+pub(crate) fn vid_pid(selector: &str) -> Option<(String, String)> {
     let mut parts = selector.split(':');
     let vid = parts.next()?.trim();
     let pid = parts.next()?.trim();
@@ -229,7 +234,7 @@ fn serial_of(selector: &str) -> Option<String> {
 /// The `Enum\USB` keys belonging to one VID:PID - the device itself and, for a
 /// composite device like the ESP's USB-Serial/JTAG, one key per interface
 /// (`…&MI_02`).
-fn device_keys(all: &[String], vid: &str, pid: &str) -> Vec<String> {
+pub(crate) fn device_keys(all: &[String], vid: &str, pid: &str) -> Vec<String> {
     let want = format!(r"\VID_{vid}&PID_{pid}");
     all.iter()
         .filter(|k| {
@@ -276,9 +281,10 @@ fn belongs_to(instance: &str, prefix: Option<&str>) -> bool {
 /// indented `Name  TYPE  Value` lines under it belong to it. The two facts sit in
 /// DIFFERENT sections - `Service` on the instance key itself, the GUID under its
 /// `Device Parameters` subkey - so they are stitched back together by instance.
-fn winusb_instances(dump: &str, device_key: &str) -> Vec<WinUsbInstance> {
+pub(crate) fn winusb_instances(dump: &str, device_key: &str) -> Vec<WinUsbInstance> {
     let mut winusb: Vec<String> = Vec::new();
     let mut with_guid: Vec<String> = Vec::new();
+    let mut ports: Vec<(String, String)> = Vec::new();
     let mut id = String::new();
     let mut in_params = false;
 
@@ -316,6 +322,11 @@ fn winusb_instances(dump: &str, device_key: &str) -> Vec<WinUsbInstance> {
                 .is_some_and(|n| n.eq_ignore_ascii_case("DeviceInterfaceGUID"))
             {
                 with_guid.push(id.clone());
+            } else if name.eq_ignore_ascii_case("PortName") {
+                // `PortName  REG_SZ  COM12` - the last column is the value.
+                if let Some(v) = f.last() {
+                    ports.push((id.clone(), v.to_owned()));
+                }
             }
         } else if name.eq_ignore_ascii_case("Service")
             && f.any(|v| v.eq_ignore_ascii_case("winusb"))
@@ -330,7 +341,12 @@ fn winusb_instances(dump: &str, device_key: &str) -> Vec<WinUsbInstance> {
         .into_iter()
         .map(|id| {
             let has_guid = with_guid.contains(&id);
-            WinUsbInstance { id, has_guid }
+            let port_name = ports.iter().find(|(i, _)| *i == id).map(|(_, p)| p.clone());
+            WinUsbInstance {
+                id,
+                has_guid,
+                port_name,
+            }
         })
         .collect()
 }
@@ -338,7 +354,7 @@ fn winusb_instances(dump: &str, device_key: &str) -> Vec<WinUsbInstance> {
 /// Immediate subkeys of a registry key, as full `HKEY_…` paths. Empty when `reg`
 /// is missing or refuses - indistinguishable from "no such devices", and both
 /// mean the caller must not conclude anything.
-fn reg_subkeys(key: &str) -> Vec<String> {
+pub(crate) fn reg_subkeys(key: &str) -> Vec<String> {
     reg_dump(key)
         .lines()
         .map(str::trim)
@@ -351,7 +367,7 @@ fn reg_subkeys(key: &str) -> Vec<String> {
 /// is a few dozen lines, so one dump beats guessing which subkey holds what -
 /// and `reg /v` matches value names EXACTLY, which would miss `…GUIDs` when
 /// asked for `…GUID`.
-fn reg_dump(key: &str) -> String {
+pub(crate) fn reg_dump(key: &str) -> String {
     no_window(&mut Command::new("reg"))
         .args(["query", key, "/s"])
         .output()

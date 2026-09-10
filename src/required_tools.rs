@@ -1199,6 +1199,22 @@ fn check_usb_probe_driver() -> ToolStatus {
     if probes.is_empty() {
         return ToolStatus::Ok("n/a (no debug probe attached)".to_string());
     }
+    // A serial interface taken over by a WinUSB install comes FIRST: it is the
+    // more damaging of the two mistakes (the board loses its COM port, so
+    // flashing and the monitor stop) and the one the user did not intend.
+    let hijacked: Vec<crate::win_driver::HijackedPort> = probes
+        .iter()
+        .flat_map(|p| crate::win_driver::hijacked_ports(&p.selector))
+        .collect();
+    if let Some(h) = hijacked.first() {
+        return ToolStatus::Failed(format!(
+            "{} — Zadig was pointed at the serial interface instead of the debug one. \
+             Flashing and the monitor have nothing to open. Use \"Restore COM port\" on this \
+             row: Windows still has the name on file, so the port comes back as {}.",
+            h.summary(),
+            h.port_name
+        ));
+    }
     let stuck: Vec<String> = probes
         .iter()
         .filter(|p| crate::probe::missing_device_interface_guid(Some(&p.selector)))

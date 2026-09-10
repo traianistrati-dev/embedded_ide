@@ -31,6 +31,73 @@ fn stage_udev_rules(tools_state: &Arc<Mutex<required_tools::ToolsState>>, ctx: &
     ctx.request_repaint();
 }
 
+/// Undo a WinUSB install that took a board's COM port, after saying exactly
+/// what will be removed.
+///
+/// The command is logged and copied BEFORE the elevation prompt, not instead of
+/// it: deleting driver packages is not something to accept from a dialog that
+/// only names `pnputil`, and a user who would rather read it first — or run it
+/// in their own admin shell — has it either way.
+fn restore_com_port(tools_state: &Arc<Mutex<required_tools::ToolsState>>, ctx: &egui::Context) {
+    let probes = crate::probe::list_probes().unwrap_or_default();
+    let ports: Vec<crate::win_driver::HijackedPort> = probes
+        .iter()
+        .flat_map(|p| crate::win_driver::hijacked_ports(&p.selector))
+        .collect();
+
+    let Some(port) = ports.first() else {
+        let mut s = tools_state.lock().unwrap();
+        s.push_log_public("> No serial interface is held by a WinUSB driver — nothing to undo.");
+        ctx.request_repaint();
+        return;
+    };
+    let Some(script) = crate::win_driver::restore_script(port) else {
+        let mut s = tools_state.lock().unwrap();
+        s.push_log_public(format!("[X] {}", port.summary()));
+        s.push_log_public(
+            "  …but no driver package in the store names that interface, so there is nothing \
+             safe to delete. Undo it from Device Manager instead: the device -> Uninstall \
+             device, ticking \"attempt to remove the driver\", then replug."
+                .to_string(),
+        );
+        ctx.request_repaint();
+        return;
+    };
+
+    {
+        let mut s = tools_state.lock().unwrap();
+        s.push_log_public(format!("> {}", port.summary()));
+        s.push_log_public(format!(
+            "  {} package(s) built by Zadig for that interface will be removed:",
+            port.packages.len()
+        ));
+        for p in &port.packages {
+            s.push_log_public(format!("    {p}"));
+        }
+        for line in script.lines() {
+            s.push_log_public(format!("  {line}"));
+        }
+        ctx.copy_text(script.clone());
+        s.push_log_public("  (commands copied to the clipboard)".to_string());
+        s.push_log_public("  Windows will ask for administrator rights…".to_string());
+    }
+    ctx.request_repaint();
+
+    let outcome = crate::win_driver::run_elevated(&script);
+    let mut s = tools_state.lock().unwrap();
+    match outcome {
+        Ok(_) => {
+            s.push_log_public(format!(
+                "[OK] driver removed — {} should be back. Re-check this row, and unplug and \
+                 replug the board if it is not.",
+                port.port_name
+            ));
+        }
+        Err(e) => s.push_log_public(format!("[X] {e}")),
+    }
+    ctx.request_repaint();
+}
+
 /// Report the serial-access fix in the tools log + clipboard.
 ///
 /// The re-login warning is not decoration: `usermod` changes the database, but a
@@ -365,6 +432,30 @@ pub fn show_tools_tab(
                                 {
                                     show_serial_access_fix(tools_state, ctx);
                                 }
+                            }
+
+                            // Giving a hijacked COM port back — the one repair
+                            // in this tab that Windows can be asked to do
+                            // directly, since UAC is a consent dialog a GUI can
+                            // reach (a Linux `sudo` is not).
+                            if row.name == required_tools::PROBE_DRIVER_TOOL
+                                && matches!(row.status, ToolStatus::Failed(_))
+                                && ui
+                                    .add_enabled(
+                                        !busy,
+                                        egui::Button::new(
+                                            egui::RichText::new("Restore COM port").size(10.5),
+                                        )
+                                        .small(),
+                                    )
+                                    .on_hover_text(
+                                        "Remove the WinUSB driver Zadig put on the board's \
+                                         SERIAL interface, so Windows gives the COM port back. \
+                                         Needs administrator rights.",
+                                    )
+                                    .clicked()
+                            {
+                                restore_com_port(tools_state, ctx);
                             }
 
                             // Manual URL link — for tools without auto-install
