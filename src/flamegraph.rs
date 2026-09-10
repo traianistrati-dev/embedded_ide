@@ -238,8 +238,12 @@ fn run(
         if let Some(tagged) = crate::failure_hint::probe_rs_panic(&everything)
             .map(|d| crate::failure_hint::probe_rs_panic_message(&d))
             .or_else(|| {
-                crate::failure_hint::probe_open_failure(&everything)
-                    .map(|d| crate::failure_hint::probe_open_message(&d))
+                crate::failure_hint::probe_open_failure(&everything).map(|d| {
+                    crate::failure_hint::probe_open_message(
+                        &d,
+                        crate::probe::missing_device_interface_guid(Some(&probe)),
+                    )
+                })
             })
         {
             return tagged;

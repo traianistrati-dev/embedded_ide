@@ -271,13 +271,17 @@ pub(crate) fn cargo_build_streamed(
 /// Shared with the Debug tab: probe-rs dying of its own bug looks exactly like
 /// an ordinary exit / socket close, so both orchestrators have to go looking for
 /// the real reason themselves.
-pub(crate) fn probe_rs_failure(console: &TerminalState) -> Option<String> {
+pub(crate) fn probe_rs_failure(console: &TerminalState, probe: Option<&str>) -> Option<String> {
     let tail = console.tail_text(60);
     if let Some(detail) = crate::failure_hint::probe_rs_panic(&tail) {
         return Some(crate::failure_hint::probe_rs_panic_message(&detail));
     }
-    crate::failure_hint::probe_open_failure(&tail)
-        .map(|d| crate::failure_hint::probe_open_message(&d))
+    crate::failure_hint::probe_open_failure(&tail).map(|d| {
+        crate::failure_hint::probe_open_message(
+            &d,
+            crate::probe::missing_device_interface_guid(probe),
+        )
+    })
 }
 
 /// The orchestrator body: build, then stream probe-rs until it exits.
@@ -336,7 +340,7 @@ fn run_session(
     ctx.request_repaint();
 
     let mut cmd = Command::new("probe-rs");
-    let mut probe = no_window(&mut cmd)
+    let mut probe_rs = no_window(&mut cmd)
         .current_dir(project_dir)
         .args(&args)
         .stdin(Stdio::null())
@@ -359,7 +363,7 @@ fn run_session(
 
     let done = Arc::new(AtomicUsize::new(0));
     let mut pipes = 0;
-    if let Some(out) = probe.stdout.take() {
+    if let Some(out) = probe_rs.stdout.take() {
         pipes += 1;
         spawn_reader(
             out,
@@ -370,7 +374,7 @@ fn run_session(
             Arc::clone(&done),
         );
     }
-    if let Some(err) = probe.stderr.take() {
+    if let Some(err) = probe_rs.stderr.take() {
         pipes += 1;
         spawn_reader(
             err,
@@ -381,7 +385,7 @@ fn run_session(
             Arc::clone(&done),
         );
     }
-    *child_slot.lock().unwrap() = Some(probe);
+    *child_slot.lock().unwrap() = Some(probe_rs);
 
     // Wait until both pipes are done (probe-rs exited) or the user stopped.
     while done.load(Ordering::Relaxed) < pipes && !stop.load(Ordering::Relaxed) {
@@ -402,7 +406,7 @@ fn run_session(
         Some(Ok(st)) => {
             // probe-rs can die of its own panic, or refuse to open a probe it
             // just listed — neither is "check your wiring", so say what it was.
-            if let Some(msg) = probe_rs_failure(&state.lock().unwrap()) {
+            if let Some(msg) = probe_rs_failure(&state.lock().unwrap(), probe) {
                 return Err(msg);
             }
             Err(format!(

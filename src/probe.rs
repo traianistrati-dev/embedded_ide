@@ -130,9 +130,152 @@ pub fn list_probes() -> Result<Vec<ProbeInfo>, String> {
         return Err(crate::failure_hint::probe_rs_panic_message(&detail));
     }
     if let Some(detail) = crate::failure_hint::probe_open_failure(&text) {
-        return Err(crate::failure_hint::probe_open_message(&detail));
+        return Err(crate::failure_hint::probe_open_message(&detail, false));
     }
     Ok(parse_list(&text))
+}
+
+/// Windows only: is this probe's USB interface registered without a
+/// device-interface GUID?
+///
+/// A probe can be LISTED and still be impossible to open. Enumeration reads
+/// descriptors the OS has already cached; OPENING one means opening a device
+/// INTERFACE, and nusb - so probe-rs - finds that path through a
+/// `DeviceInterfaceGUIDs` value under the device's `Device Parameters` key.
+/// Zadig's driver package writes that value. The WinUSB binding Windows makes
+/// by itself from a device's MS-OS descriptors can leave it out, and then every
+/// open fails with "The selected USB device could not be opened" - nothing is
+/// holding the probe, there is simply no path to open it by. Seen on an
+/// ESP32-C3's built-in USB-Serial/JTAG while the ST-Link on the same machine,
+/// installed through Zadig, carried the value.
+///
+/// Answers `false` unless it is sure: a selector it cannot parse, a device
+/// Windows has no record of, or a `reg` that will not answer. A failure card is
+/// chosen from this, and a wrong `true` sends the user off to reinstall a
+/// driver that was never the problem.
+pub fn missing_device_interface_guid(selector: Option<&str>) -> bool {
+    if !cfg!(target_os = "windows") {
+        return false;
+    }
+    let Some((vid, pid)) = selector.and_then(vid_pid) else {
+        return false;
+    };
+    let keys = device_keys(&reg_subkeys(USB_ENUM), &vid, &pid);
+    // No record of the device at all: not our diagnosis to make.
+    !keys.is_empty() && !keys.iter().any(|k| reg_has_guid(k))
+}
+
+/// Where Windows keeps one key per USB device it has ever seen.
+const USB_ENUM: &str = r"HKLM\SYSTEM\CurrentControlSet\Enum\USB";
+
+/// The `VID`/`PID` halves of a `VID:PID[:Serial]` selector, spelled the way the
+/// registry spells them. `None` unless both are four hex digits: a registry key
+/// name is built from these, and a half-parsed selector must not produce one.
+fn vid_pid(selector: &str) -> Option<(String, String)> {
+    let mut parts = selector.split(':');
+    let vid = parts.next()?.trim();
+    let pid = parts.next()?.trim();
+    let hex4 = |s: &str| s.len() == 4 && s.chars().all(|c| c.is_ascii_hexdigit());
+    (hex4(vid) && hex4(pid)).then(|| (vid.to_ascii_uppercase(), pid.to_ascii_uppercase()))
+}
+
+/// The `Enum\USB` keys belonging to one VID:PID - the device itself and, for a
+/// composite device like the ESP's USB-Serial/JTAG, one key per interface
+/// (`…&MI_02`). The GUID sits on whichever key carries the driver, so every one
+/// of them is a candidate.
+fn device_keys(all: &[String], vid: &str, pid: &str) -> Vec<String> {
+    let want = format!(r"\VID_{vid}&PID_{pid}");
+    all.iter()
+        .filter(|k| {
+            let up = k.to_ascii_uppercase();
+            // The match must END the key name or be followed by `&MI_nn`, so
+            // that `PID_1001` never answers for a `PID_10011`.
+            up.find(&want)
+                .is_some_and(|i| matches!(up[i + want.len()..].chars().next(), None | Some('&')))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Immediate subkeys of a registry key, as full `HKEY_…` paths. Empty when
+/// `reg` is missing or refuses - indistinguishable from "no such devices", and
+/// both mean the caller must not conclude anything.
+fn reg_subkeys(key: &str) -> Vec<String> {
+    let Ok(out) = no_window(&mut Command::new("reg"))
+        .args(["query", key])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("HKEY_"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Does anything under this device key carry a device-interface GUID? The
+/// subtree is a few dozen lines, so dumping it beats guessing which subkey holds
+/// it and which of the two spellings (`DeviceInterfaceGUID`, `…GUIDs`) the INF
+/// used - `reg /v` matches value names exactly, not by prefix.
+fn reg_has_guid(key: &str) -> bool {
+    no_window(&mut Command::new("reg"))
+        .args(["query", key, "/s"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("DeviceInterfaceGUID"))
+}
+
+#[cfg(test)]
+mod guid_tests {
+    use super::*;
+
+    #[test]
+    fn a_selector_yields_the_registry_spelling_of_its_ids() {
+        // probe-rs prints the ids lowercase; the registry spells them upper.
+        assert_eq!(
+            vid_pid("303a:1001:50:78:7D:62:33:A4"),
+            Some(("303A".to_owned(), "1001".to_owned()))
+        );
+        assert_eq!(
+            vid_pid("0483:3748"),
+            Some(("0483".to_owned(), "3748".to_owned()))
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_two_hex_ids_is_refused() {
+        // A key name gets built from these, so "nearly right" is not enough.
+        for bad in ["", "303a", "303a:", "303a:100", "303a:10011", "zzzz:1001"] {
+            assert_eq!(vid_pid(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_composite_devices_interface_keys_all_count() {
+        // The ESP32-C3 bench: the device plus its serial and JTAG interfaces.
+        let all = vec![
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001".to_owned(),
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001&MI_00"
+                .to_owned(),
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001&MI_02"
+                .to_owned(),
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_0483&PID_3748".to_owned(),
+        ];
+        let mine = device_keys(&all, "303A", "1001");
+        assert_eq!(mine.len(), 3, "{mine:?}");
+        assert!(mine.iter().all(|k| k.contains("VID_303A")), "{mine:?}");
+    }
+
+    #[test]
+    fn a_longer_product_id_is_not_a_match() {
+        // `PID_1001` must not answer for `PID_10012` - different device, and
+        // the whole verdict is "no key of mine has a GUID".
+        let all = vec![
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_10012".to_owned(),
+        ];
+        assert!(device_keys(&all, "303A", "1001").is_empty());
+    }
 }
 
 /// Reset the target through the probe (`probe-rs reset`), streaming the result

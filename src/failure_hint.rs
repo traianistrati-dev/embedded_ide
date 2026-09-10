@@ -126,10 +126,13 @@ pub fn probe_open_failure(text: &str) -> Option<String> {
     })
 }
 
-/// The tagged message for a probe that enumerates but won't open. The WinUSB
-/// case is called out by name because it is deterministic (every attach fails
-/// the same way) and its two fixes are not guessable from the error text.
-pub fn probe_open_message(detail: &str) -> String {
+/// The tagged message for a probe that enumerates but won't open. Two cases are
+/// called out by name because they are deterministic (every attach fails the
+/// same way) and their fixes are not guessable from the error text: the WinUSB
+/// reset, and - via `no_guid`, which the caller establishes from the registry
+/// (`probe::missing_device_interface_guid`) - an interface with no
+/// device-interface GUID. Everything else gets the list of usual suspects.
+pub fn probe_open_message(detail: &str, no_guid: bool) -> String {
     let winusb = detail.contains("reset not supported by WinUSB");
     let mut s = format!("[PROBE_OPEN_FAILED] {detail}\n\n");
     if winusb {
@@ -143,6 +146,22 @@ pub fn probe_open_message(detail: &str) -> String {
              That can upset STM32CubeProgrammer / ST-Link Utility, and is undone from Device \
              Manager -> Update driver.\n\n\
              Nothing is wrong with your firmware, wiring or the Debug-friendly build.",
+        );
+    } else if no_guid {
+        s.push_str(
+            "Windows registered this probe's USB interface WITHOUT a device-interface GUID, so \
+             probe-rs has no device path to open - that is checked in the registry, under \
+             Enum\\USB, not guessed from the error. Listing the probe still works, because \
+             enumeration never opens anything; that is why it is in the Probe list. Nothing is \
+             holding it.\n\n\
+             -> Reinstall its driver with Zadig (zadig.akeo.ie): Options -> List All Devices, \
+             pick the probe's DEBUG interface - on an ESP built-in JTAG that is \"USB \
+             JTAG/serial debug unit (Interface 2)\" - and install WinUSB. Zadig's driver package \
+             writes the GUID; the binding Windows made on its own did not.\n\
+             -> The serial port on the same cable is a different interface and is left alone by \
+             that, so flashing and the monitor over USB-Serial keep working.\n\n\
+             Until it is registered, RTT, Debug and Profile-Runtime all fail here the same way - \
+             none of them can open the probe.",
         );
     } else {
         s.push_str(
@@ -422,7 +441,7 @@ mod tests {
         let detail = probe_open_failure(out).expect("detected");
         assert!(detail.contains("reset not supported by WinUSB"), "{detail}");
 
-        let msg = probe_open_message(&detail);
+        let msg = probe_open_message(&detail, false);
         let (hint, body) = parse(&msg).expect("tagged");
         assert_eq!(hint.tag, "[PROBE_OPEN_FAILED]");
         assert!(body.contains("--version 0.29.0"), "{body}");
@@ -430,7 +449,7 @@ mod tests {
 
         // A different open failure still gets the generic checklist.
         let other = probe_open_failure("Failed to open probe: device busy").expect("detected");
-        let generic = probe_open_message(&other);
+        let generic = probe_open_message(&other, false);
         assert!(
             generic.contains("Another program is holding it"),
             "{generic}"
@@ -439,6 +458,44 @@ mod tests {
 
         // "no probe found" is a different problem and must not match.
         assert!(probe_open_failure("Error: no debug probe was found").is_none());
+    }
+
+    /// A probe whose USB interface was registered without a device-interface
+    /// GUID is NOT busy: the generic checklist's first line ("another program
+    /// is holding it") is advice that can never work here, and the one thing
+    /// that does work - reinstalling the driver - is on no list the user can
+    /// guess. The caller establishes the fact from the registry; this only has
+    /// to keep the two cards apart.
+    #[test]
+    fn a_probe_with_no_device_interface_guid_gets_its_own_card() {
+        // probe-rs's own shape on an ESP32-C3 whose JTAG interface has no GUID.
+        let out = "Failed to open the debug probe.\n\
+                   Caused by:\n\
+                   0: The debug probe could not be created.\n\
+                   1: The selected USB device could not be opened.\n";
+        let detail = probe_open_failure(out).expect("detected");
+
+        let msg = probe_open_message(&detail, true);
+        let (hint, body) = parse(&msg).expect("tagged");
+        assert_eq!(hint.tag, "[PROBE_OPEN_FAILED]");
+        assert!(body.contains("Zadig"), "{body}");
+        assert!(
+            body.contains("Interface 2"),
+            "names the ESP interface: {body}"
+        );
+        assert!(
+            !body.contains("Another program is holding it"),
+            "the one cause that is ruled out: {body}"
+        );
+
+        // The SAME text without the registry finding keeps the old checklist —
+        // the verdict comes from the caller, never from the error string.
+        let generic = probe_open_message(&detail, false);
+        assert!(
+            generic.contains("Another program is holding it"),
+            "{generic}"
+        );
+        assert!(!generic.contains("Zadig"), "{generic}");
     }
 
     /// A hint that names a tool must name one that actually exists in the

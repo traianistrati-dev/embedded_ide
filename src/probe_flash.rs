@@ -190,8 +190,12 @@ pub fn start_probe_flash(
             let explained = crate::failure_hint::probe_rs_panic(&tail)
                 .map(|d| crate::failure_hint::probe_rs_panic_message(&d))
                 .or_else(|| {
-                    crate::failure_hint::probe_open_failure(&tail)
-                        .map(|d| crate::failure_hint::probe_open_message(&d))
+                    crate::failure_hint::probe_open_failure(&tail).map(|d| {
+                        crate::failure_hint::probe_open_message(
+                            &d,
+                            crate::probe::missing_device_interface_guid(probe.as_deref()),
+                        )
+                    })
                 });
             ProbeFlashState::Error(
                 explained.unwrap_or_else(|| "cargo flash failed — see the log above".into()),

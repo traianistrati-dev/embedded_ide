@@ -1085,7 +1085,8 @@ fn spawn_dap_reader(
             // calling it "ended", look for the real failure in what the server
             // printed; otherwise the user gets a calm "[debug session ended]"
             // after a wall of `<unknown>` frames or a WinUSB complaint.
-            let crash = crate::rtt::probe_rs_failure(&console.lock().unwrap());
+            let crash =
+                crate::rtt::probe_rs_failure(&console.lock().unwrap(), cfg.probe.as_deref());
             let mut st = state.lock().unwrap();
             // `Stopping` is excluded: the socket closing is EXPECTED there (the
             // single-session server exits after our disconnect), and `stop`'s
@@ -1209,7 +1210,7 @@ fn handle_response(
             // came before it.
             let real = {
                 let c = console.lock().unwrap();
-                crate::rtt::probe_rs_failure(&c)
+                crate::rtt::probe_rs_failure(&c, cfg.probe.as_deref())
             };
             state.lock().unwrap().phase = DebugPhase::Error(real.unwrap_or(err));
         }
