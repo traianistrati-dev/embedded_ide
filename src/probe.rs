@@ -135,38 +135,71 @@ pub fn list_probes() -> Result<Vec<ProbeInfo>, String> {
     Ok(parse_list(&text))
 }
 
-/// Windows only: is this probe's USB interface registered without a
-/// device-interface GUID?
+/// Windows only: is a USB interface of this probe bound to WinUSB but registered
+/// WITHOUT a device-interface GUID?
 ///
 /// A probe can be LISTED and still be impossible to open. Enumeration reads
 /// descriptors the OS has already cached; OPENING one means opening a device
 /// INTERFACE, and nusb - so probe-rs - finds that path through a
-/// `DeviceInterfaceGUIDs` value under the device's `Device Parameters` key.
-/// Zadig's driver package writes that value. The WinUSB binding Windows makes
-/// by itself from a device's MS-OS descriptors can leave it out, and then every
-/// open fails with "The selected USB device could not be opened" - nothing is
-/// holding the probe, there is simply no path to open it by. Seen on an
-/// ESP32-C3's built-in USB-Serial/JTAG while the ST-Link on the same machine,
-/// installed through Zadig, carried the value.
+/// `DeviceInterfaceGUIDs` value under the interface's `Device Parameters` key.
+/// Zadig's driver package writes that value. The WinUSB binding Windows makes by
+/// itself from a device's MS-OS descriptors can leave it out, and then every open
+/// fails with "The selected USB device could not be opened" - nothing is holding
+/// the probe, there is simply no path to open it by.
+///
+/// The question has to be asked **per interface**, and that is the whole
+/// subtlety. An ESP32-C3 puts its serial port and its JTAG on one composite
+/// device; the serial half can carry a GUID while the JTAG half does not, and a
+/// device-wide "does anything here have a GUID?" then answers a cheerful yes
+/// while probe-rs cannot open a thing. Only interfaces WinUSB actually drives
+/// count - a `usbser` COM port has no bearing on whether a debugger can attach.
+///
+/// Instances are also tied back to THIS probe through the parent's
+/// `ParentIdPrefix` whenever the selector carries a serial: a board that has been
+/// unplugged leaves its interface keys behind for good, and they would otherwise
+/// vote on the state of a board that is not even connected.
 ///
 /// Answers `false` unless it is sure: a selector it cannot parse, a device
-/// Windows has no record of, or a `reg` that will not answer. A failure card is
-/// chosen from this, and a wrong `true` sends the user off to reinstall a
-/// driver that was never the problem.
+/// Windows has no record of, no WinUSB interface at all, or a `reg` that will not
+/// answer. A failure card is chosen from this, and a wrong `true` sends the user
+/// off to reinstall a driver that was never the problem.
 pub fn missing_device_interface_guid(selector: Option<&str>) -> bool {
     if !cfg!(target_os = "windows") {
         return false;
     }
-    let Some((vid, pid)) = selector.and_then(vid_pid) else {
+    let Some(sel) = selector else {
+        return false;
+    };
+    let Some((vid, pid)) = vid_pid(sel) else {
         return false;
     };
     let keys = device_keys(&reg_subkeys(USB_ENUM), &vid, &pid);
-    // No record of the device at all: not our diagnosis to make.
-    !keys.is_empty() && !keys.iter().any(|k| reg_has_guid(k))
+    if keys.is_empty() {
+        return false; // No record of the device at all: not our diagnosis to make.
+    }
+    let prefix = serial_of(sel).and_then(|s| parent_id_prefix(&vid, &pid, &s));
+    for key in &keys {
+        for inst in winusb_instances(&reg_dump(key), key) {
+            if !belongs_to(&inst.id, prefix.as_deref()) {
+                continue;
+            }
+            if !inst.has_guid {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Where Windows keeps one key per USB device it has ever seen.
 const USB_ENUM: &str = r"HKLM\SYSTEM\CurrentControlSet\Enum\USB";
+
+/// One device instance under an interface key, as far as this module cares.
+struct WinUsbInstance {
+    /// The instance segment, e.g. `6&205b2bf0&0&0002`, lowercased.
+    id: String,
+    has_guid: bool,
+}
 
 /// The `VID`/`PID` halves of a `VID:PID[:Serial]` selector, spelled the way the
 /// registry spells them. `None` unless both are four hex digits: a registry key
@@ -179,10 +212,23 @@ fn vid_pid(selector: &str) -> Option<(String, String)> {
     (hex4(vid) && hex4(pid)).then(|| (vid.to_ascii_uppercase(), pid.to_ascii_uppercase()))
 }
 
+/// Everything after the `VID:PID` of a selector - the serial, which is itself
+/// full of colons on an ESP (`50:78:7D:62:33:A4`), so it must NOT be split
+/// further. `None` for a selector that carries no serial.
+fn serial_of(selector: &str) -> Option<String> {
+    let mut parts = selector.splitn(3, ':');
+    parts.next()?;
+    parts.next()?;
+    parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 /// The `Enum\USB` keys belonging to one VID:PID - the device itself and, for a
 /// composite device like the ESP's USB-Serial/JTAG, one key per interface
-/// (`…&MI_02`). The GUID sits on whichever key carries the driver, so every one
-/// of them is a candidate.
+/// (`…&MI_02`).
 fn device_keys(all: &[String], vid: &str, pid: &str) -> Vec<String> {
     let want = format!(r"\VID_{vid}&PID_{pid}");
     all.iter()
@@ -197,38 +243,222 @@ fn device_keys(all: &[String], vid: &str, pid: &str) -> Vec<String> {
         .collect()
 }
 
-/// Immediate subkeys of a registry key, as full `HKEY_…` paths. Empty when
-/// `reg` is missing or refuses - indistinguishable from "no such devices", and
-/// both mean the caller must not conclude anything.
+/// The `ParentIdPrefix` Windows assigned to one composite device, which every
+/// one of its interface instances is named after. This is what ties an interface
+/// back to the physical board identified by `serial`.
+fn parent_id_prefix(vid: &str, pid: &str, serial: &str) -> Option<String> {
+    let key = format!(r"{USB_ENUM}\VID_{vid}&PID_{pid}\{serial}");
+    reg_dump(&key).lines().find_map(|l| {
+        let mut f = l.split_whitespace();
+        if !f.next()?.eq_ignore_ascii_case("ParentIdPrefix") {
+            return None;
+        }
+        f.next()?; // the REG_SZ type column
+        f.next().map(str::to_ascii_lowercase)
+    })
+}
+
+/// Is this instance one of the probe we asked about? Without a prefix to compare
+/// against, every instance counts - which is right for a non-composite probe
+/// whose selector carries no serial.
+fn belongs_to(instance: &str, prefix: Option<&str>) -> bool {
+    prefix.is_none_or(|p| {
+        instance
+            .to_ascii_lowercase()
+            .starts_with(&p.to_ascii_lowercase())
+    })
+}
+
+/// The instances under one device key that WinUSB drives, and whether each one
+/// carries a device-interface GUID.
+///
+/// Parses `reg query <key> /s`: every `HKEY_…` line opens a section and the
+/// indented `Name  TYPE  Value` lines under it belong to it. The two facts sit in
+/// DIFFERENT sections - `Service` on the instance key itself, the GUID under its
+/// `Device Parameters` subkey - so they are stitched back together by instance.
+fn winusb_instances(dump: &str, device_key: &str) -> Vec<WinUsbInstance> {
+    let mut winusb: Vec<String> = Vec::new();
+    let mut with_guid: Vec<String> = Vec::new();
+    let mut id = String::new();
+    let mut in_params = false;
+
+    for line in dump.lines() {
+        let t = line.trim();
+        if t.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("HKEY_")) {
+            id.clear();
+            // Only sections under the key we dumped can name an instance of it.
+            // `get` rather than a slice: `reg` writes its errors in the
+            // system language, and cutting a multi-byte character in half to
+            // compare a prefix would panic this thread.
+            if !t
+                .get(..device_key.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(device_key))
+            {
+                continue;
+            }
+            let mut segs = t[device_key.len()..].trim_start_matches('\\').split('\\');
+            id = segs.next().unwrap_or_default().to_ascii_lowercase();
+            in_params = segs
+                .next()
+                .is_some_and(|s| s.eq_ignore_ascii_case("Device Parameters"));
+            continue;
+        }
+        if id.is_empty() || t.is_empty() {
+            continue;
+        }
+        let mut f = t.split_whitespace();
+        let Some(name) = f.next() else { continue };
+        if in_params {
+            // `DeviceInterfaceGUID` and `DeviceInterfaceGUIDs` are both spellings
+            // an INF may use.
+            if name
+                .get(..19)
+                .is_some_and(|n| n.eq_ignore_ascii_case("DeviceInterfaceGUID"))
+            {
+                with_guid.push(id.clone());
+            }
+        } else if name.eq_ignore_ascii_case("Service")
+            && f.any(|v| v.eq_ignore_ascii_case("winusb"))
+        {
+            winusb.push(id.clone());
+        }
+    }
+
+    winusb.sort();
+    winusb.dedup();
+    winusb
+        .into_iter()
+        .map(|id| {
+            let has_guid = with_guid.contains(&id);
+            WinUsbInstance { id, has_guid }
+        })
+        .collect()
+}
+
+/// Immediate subkeys of a registry key, as full `HKEY_…` paths. Empty when `reg`
+/// is missing or refuses - indistinguishable from "no such devices", and both
+/// mean the caller must not conclude anything.
 fn reg_subkeys(key: &str) -> Vec<String> {
-    let Ok(out) = no_window(&mut Command::new("reg"))
-        .args(["query", key])
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
+    reg_dump(key)
         .lines()
         .map(str::trim)
-        .filter(|l| l.starts_with("HKEY_"))
+        .filter(|l| l.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("HKEY_")))
         .map(str::to_owned)
         .collect()
 }
 
-/// Does anything under this device key carry a device-interface GUID? The
-/// subtree is a few dozen lines, so dumping it beats guessing which subkey holds
-/// it and which of the two spellings (`DeviceInterfaceGUID`, `…GUIDs`) the INF
-/// used - `reg /v` matches value names exactly, not by prefix.
-fn reg_has_guid(key: &str) -> bool {
+/// `reg query <key> /s` as text, empty when `reg` cannot answer. A device subtree
+/// is a few dozen lines, so one dump beats guessing which subkey holds what -
+/// and `reg /v` matches value names EXACTLY, which would miss `…GUIDs` when
+/// asked for `…GUID`.
+fn reg_dump(key: &str) -> String {
     no_window(&mut Command::new("reg"))
         .args(["query", key, "/s"])
         .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("DeviceInterfaceGUID"))
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod guid_tests {
     use super::*;
+
+    /// Verbatim `reg query … /s` output from the bench: an ESP32-C3 whose SERIAL
+    /// interface was given WinUSB and a GUID by mistake while the JTAG interface
+    /// - the only one probe-rs opens - has none. The device-wide question
+    /// ("anything here got a GUID?") answers yes and is wrong.
+    const MI_00: &str =
+        r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001&MI_00";
+    const MI_02: &str =
+        r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001&MI_02";
+
+    fn mi_00_dump() -> String {
+        format!(
+            "{MI_00}\\6&205b2bf0&0&0000\n    \
+             Service    REG_SZ    WinUSB\n\
+             {MI_00}\\6&205b2bf0&0&0000\\Device Parameters\n    \
+             DeviceInterfaceGUIDs    REG_MULTI_SZ    {{0F7E33F1-955E-4C66-BF6C-95D59F852507}}\n\
+             {MI_00}\\6&205b2bf0&0&0000\\Properties\n\
+             {MI_00}\\6&fb727e3&1&0000\n    \
+             Service    REG_SZ    usbser\n\
+             {MI_00}\\6&fb727e3&1&0000\\Device Parameters\n"
+        )
+    }
+
+    fn mi_02_dump() -> String {
+        format!(
+            "{MI_02}\\6&205b2bf0&0&0002\n    \
+             Service    REG_SZ    WINUSB\n\
+             {MI_02}\\6&205b2bf0&0&0002\\Device Parameters\n\
+             {MI_02}\\6&205b2bf0&0&0002\\Device Parameters\\WDF\n    \
+             WdfDirectHardwareAccess    REG_DWORD    0x1\n\
+             {MI_02}\\6&fb727e3&1&0002\n    \
+             Service    REG_SZ    WINUSB\n\
+             {MI_02}\\6&fb727e3&1&0002\\Device Parameters\n"
+        )
+    }
+
+    #[test]
+    fn a_serial_port_bound_to_usbser_is_not_a_debug_interface() {
+        // Only the WinUSB-driven instance is reported; `usbser` never counts.
+        let found = winusb_instances(&mi_00_dump(), MI_00);
+        assert_eq!(found.len(), 1, "usbser instance must not be listed");
+        assert_eq!(found[0].id, "6&205b2bf0&0&0000");
+        assert!(found[0].has_guid);
+    }
+
+    #[test]
+    fn the_guid_is_read_from_device_parameters_not_the_instance_key() {
+        // Both JTAG instances are WinUSB and NEITHER has a GUID - the `Device
+        // Parameters` sections are there, just empty of one.
+        let found = winusb_instances(&mi_02_dump(), MI_02);
+        assert_eq!(
+            found.len(),
+            2,
+            "{:?}",
+            found.iter().map(|i| &i.id).collect::<Vec<_>>()
+        );
+        assert!(found.iter().all(|i| !i.has_guid));
+    }
+
+    #[test]
+    fn a_guid_on_the_serial_half_does_not_vouch_for_the_jtag_half() {
+        // The bug this replaced: asking the question device-wide. The serial
+        // interface has a GUID, the JTAG interface does not, and probe-rs can
+        // still not open the probe.
+        let serial = winusb_instances(&mi_00_dump(), MI_00);
+        let jtag = winusb_instances(&mi_02_dump(), MI_02);
+        assert!(serial.iter().any(|i| i.has_guid), "the misleading yes");
+        assert!(
+            jtag.iter().any(|i| !i.has_guid),
+            "and the answer that actually decides it"
+        );
+    }
+
+    #[test]
+    fn an_unplugged_board_does_not_vote() {
+        // `6&fb727e3&1` is a board that was removed; its keys stay behind for
+        // good. Only instances under the live board's ParentIdPrefix count.
+        let live = "6&205b2bf0&0";
+        assert!(belongs_to("6&205b2bf0&0&0002", Some(live)));
+        assert!(!belongs_to("6&fb727e3&1&0002", Some(live)));
+        // No serial in the selector - a non-composite probe - so nothing is
+        // excluded; that is the honest default, not a bug.
+        assert!(belongs_to("6&fb727e3&1&0002", None));
+    }
+
+    #[test]
+    fn a_localised_reg_error_does_not_panic_the_check() {
+        // `reg` writes its errors in the language Windows is installed in, so a
+        // dump can be a sentence rather than a key listing. Comparing a prefix
+        // of one by BYTES would cut a multi-byte character in half and panic -
+        // inside the background thread the Tools check runs on.
+        let dump = "FEHLER: Der angegebene Registrierungsschl\u{fc}ssel wurde nicht gefunden.\n\
+                    \u{3a9}\u{3a9}\u{3a9} unreadable\n    Service    REG_SZ    WINUSB\n";
+        assert!(winusb_instances(dump, MI_02).is_empty());
+        // An empty dump says nothing rather than claiming a fault.
+        assert!(winusb_instances("", MI_02).is_empty());
+    }
 
     #[test]
     fn a_selector_yields_the_registry_spelling_of_its_ids() {
@@ -244,6 +474,17 @@ mod guid_tests {
     }
 
     #[test]
+    fn a_serial_full_of_colons_survives_intact() {
+        // The ESP serial is itself colon-separated, so splitting on every colon
+        // would truncate it to "50" and find no device.
+        assert_eq!(
+            serial_of("303a:1001:50:78:7D:62:33:A4").as_deref(),
+            Some("50:78:7D:62:33:A4")
+        );
+        assert_eq!(serial_of("0483:3748"), None);
+    }
+
+    #[test]
     fn anything_that_is_not_two_hex_ids_is_refused() {
         // A key name gets built from these, so "nearly right" is not enough.
         for bad in ["", "303a", "303a:", "303a:100", "303a:10011", "zzzz:1001"] {
@@ -256,10 +497,8 @@ mod guid_tests {
         // The ESP32-C3 bench: the device plus its serial and JTAG interfaces.
         let all = vec![
             r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001".to_owned(),
-            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001&MI_00"
-                .to_owned(),
-            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001&MI_02"
-                .to_owned(),
+            MI_00.to_owned(),
+            MI_02.to_owned(),
             r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_0483&PID_3748".to_owned(),
         ];
         let mine = device_keys(&all, "303A", "1001");
@@ -269,8 +508,7 @@ mod guid_tests {
 
     #[test]
     fn a_longer_product_id_is_not_a_match() {
-        // `PID_1001` must not answer for `PID_10012` - different device, and
-        // the whole verdict is "no key of mine has a GUID".
+        // `PID_1001` must not answer for `PID_10012` - different device.
         let all = vec![
             r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_10012".to_owned(),
         ];
