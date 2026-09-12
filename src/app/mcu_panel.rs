@@ -2375,11 +2375,15 @@ impl AppIde {
                     if self.mcu.is_some() {
                         ui.horizontal(|ui| {
                             let Some(mcu) = &mut self.mcu else { return };
-                            let rot_hint = if mcu.is_quad_package() {
-                                "Rotate the chip 45° into a diamond — helps line up pins & modules. Toggle off to reset."
-                            } else {
-                                "Rotate the chip 90° (vertical / horizontal) — helps line up pins & modules."
-                            };
+                            // Asked of the SAME predicate the rotation itself
+                            // uses. Two hand-written package tests is how the
+                            // button came to promise a 90° turn on a ball grid
+                            // that the renderer would have made a diamond.
+                            let rot_hint =
+                                crate::panels::mcu_module::mcu::gui::rotate::RotMode::for_package(
+                                    mcu,
+                                )
+                                .hint();
                             if ui
                                 .selectable_label(
                                     mcu.rotated,

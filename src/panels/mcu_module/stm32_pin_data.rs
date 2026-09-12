@@ -200,8 +200,7 @@ pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<Convert
     }
     if let Some(g) = &grid {
         base_warnings.push(format!(
-            "{} ball(s) laid out on a {}x{} grid ({package}). Rotation is not available \
-             for grid packages.",
+            "{} ball(s) laid out on a {}x{} grid ({package}).",
             g.cells.len(),
             g.rows,
             g.cols

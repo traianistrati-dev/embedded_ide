@@ -158,9 +158,14 @@ impl Mcu {
         }
     }
 
-    /// A 4-sided (QFP-style) package — pins on 3 or 4 edges. Rotation makes it a
-    /// 45° diamond; a 2-sided (DIP) package rotates 90° instead. See
-    /// [`crate::panels::mcu_module::mcu::gui::rotate`].
+    /// A 4-sided (QFP-style) package — pins on 3 or 4 edges.
+    ///
+    /// One of the two inputs to
+    /// [`RotMode::for_package`](crate::panels::mcu_module::mcu::gui::rotate::RotMode::for_package),
+    /// not the whole rotation rule: a ball grid has every side vec EMPTY and
+    /// still becomes a diamond, on the strength of
+    /// [`has_inner_pins`](Self::has_inner_pins). Only a genuinely 2-sided (DIP)
+    /// package is left to rotate 90°.
     pub fn is_quad_package(&self) -> bool {
         [
             &self.top_pins,

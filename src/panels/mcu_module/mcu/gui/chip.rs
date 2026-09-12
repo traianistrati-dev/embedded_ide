@@ -1,6 +1,6 @@
 //! Chip body and pin rendering — draws the MCU chip and its pins on 4 sides.
 
-use super::geometry::{PinGeom, PinPlace, PinSide, pin_geometry};
+use super::geometry::{BALL_D, PinGeom, PinPlace, PinSide, pin_geometry};
 use super::rotate::{Rot, RotMode, ScreenSide};
 use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT, PIN_WIDTH};
 use crate::panels::mcu_module::pins::logic::pin::{PIN_FONT_SIZE, Pin};
@@ -262,22 +262,74 @@ fn render_diamond(
     for lp in &locals {
         bb = bb.union(egui::Rect::from_points(&rot.quad(lp.rect)));
     }
-    let resp = ui.interact(bb, ui.id().with("chip_diamond_pins"), egui::Sense::click());
+    // One interaction over the whole chip, and only for STUBS: rotated 45° a
+    // 50x30 stub has a 57 px bounding box on a 33 px pitch, so per-pin rects
+    // would steal each other's clicks. Balls have the opposite problem — a 34 px
+    // circle on a 46 px pitch never overlaps a neighbour — and take their own
+    // interact inside `Pin::draw_ball`. On a package that is ALL balls, claiming
+    // this rect anyway would swallow every click on the body's empty space and
+    // stop it clearing the selection, which is not what the same chip does
+    // upright.
+    let has_stubs = locals
+        .iter()
+        .any(|lp| matches!(lp.place, PinPlace::Edge(_)));
+    let resp =
+        has_stubs.then(|| ui.interact(bb, ui.id().with("chip_diamond_pins"), egui::Sense::click()));
     // Inverse-rotate the pointer into the local frame. `hover_pos` applies the
     // Scene's layer transform, so this is correct at any zoom; on the click
     // frame the pointer is where the click landed, so it doubles as the click
     // position (avoids `interact_pointer_pos`, which is not layer-adjusted).
-    let hover_local = resp.hover_pos().map(|p| rot.inverse(p));
-    let clicked_now = resp.clicked();
+    let hover_local = resp
+        .as_ref()
+        .and_then(|r| r.hover_pos())
+        .map(|p| rot.inverse(p));
+    let clicked_now = resp.is_some_and(|r| r.clicked());
 
     let mut clicked = None;
     for lp in &locals {
+        // Balls live INSIDE the body, which is where a selected pin's function
+        // list goes — the same rule, for the same reason, as the upright
+        // renderer's. Without it the list would have 201 click targets under it.
+        if selected.is_some() && matches!(lp.place, PinPlace::Ball { .. }) {
+            continue;
+        }
         let is_sel = selected == Some(lp.pin.number);
-        let hovered = hover_local.is_some_and(|p| lp.rect.contains(p));
         let painter = &dimmed(
             painter,
             hits.as_ref().is_some_and(|h| !h.contains(&lp.pin.number)),
         );
+        if let PinPlace::Ball { designator } = &lp.place {
+            // A circle is invariant under rotation — only its CENTRE moves — so
+            // `Pin::draw_ball` is reused whole rather than re-implemented as a
+            // rotated quad: round shape, name fitted to the diameter, the
+            // hover/selected fills, the rule that a reserved rail does not light
+            // up (a BGA is mostly VDD and VSS), and the selection ring. Its own
+            // `interact` registers here, INSIDE the loop, so it lands above the
+            // body-wide one taken before the loop and wins the click.
+            let scr = ball_screen_rect(lp, rot);
+            if lp.pin.draw_ball(painter, scr, Some(ui), is_sel) {
+                clicked = Some(lp.pin.number);
+            }
+            // The designator hangs straight DOWN on screen instead of riding the
+            // rotation. Carried rigidly it would swing to the lower LEFT, where
+            // the next ball is one BALL_PITCH away and the label lands on it;
+            // straight down the nearest ball is the local DIAGONAL neighbour, a
+            // further √2 out. The cost is that the labels do not turn with the
+            // lattice, which is the readable half of the trade.
+            draw_designator(
+                painter,
+                selected.is_none(),
+                scr.center() + egui::vec2(0.0, BALL_D / 2.0 + 2.0),
+                egui::Align2::CENTER_TOP,
+                designator,
+                lp.pin,
+            );
+            if let Some(grp) = mcu.group_of_pin(lp.pin.number) {
+                draw_group_tick(painter, lp, rot, super::modules::group_color(&grp.name));
+            }
+            continue;
+        }
+        let hovered = hover_local.is_some_and(|p| lp.rect.contains(p));
         painter.add(egui::Shape::convex_polygon(
             rot.quad(lp.rect),
             lp.pin.get_background_color(),
@@ -360,6 +412,20 @@ fn render_diamond(
         }
     }
     clicked
+}
+
+/// Where a ball lands on screen once the chip is rotated.
+///
+/// A circle is invariant under rotation, so the rect stays UPRIGHT and exactly
+/// `BALL_D` across; only the centre moves. A stub cannot be treated this way —
+/// `Rot::quad` of one inflates its bounding box by up to √2 — which is why the
+/// two paths differ at all.
+///
+/// A free function and not an inline expression because `render_diamond` needs
+/// a `Painter` and a `Ui` and so cannot be reached from a test, while this is
+/// the whole of the geometry the ball arm adds.
+fn ball_screen_rect(g: &PinGeom<'_>, rot: Rot) -> egui::Rect {
+    egui::Rect::from_center_size(rot.apply(g.rect.center()), g.rect.size())
 }
 
 /// The device mark on a pad: a short bar across the outer tip of its stub, in
@@ -487,4 +553,237 @@ pub fn render_pins_and_detect_clicks(
     }
 
     clicked_pin
+}
+
+/// The one piece of the diamond's ball arm that a test can reach.
+#[cfg(test)]
+mod a_rotated_ball {
+    use super::*;
+    use crate::panels::mcu_module::mock_mcu;
+
+    fn body() -> egui::Rect {
+        egui::Rect::from_center_size(egui::pos2(400.0, 300.0), egui::vec2(220.0, 320.0))
+    }
+
+    /// A ball moves with the rotation but does not TURN with it, and it does
+    /// not grow.
+    ///
+    /// The distinction is the whole reason `render_diamond` needed a second
+    /// arm. A stub goes through `Rot::quad`, whose axis-aligned bounding box at
+    /// 45° is up to sqrt(2) wider than the stub — correct there, because a
+    /// rotated rectangle really does cover more screen. A circle covers exactly
+    /// the same disc at every angle, so treating it the same way would inflate
+    /// every ball by 41% and overlap its neighbours on a 46 px pitch.
+    #[test]
+    fn a_ball_is_drawn_at_its_rotated_centre_and_keeps_its_diameter() {
+        let mcu = mock_mcu::create_wlcsp12();
+        let chip = body();
+        let mut balls = 0;
+        for angle in [
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+            std::f32::consts::FRAC_PI_4,
+        ] {
+            let rot = Rot::new(chip.center(), angle);
+            for g in pin_geometry(&mcu, chip) {
+                assert!(
+                    matches!(g.place, PinPlace::Ball { .. }),
+                    "WLCSP is all balls"
+                );
+                balls += 1;
+                let scr = ball_screen_rect(&g, rot);
+                let want = rot.apply(g.rect.center());
+                assert!(
+                    (scr.center() - want).length() < 0.01,
+                    "pin {} at {angle}: {:?} vs {want:?}",
+                    g.pin.number,
+                    scr.center()
+                );
+                assert!(
+                    (scr.width() - BALL_D).abs() < 0.01 && (scr.height() - BALL_D).abs() < 0.01,
+                    "pin {} at {angle} measured {:?}",
+                    g.pin.number,
+                    scr.size()
+                );
+            }
+        }
+        assert_eq!(balls, 36, "12 balls at each of three angles");
+    }
+
+    /// And the stub treatment really would be wrong — the comparison the arm
+    /// exists to avoid, pinned so it cannot quietly stop being true.
+    #[test]
+    fn the_stub_treatment_would_inflate_it() {
+        let mcu = mock_mcu::create_wlcsp12();
+        let chip = body();
+        let rot = Rot::new(chip.center(), std::f32::consts::FRAC_PI_4);
+        let g = pin_geometry(&mcu, chip).next().expect("a ball");
+        let as_stub = egui::Rect::from_points(&rot.quad(g.rect));
+        assert!(
+            as_stub.width() > ball_screen_rect(&g, rot).width() * 1.4,
+            "a quad'd ball spans {} against the circle's {BALL_D}",
+            as_stub.width()
+        );
+    }
+}
+
+/// Driving the real renderer, headlessly.
+///
+/// `egui::Context::run_ui` needs no window and no GPU, so the whole of
+/// `Mcu::draw` can be exercised in a unit test. It is the only way to reach the
+/// diamond's ball arm at all — everything else in this file's tests stops at
+/// the geometry seam.
+#[cfg(test)]
+mod the_diamond_really_runs_on_a_ball_grid {
+    use super::*;
+    use crate::panels::mcu_module::mock_mcu;
+
+    /// How many circles and convex polygons a frame painted, anywhere in its
+    /// shape tree. A ball is a circle; a rotated stub — and the diamond body —
+    /// is a convex polygon.
+    fn shape_census(shapes: &[egui::epaint::ClippedShape]) -> (usize, usize) {
+        fn walk(s: &egui::Shape, c: &mut usize, p: &mut usize) {
+            match s {
+                egui::Shape::Circle(_) => *c += 1,
+                egui::Shape::Path(_) => *p += 1,
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, c, p)),
+                _ => {}
+            }
+        }
+        let (mut c, mut p) = (0, 0);
+        for s in shapes {
+            walk(&s.shape, &mut c, &mut p);
+        }
+        (c, p)
+    }
+
+    /// Every string a frame painted, anywhere in its shape tree.
+    fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for s in shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    /// Paint one frame of the Pins canvas for `mcu` and hand back its shapes.
+    fn frame(mcu: &mut Mcu) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 1200.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            mcu.draw(ui);
+        })
+        .shapes
+    }
+
+    fn frame_census(mcu: &mut Mcu) -> (usize, usize) {
+        shape_census(&frame(mcu))
+    }
+
+    /// Rotating a ball grid must not cost it a single ball.
+    ///
+    /// A differential test, because the absolute count is not the interesting
+    /// number — the EQUALITY is. Before the ball arm existed, turning this chip
+    /// on would have routed all twelve balls through the stub path, which paints
+    /// `Shape::convex_polygon`: the upright frame would still have drawn twelve
+    /// circles and the rotated one none. Any future change that quietly drops
+    /// balls out of the diamond shows up here as a smaller number, and a panic
+    /// in the new arm shows up as a failure rather than as a blank canvas.
+    #[test]
+    fn a_rotated_grid_paints_the_same_balls_as_an_upright_one() {
+        let mut upright = mock_mcu::create_wlcsp12();
+        let (flat_circles, _) = frame_census(&mut upright);
+        assert!(
+            flat_circles >= 12,
+            "the twelve balls of a WLCSP12, upright: {flat_circles} circles"
+        );
+
+        let mut turned = mock_mcu::create_wlcsp12();
+        turned.rotated = true;
+        assert_eq!(
+            super::super::rotate::RotMode::of(&turned),
+            super::super::rotate::RotMode::Diamond,
+            "the fixture must actually reach the diamond path"
+        );
+        let (turned_circles, turned_polys) = frame_census(&mut turned);
+        assert_eq!(
+            turned_circles, flat_circles,
+            "a turned ball grid loses balls - the diamond is drawing them as quads"
+        );
+        // The other half of the claim: it is not drawing them as BOTH. The one
+        // polygon a rotated WLCSP is entitled to is the diamond body itself —
+        // it has no stubs to rotate and no device ticks. Twelve more would mean
+        // the ball arm fell through into the stub path instead of returning.
+        assert_eq!(
+            turned_polys, 1,
+            "only the body should be a polygon on an all-ball package"
+        );
+    }
+
+    /// A turned ball is still labelled with what the DATASHEET calls it.
+    ///
+    /// The designator is the only handle a board has on a ball; the pin number
+    /// beside it is our own 1..N ordinal, assigned in reading order by the
+    /// importer, and means nothing outside this program. The stub path prints
+    /// that ordinal, correctly, because an edge pin really is pin 7 — so the
+    /// whole reason the ball arm calls `draw_designator` instead is this, and
+    /// nothing about the shapes would have noticed the difference.
+    #[test]
+    fn every_ball_still_carries_its_datasheet_designator() {
+        let mut turned = mock_mcu::create_wlcsp12();
+        turned.rotated = true;
+        let painted = texts(&frame(&mut turned));
+        let cells = turned.grid.as_ref().expect("a ball grid").cells.clone();
+        assert_eq!(cells.len(), 12);
+        for c in &cells {
+            let d = c.designator();
+            assert!(
+                painted.contains(&d),
+                "ball {} ({}) lost its designator {d}; the frame says {painted:?}",
+                c.pin.number,
+                c.pin.name
+            );
+        }
+    }
+
+    /// Selecting a ball clears the body for its function list, turned as well as
+    /// upright.
+    ///
+    /// The list is drawn INSIDE the body, which on a grid package is where every
+    /// ball is. The upright renderer has always stepped them aside for it; the
+    /// diamond needed the same rule copied in, or the rows would have shown
+    /// twelve circles through them and, worse, kept a click target under each.
+    #[test]
+    fn a_selected_pin_clears_the_balls_off_the_body_in_both_orientations() {
+        let mut upright = mock_mcu::create_wlcsp12();
+        let (loose, _) = frame_census(&mut upright);
+        upright.selected_pin = Some(1);
+        let (upright_open, _) = frame_census(&mut upright);
+        assert!(
+            upright_open < loose,
+            "the upright renderer drops balls while the list is open: {upright_open} vs {loose}"
+        );
+
+        let mut turned = mock_mcu::create_wlcsp12();
+        turned.rotated = true;
+        turned.selected_pin = Some(1);
+        assert_eq!(
+            frame_census(&mut turned).0,
+            upright_open,
+            "the diamond keeps balls under the function list"
+        );
+    }
 }

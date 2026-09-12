@@ -1,13 +1,21 @@
 //! Diagram rotation for the Pins canvas (view-only — never touches the model's
 //! pin/side vecs or codegen).
 //!
-//! Two modes, chosen by the package ([`RotMode::of`]):
+//! Two SHAPES, and three kinds of package feeding them
+//! ([`RotMode::for_package`]):
 //! * **Quarter** — a 2-sided (DIP) chip turns 90° clockwise (vertical ⇄
 //!   horizontal). Everything stays axis-aligned, so the pins are re-drawn on
 //!   their rotated screen side reusing the normal per-side pin renderers.
-//! * **Diamond** — a 4-sided (QFP) chip becomes a 45° diamond. That is a real
-//!   2-D rotation: geometry is rotated for drawing via [`Rot`], and the pointer
-//!   is inverse-rotated for hit-testing.
+//! * **Diamond** — a 4-sided (QFP) chip, or a BALL GRID (BGA, WLCSP), becomes a
+//!   45° diamond. That is a real 2-D rotation: geometry is rotated for drawing
+//!   via [`Rot`], and the pointer is inverse-rotated for hit-testing.
+//!
+//! A grid rides the same 45° rotation as a quad because a ball is a POINT, and
+//! a point transform is all the diamond is. What the grid still cannot do is
+//! TRANSPOSE (row ⇄ column) — which is what "turn the ballout" means on a
+//! datasheet, and is a different, so far unimplemented, operation. This module
+//! used to refuse a grid outright on the strength of that distinction, which
+//! left the toggle lit over a chip that never moved.
 //!
 //! Both compute pin geometry in the chip's LOCAL (un-rotated) frame — identical
 //! to the default layout — then apply [`Rot`]. Angles are clockwise-positive to
@@ -23,24 +31,49 @@ pub enum RotMode {
     None,
     /// 2-sided (DIP) chip rotated 90° clockwise.
     Quarter,
-    /// 4-sided (QFP) chip rotated 45° clockwise (diamond).
+    /// 4-sided (QFP) chip or ball grid rotated 45° clockwise (diamond).
     Diamond,
 }
 
+/// Hover text for the toggle, one per shape. Whole literals, not assembled from
+/// continued ones: a `\`-continuation renders as a run of spaces the moment
+/// rustfmt reflows it, and this file has no reason to risk that.
+const DIAMOND_HINT: &str =
+    "Rotate the chip 45° into a diamond — helps line up pins & modules. Toggle off to reset.";
+const QUARTER_HINT: &str =
+    "Rotate the chip 90° (vertical / horizontal) — helps line up pins & modules.";
+
 impl RotMode {
-    /// Pick the mode from the chip's package and its `rotated` toggle.
-    pub fn of(mcu: &Mcu) -> Self {
-        // A ball grid has no edges to rotate onto: turning it means transposing
-        // (row, column), which is a different operation from either mode here.
-        // Until that exists, a grid package simply doesn't rotate.
-        if mcu.grid.is_some() {
-            RotMode::None
-        } else if !mcu.rotated {
-            RotMode::None
-        } else if mcu.is_quad_package() {
+    /// The shape this PACKAGE turns into — what the toggle *would* do, asked
+    /// without reference to whether it is currently on.
+    ///
+    /// Split out from [`Self::of`] because the hover text has to name the
+    /// rotation BEFORE it happens, and while it ran its own package test the
+    /// two could disagree: [`Mcu::is_quad_package`] counts non-empty side vecs
+    /// and needs three, so a ball grid — whose four sides are all empty, every
+    /// pin being a cell — scored zero and was promised a 90° turn.
+    pub fn for_package(mcu: &Mcu) -> Self {
+        if mcu.is_quad_package() || mcu.has_inner_pins() {
             RotMode::Diamond
         } else {
             RotMode::Quarter
+        }
+    }
+
+    /// Pick the mode from the chip's package and its `rotated` toggle.
+    pub fn of(mcu: &Mcu) -> Self {
+        if mcu.rotated {
+            Self::for_package(mcu)
+        } else {
+            RotMode::None
+        }
+    }
+
+    /// What the Rotate toggle promises, for its hover text.
+    pub fn hint(self) -> &'static str {
+        match self {
+            RotMode::Diamond => DIAMOND_HINT,
+            _ => QUARTER_HINT,
         }
     }
 
@@ -134,6 +167,92 @@ impl ScreenSide {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panels::mcu_module::mock_mcu;
+
+    // ── Which shape a package turns into ────────────────────────────────────
+    // `RotMode::of` had no test at all until a ball grid turned out not to
+    // rotate — the gate that produced the bug was the one uncovered thing in
+    // the file. These cover it in both directions: what turns, and what the
+    // button SAYS will turn.
+
+    /// A ball grid becomes a diamond.
+    ///
+    /// It cannot lean on [`Mcu::is_quad_package`]: a WLCSP has all four side
+    /// vecs empty — every pin is a grid cell — so that predicate says no. The
+    /// diamond is right anyway, because a ball is a POINT and 45° is a point
+    /// transform; only a row/column TRANSPOSE would need edges to land on.
+    #[test]
+    fn a_ball_grid_rotates_into_a_diamond() {
+        let mut mcu = mock_mcu::create_wlcsp12();
+        assert!(
+            !mcu.is_quad_package(),
+            "a WLCSP has no edge pins to count, which is the trap"
+        );
+        mcu.rotated = true;
+        assert_eq!(RotMode::of(&mcu), RotMode::Diamond);
+    }
+
+    /// The TOGGLE decides whether anything happens, the PACKAGE only decides
+    /// what. The old gate confused the two: it answered `None` for a grid
+    /// however the toggle stood, so the button lit up over a chip that never
+    /// moved.
+    #[test]
+    fn an_unrotated_grid_is_still_upright() {
+        let mcu = mock_mcu::create_wlcsp12();
+        assert!(!mcu.rotated, "the fixture starts upright");
+        assert_eq!(RotMode::of(&mcu), RotMode::None);
+        assert_eq!(
+            RotMode::for_package(&mcu),
+            RotMode::Diamond,
+            "…but it is a diamond the moment it is switched on"
+        );
+    }
+
+    /// Every package the app can draw has a rotation.
+    ///
+    /// A new package kind that fell through to `None` would draw nothing and
+    /// explain nothing — the exact failure this file used to have — so it fails
+    /// here instead of on someone's screen.
+    #[test]
+    fn every_package_has_a_rotation() {
+        for mcu in [
+            mock_mcu::create_stm32f103c8tx(),
+            mock_mcu::create_wlcsp12(),
+            mock_mcu::create_two_sided(),
+        ] {
+            assert_ne!(RotMode::for_package(&mcu), RotMode::None, "{}", mcu.name);
+        }
+    }
+
+    /// The hover text and the rotation read ONE predicate.
+    ///
+    /// They did not: the toggle ran its own `is_quad_package()` test, so on a
+    /// ball grid it promised a 90° turn while the renderer would have delivered
+    /// 45°. Two hand-written package tests is how that divergence was possible
+    /// at all, and this is what stops a third from appearing.
+    #[test]
+    fn the_hint_matches_the_mode() {
+        for mcu in [
+            mock_mcu::create_stm32f103c8tx(),
+            mock_mcu::create_wlcsp12(),
+            mock_mcu::create_two_sided(),
+        ] {
+            let mode = RotMode::for_package(&mcu);
+            let hint = mode.hint();
+            assert_eq!(
+                hint.contains("45°"),
+                mode == RotMode::Diamond,
+                "{} says: {hint}",
+                mcu.name
+            );
+            assert_eq!(
+                hint.contains("90°"),
+                mode == RotMode::Quarter,
+                "{} says: {hint}",
+                mcu.name
+            );
+        }
+    }
 
     #[test]
     fn identity_is_noop() {

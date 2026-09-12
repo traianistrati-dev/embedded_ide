@@ -48,11 +48,12 @@ impl Mcu {
             None => layout::calculate_layout(top_count, left_count, geometry::top_pad(self)),
         };
 
-        // Diagram rotation (view-only): a 2-sided chip turns 90°, a 4-sided one
-        // becomes a 45° diamond. `local_chip` is the un-rotated body used to
-        // compute pin geometry; `display_chip` is the axis-aligned rect the body
-        // + info panel + modules use; `content_rect` is where the inner panel
-        // draws (shrunk to fit the diamond). See `rotate.rs`.
+        // Diagram rotation (view-only): a 2-sided chip turns 90°, while a
+        // 4-sided one and a ball grid both become a 45° diamond. `local_chip`
+        // is the un-rotated body used to compute pin geometry; `display_chip`
+        // is the axis-aligned rect the body + info panel + modules use;
+        // `content_rect` is where the inner panel draws (shrunk to fit the
+        // diamond). See `rotate.rs`.
         let rot_mode = rotate::RotMode::of(self);
 
         // Reserve a margin all around the chip for virtual modules and in/out

@@ -257,3 +257,38 @@ pub fn create_stm32f103c8tx() -> Mcu {
         right_pins,
     )
 }
+
+/// The STM32C011D6Yx in WLCSP12 — the tree's ball-grid chip, built from the
+/// shipped example rather than hand-typed.
+///
+/// Its four side vecs come out EMPTY and all twelve pins are grid cells, which
+/// is the property most tests about ball grids actually turn on: a package
+/// whose pins are all inside the body. Reading the `.ron` keeps that property
+/// tied to real shipped data instead of to a literal a refactor could quietly
+/// change.
+pub fn create_wlcsp12() -> Mcu {
+    const SRC: &str = include_str!("../../../assets/mcus/examples/stm32c011d6yx_wlcsp12.ron");
+    ron::from_str::<super::mcu_def::McuDefinition>(SRC)
+        .expect("the shipped WLCSP12 example must parse")
+        .build_mcu()
+}
+
+/// A genuinely 2-sided (DIP-style) chip: pins on the left and right only.
+///
+/// Hand-built because the tree ships none — every `.ron` in `assets/mcus` fills
+/// three or four sides, and a two-row package only ever arrives from an import
+/// (`stm32_pin_data::distribute_sides_2row`). Without it the 90° branch of the
+/// rotation rule has nothing to test it with.
+pub fn create_two_sided() -> Mcu {
+    let left = (1..=4).map(|n| Pin::new(n, &format!("PA{n}"))).collect();
+    let right = (5..=8).map(|n| Pin::new(n, &format!("PB{n}"))).collect();
+    Mcu::new(
+        "SO8N-ish".to_owned(),
+        "stm32f0".to_owned(),
+        ToolchainKind::RustEmbedded,
+        vec![],
+        vec![],
+        left,
+        right,
+    )
+}
