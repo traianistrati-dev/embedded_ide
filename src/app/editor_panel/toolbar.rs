@@ -515,7 +515,16 @@ impl AppIde {
                     project.probe_chip.clone(),
                     self.selected_probe.clone(),
                     toolchain,
-                    400, // sample count — a few seconds of halt-sampling
+                    // Sample count. Measured on an ESP32-C3 over its built-in
+                    // USB-JTAG: ~0.44 s per sample, nearly all of it the
+                    // pause/stackTrace/continue round trip and none of it the
+                    // 8 ms spacing - so 400 was about THREE MINUTES of watching
+                    // a counter, not the "few seconds" it used to claim here.
+                    // 120 is ~55 s, and still leaves a branch worth 10% of the
+                    // runtime around a dozen samples wide - enough to read off
+                    // the graph. Three hardware runs at this count landed
+                    // within 8-11% of a 10% branch.
+                    120,
                     Arc::clone(&self.flame_state),
                     self.egui_ctx.clone(),
                 );

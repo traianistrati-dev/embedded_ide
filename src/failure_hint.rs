@@ -71,6 +71,11 @@ pub const HINTS: &[Hint] = &[
         title: "The debug session never started",
         tool: None, // nothing to install — it is a build/probe situation
     },
+    Hint {
+        tag: "[STALE_OUT_DIR]",
+        title: "A dependency's generated file is missing",
+        tool: None, // nothing to install — one package's fingerprint has to go
+    },
 ];
 
 /// The tagged message for a `launch` that the adapter never answered. `elf_mb`
@@ -259,6 +264,76 @@ pub fn flash_full_message(detail: &str) -> String {
     )
 }
 
+/// The package whose build script left nothing in `OUT_DIR`, from a rustc
+/// `couldn't read` diagnostic — `None` when the output holds no such failure.
+///
+/// A build script writes generated code into `OUT_DIR` and its crate pulls it
+/// back in with `include!(concat!(env!("OUT_DIR"), …))`. Delete that one file
+/// and the build is stuck for good, because cargo fingerprints a build script's
+/// INPUTS and never its outputs: the script still counts as fresh, so it is
+/// never re-run, and every Build and every Clippy fails identically until the
+/// fingerprint is cleared by hand.
+///
+/// Worth naming rather than leaving in the diagnostic list, because the line it
+/// points at lives inside a registry crate — it reads as "that dependency is
+/// broken" or "my code is broken", and neither is true. The path is the only
+/// thing that names the culprit, and cargo's layout puts it there verbatim:
+/// `…/build/<pkg>-<hash>/out/<file>`.
+pub fn stale_out_dir(text: &str) -> Option<String> {
+    text.lines()
+        .filter(|l| l.contains("couldn't read"))
+        .find_map(package_from_out_dir_path)
+}
+
+/// `<pkg>` out of a `…/build/<pkg>-<hash>/out/…` path anywhere in `line`.
+///
+/// Separators are MIXED in the real message and matching both forms is hopeless
+/// without normalising first: the `OUT_DIR` half arrives with the platform's own
+/// (`\` on Windows) while the `concat!` half is always `/`, so one path reads
+/// `…\build\serde_core-f9656f87a1d5476f\out/private.rs`.
+fn package_from_out_dir_path(line: &str) -> Option<String> {
+    let norm = line.replace('\\', "/");
+    // The LAST `/build/`: a project living under a directory of that name would
+    // otherwise win over cargo's own, which is always the deeper one.
+    let (_, after) = norm.rsplit_once("/build/")?;
+    let (dir, _) = after.split_once("/out/")?;
+    // Package names carry hyphens (`proc-macro2`) and the hash never does, so
+    // only the LAST segment may be cut off.
+    let (name, hash) = dir.rsplit_once('-')?;
+    let hashish = hash.len() >= 8 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+    (!name.is_empty() && hashish).then(|| name.to_owned())
+}
+
+/// The tagged message for a build script whose `OUT_DIR` lost its generated
+/// file. `pkg` is spelled exactly as `cargo clean -p` wants it.
+pub fn stale_out_dir_message(pkg: &str) -> String {
+    format!(
+        "[STALE_OUT_DIR] `{pkg}` can't find the file its own build script generated.\n\n\
+         The script writes that file into OUT_DIR and the crate includes it back with \
+         `include!(concat!(env!(\"OUT_DIR\"), …))`. It is gone — but cargo still counts the \
+         script as fresh, because a build script is fingerprinted by its INPUTS and never by \
+         what it produced. So cargo will not re-run it on its own, and every Build and every \
+         Clippy fails this same way until that one fingerprint is thrown away.\n\n\
+         This is neither your code nor a broken dependency: something outside cargo deleted \
+         files under the build workspace. A temp-file cleaner (Windows Storage Sense, Disk \
+         Cleanup), an antivirus, or a build killed mid-write all do it.\n\n\
+         -> Click \"Clean {pkg}\" below, then Build again. Only that package is rebuilt.\n\
+         -> The same by hand:  cargo clean -p {pkg}"
+    )
+}
+
+/// The package name back out of a [`stale_out_dir_message`] — what the card's
+/// recovery button hands to `cargo clean -p`.
+///
+/// Read back from the composed message rather than carried beside it: the
+/// message is the whole of what crosses into [`crate::build::BuildState`]`::Failed`,
+/// and a second channel for one string is a second thing to keep in step.
+pub fn stale_out_dir_package(msg: &str) -> Option<&str> {
+    let (_, rest) = msg.split_once("cargo clean -p ")?;
+    let pkg = rest.split_whitespace().next()?;
+    (!pkg.is_empty()).then_some(pkg)
+}
+
 /// The hint for `msg` plus the message with its marker removed. Pure.
 pub fn parse(msg: &str) -> Option<(&'static Hint, &str)> {
     HINTS.iter().find_map(|h| {
@@ -345,6 +420,64 @@ mod tests {
         assert_eq!(h.title, "MSVC build tools missing or incomplete");
         assert_eq!(rest, "libs are gone");
         assert_eq!(strip("[DISK_FULL] no space"), "no space");
+    }
+
+    /// The real diagnostic, kept verbatim — mixed separators and all. The `\`
+    /// of `OUT_DIR` meeting the `/` of `concat!` is exactly what a naive
+    /// `contains("/out/")` misses on Windows.
+    const LOST_OUT_DIR: &str = "error: couldn't read `C:\\Users\\istra\\AppData\\Local\\Temp\\embedded_ide_0_check\\target\\debug\\build\\serde_core-f9656f87a1d5476f\\out/private.rs`: The system cannot find the file specified. (os error 2)\n   --> C:\\Users\\istra\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\serde_core-1.0.229\\src\\crate_root.rs:165:9";
+
+    #[test]
+    fn finds_the_package_that_lost_its_out_dir() {
+        assert_eq!(stale_out_dir(LOST_OUT_DIR).as_deref(), Some("serde_core"));
+    }
+
+    /// Package names contain hyphens; the hash does not. Cutting at the FIRST
+    /// one would hand `cargo clean -p` the string "proc", which is not a
+    /// package and fails with no useful message.
+    #[test]
+    fn hyphenated_package_survives_the_hash_split() {
+        let line = "error: couldn't read `/tmp/w/target/debug/build/proc-macro2-4b2f539c19a5d13e/out/probe.rs`: No such file";
+        assert_eq!(stale_out_dir(line).as_deref(), Some("proc-macro2"));
+    }
+
+    /// A project that happens to live under a `build/` directory must not
+    /// shadow cargo's own, which is always deeper.
+    #[test]
+    fn the_deepest_build_directory_wins() {
+        let line = "error: couldn't read `C:\\build\\myproj\\target\\debug\\build\\ring-0123456789abcdef\\out/x.rs`: nope";
+        assert_eq!(stale_out_dir(line).as_deref(), Some("ring"));
+    }
+
+    /// Not every `couldn't read` is this. A missing file of the user's own has
+    /// no `build/<pkg>-<hash>/out/` shape, and claiming it does would offer a
+    /// `cargo clean -p` for a package that does not exist.
+    #[test]
+    fn an_ordinary_missing_file_is_not_a_stale_out_dir() {
+        assert!(stale_out_dir("error: couldn't read `src/pins/configs/uart1.rs`: nope").is_none());
+        assert!(stale_out_dir("error[E0425]: cannot find value `x`").is_none());
+        // Right shape, but the tail is not a hash — so not cargo's layout.
+        assert!(
+            stale_out_dir("error: couldn't read `/w/target/debug/build/my-crate/out/g.rs`: nope")
+                .is_none()
+        );
+    }
+
+    /// The button reads the package back out of the message it renders, so the
+    /// two must round-trip. Written as one test because separately they can
+    /// both pass while disagreeing.
+    #[test]
+    fn message_round_trips_the_package_name() {
+        for pkg in ["serde_core", "proc-macro2", "ring"] {
+            let msg = stale_out_dir_message(pkg);
+            assert!(msg.starts_with("[STALE_OUT_DIR]"), "{msg}");
+            assert_eq!(stale_out_dir_package(&msg), Some(pkg));
+            // The copy-paste line has to survive rustfmt joining the literal.
+            assert!(msg.contains(&format!("cargo clean -p {pkg}")), "{msg}");
+            // And the card must know the tag, or it renders as raw text.
+            assert!(parse(&msg).is_some(), "{pkg} tag missing from HINTS");
+        }
+        assert!(stale_out_dir_package("[DISK_FULL] no space").is_none());
     }
 
     #[test]

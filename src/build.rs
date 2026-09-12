@@ -574,6 +574,33 @@ pub fn start_clean(
     });
 }
 
+/// `cargo clean -p <package>` — the targeted form of [`start_clean`].
+///
+/// Recovering a lost `OUT_DIR` needs exactly one package's fingerprint thrown
+/// away. A full `cargo clean` also works and is what the disk-full card offers,
+/// but here it would buy nothing and cost a cold rebuild of the whole tree —
+/// minutes on an ESP32 target, for a fault in one crate.
+pub fn start_clean_package(
+    workspace_dir: PathBuf,
+    package: String,
+    state: Arc<Mutex<BuildState>>,
+    ctx: eframe::egui::Context,
+) {
+    *state.lock().unwrap() = BuildState::Building;
+    ctx.request_repaint();
+
+    thread::spawn(move || {
+        let _ = no_window(&mut Command::new("cargo"))
+            .current_dir(&workspace_dir)
+            .args(["clean", "-p", &package])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        *state.lock().unwrap() = BuildState::Idle;
+        ctx.request_repaint();
+    });
+}
+
 // ── Internal ──────────────────────────────────────────────────────────────────
 
 /// Ensure the rustup target is installed, then run `cargo <subcommand>` (either
@@ -742,6 +769,16 @@ fn run_cargo(
     );
     if let Some(detail) = crate::failure_hint::flash_overflow(&linker_text) {
         return BuildState::Failed(crate::failure_hint::flash_full_message(&detail));
+    }
+
+    // A dependency's build script generated a file that is no longer there.
+    // Same shape as the overflow above — an ordinary `error` diagnostic — and
+    // checked in the same place for the same reason, but it needs saying even
+    // louder: the line it points at is inside a registry crate, so the list
+    // alone reads as a broken dependency. It is also not self-healing; cargo
+    // will skip that build script forever (see `failure_hint::stale_out_dir`).
+    if let Some(pkg) = crate::failure_hint::stale_out_dir(&linker_text) {
+        return BuildState::Failed(crate::failure_hint::stale_out_dir_message(&pkg));
     }
 
     if !saw_build_finished {

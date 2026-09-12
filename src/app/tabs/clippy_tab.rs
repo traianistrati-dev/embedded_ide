@@ -152,7 +152,40 @@ pub fn show_clippy_tab(
                 .show(ui, |ui| {
                     // Known cause (missing clippy / MSVC toolchain …) → shared
                     // card; otherwise the raw message.
-                    if crate::failure_hint::show_card(ui, msg, |_| {}) {
+                    //
+                    // A lost OUT_DIR fails Clippy exactly as it fails Build —
+                    // it is one `cargo check` underneath — so the recovery
+                    // button belongs on BOTH cards. Without it this tab would
+                    // explain the problem and then leave the user to run the
+                    // command by hand.
+                    let stale_pkg = msg
+                        .starts_with("[STALE_OUT_DIR]")
+                        .then(|| crate::failure_hint::stale_out_dir_package(msg))
+                        .flatten()
+                        .map(str::to_owned);
+                    if crate::failure_hint::show_card(ui, msg, |ui| {
+                        if let Some(pkg) = &stale_pkg
+                            && ui
+                                .add(egui::Button::new(
+                                    egui::RichText::new(format!("{} Clean {pkg}", ph::TRASH))
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(255, 210, 80)),
+                                ))
+                                .on_hover_text(format!(
+                                    "Run `cargo clean -p {pkg}` — throws away that one \
+                                     package's fingerprint so its build script runs again on \
+                                     the next run.\nNothing else is rebuilt."
+                                ))
+                                .clicked()
+                        {
+                            crate::build::start_clean_package(
+                                crate::workspace::dir(),
+                                pkg.clone(),
+                                Arc::clone(clippy_state),
+                                ui.ctx().clone(),
+                            );
+                        }
+                    }) {
                         return;
                     }
                     ui.add(

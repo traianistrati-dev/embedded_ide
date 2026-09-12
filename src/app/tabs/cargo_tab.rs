@@ -212,6 +212,13 @@ pub fn show_cargo_tab(
             // `crate::failure_hint`; the disk-full case adds its own recovery
             // button, the tool-related ones get "Open Tools" for free.
             let is_disk_full = msg.starts_with("[DISK_FULL]");
+            // The one package whose build script has to re-run. Owned, not
+            // borrowed from `msg`: the closure below also needs `msg` itself.
+            let stale_pkg = msg
+                .starts_with("[STALE_OUT_DIR]")
+                .then(|| crate::failure_hint::stale_out_dir_package(msg))
+                .flatten()
+                .map(str::to_owned);
             let shown = crate::failure_hint::show_card(ui, msg, |ui| {
                 if is_disk_full
                     && ui
@@ -226,6 +233,28 @@ pub fn show_cargo_tab(
                         .clicked()
                 {
                     build::start_clean(workspace.clone(), Arc::clone(build_state), ctx.clone());
+                    *selected_diagnostic = None;
+                }
+                if let Some(pkg) = &stale_pkg
+                    && ui
+                        .add(egui::Button::new(
+                            egui::RichText::new(format!("{} Clean {pkg}", ph::TRASH))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(255, 210, 80)),
+                        ))
+                        .on_hover_text(format!(
+                            "Run `cargo clean -p {pkg}` — throws away that one package's \
+                             fingerprint so its build script runs again on the next Build.\n\
+                             Nothing else is rebuilt."
+                        ))
+                        .clicked()
+                {
+                    build::start_clean_package(
+                        workspace.clone(),
+                        pkg.clone(),
+                        Arc::clone(build_state),
+                        ctx.clone(),
+                    );
                     *selected_diagnostic = None;
                 }
             });
