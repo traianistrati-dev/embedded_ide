@@ -371,13 +371,28 @@ pub struct LspState {
     /// Same, for the last code-action request (Ctrl+Enter).
     pub code_action_for: Option<(String, u32)>,
     /// The request id of the pending `textDocument/implementation` (Ctrl+F12),
-    /// if any. Its response funnels into the SAME `definition_result` slot, so
+    /// if any. Its response funnels into the SAME `definition_results` slot, so
     /// the whole F12 navigation pipeline downstream serves both.
     implementation_req_id: Option<u64>,
     /// Set when a definition response arrives; consumed by the app.
     pub definition_response_received: bool,
-    /// The definition target from the last F12, if any.
-    pub definition_result: Option<DefinitionLoc>,
+    /// Whether that pending/last answer came from `textDocument/implementation`
+    /// (Ctrl+F12) rather than `textDocument/definition` (F12). The two share
+    /// this slot, and only the request knows which question was asked — the
+    /// answers are the same shape.
+    pub definition_is_impl: bool,
+    /// EVERY target the last F12 / Ctrl+F12 resolved to; empty when there was
+    /// none.
+    ///
+    /// A `Vec`, not an `Option`, because `textDocument/implementation` is
+    /// genuinely multi-valued: a trait implemented by three types answers with
+    /// three locations. This slot held ONE `DefinitionLoc` from the day Ctrl+F12
+    /// was added, inherited from `textDocument/definition` — which really is
+    /// single-valued for Rust, so the truncation was invisible there. On the
+    /// implementation path it meant the editor could only ever navigate to
+    /// whichever impl rust-analyzer happened to list first, no matter which type
+    /// the caret was on.
+    pub definition_results: Vec<DefinitionLoc>,
     /// The request id of the pending `textDocument/documentSymbol`, if any.
     symbols_req_id: Option<u64>,
     /// The rel_path the pending/last `symbols_result` was requested for.
@@ -463,7 +478,8 @@ impl Default for LspState {
             code_action_for: None,
             implementation_req_id: None,
             definition_response_received: false,
-            definition_result: None,
+            definition_is_impl: false,
+            definition_results: Vec::new(),
             symbols_req_id: None,
             symbols_for_file: String::new(),
             symbols_response_received: false,
@@ -923,9 +939,15 @@ impl LspState {
         self.next_req_id += 1;
         let id = self.next_req_id;
         self.definition_req_id = Some(id);
+        // Drop any implementation request still in flight. The two share one
+        // result slot and the reader dispatches on whichever id matches, so a
+        // straggler would be consumed as THIS request's answer — a jump to
+        // wherever the previous keystroke pointed.
+        self.implementation_req_id = None;
         self.definition_for = Some((rel_path.to_owned(), line + 1));
         self.definition_response_received = false;
-        self.definition_result = None;
+        self.definition_is_impl = false;
+        self.definition_results.clear();
         let uri = format!("{}/{}", self.root_uri, rel_path);
         self.send_raw(
             serde_json::json!({
@@ -956,8 +978,17 @@ impl LspState {
         self.next_req_id += 1;
         let id = self.next_req_id;
         self.implementation_req_id = Some(id);
+        // As `request_definition`, mirrored: whichever of the two asked last
+        // owns the slot. Without this the `definition_req_id` arm — tested
+        // FIRST in the reader — would answer a Ctrl+F12 with a stale F12 result.
+        self.definition_req_id = None;
+        // Ctrl+F12 never recorded what it asked about, so the "nothing found"
+        // message explained a line the LAST F12 was on, in a possibly different
+        // file. Same question, same bookkeeping.
+        self.definition_for = Some((rel_path.to_owned(), line + 1));
         self.definition_response_received = false;
-        self.definition_result = None;
+        self.definition_is_impl = true;
+        self.definition_results.clear();
         let uri = format!("{}/{}", self.root_uri, rel_path);
         self.send_raw(
             serde_json::json!({
@@ -974,12 +1005,13 @@ impl LspState {
         true
     }
 
-    /// Take the definition result once RA responded. `Some(Some(loc))` = found,
-    /// `Some(None)` = no definition (stop waiting), `None` = not ready yet.
-    pub fn take_definition_result(&mut self) -> Option<Option<DefinitionLoc>> {
+    /// Take every definition / implementation target once RA responded.
+    /// `Some(locs)` = answered (an EMPTY vec means "none found", stop waiting),
+    /// `None` = still waiting.
+    pub fn take_definition_results(&mut self) -> Option<Vec<DefinitionLoc>> {
         if self.definition_response_received {
             self.definition_response_received = false;
-            Some(self.definition_result.take())
+            Some(std::mem::take(&mut self.definition_results))
         } else {
             None
         }
@@ -1273,7 +1305,8 @@ impl LspState {
         self.definition_req_id = None;
         self.implementation_req_id = None;
         self.definition_response_received = false;
-        self.definition_result = None;
+        self.definition_is_impl = false;
+        self.definition_results.clear();
         self.symbols_req_id = None;
         self.symbols_for_file.clear();
         self.symbols_response_received = false;
@@ -2054,14 +2087,14 @@ fn handle_incoming(
                     ctx.request_repaint();
                 } else if s.definition_req_id == Some(req_id) {
                     s.definition_req_id = None;
-                    s.definition_result = parse_definition(&msg["result"]);
+                    s.definition_results = parse_definition_list(&msg["result"]);
                     s.definition_response_received = true;
                     ctx.request_repaint();
                 } else if s.implementation_req_id == Some(req_id) {
                     // Same Location | Location[] | LocationLink[] shapes as a
                     // definition response — funneled into the same slot.
                     s.implementation_req_id = None;
-                    s.definition_result = parse_definition(&msg["result"]);
+                    s.definition_results = parse_definition_list(&msg["result"]);
                     s.definition_response_received = true;
                     ctx.request_repaint();
                 } else if s.symbols_req_id == Some(req_id) {
@@ -2525,28 +2558,38 @@ fn inlay_label_text(label: &serde_json::Value) -> String {
     String::new()
 }
 
-/// Parse a `textDocument/definition` result (Location / Location[] / LocationLink[])
-/// into a single target — the first location.
-fn parse_definition(result: &serde_json::Value) -> Option<DefinitionLoc> {
-    let loc = if result.is_array() {
-        result.as_array()?.first()?
+/// Parse a `textDocument/definition` or `…/implementation` result
+/// (Location / Location[] / LocationLink[]) into EVERY target it names.
+///
+/// This used to return the first location only, which is right for
+/// `definition` — a Rust symbol has one — and silently wrong for
+/// `implementation`, whose whole point is to answer with the N impls. The
+/// array is the answer, not a wrapper around it.
+fn parse_definition_list(result: &serde_json::Value) -> Vec<DefinitionLoc> {
+    if let Some(arr) = result.as_array() {
+        arr.iter().filter_map(parse_one_location).collect()
     } else if result.is_object() {
-        result
+        parse_one_location(result).into_iter().collect()
     } else {
-        return None;
-    };
-    // Location { uri, range } | LocationLink { targetUri, targetSelectionRange }
+        // JSON null — "I have no answer", not a malformed one.
+        Vec::new()
+    }
+}
+
+/// One `Location { uri, range }` or `LocationLink { targetUri, … }`.
+fn parse_one_location(loc: &serde_json::Value) -> Option<DefinitionLoc> {
     let (uri, range) = if let Some(u) = loc["uri"].as_str() {
         (u, &loc["range"])
-    } else if let Some(u) = loc["targetUri"].as_str() {
+    } else {
+        let u = loc["targetUri"].as_str()?;
+        // `targetSelectionRange` is the NAME; `targetRange` the whole item.
+        // Prefer the name so the jump lands on the signature line.
         let r = if loc["targetSelectionRange"].is_object() {
             &loc["targetSelectionRange"]
         } else {
             &loc["targetRange"]
         };
         (u, r)
-    } else {
-        return None;
     };
     Some(DefinitionLoc {
         path: uri_to_path(uri),
@@ -2957,6 +3000,89 @@ mod ra_sweep_tests {
         let line = "INFO: No tasks are running which match the specified criteria.";
         assert_eq!(tasklist_image_name(line), None);
         assert_eq!(tasklist_image_name(""), None);
+    }
+}
+
+#[cfg(test)]
+mod definition_list_tests {
+    use super::parse_definition_list;
+
+    fn loc(file: &str, line: u64) -> serde_json::Value {
+        serde_json::json!({
+            "uri": format!("file:///work/{file}"),
+            "range": { "start": { "line": line, "character": 4 },
+                       "end":   { "line": line, "character": 9 } },
+        })
+    }
+
+    /// THE regression. `textDocument/implementation` answers with one location
+    /// per impl; this parser used to keep `.first()` and drop the rest, so a
+    /// trait implemented in three files could only ever navigate to one of them
+    /// — and always the same one, since the order comes from rust-analyzer's
+    /// crate traversal and not from the caret.
+    #[test]
+    fn every_implementation_survives_the_parse() {
+        let result = serde_json::json!([
+            loc("report_normal_mode.rs", 40),
+            loc("report_debug_mode.rs", 55),
+            loc("report_raw_mode.rs", 12),
+        ]);
+        let got = parse_definition_list(&result);
+        assert_eq!(got.len(), 3, "no implementation may be dropped: {got:?}");
+        assert_eq!(got[1].line, 55);
+        assert!(got[1].path.ends_with("report_debug_mode.rs"));
+    }
+
+    /// A single `Location` object — the shape `definition` usually answers with
+    /// — is one target, not zero.
+    #[test]
+    fn a_bare_location_object_is_one_target() {
+        let got = parse_definition_list(&loc("parse_result.rs", 7));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].line, 7);
+    }
+
+    /// `LocationLink` carries the name span separately; the jump must land on
+    /// the signature, not on the first line of a 200-line item.
+    #[test]
+    fn a_location_link_jumps_to_the_name_not_the_whole_item() {
+        let result = serde_json::json!([{
+            "targetUri": "file:///work/a.rs",
+            "targetRange":          { "start": { "line": 10, "character": 0 },
+                                      "end":   { "line": 90, "character": 1 } },
+            "targetSelectionRange": { "start": { "line": 12, "character": 7 },
+                                      "end":   { "line": 12, "character": 11 } },
+        }]);
+        let got = parse_definition_list(&result);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].line, 12, "targetSelectionRange is the name");
+        assert_eq!(got[0].character, 7);
+    }
+
+    /// A link WITHOUT a selection range still resolves, rather than vanishing.
+    #[test]
+    fn a_location_link_without_a_selection_range_falls_back() {
+        let result = serde_json::json!([{
+            "targetUri": "file:///work/a.rs",
+            "targetRange": { "start": { "line": 10, "character": 0 },
+                             "end":   { "line": 90, "character": 1 } },
+        }]);
+        assert_eq!(parse_definition_list(&result)[0].line, 10);
+    }
+
+    /// `null` is rust-analyzer saying "I have no answer" — an empty list, and
+    /// the caller reports it. An entry it cannot decode must not poison the
+    /// ones it can.
+    #[test]
+    fn null_is_empty_and_junk_does_not_take_its_neighbours_down() {
+        assert!(parse_definition_list(&serde_json::Value::Null).is_empty());
+        let mixed = serde_json::json!([
+            { "nonsense": true },
+            loc("good.rs", 3),
+        ]);
+        let got = parse_definition_list(&mixed);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].line, 3);
     }
 }
 

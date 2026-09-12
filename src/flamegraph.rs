@@ -172,7 +172,19 @@ fn run(
     let port = free_port();
     let mut server = no_window(&mut Command::new("probe-rs"))
         .current_dir(project_dir)
-        .args(["dap-server", "--port", &port.to_string()])
+        // `--single-session`: without it probe-rs stays in multi-session mode
+        // and keeps listening after the client disconnects, so it never exits
+        // on its own and the only way out is a kill - and a killed probe-rs
+        // never detaches the probe. `debugger.rs` learned this on the ST-Link,
+        // which stayed in debug mode until a replug; the ESP32-C3 answers the
+        // same treatment with "Timeout during DMI access" on every attach
+        // afterwards.
+        .args([
+            "dap-server",
+            "--single-session",
+            "--port",
+            &port.to_string(),
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         // Capture stderr: probe-rs logs the REAL reason an attach fails here
@@ -213,8 +225,11 @@ fn run(
     // collects them here - that is where the reason for a failure lives.
     let console = Arc::new(Mutex::new(Vec::<String>::new()));
     let result = sample_over_dap(port, &elf, chip, &probe, &console, n_samples, state, ctx);
-    let _ = server.kill();
-    let _ = server.wait();
+    // `sample_over_dap` has dropped its socket by the time it returns, which
+    // ends the session on the server's side too - including the failure paths,
+    // which never get as far as sending `disconnect`. Let it unwind before the
+    // kill rather than cutting it off mid-teardown: see `wait_or_kill`.
+    wait_or_kill(&mut server, Duration::from_secs(2));
     if let Some(h) = drain {
         let _ = h.join(); // kill → stderr EOF → drain exits; ensures full capture
     }
@@ -259,6 +274,27 @@ fn run(
         }
         out
     })
+}
+
+/// Wait up to `grace` for the dap-server to exit by itself, and only then kill
+/// it. A debugger killed mid-teardown leaves the target's debug module still
+/// configured - on a RISC-V ESP32-C3 that shows up as probe-rs warning "Could
+/// not clear all hardware breakpoints", after which EVERY later attach dies
+/// with "Timeout during DMI access" until the board is power-cycled. The wait
+/// costs nothing in the normal case, where the server is already gone.
+fn wait_or_kill(server: &mut std::process::Child, grace: Duration) {
+    // The server is started with `--single-session`, so a finished session is
+    // what makes it leave; this only has to outlast probe-rs's own shutdown.
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline {
+        match server.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(_) => break,
+        }
+    }
+    let _ = server.kill();
+    let _ = server.wait();
 }
 
 /// The last `n` non-empty lines, trimmed and back in order — both failure
@@ -408,6 +444,12 @@ fn sample_over_dap(
         }
     }
     let _ = send(&mut stream, &mut seq, "disconnect", json!({}));
+    // Wait for the answer instead of firing and forgetting: probe-rs
+    // deconfigures the target while it handles `disconnect` - clears the
+    // hardware breakpoints it set and lets the core run again. The process is
+    // killed immediately after this returns, so not waiting here is what makes
+    // the kill land in the middle of that.
+    let _ = wait_response(&mut stream, "disconnect", console);
 
     if samples.is_empty() {
         return Err(
@@ -564,6 +606,43 @@ fn free_port() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `wait_or_kill` is what keeps a probe-rs teardown from being cut in half;
+    // both halves of its contract are worth pinning down.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn a_server_that_is_already_gone_is_not_waited_for() {
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        wait_or_kill(&mut child, Duration::from_secs(10));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the grace period must end when the process does, not run out"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn a_server_that_will_not_leave_is_killed() {
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 20 127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_or_kill(&mut child, Duration::from_millis(200));
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "a server that outlives its grace period must still be killed"
+        );
+    }
 
     #[test]
     fn folds_stacks_into_a_tree_hot_path_first() {

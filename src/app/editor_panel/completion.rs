@@ -353,6 +353,38 @@ impl AppIde {
                 // analyzer for a request that can never be answered.
                 if rel.ends_with(".rs") {
                     let (line, col) = lsp_cursor_pos(&display_code, idx);
+                    // Captured NOW, not when the answer lands: by then the
+                    // galley that can place the caret on screen is gone and the
+                    // text may have moved on. One anchors the chooser, the other
+                    // decides which of its rows leads — rust-analyzer answers
+                    // `implementation` for the TRAIT ITEM, so the receiver type
+                    // the user wrote exists only on this line.
+                    self.definition_caret_line = display_code
+                        .lines()
+                        .nth(line as usize)
+                        .unwrap_or_default()
+                        .to_owned();
+                    self.definition_anchor = {
+                        let clamped = idx.min(
+                            editor_resp
+                                .galley
+                                .job
+                                .text
+                                .chars()
+                                .count()
+                                .saturating_sub(1),
+                        );
+                        let local = editor_resp
+                            .galley
+                            .pos_from_cursor(egui::text::CCursor::new(clamped));
+                        editor_resp.response.rect.left_top()
+                            + local.min.to_vec2()
+                            + egui::vec2(0.0, local.height() + 4.0)
+                    };
+                    // A new question replaces the old answer: leaving the
+                    // chooser up would let Enter navigate to a row resolved from
+                    // a caret that has since moved.
+                    self.impl_picker = None;
                     // Can it answer RIGHT NOW? `Ready` alone is not enough: it
                     // flips on the first `$/progress` end of any rust-prefixed
                     // token, and `did_change` below auto-opens the document —

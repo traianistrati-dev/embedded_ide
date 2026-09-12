@@ -1706,6 +1706,20 @@ pub struct AppIde {
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
+    /// Where to anchor the go-to chooser: the caret, captured when the request
+    /// went out. The answer lands frames later, by which time the galley that
+    /// could locate the caret no longer exists — the same reason
+    /// `code_action_popup_pos` is captured at request time.
+    definition_anchor: egui::Pos2,
+    /// The source line the caret was on when that request went out.
+    ///
+    /// The only evidence the editor holds about WHICH implementation the user
+    /// means: rust-analyzer answers `textDocument/implementation` for the trait
+    /// item, so the array is identical whichever receiver type is written. The
+    /// receiver is on this line and nowhere else.
+    definition_caret_line: String,
+    /// The open go-to chooser, when a request resolved to more than one target.
+    pub(crate) impl_picker: Option<editor_panel::impl_picker::ImplPicker>,
     /// A Go-to-definition the user asked for while rust-analyzer could not
     /// answer it. Held until the analyzer is genuinely usable, then re-issued —
     /// see [`AppIde::poll_pending_goto`].
@@ -2249,6 +2263,9 @@ impl AppIde {
             file_cycle: editor_panel::file_cycle::FileCycle::default(),
             last_selected_file: ProjectFileId::MainRs,
             definition_in_flight: false,
+            definition_anchor: egui::Pos2::ZERO,
+            definition_caret_line: String::new(),
+            impl_picker: None,
             pending_goto: None,
             def_scroll_pending: false,
             definition_view: None,
@@ -3736,63 +3753,64 @@ impl AppIde {
         // ASKED (navigate + scroll the line into view). A definition in another
         // file (crate / std) is shown read-only in the Definition tab snippet.
         if self.definition_in_flight {
-            let result = self.lsp_state.lock().unwrap().take_definition_result();
-            if let Some(loc) = result {
+            let (taken, is_impl) = {
+                let mut lsp = self.lsp_state.lock().unwrap();
+                (lsp.take_definition_results(), lsp.definition_is_impl)
+            };
+            if let Some(locs) = taken {
                 self.definition_in_flight = false;
-                if let Some(loc) = loc {
-                    if let Some(id) =
-                        project_file_for_def(&loc.path, &self.project_tree.user_src_files)
-                    {
-                        // Editable: open the file, scroll to the definition, and
-                        // mark the def line with a yellow band (like the Def tab).
-                        //
-                        // In the view that pressed F12 — jumping the MAIN editor
-                        // for an F12 pressed in the Reference tab would move the
-                        // file the user was reading FROM out from under them.
-                        if asker.definition == EditorSlot::Reference {
-                            if let Some(path) = crate::editor::gui::text_pos::selected_file_rel_path(
-                                &id,
-                                &self.project_tree.user_src_files,
-                            ) {
-                                self.reference_file = Some(path);
-                            }
-                        } else {
-                            self.selected_file = id;
-                        }
-                        let ed = self.ed_of(asker.definition);
-                        ed.pending_scroll_to_line = Some((id, loc.line as usize + 1));
-                        ed.highlighted_def_line = Some((id, loc.line as usize + 1));
-                        // Not an error — clear the snippet; the MCU tab bar
-                        // auto-leaves the (now empty) Definition tab.
-                        self.definition_view = None;
-                    } else if let Some(view) = build_definition_view(&loc) {
-                        // External file → read-only snippet in the Definition
-                        // tab (MCU Configurator), scrolled to the target line.
-                        if self.active_tab != McuTab::Definition {
-                            self.definition_return_tab = self.active_tab;
-                        }
-                        self.definition_view = Some(view);
-                        self.active_tab = McuTab::Definition;
-                        self.def_scroll_pending = true;
-                        // That tab lives in the middle zone, so a collapsed
-                        // layout would swallow the snippet — F12 would look
-                        // like it did nothing. Open the zone back up.
-                        self.side_panels_collapsed = false;
-                    }
+                let noun = if is_impl {
+                    "implementation"
                 } else {
+                    "definition"
+                };
+                // Read each target's own line and the `impl` header above it, so
+                // two rows of `fn parse(&mut self)` can be told apart, then float
+                // the one the caret's line actually names to the top. Ranking is
+                // a permutation: nothing is hidden, only ordered.
+                let mut targets = editor_panel::impl_picker::build_targets(locs);
+                editor_panel::impl_picker::dedupe(&mut targets);
+                editor_panel::impl_picker::rank(&mut targets, &self.definition_caret_line);
+                match targets.len() {
                     // Answered, but with nothing. Silence here read as "the key
                     // did nothing", and a just-started analyzer answers this way
                     // more often than a warm one — an empty result and a
                     // JSON-RPC error arrive in the same shape.
-                    let asked = self.lsp_state.lock().unwrap().definition_for.clone();
-                    let reason = asked
-                        .and_then(|(rel, line)| self.caret_silence_reason(&rel, line))
-                        .map(|r| format!(" ({r})"))
-                        .unwrap_or_default();
-                    self.set_status_msg(format!(
-                        "{} No definition found for the symbol at the caret{reason}",
-                        egui_phosphor::regular::X_CIRCLE
-                    ));
+                    0 => {
+                        let asked = self.lsp_state.lock().unwrap().definition_for.clone();
+                        let reason = asked
+                            .and_then(|(rel, line)| self.caret_silence_reason(&rel, line))
+                            .map(|r| format!(" ({r})"))
+                            .unwrap_or_default();
+                        self.set_status_msg(format!(
+                            "{} No {noun} found for the symbol at the caret{reason}",
+                            egui_phosphor::regular::X_CIRCLE
+                        ));
+                    }
+                    // The overwhelmingly common case, and it must stay a single
+                    // keypress: offering a one-row chooser would tax every F12 to
+                    // pay for the rare Ctrl+F12.
+                    1 => {
+                        let t = targets.remove(0);
+                        self.goto_definition_target(&t, asker.definition);
+                    }
+                    // More than one REAL answer. Jumping to a guess would trade
+                    // "always the wrong file" for "usually the right one, and no
+                    // way to tell when it is not" — worse, because it is not
+                    // visibly wrong. The list says what rust-analyzer said.
+                    n => {
+                        self.set_status_msg(format!(
+                            "{} {n} {noun}s - Up/Down, Enter to open, Esc to dismiss",
+                            egui_phosphor::regular::ARROW_ELBOW_DOWN_RIGHT
+                        ));
+                        self.impl_picker = Some(editor_panel::impl_picker::ImplPicker {
+                            targets,
+                            sel: 0,
+                            pos: self.definition_anchor,
+                            slot: asker.definition,
+                            title: format!("{n} {noun}s"),
+                        });
+                    }
                 }
                 self.egui_ctx.request_repaint();
             }
@@ -3823,6 +3841,76 @@ impl AppIde {
         }
 
         self.tick_save_wall();
+    }
+
+    /// Open ONE go-to target: editable in the view that asked when it is a
+    /// project file, read-only in the Definition tab when it belongs to a crate
+    /// or to std.
+    ///
+    /// The single implementation of "land on this location", shared by the
+    /// direct jump and by the chooser. Two copies would drift, and the
+    /// chooser's copy is the one nobody would exercise daily.
+    fn goto_definition_target(
+        &mut self,
+        t: &editor_panel::impl_picker::ImplTarget,
+        slot: EditorSlot,
+    ) {
+        if let Some(id) = project_file_for_def(&t.path, &self.project_tree.user_src_files) {
+            // Editable: open the file, scroll to the target, and mark the line
+            // with a yellow band (like the Definition tab).
+            //
+            // In the view that ASKED — jumping the MAIN editor for an F12
+            // pressed in the Reference tab would move the file the user was
+            // reading FROM out from under them.
+            if slot == EditorSlot::Reference {
+                if let Some(path) = crate::editor::gui::text_pos::selected_file_rel_path(
+                    &id,
+                    &self.project_tree.user_src_files,
+                ) {
+                    self.reference_file = Some(path);
+                }
+            } else {
+                self.selected_file = id;
+            }
+            let ed = self.ed_of(slot);
+            ed.pending_scroll_to_line = Some((id, t.line as usize + 1));
+            ed.highlighted_def_line = Some((id, t.line as usize + 1));
+            // Not an error — clear the snippet; the MCU tab bar auto-leaves the
+            // (now empty) Definition tab.
+            self.definition_view = None;
+            return;
+        }
+        let loc = lsp::DefinitionLoc {
+            path: t.path.clone(),
+            line: t.line,
+            character: t.character,
+        };
+        if let Some(view) = build_definition_view(&loc) {
+            // External file → read-only snippet in the Definition tab (MCU
+            // Configurator), scrolled to the target line.
+            if self.active_tab != McuTab::Definition {
+                self.definition_return_tab = self.active_tab;
+            }
+            self.definition_view = Some(view);
+            self.active_tab = McuTab::Definition;
+            self.def_scroll_pending = true;
+            // That tab lives in the middle zone, so a collapsed layout would
+            // swallow the snippet — F12 would look like it did nothing. Open the
+            // zone back up.
+            self.side_panels_collapsed = false;
+        } else {
+            // Unreadable, or empty. This arm had NO else, and the consequences
+            // were the two things this codebase refuses at once: the previous
+            // answer's snippet stayed on screen under a new question — a
+            // believable lie — and the keypress reported nothing, which is
+            // indistinguishable from a broken shortcut. The answer is already
+            // drained by here, so saying so is the only honest move left.
+            self.set_status_msg(format!(
+                "{} Cannot open {}",
+                egui_phosphor::regular::X_CIRCLE,
+                short_path(&t.path)
+            ));
+        }
     }
 
     /// Advance the "Save (wall clock)" envelope: note when the LSP flush

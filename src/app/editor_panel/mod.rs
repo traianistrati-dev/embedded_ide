@@ -46,6 +46,7 @@ mod fold_ui;
 mod format;
 mod generics;
 mod idle_sync;
+pub(crate) mod impl_picker;
 mod inlay_hint;
 mod let_annotation;
 mod move_lines;
@@ -545,6 +546,34 @@ impl AppIde {
                     self.ed.code_action_choice = Some(self.ed.code_action_sel.min(count - 1));
                 }
             });
+        }
+        // Go-to chooser (Ctrl+F12 with several implementations). Same rule as
+        // the code-action list: Enter is consumed HERE, before the editor, or it
+        // splits the line under the caret instead of navigating.
+        let picker_rows = self
+            .impl_picker
+            .as_ref()
+            .filter(|p| p.slot == slot)
+            .map(|p| p.targets.len())
+            .unwrap_or(0);
+        if picker_rows > 0 {
+            let mut take: Option<usize> = None;
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                    self.impl_picker = None;
+                } else if let Some(p) = self.impl_picker.as_mut() {
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        p.sel = (p.sel + 1).min(picker_rows - 1);
+                    } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        p.sel = p.sel.saturating_sub(1);
+                    } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                        take = Some(p.sel.min(picker_rows - 1));
+                    }
+                }
+            });
+            if let Some(i) = take {
+                self.take_impl_picker_choice(i);
+            }
         }
         // ── Inline type hint: Tab accepts (inserts the inferred type) ─
         // Only when a ghost hint is showing, no completion / code-action
@@ -1617,6 +1646,7 @@ impl AppIde {
         }
         self.show_code_action_popup(ui);
         self.show_add_dep_popup(ui);
+        self.show_impl_picker(ui);
 
         // ── Right-click context menu ──────────────────────────────────
         // Lists every editor command with its shortcut. A click drives
