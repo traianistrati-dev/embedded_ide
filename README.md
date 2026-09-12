@@ -10,6 +10,8 @@ It is built for the workflow of small MCU projects: you spend your time deciding
 decisions into correct HAL setup code. Your own application logic is always kept
 safe across regenerations.
 
+![A tour of the Embedded IDE](docs/embedded_ide_tour.gif)
+
 > Status: early development (`v0.1`). **Fourteen chips ship built in** — one
 > STM32, nine ESP32 and all four Raspberry Pi Pico boards — and the rest of the
 > STM32 catalogue is reachable by importing a part from ST's own database. A new
