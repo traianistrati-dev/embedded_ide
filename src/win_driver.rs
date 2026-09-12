@@ -70,9 +70,8 @@ pub fn hijacked_ports(selector: &str) -> Vec<HijackedPort> {
         &vid,
         &pid,
     );
-    // Asked once, not once per interface: the store is the same for all of them.
-    let store = enum_drivers();
-    let mut out = Vec::new();
+    // The registry alone says WHETHER anything is wrong.
+    let mut found: Vec<(String, String)> = Vec::new();
     for key in &keys {
         let hardware_id = match key.rsplit('\\').next() {
             Some(leaf) if !leaf.is_empty() => format!(r"USB\{leaf}"),
@@ -81,17 +80,28 @@ pub fn hijacked_ports(selector: &str) -> Vec<HijackedPort> {
         for inst in crate::probe::winusb_instances(&crate::probe::reg_dump(key), key) {
             // A COM name on a WinUSB-driven interface is the whole signal: a
             // port Windows still has on file, with no driver left to serve it.
-            let Some(port_name) = inst.port_name else {
-                continue;
-            };
-            out.push(HijackedPort {
-                packages: packages_for(&store, &hardware_id),
-                hardware_id: hardware_id.clone(),
-                port_name,
-            });
+            if let Some(port_name) = inst.port_name {
+                found.push((hardware_id.clone(), port_name));
+            }
         }
     }
-    out
+    // Only then ask the driver store WHO to blame. Enumerating it takes tens of
+    // seconds on a machine with a full store, and this runs on the Tools tab's
+    // check - where the answer is needed only when something is actually broken,
+    // which is almost never. Paying for it on every healthy check left the row
+    // spinning for the best part of a minute.
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let store = enum_drivers();
+    found
+        .into_iter()
+        .map(|(hardware_id, port_name)| HijackedPort {
+            packages: packages_for(&store, &hardware_id),
+            hardware_id,
+            port_name,
+        })
+        .collect()
 }
 
 /// The `pnputil` lines that give the port back, or `None` when there is nothing
