@@ -366,7 +366,10 @@ impl AppIde {
             }
             Err(e) => {
                 *self.build_state.lock().unwrap() =
-                    BuildState::Failed(format!("Could not write project to temp dir: {e}"));
+                    BuildState::Failed(format!(
+                        "Could not write project to the build workspace ({}): {e}",
+                        crate::workspace::dir().display()
+                    ));
             }
         }
     }

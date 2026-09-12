@@ -1,21 +1,27 @@
 //! The per-instance scratch workspace.
 //!
 //! Every build, check, clippy, flash, size and rust-analyzer session runs
-//! against a throw-away COPY of the project under the temp dir — never the
-//! user's own folder. That directory used to be one hardcoded path, which made
-//! a second IDE window a data hazard rather than a second window: both
-//! processes wrote their whole project into it on every save, so `main.rs`,
-//! `Cargo.toml`, `memory.x` and the target triple in `.cargo/config.toml` were
-//! whatever the last instance saved. On top of that, `write_project`'s
-//! foreign-crate prune deleted the other project's libraries, the notify
-//! watcher pulled the other project's files into this one's tree (and from
-//! there into the real project folder on the next save), and the stale-RA sweep
-//! — keyed by this very directory — shot the other instance's analyzer.
+//! against a throw-away COPY of the project in a per-user cache directory (see
+//! [`base`]) — never the user's own folder. That directory used to be one
+//! hardcoded path, which made a second IDE window a data hazard rather than a
+//! second window: both processes wrote their whole project into it on every
+//! save, so `main.rs`, `Cargo.toml`, `memory.x` and the target triple in
+//! `.cargo/config.toml` were whatever the last instance saved. On top of that,
+//! `write_project`'s foreign-crate prune deleted the other project's libraries,
+//! the notify watcher pulled the other project's files into this one's tree
+//! (and from there into the real project folder on the next save), and the
+//! stale-RA sweep — keyed by this very directory — shot the other instance's
+//! analyzer.
 //!
 //! So each process now claims its own SLOT: `embedded_ide_0_check`,
-//! `embedded_ide_0_check_2`, `embedded_ide_0_check_3`, … The first instance
-//! keeps the original path byte-for-byte, so the usual single-window case is
-//! unchanged and its warm `target/` survives this change.
+//! `embedded_ide_0_check_2`, `embedded_ide_0_check_3`, … The first window still
+//! gets the unsuffixed name, so the usual single-window case reads the same as
+//! it always did.
+//!
+//! The slot NAMES survived the move out of `%TEMP%`; the paths did not. An
+//! install upgrading across that move builds cold once, because its warm
+//! `target/` is at the old location — which the sweep then reclaims rather than
+//! leaving gigabytes stranded (see [`sweep_stale_slots`]).
 //!
 //! Claiming is an OS-level exclusive lock on a file inside the slot, held open
 //! for the life of the process. That is deliberate: the kernel drops the handle
@@ -31,6 +37,52 @@ use std::sync::OnceLock;
 /// environment can't spin.
 const MAX_SLOTS: u32 = 16;
 
+/// The directory the slots live in.
+///
+/// Deliberately NOT the system temp directory, which is where they used to be.
+/// `%TEMP%` is a place the OS is *invited* to clean: Windows Storage Sense's
+/// "delete temporary files that my apps aren't using" removes files out of it
+/// while leaving the directories standing, and a cargo `target/` cannot survive
+/// that. Cargo fingerprints a build script by its INPUTS and never by what it
+/// wrote, so ONE deleted file under `target/…/build/<pkg>-<hash>/out/` leaves
+/// the script looking fresh for good: it is never re-run, and every Build and
+/// Clippy fails on a missing `include!`. That is not a theory — it happened
+/// here, and [`crate::failure_hint::stale_out_dir`] exists to explain the
+/// wreckage to the user. This function is the other half of that fix: stop
+/// putting a build cache somewhere a cleaner is entitled to empty.
+///
+/// A build cache must also not ROAM. `%APPDATA%` follows the user to every
+/// machine on a domain profile, and a 16 GB `target/` is not a thing to
+/// synchronise — hence LOCAL app data on Windows, and the CACHE directory (not
+/// the config one [`crate::panels::mcu_module::registry::user_config_dir`]
+/// uses) elsewhere.
+fn base() -> PathBuf {
+    let cache = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches"))
+    } else {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+    };
+    // No resolvable cache home is the one case where temp is still the answer:
+    // it is a worse place, but this module's contract is that `dir()` always
+    // answers, and refusing to build at all would be worse still.
+    cache
+        .map(|b| b.join("embedded_ide_0"))
+        .unwrap_or_else(legacy_base)
+}
+
+/// The system temp directory — where slots lived before [`base`] moved them.
+///
+/// Named once, here, so the sweep can still find and reclaim what an install
+/// upgrading from an older build left behind: those directories hold gigabytes
+/// and nothing else will ever look for them again.
+fn legacy_base() -> PathBuf {
+    std::env::temp_dir()
+}
+
 /// The claimed slot's directory + its 1-based number, resolved once by [`init`].
 static WORKSPACE: OnceLock<(PathBuf, u32)> = OnceLock::new();
 
@@ -41,7 +93,7 @@ static LOCK: OnceLock<std::fs::File> = OnceLock::new();
 /// Claim a workspace slot. Call ONCE from `main`, before anything spawns a
 /// thread or touches the workspace — every later reader gets the same answer.
 pub fn init() {
-    let base = std::env::temp_dir();
+    let base = base();
     for slot in 1..=MAX_SLOTS {
         let dir = base.join(slot_name(slot));
         if std::fs::create_dir_all(&dir).is_err() {
@@ -53,7 +105,7 @@ pub fn init() {
             return;
         }
     }
-    // Every slot is taken (or the temp dir is unwritable). A pid-unique
+    // Every slot is taken (or the cache dir is unwritable). A pid-unique
     // directory is worse — a cold `target/` every launch — but it is still
     // correct, and correctness is the point of this module.
     let dir = base.join(format!("embedded_ide_0_check_p{}", std::process::id()));
@@ -89,18 +141,35 @@ pub fn sweep_stale_slots() {
         return;
     };
     std::thread::spawn(move || {
-        let base = std::env::temp_dir();
-        let Ok(entries) = std::fs::read_dir(&base) else {
-            return;
-        };
         let cutoff = std::time::Duration::from_secs(STALE_SLOT_DAYS * 24 * 60 * 60);
-        for entry in entries.flatten() {
-            let dir = entry.path();
-            if sweepable(&dir, &ours, cutoff) {
-                let _ = std::fs::remove_dir_all(&dir);
-            }
+        sweep_base(&base(), &ours, cutoff);
+
+        // Slots at the OLD location are not stale, they are STRANDED: nothing
+        // will ever claim one again, so the reasoning behind
+        // [`STALE_SLOT_DAYS`] — keep a free slot warm, the next window reuses
+        // it — does not apply to them at all. The only question left is whether
+        // a window from an older build still holds the lock, and `sweepable`
+        // answers that. Making these wait a fortnight would leave gigabytes
+        // nobody can use on the disk this sweep exists to protect.
+        let legacy = legacy_base();
+        if legacy != base() {
+            sweep_base(&legacy, &ours, std::time::Duration::ZERO);
         }
     });
+}
+
+/// Sweep one directory of slots. Split from [`sweep_stale_slots`] so the new
+/// and legacy locations can share it on different cutoffs.
+fn sweep_base(base: &Path, ours: &Path, cutoff: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if sweepable(&dir, ours, cutoff) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }
 
 /// May `dir` be deleted? Every guard the sweep has, in one place.
@@ -165,7 +234,7 @@ pub fn dir() -> PathBuf {
     WORKSPACE
         .get()
         .map(|(d, _)| d.clone())
-        .unwrap_or_else(|| std::env::temp_dir().join("embedded_ide_0_check"))
+        .unwrap_or_else(|| base().join(slot_name(1)))
 }
 
 /// This instance's slot number (1 = the first/only window, 0 = pid fallback).
@@ -318,6 +387,69 @@ mod tests {
         assert_eq!(slot_name(2), "embedded_ide_0_check_2");
     }
 
+    /// The whole point of [`base`]: a cargo `target/` must not sit where the OS
+    /// is entitled to delete files out from under it.
+    #[test]
+    fn the_workspace_lives_outside_the_system_temp_dir() {
+        let b = base();
+        assert!(
+            b.ends_with("embedded_ide_0"),
+            "the base must be app-specific or a sweep would scan a shared dir: {}",
+            b.display()
+        );
+        // A machine with no resolvable cache home legitimately falls back to
+        // temp, so only assert the move where the env can actually answer.
+        let home_var = if cfg!(windows) { "LOCALAPPDATA" } else { "HOME" };
+        if std::env::var_os(home_var).is_some() {
+            assert!(
+                !b.starts_with(legacy_base()),
+                "the scratch workspace is back under the OS temp dir, which cleaners \
+                 empty while leaving the directories — the exact fault that made every \
+                 build fail on a missing OUT_DIR file: {}",
+                b.display()
+            );
+        }
+    }
+
+    /// `temp_dir()` inside THIS file, outside `legacy_base`, is the regression
+    /// that would undo the move — and the sibling guard
+    /// (`nothing_rebuilds_the_workspace_path_by_hand`) cannot catch it, because
+    /// it skips `workspace.rs` by name. This file is where the bug would live.
+    ///
+    /// The base is read in three places — [`init`], the sweep and [`dir`]'s
+    /// fallback. One of them left behind is not a compile error: it is a slot
+    /// nobody ever sweeps, which is how six of them once reached 8.3 GB on a
+    /// disk at zero bytes free.
+    #[test]
+    fn only_the_legacy_hook_may_name_the_temp_dir() {
+        let src = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workspace.rs"),
+        )
+        .expect("read this module's own source");
+        // Tests are allowed it — their scratch dirs belong in temp.
+        let head = src.split("#[cfg(test)]").next().unwrap_or_default();
+        let hits: Vec<&str> = head
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains("temp_dir()"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the system temp dir may be named exactly ONCE, in `legacy_base`; \
+             call `base()` instead:\n{}",
+            hits.join("\n")
+        );
+        let (_, after) = head
+            .split_once("fn legacy_base")
+            .expect("`legacy_base` must still exist — the sweep needs it to reclaim old slots");
+        assert!(
+            after.lines().take(4).any(|l| l.contains("temp_dir()")),
+            "the one remaining `temp_dir()` is no longer `legacy_base`'s"
+        );
+    }
+
     /// A held lock must refuse the next claim — that is the whole mechanism.
     /// Same-process locking counts: Windows share_mode and unix `flock` are
     /// both per-open-file-description, not per-process-and-forgiving.
@@ -453,7 +585,7 @@ mod tests {
 
 #[cfg(test)]
 mod stale_slot_sweep {
-    use super::{sweepable, try_lock};
+    use super::{sweep_base, sweepable, try_lock};
     use std::time::Duration;
 
     /// Everything is old (cutoff 0) / nothing is (cutoff a century).
@@ -526,6 +658,48 @@ mod stale_slot_sweep {
             !sweepable(&slot, &base, NEVER),
             "just created, so not stale"
         );
+    }
+
+    /// A stranded slot at the OLD location goes at once, brand new or not.
+    ///
+    /// The fortnight exists because a free slot is REUSABLE. One left in
+    /// `%TEMP%` is not: `base()` never looks there again, so waiting only keeps
+    /// gigabytes nobody can reach. The zero cutoff is what expresses that, and
+    /// the lock is still the thing that protects a live older window.
+    #[test]
+    fn a_stranded_legacy_slot_goes_without_waiting() {
+        let base = scratch("stranded");
+        let slot = base.join("embedded_ide_0_check");
+        std::fs::create_dir_all(&slot).unwrap();
+        let zero = OLD;
+        assert!(
+            sweepable(&slot, &base, zero),
+            "a just-created legacy slot is still unreachable, so it must go"
+        );
+        // ...unless an older window is still in it.
+        let held = try_lock(&slot.join(".instance.lock")).expect("take the lock");
+        assert!(
+            !sweepable(&slot, &base, zero),
+            "a legacy slot a live window still holds must survive the migration"
+        );
+        drop(held);
+    }
+
+    /// `sweep_base` must not walk out of the directory it was given, and must
+    /// not touch anything that is not a slot.
+    #[test]
+    fn sweeping_a_base_spares_everything_that_is_not_a_slot() {
+        let base = scratch("selective");
+        let slot = base.join("embedded_ide_0_check_7");
+        let bystander = base.join("someone_elses_cache");
+        let ours = base.join("embedded_ide_0_check");
+        for d in [&slot, &bystander, &ours] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        sweep_base(&base, &ours, OLD);
+        assert!(!slot.exists(), "an unheld slot should have been swept");
+        assert!(bystander.exists(), "a directory that is not a slot is not ours");
+        assert!(ours.exists(), "our own slot must never be swept");
     }
 
     /// Our own slot, and anything that is not a slot at all, are untouchable.

@@ -1,7 +1,8 @@
 //! Git integration (bottom-panel "Git" tab + project-tree context menu).
 //!
 //! Runs the system `git` CLI in the **project directory** (`project_dir`,
-//! where Save writes) — never in the `%TEMP%` check workspace. Commits are
+//! where Save writes) — never in the scratch check workspace
+//! ([`crate::workspace::dir`]). Commits are
 //! **strictly what's on disk** (user decision 2026-07-06): the tab shows an
 //! amber warning when the in-memory editors differ from the saved files, but
 //! never saves on its own.
