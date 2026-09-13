@@ -1706,9 +1706,12 @@ pub(super) fn definitions_from_file(
 pub(super) fn uses_dma_def(family: &str) -> bool {
     // RP2040/RP2350 join F1 and ESP: their DMA comes from the chip's own HAL,
     // not from the definition's channel table, so an empty table means nothing.
+    // nRF52 has no channel table at all: its EasyDMA is built into each
+    // peripheral, so there is nothing to allocate and nothing to be missing.
     !(family == "stm32f1"
         || crate::panels::mcu_module::codegen::family::is_esp(family)
-        || crate::panels::mcu_module::codegen::rp::is_rp(family))
+        || crate::panels::mcu_module::codegen::rp::is_rp(family)
+        || crate::panels::mcu_module::codegen::nrf::is_nrf(family))
 }
 
 /// Everything about a chip that will not work, in one list.
@@ -2666,7 +2669,7 @@ mod chip_gaps_tests {
     fn dma_is_not_asked_of_the_families_that_do_not_use_it() {
         for family in [
             "stm32f1", "esp32", "esp32c2", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2",
-            "esp32s2", "esp32s3",
+            "esp32s2", "esp32s3", "rp2040", "rp235x", "nrf52833",
         ] {
             assert!(!uses_dma_def(family), "{family} was asked about DMA");
         }

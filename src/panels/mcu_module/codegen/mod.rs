@@ -13,6 +13,7 @@ pub mod dma_map;
 pub mod embassy_async;
 pub mod embassy_common;
 pub mod family;
+pub mod nrf;
 pub mod nvic;
 pub mod rcc;
 pub mod rcc_mux;
