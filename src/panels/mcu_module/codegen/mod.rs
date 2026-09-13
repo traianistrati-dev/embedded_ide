@@ -5,6 +5,8 @@
 //! registry. Each backend wraps the HAL-specific generator:
 //! - "stm32f1" → `stm32` module (Rust Embedded HAL)
 //! - "esp32c3" → parent `codegen_esp` module (esp-hal)
+//! - "rp2040" / "rp235x" → [`rp`] (rp2040-hal / rp235x-hal, embassy-rp)
+//! - "nrf52833" (any `nrf52*`) → [`nrf`] (nrf52833-hal)
 //! - unknown families (e.g. STM8) → no generated code yet.
 
 pub mod common;

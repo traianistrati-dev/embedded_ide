@@ -7017,7 +7017,7 @@ mod tests {
     #[test]
     fn every_kind_says_where_its_shared_settings_live() {
         for kind in ModuleKind::ALL {
-            for family in ["stm32f1", "stm32g0", "esp32c3", "rp2040"] {
+            for family in ["stm32f1", "stm32g0", "esp32c3", "rp2040", "nrf52833"] {
                 let out = drive(kind, kind.default_config(1), family, false, false, false);
                 let got: Vec<&str> = out
                     .elsewhere_fields()

@@ -83,6 +83,18 @@ pub fn codegen_node_ids(family: &str) -> Vec<&'static str> {
         // PLL's FBDIV / POSTDIV1 / POSTDIV2. Those three are what a `PLLConfig`
         // is made of, so renaming any of them in the editor would silently
         // change the frequency the chip boots at.
+        // The nRF tree as `nrf::clock_choice` reads it: each mux's selected
+        // edge is followed back to its source, so the two muxes AND the
+        // sources they can land on are all names code generation depends on.
+        f if crate::panels::mcu_module::codegen::nrf::is_nrf(f) => vec![
+            "hfclk_src",
+            "lfclk_src",
+            "hfint",
+            "hfxo",
+            "hfxo_pll",
+            "lfrc",
+            "lfsynth",
+        ],
         f if crate::panels::mcu_module::codegen::rp::is_rp(f) => vec![
             "xosc",
             "pll_sys_fb",
@@ -374,6 +386,9 @@ pub fn generates_clock_code(family: &str) -> bool {
     family == "stm32f1"
         || is_esp(family)
         || crate::panels::mcu_module::codegen::rp::is_rp(family)
+        // nRF: `Clocks::new(..).enable_ext_hfosc().set_lfclk_src_*()`, read off
+        // the tree's two muxes.
+        || crate::panels::mcu_module::codegen::nrf::is_nrf(family)
         || rcc_recipe(family).is_some()
 }
 
@@ -412,7 +427,12 @@ pub fn generates_clock_code_for(family: &str, clock: &ClockConfig) -> bool {
 /// the switch appeared, and their hand-written clock would have been overwritten
 /// on the first regeneration.
 pub fn supports_manual_clock(family: &str) -> bool {
-    !(family == "stm32f1" || is_esp(family))
+    // nRF joins them: its clock block is two `Clocks` calls inside the one
+    // marker-wrapped `main`, and `NrfBackend` never reads `clock_manual`, so
+    // the switch would promise a preservation that does not happen.
+    !(family == "stm32f1"
+        || is_esp(family)
+        || crate::panels::mcu_module::codegen::nrf::is_nrf(family))
 }
 
 /// The clock selections, family-neutral — what the generic emitter consumes and
@@ -1601,6 +1621,11 @@ mod tests {
         for f in ESP_FAMILIES {
             assert!(!supports_manual_clock(f), "{f} was offered manual clock");
         }
+        assert!(generates_clock_code("nrf52833"));
+        assert!(
+            !supports_manual_clock("nrf52833"),
+            "nrf was offered manual clock"
+        );
     }
 
     /// A hand-written block survives regeneration; going back to generated

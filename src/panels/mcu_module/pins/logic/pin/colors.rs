@@ -76,6 +76,13 @@ pub fn reserved_role(name: &str) -> &'static str {
         "Enables the 3.3 V regulator, pulled HIGH on the board. Pull it LOW to switch the Pico off."
     } else if n == "VSYS" {
         "Main input, 1.8 to 5.5 V. Feeds the regulator through a diode from VBUS, so it can also be back-powered."
+    // BBC micro:bit v2 edge connector. The two large rings and the small pads
+    // tied to them carry the same supply; the accessibility pad is a GPIO the
+    // board reserves for assistive switches.
+    } else if n == "3V" || n.starts_with("3V (") {
+        "3.3 V from the micro:bit's own regulator, shared with the chip and the on-board hardware, so the current left for accessories is limited."
+    } else if n.contains("ACCESSIBILITY") {
+        "P0.12, reserved by the micro:bit for accessibility hardware (switch access). The foundation asks that nothing else use it."
     } else if n == "VBUS" {
         "5 V straight from the micro-USB connector, present only while USB is plugged in."
     } else if n.starts_with("NPOR") {
