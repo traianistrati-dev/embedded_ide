@@ -104,7 +104,7 @@ impl PinDef {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DmaDef {
     /// `true` when any channel can serve any peripheral (DMAMUX / GPDMA), which
-    /// is 1107 of the database's 1964 parts. Then no request table is needed at
+    /// is 1367 of the database's 2123 parts. Then no request table is needed at
     /// all: the allocator just hands out free channels.
     pub mux: bool,
     /// Every channel the chip has, with the interrupt each is served by.

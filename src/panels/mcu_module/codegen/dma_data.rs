@@ -7,7 +7,8 @@
 //!   `GPDMA1_Channel0_IRQn` (H5 / U5, numbered from ZERO).
 //! * `DMA-<ver>_Modes.xml` says whether the chip binds requests to fixed
 //!   channels (F0/F1/F2/F3/F4/F7/L0/L1/L4) or muxes them — everything newer,
-//!   1107 of the database's 1964 parts. A mux part needs no request table at
+//!   1367 of the database's 2123 parts (measured by `sweep_the_vendor_database`, not
+//!   guessed). A mux part needs no request table at
 //!   all: any free channel can serve any peripheral.
 //!
 //! Both halves matter to codegen: embassy's `Channel::new` takes a `Binding` for
@@ -461,6 +462,39 @@ pub fn dma_def_for(
     def
 }
 
+/// Where the vendor database actually is, for the `--ignored` guards that read
+/// it. Shared because three of them used to hardcode the same path.
+///
+/// That hardcoded path was `H:/stm32cube-database-master/…`, a hand-made
+/// checkout — and when it shrank to a partial 232-file mirror, every guard that
+/// read it went quiet instead of failing: the sweep reported "232/232 parts, 0
+/// classic" and [`super::dma_map`]'s hand-table check printed "0 hand-written
+/// entries confirmed" and still passed. **A guard that verifies nothing must not
+/// be green**, so the callers assert they checked something.
+///
+/// Resolution order: `EIDE_CUBE_DB`, then the same chip sources the importer
+/// itself uses (`has_clock()` means it is a CubeMX `db` root, which is what
+/// `db/mcu/IP` lives under), then the legacy path last so an existing checkout
+/// still works.
+#[cfg(test)]
+pub(crate) fn vendor_db_dir() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("EIDE_CUBE_DB") {
+        let p = std::path::PathBuf::from(p);
+        return p.is_dir().then_some(p);
+    }
+    crate::panels::mcu_module::chip_sources::all_sources()
+        .into_iter()
+        .filter(|s| s.has_clock())
+        .map(|s| s.chips)
+        .find(|p| p.is_dir())
+        .or_else(|| {
+            let legacy = std::path::PathBuf::from(
+                "H:/stm32cube-database-master/stm32cube-database-master/db/mcu",
+            );
+            legacy.is_dir().then_some(legacy)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,10 +556,11 @@ mod tests {
     #[test]
     #[ignore = "needs the STM32Cube database"]
     fn value_and_name_agree_across_the_database() {
-        let dir = std::path::Path::new(&std::env::var("EIDE_CUBE_DB").unwrap_or_else(|_| {
-            "H:/stm32cube-database-master/stm32cube-database-master/db/mcu".into()
-        }))
-        .join("IP");
+        let Some(db) = super::vendor_db_dir() else {
+            eprintln!("no STM32Cube database found - nothing checked");
+            return;
+        };
+        let dir = db.join("IP");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             eprintln!("no database at {} - nothing checked", dir.display());
             return;
@@ -710,12 +745,11 @@ mod tests {
     #[test]
     #[ignore = "needs the STM32Cube database on disk"]
     fn sweep_the_vendor_database() {
-        let db =
-            std::path::Path::new("H:/stm32cube-database-master/stm32cube-database-master/db/mcu");
-        if !db.is_dir() {
-            eprintln!("database not mounted at {} - nothing checked", db.display());
+        let Some(db) = super::vendor_db_dir() else {
+            eprintln!("no STM32Cube database found - nothing checked");
             return;
-        }
+        };
+        let db = db.as_path();
         let mut cache = std::collections::HashMap::new();
         let (mut total, mut with, mut mux, mut classic, mut routed) = (0, 0, 0, 0, 0);
         let mut example: Option<(String, crate::panels::mcu_module::mcu_def::DmaDef)> = None;

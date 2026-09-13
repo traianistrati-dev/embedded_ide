@@ -235,8 +235,8 @@ fn irq_for(family: &str, channel: &str) -> Option<String> {
 /// Two ways to answer, in order:
 ///
 /// 1. **The chip's own data**, when it was imported from the vendor database.
-///    Muxed (DMAMUX / GPDMA, 1085 of the 1839 parts it describes): any free
-///    channel, because that is what muxed means. Fixed mapping (754 parts):
+///    Muxed (DMAMUX / GPDMA, 1367 of the database's 2123 parts): any free
+///    channel, because that is what muxed means. Fixed mapping (756 parts):
 ///    only the channels its request table routes this peripheral to.
 /// 2. **The family table** above, for chips carrying no vendor data — the two
 ///    built-ins, and anything imported from the public open-pin-data repo.
@@ -496,12 +496,10 @@ mod tests {
     #[test]
     #[ignore = "needs the STM32Cube database on disk"]
     fn the_hand_tables_match_the_vendor_database() {
-        let db =
-            std::path::Path::new("H:/stm32cube-database-master/stm32cube-database-master/db/mcu");
-        if !db.is_dir() {
-            eprintln!("database not mounted - nothing checked");
+        let Some(db) = super::super::dma_data::vendor_db_dir() else {
+            eprintln!("no STM32Cube database found - nothing checked");
             return;
-        }
+        };
         let mut cache = std::collections::HashMap::new();
         let mut checked = 0usize;
         for (family, chip, table) in [
@@ -536,6 +534,15 @@ mod tests {
                 checked += 1;
             }
         }
+        // A green run that checked NOTHING is the failure this assert exists
+        // for: a missing chip file is an `eprintln!` + `continue`, so when the
+        // database moved out from under the old hardcoded path all three chips
+        // skipped and the test still reported ok.
+        assert!(
+            checked > 0,
+            "the database at {} yielded no comparable entries -              the guard would have passed while verifying nothing",
+            db.display()
+        );
         println!("{checked} hand-written entries confirmed against the database");
     }
 

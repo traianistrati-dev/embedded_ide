@@ -25,17 +25,30 @@ impl AppIde {
     ) -> Option<f32> {
         // First-open baud seeding for the Serial tab (was the toolbar Serial
         // button's job before it was removed): while the tab is selected and
-        // idle, seed the baud from the first _USART virtual module — once.
+        // idle, seed the baud from a USART virtual module — once per project.
+        //
+        // The LOWEST instance, not the first module in `mcu.modules`, which is
+        // wiring order. It matters on Espressif parts: the port the Serial tab
+        // is about to open carries the CONSOLE, which is UART0 there (the same
+        // peripheral `esp-println` writes through), so a project whose first-
+        // drawn module happened to be a UART1 sensor handed the tab that
+        // sensor's rate. Instances are unique per module, so there is no tie.
         if self.build_tab == BuildPanelTab::Serial
             && !self.serial.baud_seeded
             && !self.serial.is_connected()
         {
             self.serial.baud_seeded = true;
             if let Some(baud) = self.mcu.as_ref().and_then(|mcu| {
-                mcu.modules.iter().find_map(|m| match &m.config {
-                    crate::panels::mcu_module::modules::ModuleConfig::Usart(c) => Some(c.baud_rate),
-                    _ => None,
-                })
+                mcu.modules
+                    .iter()
+                    .filter_map(|m| match &m.config {
+                        crate::panels::mcu_module::modules::ModuleConfig::Usart(c) => {
+                            Some((c.instance, c.baud_rate))
+                        }
+                        _ => None,
+                    })
+                    .min_by_key(|(instance, _)| *instance)
+                    .map(|(_, baud)| baud)
             }) {
                 self.serial.baud = baud;
             }

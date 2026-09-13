@@ -399,7 +399,11 @@ mod tests {
         );
         // A machine with no resolvable cache home legitimately falls back to
         // temp, so only assert the move where the env can actually answer.
-        let home_var = if cfg!(windows) { "LOCALAPPDATA" } else { "HOME" };
+        let home_var = if cfg!(windows) {
+            "LOCALAPPDATA"
+        } else {
+            "HOME"
+        };
         if std::env::var_os(home_var).is_some() {
             assert!(
                 !b.starts_with(legacy_base()),
@@ -422,10 +426,9 @@ mod tests {
     /// disk at zero bytes free.
     #[test]
     fn only_the_legacy_hook_may_name_the_temp_dir() {
-        let src = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workspace.rs"),
-        )
-        .expect("read this module's own source");
+        let src =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workspace.rs"))
+                .expect("read this module's own source");
         // Tests are allowed it — their scratch dirs belong in temp.
         let head = src.split("#[cfg(test)]").next().unwrap_or_default();
         let hits: Vec<&str> = head
@@ -698,7 +701,10 @@ mod stale_slot_sweep {
         }
         sweep_base(&base, &ours, OLD);
         assert!(!slot.exists(), "an unheld slot should have been swept");
-        assert!(bystander.exists(), "a directory that is not a slot is not ours");
+        assert!(
+            bystander.exists(),
+            "a directory that is not a slot is not ours"
+        );
         assert!(ours.exists(), "our own slot must never be swept");
     }
 

@@ -698,6 +698,7 @@ pub(super) fn show_diag_panel(
                 openocd_state,
                 openocd_target_cfg,
                 espflash_state,
+                espflash_used_port,
                 espflash_port,
                 toolchain,
                 flash_scan,

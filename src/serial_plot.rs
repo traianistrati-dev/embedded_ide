@@ -91,8 +91,18 @@ impl PlotState {
             return;
         }
         if self.paused {
+            // The bytes arriving while paused are dropped, but WHERE they stop
+            // decides what the next ones are. Ending on a newline means the
+            // stream resumes at a line start and nothing is owed; ending
+            // mid-line means the first bytes after Resume are that line's TAIL,
+            // and parsing them as a whole line invents a sample. That is the
+            // same hole the ring-loss branch below fixes, and it takes the same
+            // answer - but only in the second case, which is why this looks at
+            // the dropped bytes instead of always discarding.
+            let take = (new as usize).min(rx.len());
+            let resumes_at_a_line_start = take > 0 && rx[rx.len() - take..].last() == Some(&b'\n');
             self.pending.clear();
-            self.discarding = false;
+            self.discarding = !resumes_at_a_line_start;
             return;
         }
         if new as usize > rx.len() {
@@ -627,6 +637,26 @@ mod tests {
         q.feed(&long, long.len() as u64);
         assert_eq!(q.channels.len(), 1);
         assert_eq!(q.channels[0].name, "b");
+    }
+
+    /// Pausing mid-LINE and resuming must not parse the tail as a line. The
+    /// existing test above pauses on a newline boundary, where nothing is owed;
+    /// this is the other half, and it used to invent a sample per resume.
+    #[test]
+    fn resuming_in_the_middle_of_a_line_drops_its_tail() {
+        let mut p = PlotState::default();
+        p.feed(b"a:1\n", 4);
+        p.paused = true;
+        // Stops MID-LINE: "a:2" has no newline yet, so the stream does not
+        // resume at a line start.
+        p.feed(b"a:2", 7);
+        p.paused = false;
+        // ":999" is the tail of the line whose head was dropped. Read as a
+        // whole line it would invent a sample; it must go to the newline.
+        p.feed(b":999\na:3\n", 16);
+        let vals: Vec<f32> = p.channels[0].data.iter().map(|&(_, v)| v).collect();
+        assert_eq!(vals, vec![1.0, 3.0], "the torn tail became a sample");
+        assert_eq!(p.channels.len(), 1);
     }
 
     #[test]

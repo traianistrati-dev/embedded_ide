@@ -249,35 +249,18 @@ See the log for details."
             .join("release")
             .join(format!("{chip}-project"));
 
-        // Full espflash command (shown in log for easy copy-paste / debugging):
-        //   --ignore-app-descriptor  : belt and braces. It was needed when the
-        //                              generator emitted no descriptor at all;
-        //                              every generated main.rs now carries
-        //                              `esp_bootloader_esp_idf::esp_app_desc!()`
-        //                              (checked by `the_generated_main_carries_an_app_descriptor`),
-        //                              so espflash's check would pass anyway.
-        //                              Kept because it also covers a user who
-        //                              deletes that line from their own main.rs.
-        //   --after hard-reset       : explicitly reset the chip via the RTS line
-        //                              after flashing so boards with a DTR/RTS
-        //                              auto-reset circuit reboot automatically.
-        //   --port <port>            : optional; empty string = auto-detect.
-        let port_display = if port.is_empty() {
-            "auto".to_owned()
+        // One reset, by whoever is going to watch the output (see
+        // `monitor_follows`). Two resets would boot the firmware twice, and the
+        // first boot's output has nobody listening.
+        let after = if monitor_follows {
+            "no-reset"
         } else {
-            port.clone()
+            "hard-reset"
         };
-        push_log(
-            &log,
-            &ctx,
-            &format!(
-                // "▶ espflash flash --chip {chip} --port {port_display} \
-                // --ignore-app-descriptor --after hard-reset {} …",
-                "> espflash flash --chip {chip} --port {} --ignore-app-descriptor {}-",
-                port_display,
-                elf_path.display()
-            ),
-        );
+        // ONE list, spawned below and echoed here. They were two hand-kept
+        // copies and had already drifted - see `flash_args`.
+        let args = flash_args(&chip, &port, after, &elf_path);
+        push_log(&log, &ctx, &format!("> espflash {}", args.join(" ")));
         if port.is_empty() {
             push_log(
                 &log,
@@ -293,21 +276,7 @@ See the log for details."
         let mut esp_cmd = Command::new("espflash");
         esp_cmd
             .current_dir(&project_dir)
-            .args(["flash", "--chip", &chip]);
-        if !port.is_empty() {
-            esp_cmd.args(["--port", &port]);
-        }
-        // One reset, by whoever is going to watch the output (see
-        // `monitor_follows`). Two resets would boot the firmware twice, and the
-        // first boot's output has nobody listening.
-        let after = if monitor_follows {
-            "no-reset"
-        } else {
-            "hard-reset"
-        };
-        esp_cmd
-            .args(["--ignore-app-descriptor", "--after", after])
-            .arg(&elf_path)
+            .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -463,10 +432,17 @@ pub fn read_board_info(
     child: crate::flash_stop::FlashHandle,
     ctx: eframe::egui::Context,
     port: String,
+    // The SAME handle the flash writes to. `ReadingInfo` already counts as a
+    // port holder (see `diag_panel`), but only the flash ever filled this in -
+    // so while board-info held the port the Serial tab was told nobody had it,
+    // and Connect failed with the raw OS error the held-port note exists to
+    // replace.
+    used_port: Arc<Mutex<String>>,
 ) {
     if state.lock().unwrap().is_busy() {
         return;
     }
+    *used_port.lock().unwrap() = port.clone();
     *state.lock().unwrap() = EspFlashState::ReadingInfo;
     log.lock().unwrap().clear();
     crate::flash_stop::arm(&child);
@@ -576,6 +552,42 @@ pub fn read_board_info(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// The `espflash flash` argument list: ONE source, read both by the spawned
+/// command and by the line echoed into the Flash log for copy-paste.
+///
+/// They were two hand-kept copies and had drifted three ways: the echo had lost
+/// `--after` (the flag that decides whether the chip reboots), it printed
+/// `--port auto` where nothing at all is passed, and it carried a stray `-`
+/// glued to the ELF path - so the command offered for pasting named a file that
+/// does not exist and a reset behaviour the IDE never used.
+///
+/// `--ignore-app-descriptor` is belt and braces. It was needed when the
+/// generator emitted no descriptor at all; every generated `main.rs` now carries
+/// `esp_bootloader_esp_idf::esp_app_desc!()` (checked by
+/// `the_generated_main_carries_an_app_descriptor`), so espflash's check would
+/// pass anyway. Kept because it also covers a user who deletes that line from
+/// their own `main.rs`.
+///
+/// `--after` decides the reset, and `hard-reset` drives the **DTR** line - that
+/// is espflash 4's own wording for it - so a board with the usual auto-reset
+/// circuit reboots into the new firmware. `no-reset` leaves the chip alone for
+/// whoever is about to watch the output.
+///
+/// An empty `port` passes no `--port` at all, which is how espflash is told to
+/// auto-detect.
+fn flash_args(chip: &str, port: &str, after: &str, elf: &std::path::Path) -> Vec<String> {
+    let mut args: Vec<String> = vec!["flash".into(), "--chip".into(), chip.into()];
+    if !port.is_empty() {
+        args.push("--port".into());
+        args.push(port.into());
+    }
+    args.push("--ignore-app-descriptor".into());
+    args.push("--after".into());
+    args.push(after.into());
+    args.push(elf.display().to_string());
+    args
+}
+
 fn push_log(log: &Arc<Mutex<Vec<String>>>, ctx: &eframe::egui::Context, line: &str) {
     log.lock().unwrap().push(line.to_string());
     ctx.request_repaint();
@@ -588,6 +600,49 @@ fn set(state: &Arc<Mutex<EspFlashState>>, ctx: &eframe::egui::Context, next: Esp
 
 #[cfg(test)]
 mod build_failure_tests {
+    use super::flash_args;
+
+    /// The line echoed for copy-paste IS the command that runs, and it is a real
+    /// command: the flag that decides whether the chip reboots is present, no
+    /// `--port auto` (there is no port called `auto`), and nothing is glued to
+    /// the ELF path.
+    #[test]
+    fn the_flash_arguments_are_one_list_and_paste_back() {
+        let elf = std::path::Path::new("target/x/release/esp32c3-project");
+        let elf_s = elf.display().to_string();
+
+        let with_port = flash_args("esp32c3", "COM7", "hard-reset", elf);
+        let want: Vec<String> = [
+            "flash",
+            "--chip",
+            "esp32c3",
+            "--port",
+            "COM7",
+            "--ignore-app-descriptor",
+            "--after",
+            "hard-reset",
+            elf_s.as_str(),
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        assert_eq!(with_port, want);
+
+        // Both reset modes reach the list; the echo used to show neither.
+        for after in ["hard-reset", "no-reset"] {
+            let a = flash_args("esp32", "COM3", after, elf);
+            assert!(a.contains(&"--after".to_owned()), "{a:?}");
+            assert!(a.contains(&after.to_owned()), "{a:?}");
+        }
+
+        // Empty port = no --port at all, and the ELF path ends the list clean.
+        let auto = flash_args("esp32s3", "", "hard-reset", elf);
+        assert!(
+            !auto.iter().any(|a| a == "--port" || a == "auto"),
+            "{auto:?}"
+        );
+        assert_eq!(auto.last().unwrap(), &elf_s);
+    }
 
     /// Every generated `main.rs` carries the ESP-IDF app descriptor.
     ///
@@ -615,7 +670,7 @@ mod build_failure_tests {
                 mcu.runtime = rt;
                 assert!(
                     mcu.fresh_main_rs().contains("esp_app_desc!"),
-                    "{} / {rt:?}: no app descriptor, so espflash needs the flag                      and the comments explaining it are right again",
+                    "{} / {rt:?}: no app descriptor, so the flag is load-bearing again",
                     d.id
                 );
                 checked += 1;

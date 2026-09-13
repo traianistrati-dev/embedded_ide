@@ -65,6 +65,11 @@ pub fn show_serial_tab(
     // ── Controls row ──────────────────────────────────────────────────────────
     ui.horizontal_wrapped(|ui| {
         ui.label("Port:");
+        // Each row carries what is on the other end, not just the number. An
+        // Espressif board routinely enumerates TWO ports - the chip's own
+        // USB-Serial/JTAG beside a CP210x/CH340 bridge - and the number alone
+        // says nothing about which one is the chip. See `serial::port_label`.
+        let selected_is = serial.port_labels.get(&serial.port).cloned();
         egui::ComboBox::from_id_salt("serial_port")
             .selected_text(if serial.port.is_empty() {
                 "—".to_owned()
@@ -73,8 +78,17 @@ pub fn show_serial_tab(
             })
             .show_ui(ui, |ui| {
                 for p in serial.ports.clone() {
-                    ui.selectable_value(&mut serial.port, p.clone(), p);
+                    let row = match serial.port_labels.get(&p) {
+                        Some(what) => format!("{p} — {what}"),
+                        None => p.clone(),
+                    };
+                    ui.selectable_value(&mut serial.port, p, row);
                 }
+            })
+            .response
+            .on_hover_text(match &selected_is {
+                Some(what) => format!("{} — {what}", serial.port),
+                None => "Which serial port to open".to_owned(),
             });
         if ui
             .button(ph::ARROWS_CLOCKWISE)
@@ -1052,7 +1066,11 @@ fn show_tx_area(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui::Conte
         let resp = ui.add_sized(
             [ui.available_width(), serial.tx_height],
             egui::TextEdit::multiline(&mut serial.tx_input)
-                .hint_text("text to send (Ctrl+Enter)")
+                .hint_text(if hex {
+                    "hex bytes e.g. 41 54 0D (Ctrl+Enter)"
+                } else {
+                    "text to send (Ctrl+Enter)"
+                })
                 .interactive(connected)
                 .layouter(&mut tx_layouter),
         );
@@ -1067,20 +1085,31 @@ fn show_tx_area(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui::Conte
         // Encode each non-empty line, then queue them so they go out one at a
         // time with the configured `line_gap` pause — non-blocking (paced by
         // `pump_tx_queue` below), so the UI stays responsive during the sequence.
+        let mut bad: Option<String> = None;
         let lines: Vec<Vec<u8>> = serial
             .tx_input
             .clone()
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
-            .map(|line| {
-                let mut bytes = hex_string_to_bytes(line).unwrap_or_default();
-                if serial.append_crlf {
-                    bytes.extend_from_slice(b"\r\n");
+            .filter_map(|line| match encode_tx_line(line, hex) {
+                Ok(mut bytes) => {
+                    if serial.append_crlf {
+                        bytes.extend_from_slice(b"\r\n");
+                    }
+                    Some(bytes)
                 }
-                bytes
+                Err(e) => {
+                    // Dropping it in silence was the old behaviour, and it is
+                    // the worst of the three: the line simply did not go out.
+                    bad.get_or_insert(e);
+                    None
+                }
             })
             .collect();
+        if let Some(e) = bad {
+            serial.state.lock().unwrap().error = Some(e);
+        }
         serial.queue_lines(lines);
     }
 
@@ -1091,6 +1120,23 @@ fn show_tx_area(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui::Conte
     }
 }
 
+/// One typed line into the bytes that go on the wire.
+///
+/// The **Hex** toggle decides - the same toggle that already colours this box
+/// per byte and switches the RX view. It governed only the LOOK: the line was
+/// hex-decoded unconditionally, with `unwrap_or_default()` swallowing the
+/// failure, so a box whose hint read "text to send" sent nothing at all when
+/// given text. `hello` parsed to no bytes, and a word that happens to be two
+/// hex digits (`de`) went out as the single byte 0xDE. Text sending was there
+/// originally (`tx_input.into_bytes()`) and was REPLACED, not extended, when
+/// hex sequences were added.
+fn encode_tx_line(line: &str, hex: bool) -> Result<Vec<u8>, String> {
+    if !hex {
+        return Ok(line.as_bytes().to_vec());
+    }
+    hex_string_to_bytes(line).map_err(|_| format!("Not hex bytes: {line:?} - nothing was sent"))
+}
+
 fn hex_string_to_bytes(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
     s.split_whitespace()
         .map(|x| u8::from_str_radix(x, 16))
@@ -1099,6 +1145,29 @@ fn hex_string_to_bytes(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
 
 #[cfg(test)]
 mod held_port_tests {
+    use super::encode_tx_line;
+
+    /// The send box obeys the Hex toggle it already renders itself by. Before
+    /// this, text typed into a box hinting "text to send" produced NO bytes,
+    /// and a two-hex-digit word produced the wrong one.
+    #[test]
+    fn the_send_box_encodes_the_way_its_own_toggle_says() {
+        // Text mode: the bytes are the characters, verbatim.
+        assert_eq!(encode_tx_line("AT+RST", false).unwrap(), b"AT+RST".to_vec());
+        // The two cases the old unconditional hex decode got wrong.
+        assert_eq!(encode_tx_line("hello", false).unwrap(), b"hello".to_vec());
+        assert_eq!(encode_tx_line("de", false).unwrap(), b"de".to_vec());
+
+        // Hex mode still parses whitespace-separated bytes, as before.
+        assert_eq!(
+            encode_tx_line("41 54 0D", true).unwrap(),
+            vec![0x41, 0x54, 0x0D]
+        );
+        // And a line that is not hex now SAYS so instead of vanishing.
+        let err = encode_tx_line("hello", true).unwrap_err();
+        assert!(err.contains("hello"), "{err}");
+    }
+
     use super::*;
 
     /// Only the SELECTED port is a conflict. This mirrors the `filter` in

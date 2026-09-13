@@ -717,12 +717,25 @@ pub fn is_espressif_target(kind: &str, vid_pid: &str) -> bool {
 
 /// Look up VID:PID in the programmer catalogue.
 /// Returns `Some((display_name, kind))` only for recognised embedded programmers.
-fn find_programmer(vid_pid: &str) -> Option<(&'static str, &'static str)> {
+/// The catalogue's EXACT answer for an id, with no vendor guessing.
+///
+/// Split out of [`find_programmer`], whose fallbacks are deliberate guesses: by
+/// VID it answers with the FIRST row of that vendor, which is the right answer
+/// to "can this be flashed?" and the wrong one to "what IS this?" - it would
+/// call an unlisted CP2110 a "CP2102". A caller that NAMES a device to the user
+/// (the Serial tab's port list, via `serial::port_label`) wants this one and its
+/// own fallback.
+pub(crate) fn exact_programmer(vid_pid: &str) -> Option<(&'static str, &'static str)> {
+    KNOWN_PROGRAMMERS
+        .iter()
+        .find(|(vp, _, _)| vid_pid.eq_ignore_ascii_case(vp))
+        .map(|&(_, name, kind)| (name, kind))
+}
+
+pub(crate) fn find_programmer(vid_pid: &str) -> Option<(&'static str, &'static str)> {
     // 1. Exact VID:PID match
-    for &(vp, name, kind) in KNOWN_PROGRAMMERS {
-        if vid_pid.eq_ignore_ascii_case(vp) {
-            return Some((name, kind));
-        }
+    if let Some(hit) = exact_programmer(vid_pid) {
+        return Some(hit);
     }
     // 2. Vendor fallbacks, for families with many PIDs
     let vid = vid_pid.split(':').next().unwrap_or("").to_lowercase();
@@ -735,6 +748,18 @@ fn find_programmer(vid_pid: &str) -> Option<(&'static str, &'static str)> {
     //    not recognise is still an Espressif part; say so and let it through.
     if vid == "303a" {
         return Some(("Espressif USB device", "ESP32"));
+    }
+
+    // 2b. WCH, for the same reason and with the opposite bias. The by-prefix
+    //     sweep below answers with the FIRST `1a86` row, which is the
+    //     `WCH-Link (RISC-V)` debug probe - so an unlisted WCH SERIAL bridge
+    //     (a CH343, say) is announced as a CMSIS-DAP probe and, not being
+    //     "USB-Serial", is filtered out of the Flash tab on an ESP project.
+    //     The vendor ships overwhelmingly serial bridges; the probe is the
+    //     exception and is listed by its exact id, so it is already matched
+    //     above. Anything else from 1a86 is a bridge.
+    if vid == "1a86" {
+        return Some(("WCH USB-Serial", "USB-Serial"));
     }
 
     for &(vp, name, kind) in KNOWN_PROGRAMMERS {

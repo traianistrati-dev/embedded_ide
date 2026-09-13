@@ -1093,9 +1093,18 @@ pub fn async_peripherals(
     let mut alloc = dma_map::DmaAllocator::for_chip(family, chip.dma);
     // Hand-picked channels come out of circulation FIRST, so that whichever
     // peripheral happens to be emitted earlier cannot take one.
+    //
+    // EVERY map that carries a hand-pinned pair has to be in this chain.
+    // `lpuart` was missing, and the failure was exactly the arbitrariness the
+    // manual field exists to remove: a channel pinned on an LPUART module was
+    // still free when USART/SPI/I2C/I2S/SAI/SDMMC were served, so whoever came
+    // first took it and the LPUART fell through to `AlreadyTaken` and a clash
+    // TODO. It is easy to miss because LPUART is its own map — the emission
+    // loop below pairs it with USART deliberately for that reason.
     for (tx, rx) in usart
         .values()
         .map(|c| (&c.dma_tx, &c.dma_rx))
+        .chain(lpuart.values().map(|c| (&c.dma_tx, &c.dma_rx)))
         .chain(spi.values().map(|c| (&c.dma_tx, &c.dma_rx)))
         .chain(i2c.values().map(|c| (&c.dma_tx, &c.dma_rx)))
         .chain(i2s.values().map(|c| (&c.dma_tx, &c.dma_rx)))
@@ -4932,6 +4941,109 @@ mod usart_mode_tests {
             "the pinned channel still gets its binding:
 {}",
             out.dma_irqs
+        );
+    }
+
+    /// LPUART's hand-pinned channel is reserved like everyone else's.
+    ///
+    /// It is its OWN module map, and it was the one map missing from the
+    /// reserve chain - so its pinned channel stayed free while the USART, which
+    /// is emitted FIRST, was allocated automatically. The USART took it and the
+    /// LPUART fell through to `AlreadyTaken` and a clash TODO, which is exactly
+    /// the emission-order arbitrariness the manual field exists to remove.
+    ///
+    /// The USART here is the thief on purpose: it is served before the LPUART,
+    /// so nothing else in this file would catch the omission.
+    #[test]
+    fn an_lpuart_keeps_the_channel_it_pinned() {
+        use crate::panels::mcu_module::codegen::dma_data::DmaChannel;
+        use crate::panels::mcu_module::mcu_def::DmaDef;
+        use crate::panels::mcu_module::modules::UsartMode;
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+        let mk = |name: &str, f: PinFunction| {
+            let mut p = Pin::new(1, name);
+            p.selected_function = f;
+            p
+        };
+        let pins = [
+            mk("PA9", PinFunction::UsartTx(1)),
+            mk("PA10", PinFunction::UsartRx(1)),
+            mk("PA2", PinFunction::LpuartTx(1)),
+            mk("PA3", PinFunction::LpuartRx(1)),
+        ];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        // Muxed, so automatic allocation walks CH1, CH2, … in order and the
+        // USART would otherwise swallow the LPUART's CH1.
+        let chip = DmaDef {
+            mux: true,
+            channels: (1..=6)
+                .map(|i| DmaChannel {
+                    peri: format!("DMA1_CH{i}"),
+                    irq: format!("DMA1_CHANNEL{i}"),
+                })
+                .collect(),
+            requests: Vec::new(),
+        };
+        let dma_usart = || UsartModuleConfig {
+            mode: UsartMode::Dma,
+            ..UsartModuleConfig::new(1)
+        };
+        let lpuart: BTreeMap<u8, UsartModuleConfig> = [(
+            1u8,
+            UsartModuleConfig {
+                dma_tx: "DMA1_CH1".into(),
+                ..dma_usart()
+            },
+        )]
+        .into_iter()
+        .collect();
+        let out = async_peripherals(
+            "stm32g0",
+            ChipData {
+                dma: Some(&chip),
+                irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
+                sdmmc_ip: None,
+            },
+            CompInputs {
+                settings: &Default::default(),
+                instances: &[],
+                pins: &[],
+            },
+            &refs,
+            &[(1u8, dma_usart())].into_iter().collect(),
+            &Default::default(),
+            &Default::default(),
+            &lpuart,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            None,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(
+            !out.init_calls.contains("DMA_TX_TODO"),
+            "the LPUART pinned a real channel, so nothing should fall to a TODO:
+{}",
+            out.init_calls
+        );
+        assert!(
+            out.init_calls.contains("p.DMA1_CH1,"),
+            "the LPUART keeps the channel it pinned:
+{}",
+            out.init_calls
+        );
+        assert!(
+            out.init_calls.contains("p.DMA1_CH2, p.DMA1_CH3, Irqs"),
+            "the USART, served FIRST, must skip the reserved CH1:
+{}",
+            out.init_calls
         );
     }
 

@@ -38,16 +38,31 @@ pub const DEFAULT_BLOCK_GAP_MS: u64 = 20;
 /// Module's.
 ///
 /// ONE list, because the two are joined: opening the Serial tab seeds its baud
-/// from the first USART module, so a rate one of them offers and the other does
-/// not is a rate the user can be handed and then cannot re-select. They were two
+/// from a USART module, so a rate one of them offers and the other does not is a
+/// rate the user can be handed and then cannot re-select. They were two
 /// hand-kept copies in two files with nothing comparing them.
 ///
-/// 74880 is the odd one and is here for the Espressif parts. `esp32` and
-/// `esp32c2` carry a 26 MHz crystal - their own metadata says so, and it is the
-/// DEFAULT for both - while the ROM sizes its UART divisor for 40 MHz, so the
-/// boot log arrives at 115200 x 26 / 40, which is exactly 74880. Without it that
-/// log is unreadable here at any setting, because neither picker takes a typed
-/// value.
+/// 74880 is the odd one and is here for the Espressif parts. A board whose
+/// crystal is 26 MHz boots with the ROM's UART divisor sized for 40 MHz, so its
+/// boot log arrives at 115200 x 26 / 40, which is exactly 74880. Without this
+/// entry that log is unreadable here at any setting, because neither picker
+/// takes a typed value.
+///
+/// WHICH parts can be that board is read from the shipped definitions, not
+/// asserted: `esp32` and `esp32c2` are the only two of the nine that offer
+/// 26 MHz at all, and both offer 40 MHz as well
+/// (`the_only_26mhz_parts_are_the_two_this_rate_is_for` pins the set in both
+/// directions). 26 is NOT a hardware default for them - esp-hal pre-writes
+/// `XtalClkConfig::_40` and then measures the real one - it is the low end of
+/// the range, which is what the IDE picks for the Clock tab. So 74880 is the
+/// rate for a 26 MHz BOARD, not for every ESP32; a stock 40 MHz WROOM logs at
+/// 115200.
+///
+/// The other seven carry no 26 MHz option: `esp32c5` is 40 or 48 MHz, `esp32h2`
+/// is 32 MHz and nothing else, and the remaining five are 40 MHz only. Whether
+/// the H2 ROM divides for 40 (which would put its log at 115200 x 32 / 40 =
+/// 92160) or knows its own crystal is not something this repo can check, so no
+/// rate is invented for it here.
 pub const BAUDS: [u32; 9] = [
     9600, 19200, 38400, 57600, 74880, 115200, 230400, 460800, 921600,
 ];
@@ -216,9 +231,13 @@ pub struct SerialMonitor {
     tx_next_at: Option<Instant>,
     /// Cached list of available ports (refreshed on demand).
     pub ports: Vec<String>,
-    /// One-shot: `false` until the baud has been seeded from the first
-    /// _USART virtual module (done when the Serial tab first opens while
-    /// idle — replaces the old toolbar Serial button's seeding).
+    /// Port name -> what is on the other end of it, for the ports that say.
+    /// Filled by the same pass as [`SerialMonitor::ports`]; see [`port_label`].
+    pub port_labels: HashMap<String, String>,
+    /// `false` until the baud has been seeded from the LOWEST-instance USART
+    /// virtual module (done when the Serial tab first opens while idle —
+    /// replaces the old toolbar Serial button's seeding). Cleared by
+    /// `load_project_from_dir`: it is once per PROJECT, not once per process.
     pub baud_seeded: bool,
     /// `true` → the RX area shows the live plot instead of the text/hex view
     /// (the send area keeps working, so commands can be sent while plotting).
@@ -282,6 +301,7 @@ impl Default for SerialMonitor {
             tx_queue: std::collections::VecDeque::new(),
             tx_next_at: None,
             ports: Vec::new(),
+            port_labels: HashMap::new(),
             baud_seeded: false,
             plot_on: false,
             plot: Default::default(),
@@ -298,12 +318,49 @@ impl Default for SerialMonitor {
     }
 }
 
+/// What is on the other end of a port, when the OS says enough to tell.
+///
+/// The identity was there all along and thrown away: `available_ports` hands
+/// back a `SerialPortType`, and the Flash tab already resolves the very same
+/// VID:PID through [`crate::dfu::find_programmer`] - so an Espressif
+/// `303a:1001` is named "Espressif built-in USB-Serial/JTAG" over there and was
+/// a bare `COM7` here. It matters most on Espressif boards, which routinely
+/// expose TWO ports (the chip's own USB-Serial/JTAG next to a CP210x/CH340
+/// bridge) with nothing but the number to tell them apart.
+///
+/// `None` for a port the OS does not describe as USB - there is nothing honest
+/// to say about it.
+fn port_label(info: &serialport::SerialPortInfo) -> Option<String> {
+    let serialport::SerialPortType::UsbPort(usb) = &info.port_type else {
+        return None;
+    };
+    let vid_pid = format!("{:04x}:{:04x}", usb.vid, usb.pid);
+    // An EXACT id in the catalogue is curated, and names the peripheral better
+    // than the device names itself ("Espressif built-in USB-Serial/JTAG" against
+    // the descriptor's "USB JTAG/serial debug unit"), so it wins.
+    if let Some((name, _)) = crate::dfu::exact_programmer(&vid_pid) {
+        return Some(name.to_owned());
+    }
+    // Past that, what the device says about ITSELF beats `find_programmer`'s
+    // by-VID guess, which answers with the first row of that vendor - fine for
+    // deciding whether a thing can be flashed, wrong when the answer is printed
+    // as this port's name.
+    if let Some(said) = usb.product.as_deref().or(usb.manufacturer.as_deref()) {
+        return Some(said.to_owned());
+    }
+    // Nothing but the id left: the vendor guess beats a bare number.
+    crate::dfu::find_programmer(&vid_pid).map(|(name, _)| name.to_owned())
+}
+
 impl SerialMonitor {
     /// Re-enumerate the available serial ports; pick the first one if none chosen.
     pub fn refresh_ports(&mut self) {
-        self.ports = serialport::available_ports()
-            .map(|ports| ports.into_iter().map(|p| p.port_name).collect())
-            .unwrap_or_default();
+        let found = serialport::available_ports().unwrap_or_default();
+        self.port_labels = found
+            .iter()
+            .filter_map(|p| port_label(p).map(|l| (p.port_name.clone(), l)))
+            .collect();
+        self.ports = found.into_iter().map(|p| p.port_name).collect();
         if self.port.is_empty() {
             if let Some(first) = self.ports.first() {
                 self.port = first.clone();
@@ -340,6 +397,22 @@ impl SerialMonitor {
     }
 
     /// Open `self.port` at `self.baud` and start the background reader.
+    ///
+    /// DATA ONLY: nothing here drives DTR or RTS, and nothing anywhere in `src/`
+    /// does. On an Espressif board those two lines are the reset and the
+    /// boot-mode select - through the two-transistor circuit on the esp32,
+    /// esp32c2 and esp32s2 bridge boards, and in silicon on the six parts with
+    /// the native USB-Serial/JTAG - so this tab cannot restart a chip or catch
+    /// the `println!`s that happen before `main` settles. That is exactly why the
+    /// Flash tab spawns `espflash monitor` instead (see [`crate::esp_monitor`]):
+    /// espflash drives the lines.
+    ///
+    /// What the lines DO end up at is `serialport`'s per-platform default, and
+    /// the two platforms differ: on Windows `dcb::init` deasserts both for the
+    /// whole session, while on Linux DTR is asserted on open and the crate
+    /// documents that it cannot be prevented. `required_tools.rs` already calls
+    /// that a board reset, which is why it probes tty access with `access()`
+    /// rather than by opening the device.
     pub fn connect(&mut self, ctx: &egui::Context) {
         if self.port.is_empty() || self.is_connected() {
             return;
@@ -396,6 +469,12 @@ impl SerialMonitor {
     /// the virtual pair, whose mate the other application holds. Both are opened
     /// at the SAME baud: the pair is a byte pipe, but the device is not, and a
     /// mismatch here corrupts every frame in a way that looks like noise.
+    ///
+    /// BYTES only, which is what the UI promises and is worth reading literally:
+    /// the relay never carries DTR or RTS. So Bridge can watch an application
+    /// talk to a running board, but it cannot sit between `espflash` (or any
+    /// other Espressif host tool) and a chip, because the download loader is
+    /// entered by toggling exactly those two lines.
     pub fn connect_bridge(&mut self, ctx: &egui::Context) {
         if self.is_connected() {
             return;
@@ -1534,7 +1613,7 @@ mod tests {
 
 #[cfg(test)]
 mod baud_list_tests {
-    use super::BAUDS;
+    use super::{BAUDS, port_label};
 
     /// The default a fresh console starts at has to be selectable, or the very
     /// first thing the combo shows is a value it cannot get back to.
@@ -1555,6 +1634,62 @@ mod baud_list_tests {
     }
 
     /// Sorted and unique: the combo renders in order, and a repeat would draw
+
+    /// A port is named from the table the Flash tab already uses, and falls back
+    /// to the descriptor's own strings - never to nothing when the OS said
+    /// something. A port the OS does not call USB has no honest label.
+    #[test]
+    fn a_usb_port_is_named_by_the_table_then_by_its_descriptor() {
+        use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
+        let usb = |vid, pid, product: Option<&str>| SerialPortInfo {
+            port_name: "COM7".to_owned(),
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid,
+                pid,
+                serial_number: None,
+                manufacturer: None,
+                product: product.map(str::to_owned),
+            }),
+        };
+        // The chip's own USB peripheral, which this tab used to render as a bare
+        // COM number while the Flash tab spelled it out.
+        assert_eq!(
+            port_label(&usb(0x303a, 0x1001, Some("USB JTAG/serial debug unit"))).as_deref(),
+            Some("Espressif built-in USB-Serial/JTAG")
+        );
+        // The bridge every esp32 / esp32c2 / esp32s2 board reaches the host by.
+        assert_eq!(
+            port_label(&usb(0x10c4, 0xea60, None)).as_deref(),
+            Some("CP2102 USB-Serial")
+        );
+        // An id the table has NOT heard of, from a vendor it has: the device's
+        // own name, not the vendor's first row. `find_programmer` would answer
+        // "CP2102 USB-Serial" here, which is a different chip.
+        assert_eq!(
+            port_label(&usb(0x10c4, 0xea7a, Some("CP2110 HID USB-to-UART"))).as_deref(),
+            Some("CP2110 HID USB-to-UART")
+        );
+        // Unlisted Espressif with nothing to say for itself: the vendor guess is
+        // the last resort, and it is still better than a bare COM number.
+        assert_eq!(
+            port_label(&usb(0x303a, 0x0009, None)).as_deref(),
+            Some("Espressif USB device")
+        );
+        // An id the table has never heard of still says what it is.
+        assert_eq!(
+            port_label(&usb(0x1234, 0x5678, Some("Widget"))).as_deref(),
+            Some("Widget")
+        );
+        assert_eq!(port_label(&usb(0x1234, 0x5678, None)), None);
+        assert_eq!(
+            port_label(&SerialPortInfo {
+                port_name: "COM1".to_owned(),
+                port_type: SerialPortType::Unknown,
+            }),
+            None
+        );
+    }
+
     /// the same row twice.
     #[test]
     fn the_list_is_sorted_and_has_no_repeats() {
@@ -1574,10 +1709,13 @@ mod baud_list_tests {
         );
     }
 
-    /// And the parts that need it really do carry a 26 MHz crystal - read from
-    /// the shipped definitions, not asserted from memory.
+    /// WHICH parts the rate is for, in both directions: the bundled definitions
+    /// that offer a 26 MHz crystal are exactly `esp32` and `esp32c2`. The old
+    /// version only asked whether `esp32c2` was among them, so it would still
+    /// have passed if a part had lost the option or a new one had gained it -
+    /// and the comment on BAUDS names a SET, not a member.
     #[test]
-    fn the_parts_that_need_it_run_a_26mhz_crystal() {
+    fn the_only_26mhz_parts_are_the_two_this_rate_is_for() {
         use crate::panels::mcu_module::builtins::builtin_definitions;
         use crate::panels::mcu_module::clock::graph::model::NodeKind;
         use crate::panels::mcu_module::clock::model::ClockConfig;
@@ -1598,10 +1736,11 @@ mod baud_list_tests {
                 found.push(d.id.clone());
             }
         }
-        assert!(
-            found.iter().any(|id| id == "esp32c2"),
-            "no bundled part offers a 26 MHz crystal, so the rate above needs a \
-             different justification: {found:?}"
+        found.sort();
+        assert_eq!(
+            found,
+            ["esp32", "esp32c2"],
+            "the 26 MHz set moved; 74880 is the boot-log rate for exactly it, and the comment on BAUDS names it"
         );
     }
 }

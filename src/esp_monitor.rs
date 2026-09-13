@@ -16,8 +16,13 @@
 //!   nothing before the first line is missed.
 //! - **Panics.** Given `--elf`, it turns an ESP exception backtrace's raw
 //!   addresses into function names and source lines.
-//! - **USB Serial/JTAG.** It knows the reset dance for the native-USB peripheral
-//!   (`--before usb-reset`), which a plain DTR/RTS toggle does not do.
+//! - **The reset is espflash's.** It drives the serial control lines itself,
+//!   which is how the chip reaches the start of `main` with the monitor already
+//!   attached. `monitor_args` passes no `--before`, so the sequence is
+//!   espflash's own default - NOT `usb-reset`, which this note claimed for a
+//!   long time and which `monitor_args` has never passed. The Serial tab cannot
+//!   do any of this: it opens the port and never touches a modem line (there is
+//!   no DTR/RTS call anywhere in `src/`).
 //!
 //! The Serial tab is still the right tool for TALKING to the device (TX, the
 //! plotter, the frames view); the two must not hold the same port at once, which

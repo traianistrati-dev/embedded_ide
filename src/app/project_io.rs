@@ -58,6 +58,10 @@ impl AppIde {
         self.new_folder_parent_folder = None;
         self.new_file_in_folder = None;
         self.project_name = root.file_name().and_then(|n| n.to_str()).map(String::from);
+        // Per PROJECT, not per process: the flag latched on the first Serial tab
+        // open and never cleared, so a second project opened in the same window
+        // kept the first one's baud rate.
+        self.serial.baud_seeded = false;
         self.project_dir = Some(root.to_path_buf());
         // Take this folder for this window (or find out another one has it).
         self.claim_open_project();

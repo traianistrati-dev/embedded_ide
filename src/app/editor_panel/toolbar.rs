@@ -264,19 +264,6 @@ impl AppIde {
         if toolchain != ToolchainKind::EspRust {
             return;
         }
-        // The Serial tab opens ports exclusively; two readers on one port means
-        // whichever loses gets an opaque OS error. Say so instead of racing.
-        if self.serial.is_connected() {
-            self.esp_monitor.state.lock().unwrap().push_plain(
-                crate::terminal::LineKind::Notice,
-                format!(
-                    "[error] the Serial tab is connected on {} — disconnect it there first",
-                    self.serial.port
-                ),
-            );
-            self.build_tab = BuildPanelTab::Dfu;
-            return;
-        }
         // A port MUST be resolved here. `--non-interactive` (which the monitor
         // needs, or espflash stops on a prompt nobody can see) refuses to
         // auto-detect: "No serial port was provided … when using the
@@ -307,6 +294,25 @@ impl AppIde {
                 crate::terminal::LineKind::Notice,
                 "[error] no serial port known — press Scan and pick the board in the \
                  programmer list above, then try again",
+            );
+            self.build_tab = BuildPanelTab::Dfu;
+            return;
+        }
+        // The Serial tab opens ports exclusively; two readers on one port means
+        // whichever loses gets an opaque OS error. Say so instead of racing.
+        //
+        // Matched on the PORT, which is why this sits after the resolution
+        // above: an unrelated board in the Serial tab is not a conflict - the
+        // Serial tab says so itself - and refusing on it was not harmless. This
+        // runs after a flash deliberately given `--after no-reset`, so bailing
+        // here left the chip sitting in the ROM bootloader with nobody to reset
+        // it, and the flash log's cheerful "[OK] ESP32 flash complete!" above.
+        if self.serial.is_connected() && self.serial.port == port {
+            self.esp_monitor.state.lock().unwrap().push_plain(
+                crate::terminal::LineKind::Notice,
+                format!(
+                    "[error] the Serial tab is connected on {port} - disconnect it there first"
+                ),
             );
             self.build_tab = BuildPanelTab::Dfu;
             return;
@@ -365,11 +371,10 @@ impl AppIde {
                 );
             }
             Err(e) => {
-                *self.build_state.lock().unwrap() =
-                    BuildState::Failed(format!(
-                        "Could not write project to the build workspace ({}): {e}",
-                        crate::workspace::dir().display()
-                    ));
+                *self.build_state.lock().unwrap() = BuildState::Failed(format!(
+                    "Could not write project to the build workspace ({}): {e}",
+                    crate::workspace::dir().display()
+                ));
             }
         }
     }

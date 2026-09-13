@@ -19,6 +19,10 @@ pub fn show_dfu_tab(
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
     espflash_state: &Arc<Mutex<EspFlashState>>,
+    // The port espflash is on right now, written by BOTH espflash paths -
+    // the flash and `read_board_info`. `diag_panel` reads it to name the
+    // holder for the Serial tab.
+    espflash_used_port: &Arc<Mutex<String>>,
     //espflash_port: &mut String,
     _: &mut String,
     toolchain: &ToolchainKind,
@@ -428,6 +432,7 @@ pub fn show_dfu_tab(
                 dfu_log,
                 esp_flash_child,
                 dfu_sel_programmer,
+                espflash_used_port,
             );
             // Disabled while a flash runs: it resets the very phase states the
             // Flash button reads to know it is showing "Stop Flash", so a Clear
@@ -1047,6 +1052,7 @@ fn esp_board_info_button(
     dfu_log: &Arc<Mutex<Vec<String>>>,
     esp_flash_child: &crate::flash_stop::FlashHandle,
     dfu_sel_programmer: &str,
+    espflash_used_port: &Arc<Mutex<String>>,
 ) {
     let busy = esp_state.is_busy();
     let reading = matches!(esp_state, EspFlashState::ReadingInfo);
@@ -1079,6 +1085,7 @@ fn esp_board_info_button(
             Arc::clone(esp_flash_child),
             ui.ctx().clone(),
             dfu_sel_programmer.to_owned(),
+            Arc::clone(espflash_used_port),
         );
     }
 }

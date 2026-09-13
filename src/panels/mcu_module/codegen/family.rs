@@ -1867,9 +1867,15 @@ mod tests {
     ///
     /// `dma_uses` had two arms — embassy-async and F1-blocking — and an ESP fell
     /// through both to `Vec::new()`, so the card could only ever say "no bus is
-    /// on DMA" no matter what the project did.
+    /// on DMA" no matter what the project did. It has four arms now, and the ESP
+    /// one is keyed on the FAMILY ahead of them, which is the point this test
+    /// pins: on ESP, DMA is NOT an async feature.
+    ///
+    /// This used to be `#[ignore]`d with its last assertion inverted — it still
+    /// claimed "the blocking project takes none", which was the pre-fix rule.
+    /// Ignoring it hid a test that contradicted the shipping code, so the
+    /// assertion was corrected and the attribute removed rather than left to rot.
     #[test]
-    #[ignore]
     fn an_esp_reports_its_dma_to_the_configuration_card() {
         use crate::panels::mcu_module::mcu::Runtime;
         use crate::panels::mcu_module::modules::{
@@ -1895,9 +1901,17 @@ mod tests {
         assert_eq!(uses[0].peri, "DMA_CH0");
         assert_eq!(uses[0].user, "SPI2");
 
-        // …and it is an ASYNC-runtime feature: the blocking project takes none.
+        // …and it is NOT an async-runtime feature on ESP: `with_dma` sits on
+        // esp-hal's BLOCKING drivers, so the blocking project takes the very
+        // same channel. That is why the ESP arm is keyed on the family and has
+        // to come BEFORE every runtime arm — keyed on the runtime instead, this
+        // is the case that reports nothing.
         mcu.runtime = Runtime::Blocking;
-        assert!(dma_uses(&mcu).is_empty());
+        let blocking = dma_uses(&mcu);
+        assert_eq!(
+            blocking, uses,
+            "an ESP reports the same channel on either runtime"
+        );
     }
 
     /// The same, for an ESP chip whose SPI is on the GDMA.
