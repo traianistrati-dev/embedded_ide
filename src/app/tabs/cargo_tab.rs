@@ -160,8 +160,8 @@ pub fn show_cargo_tab(
             }
             build_btn.on_hover_text(
                 "Run `cargo check` on the generated project.\n\
-                 Requires the Rust toolchain + thumbv7m-none-eabi target:\n\
-                 rustup target add thumbv7m-none-eabi",
+                 Requires the Rust toolchain + the chip's target, e.g.\n\
+                 rustup target add thumbv7em-none-eabihf (the Tools tab names it)",
             );
 
             ui.add_space(4.0);
