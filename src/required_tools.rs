@@ -15,7 +15,7 @@
 //! | cargo-bloat                 | All          | Yes (cargo)  | all       |
 //! | host C toolchain            | All          | Win only     | all †     |
 //! | serial port access          | All          | No (manual)  | Linux     |
-//! | thumbv7m-none-eabi target   | RustEmbedded | Yes          | all       |
+//! | Cortex-M targets (4, gated) | RustEmbedded | Yes          | all       |
 //! | probe-rs                    | RustEmbedded | Yes (cargo)  | all       |
 //! | dfu-util                    | RustEmbedded | Win + macOS  | all       |
 //! | openocd                     | RustEmbedded | Win + macOS  | all       |
@@ -460,19 +460,78 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             status: ToolStatus::Unknown,
         },
         // ── RustEmbedded (STM32 / ARM Cortex-M) ─────────────────────────
+        // FOUR targets, one per Cortex-M architecture the catalog spans, each
+        // gated on the project's own triple like the RISC-V pair below. There
+        // used to be a single ungated `thumbv7m-none-eabi` entry — the F103's
+        // target — marked Blocking for every RustEmbedded chip: a Pico user was
+        // told the M3 target blocked their build (it does not), and never told
+        // about `thumbv6m-none-eabi` (which does). Every STM32 outside F1 had
+        // the same wrong advice.
+        //
+        // The gates are whole triples, so they cannot overlap: `thumbv7m-` is
+        // not a prefix of `thumbv7em-`, and no soft-float `thumbv7em-none-eabi`
+        // entry exists — it WOULD be a prefix of the hard-float one.
+        RequiredTool {
+            name: "thumbv6m-none-eabi",
+            description: "Rust target for ARM Cortex-M0 / M0+ (STM32C0 / F0 / G0 / L0 / U0, RP2040)",
+            toolchain: Some(ToolchainKind::RustEmbedded),
+            only_for_target: Some("thumbv6m-none-eabi"),
+            severity: Severity::Blocking,
+            impact: "This chip cannot be compiled at all until the target is installed.",
+            check_cmd: "rustup",
+            check_args: &["target", "list", "--installed"],
+            check_pattern: "thumbv6m-none-eabi",
+            min_version: None,
+            install_cmd: Some("rustup"),
+            install_args: &["target", "add", "thumbv6m-none-eabi"],
+            manual_url: "https://docs.rust-embedded.org/book/intro/install.html",
+            status: ToolStatus::Unknown,
+        },
         RequiredTool {
             name: "thumbv7m-none-eabi",
-            description: "Rust target for ARM Cortex-M3 (STM32F1xx bare-metal)",
+            description: "Rust target for ARM Cortex-M3 (STM32F1 / F2 / L1)",
             toolchain: Some(ToolchainKind::RustEmbedded),
-            only_for_target: None,
+            only_for_target: Some("thumbv7m-none-eabi"),
             severity: Severity::Blocking,
-            impact: "This STM32 chip cannot be compiled at all until the target is installed.",
+            impact: "This chip cannot be compiled at all until the target is installed.",
             check_cmd: "rustup",
             check_args: &["target", "list", "--installed"],
             check_pattern: "thumbv7m-none-eabi",
             min_version: None,
             install_cmd: Some("rustup"),
             install_args: &["target", "add", "thumbv7m-none-eabi"],
+            manual_url: "https://docs.rust-embedded.org/book/intro/install.html",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "thumbv7em-none-eabihf",
+            description: "Rust target for ARM Cortex-M4F / M7 (STM32F3 / F4 / G4 / L4 / WB / F7 / H7, nRF52)",
+            toolchain: Some(ToolchainKind::RustEmbedded),
+            only_for_target: Some("thumbv7em-none-eabihf"),
+            severity: Severity::Blocking,
+            impact: "This chip cannot be compiled at all until the target is installed.",
+            check_cmd: "rustup",
+            check_args: &["target", "list", "--installed"],
+            check_pattern: "thumbv7em-none-eabihf",
+            min_version: None,
+            install_cmd: Some("rustup"),
+            install_args: &["target", "add", "thumbv7em-none-eabihf"],
+            manual_url: "https://docs.rust-embedded.org/book/intro/install.html",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "thumbv8m.main-none-eabihf",
+            description: "Rust target for ARM Cortex-M33 (STM32H5 / L5 / U5 / WBA, RP2350)",
+            toolchain: Some(ToolchainKind::RustEmbedded),
+            only_for_target: Some("thumbv8m.main-none-eabihf"),
+            severity: Severity::Blocking,
+            impact: "This chip cannot be compiled at all until the target is installed.",
+            check_cmd: "rustup",
+            check_args: &["target", "list", "--installed"],
+            check_pattern: "thumbv8m.main-none-eabihf",
+            min_version: None,
+            install_cmd: Some("rustup"),
+            install_args: &["target", "add", "thumbv8m.main-none-eabihf"],
             manual_url: "https://docs.rust-embedded.org/book/intro/install.html",
             status: ToolStatus::Unknown,
         },
@@ -1780,13 +1839,10 @@ mod tests {
                 );
             }
 
-            // Each RISC-V target entry appears for its OWN chips only. The
+            // Each rustup target entry appears for its OWN chips only. The
             // assertion is written from the chip's target, so it cannot drift
             // with the catalogue.
-            for t in [
-                "riscv32imc-unknown-none-elf",
-                "riscv32imac-unknown-none-elf",
-            ] {
+            for t in RUSTUP_TARGETS {
                 assert_eq!(
                     names.contains(&t),
                     target == t,
@@ -1796,6 +1852,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every rustup target the catalog knows, ARM and RISC-V alike.
+    const RUSTUP_TARGETS: [&str; 6] = [
+        "thumbv6m-none-eabi",
+        "thumbv7m-none-eabi",
+        "thumbv7em-none-eabihf",
+        "thumbv8m.main-none-eabihf",
+        "riscv32imc-unknown-none-elf",
+        "riscv32imac-unknown-none-elf",
+    ];
+
+    /// The bundled chips cover only three of the four ARM targets - no built-in
+    /// uses `thumbv7em-none-eabihf`, yet it is what every imported STM32F4 / G4 /
+    /// L4 / H7 builds for. So the sweep above cannot see the gate on that entry;
+    /// this does, for every ARM triple the IDE hands out.
+    #[test]
+    fn each_arm_target_is_offered_to_its_own_projects_only() {
+        use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+
+        let state = make_tools_state();
+        let mut s = state.lock().unwrap();
+        for t in &mut s.tools {
+            t.status = ToolStatus::Missing;
+        }
+
+        for target in &RUSTUP_TARGETS[..4] {
+            let names: Vec<&str> = s
+                .problems_for(Some(&ToolchainKind::RustEmbedded), Some(target))
+                .into_iter()
+                .map(|(n, _, _)| n)
+                .collect();
+            for t in RUSTUP_TARGETS {
+                assert_eq!(
+                    names.contains(&t),
+                    *target == t,
+                    "{target}: `{t}` offered={}",
+                    names.contains(&t)
+                );
+            }
+        }
+
+        // The gate reaches the startup banner too, not just the list. This is
+        // the Pico regression in one line: only the M3 target is missing, and
+        // a Cortex-M0+ project must not be blocked by it.
+        for t in &mut s.tools {
+            t.status = if t.name == "thumbv7m-none-eabi" {
+                ToolStatus::Missing
+            } else {
+                ToolStatus::Ok(String::new())
+            };
+        }
+        let arm = Some(&ToolchainKind::RustEmbedded);
+        assert!(
+            s.any_blocking_missing_for(arm, Some("thumbv7m-none-eabi")),
+            "an F1 project with its own target missing must block"
+        );
+        assert!(
+            !s.any_blocking_missing_for(arm, Some("thumbv6m-none-eabi")),
+            "a Pico project was blocked by the M3 target it never uses"
+        );
     }
 
     /// With no project open, a toolchain-specific tool must not fire the
