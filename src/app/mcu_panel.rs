@@ -676,6 +676,7 @@ impl AppIde {
             if self.active_tab != McuTab::Reference || self.reference_file.is_none() {
                 self.reference_was_focused = false;
                 self.reference_ctrl_space = false;
+                self.reference_escape = false;
                 if self.completion_owner == crate::app::EditorSlot::Reference {
                     let ed = self.ed_of(crate::app::EditorSlot::Reference);
                     ed.completion_open = false;

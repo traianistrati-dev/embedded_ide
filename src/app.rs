@@ -1631,6 +1631,11 @@ pub struct AppIde {
     /// Ctrl+Space arrived while the Reference editor owned the keyboard.
     /// Consumed by that editor when it renders, later in the same frame.
     reference_ctrl_space: bool,
+    /// Escape was pressed this frame, as the MAIN view saw it before any popup
+    /// consumed it. The main pass runs first and its LSP key block serves a
+    /// popup the Reference editor owns — consuming the Escape the Reference
+    /// pass needs in order to give its editor the focus back.
+    reference_escape: bool,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -2244,6 +2249,7 @@ impl AppIde {
             build_text_snapshot: HashMap::new(),
             reference_was_focused: false,
             reference_ctrl_space: false,
+            reference_escape: false,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
             lsp_settle_recheck_done: true,

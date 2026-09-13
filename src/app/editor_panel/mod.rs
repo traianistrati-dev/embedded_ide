@@ -31,6 +31,7 @@ mod code_action;
 mod comment;
 mod completion;
 mod context_menu;
+mod crate_search;
 mod debug_hover;
 mod delete_line;
 mod diag_embed;
@@ -378,6 +379,21 @@ impl AppIde {
             // editor alone, or both would claim the same keystroke.
             reference_owns_kbd || self.ed.find.had_focus
         };
+        // Escape, read BEFORE any popup below consumes it. egui drops the
+        // editor's focus on Escape before this code runs, and the restore
+        // further down needs to know Escape happened — a popup that closed on
+        // it consumed the event, and reading it only afterwards left the caret
+        // out of the editor after every popup dismissal.
+        let escape_now = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        // The main pass runs first and may consume an Escape meant for the
+        // Reference editor's popup (the LSP block serves the OWNER's list), so
+        // it hands what it saw to the second pass.
+        let escape_for_focus = if is_main {
+            self.reference_escape = escape_now;
+            escape_now
+        } else {
+            escape_now || std::mem::take(&mut self.reference_escape)
+        };
         // Close a popup whose OWNER no longer holds the keyboard: it
         // would eat Enter/Escape for a caret the user has left.
         //
@@ -479,16 +495,31 @@ impl AppIde {
         // Same key set as the LSP popup; consumed before the editor so
         // Enter/Tab don't reach the TextEdit. Accept is deferred through
         // `cargo_complete.pending` (the same path mouse clicks use).
-        if self.ed.cargo_complete.open && !self.ed.cargo_complete.items.is_empty() {
+        // Escape is taken even with no rows: the popup can now be just a note
+        // ("searching…", "type 3+ characters"), and one Escape cannot close.
+        // Only in a manifest: a flag left over from Cargo.toml must not eat the
+        // Escape meant for a chooser open in a `.rs` file.
+        //
+        // And never while the Find bar is typing: its Enter means "next match",
+        // and the popup would take it as "insert the highlighted crate" at a
+        // caret the user is not even looking at.
+        if self.ed.find.had_focus {
+            self.ed.cargo_complete.open = false;
+        }
+        if selected_is_manifest && self.ed.cargo_complete.open {
             let count = self.ed.cargo_complete.items.len();
             ui.input_mut(|inp| {
                 if inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
                     self.ed.cargo_complete.open = false;
+                } else if count == 0 {
+                    // No rows: navigation and accept keys belong to the editor.
                 } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
                     self.ed.cargo_complete.sel =
                         (self.ed.cargo_complete.sel + 1).min(count.saturating_sub(1));
+                    self.ed.cargo_complete.moved = true;
                 } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
                     self.ed.cargo_complete.sel = self.ed.cargo_complete.sel.saturating_sub(1);
+                    self.ed.cargo_complete.moved = true;
                 } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
                     || inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
                 {
@@ -728,7 +759,8 @@ impl AppIde {
         });
         let mc_caret_move = mc_caret_move.filter(|_| editor_kbd_active);
         // Escape, peeked twice for two different jobs:
-        //  * `escape_pressed_raw` — restore editor focus (see below).
+        //  * `escape_for_focus` (read earlier, before any popup consumed
+        //    it) — restore editor focus (see below).
         //  * `mc_escape_pressed`  — drop the extra carets, skipped while
         //    a completion popup is open, because dismissing that wins
         //    (it renders later in the frame and would otherwise never
@@ -1498,7 +1530,7 @@ impl AppIde {
         // flag is forced true when we restore, because `has_focus()` is
         // still false on this very frame — otherwise a second Escape in
         // a row would find it false and give up.
-        if escape_pressed_raw && self.ed.editor_was_focused {
+        if escape_for_focus && self.ed.editor_was_focused {
             editor_resp.response.request_focus();
             self.ed.editor_was_focused = true;
         } else {
@@ -1991,8 +2023,18 @@ impl AppIde {
         if selected_is_manifest {
             // Cargo.toml gets crate-name + crates.io-version completion
             // instead of the rust-analyzer driver.
-            self.handle_cargo_completion(ui, &editor_resp, &mut display_code, ctrl_space_pressed);
+            self.handle_cargo_completion(
+                ui,
+                &editor_resp,
+                &mut display_code,
+                displayed_file,
+                ctrl_space_pressed,
+            );
         } else {
+            // A Cargo popup does not survive leaving the manifest: its state is
+            // only ever refreshed by `handle_cargo_completion`, so left open it
+            // would linger invisibly and claim keys on the next visit.
+            self.ed.cargo_complete.open = false;
             // Highlight the clicked diagnostic's line (colour keyed by
             // severity) and the F12 definition line (yellow), but only
             // while the editor shows the file each belongs to.

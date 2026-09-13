@@ -4,11 +4,15 @@
 //! after a crate is chosen (`name = ""`), it suggests that crate's available
 //! versions; and inside `features = [ … ]` it suggests that crate's features.
 //!
-//! The crate-name list is a curated, **offline** set (a raw crates.io search is
-//! far too noisy for an embedded IDE — thousands of irrelevant hits). Versions
-//! AND features come from one **live** fetch of the crates.io sparse index in a
-//! background thread — features are per-version and sit in the same entry, so a
-//! second request would be pure waste.
+//! Crate names come in two groups. The curated, **offline** set leads — a raw
+//! crates.io search is far too noisy for an embedded IDE to be the only list.
+//! Below it, a **live** crates.io search ([`super::crate_search`]) keeps only
+//! names containing what was typed. Without that second group a crate outside
+//! the curated set could not be completed at all, however exact its name.
+//!
+//! Versions AND features come from one **live** fetch of the crates.io sparse
+//! index in a background thread — features are per-version and sit in the same
+//! entry, so a second request would be pure waste.
 
 use crate::app::{AppIde, ProjectFileId};
 use eframe::egui;
@@ -21,6 +25,21 @@ pub(crate) struct CargoItem {
     pub label: String,
     pub detail: String,
     pub action: CargoAccept,
+    /// Came from the live crates.io search rather than the curated list; the
+    /// popup draws a divider above the first such row.
+    pub from_search: bool,
+}
+
+/// The one line the popup shows besides its rows.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PopupNote {
+    /// Waiting on crates.io; the text says for what.
+    Loading(&'static str),
+    /// Nothing went wrong, but there is something to say — typically why the
+    /// list is empty. Without it an empty answer closes the popup silently,
+    /// which is indistinguishable from `Ctrl+Space` being broken.
+    Info(String),
+    Error(String),
 }
 
 /// What happens when an item is accepted.
@@ -40,6 +59,11 @@ pub(crate) enum CargoAccept {
 /// from the SAME fetch: features are per-version and already sit next to the
 /// version numbers in the index, so asking twice would be pure waste.
 pub(crate) struct IndexData {
+    /// The crate's name exactly as published, read from the entry itself. It can
+    /// differ from the name that was asked for — in case, or in `-` vs `_` once
+    /// [`fetch_versions`] has followed crates.io to the published spelling — and
+    /// Cargo accepts only this one.
+    pub name: Option<String>,
     /// Non-yanked versions, newest first.
     pub versions: Vec<String>,
     /// Version -> its user-facing feature names.
@@ -75,6 +99,20 @@ pub(crate) struct CargoCompleteState {
     pub version_crate: String,
     /// Shared background fetch result for `version_crate`.
     pub version_fetch: Option<Arc<Mutex<VersionFetch>>>,
+    /// Live crates.io name search: answers by query, debounce and spacing.
+    pub search: super::crate_search::CrateSearch,
+    /// Index of the line the popup was opened on. The popup is a question about
+    /// THAT line: once the caret is on another one it closes. A line NUMBER,
+    /// not a char offset — an extra caret typing above would move the offset
+    /// on every keystroke and close the popup for no reason.
+    /// Without this a popup showing only a note ("searching…") let Enter or an
+    /// arrow through to the editor and rode along to the next line, where it
+    /// filled with rows and took the NEXT Enter as an accept — inserting a
+    /// crate nobody picked, or splicing one into the middle of a line.
+    pub anchor_line: Option<usize>,
+    /// The user moved the highlight with the arrows since the list opened.
+    /// Until then row 0 is simply "the best match"; after, it is a choice.
+    pub moved: bool,
 }
 
 /// Where the cursor sits inside a Cargo.toml dependency table.
@@ -99,6 +137,10 @@ pub(crate) enum CargoCtx {
         already: Vec<String>,
         /// The caret sits between quotes (insert the bare name).
         quoted: bool,
+        /// `workspace = true`: the crate and its real name live in the root's
+        /// `[workspace.dependencies]`, so the key here may legitimately differ
+        /// from the published spelling.
+        inherited: bool,
         start: usize,
         prefix: String,
     },
@@ -113,6 +155,7 @@ impl AppIde {
         ui: &mut egui::Ui,
         editor_resp: &TextEditOutput,
         display_code: &mut String,
+        displayed_file: ProjectFileId,
         ctrl_space_pressed: bool,
     ) {
         let cursor_char_idx = editor_resp
@@ -125,18 +168,23 @@ impl AppIde {
         // Offsets and the item list belong to the file they were computed in;
         // carrying them into another manifest would splice text at a position
         // that means nothing there.
-        if self.ed.cargo_complete.for_file != Some(self.selected_file) {
+        //
+        // `displayed_file`, NOT `self.selected_file`: in the Reference view the
+        // two differ, and keying on the main editor's file wrote a library's
+        // manifest, completion included, over the firmware's Cargo.toml.
+        if self.ed.cargo_complete.for_file != Some(displayed_file) {
             self.ed.cargo_complete.open = false;
             self.ed.cargo_complete.pending = None;
             self.ed.cargo_complete.items.clear();
             self.ed.cargo_complete.sel = 0;
-            self.ed.cargo_complete.for_file = Some(self.selected_file);
+            self.ed.cargo_complete.anchor_line = None;
+            self.ed.cargo_complete.for_file = Some(displayed_file);
         }
 
         // ── 1. Apply a pending accept (keyboard or mouse) ─────────────────────
         if let Some(accept) = self.ed.cargo_complete.pending.take() {
             if let Some(cur) = cursor_char_idx {
-                self.apply_cargo_accept(ui, editor_resp, display_code, cur, accept);
+                self.apply_cargo_accept(ui, editor_resp, display_code, displayed_file, cur, accept);
             }
             // The text and caret just changed; the cursor index from this frame
             // is stale against the new text. Let the next frame (which sees the
@@ -150,6 +198,7 @@ impl AppIde {
             if let Some(cur) = cursor_char_idx {
                 if let Some(ctx) = cargo_context(display_code, cur) {
                     self.open_cargo_popup(&ctx);
+                    self.ed.cargo_complete.anchor_line = Some(line_index_of(display_code, cur));
                 } else {
                     self.ed.cargo_complete.open = false;
                 }
@@ -164,6 +213,12 @@ impl AppIde {
             self.ed.cargo_complete.open = false;
             return;
         };
+        let line = line_index_of(display_code, cur);
+        if *self.ed.cargo_complete.anchor_line.get_or_insert(line) != line {
+            // The caret moved to another line: the question was about that one.
+            self.ed.cargo_complete.open = false;
+            return;
+        }
         let Some(ctx) = cargo_context(display_code, cur) else {
             // Cursor left a completable position.
             self.ed.cargo_complete.open = false;
@@ -171,42 +226,47 @@ impl AppIde {
         };
 
         // Rebuild the visible item list from the current context.
-        let (items, loading, error) = self.cargo_items_for(&ctx);
+        let (items, note) = self.cargo_items_for(&ctx);
+        let sel = keep_selection(
+            &self.ed.cargo_complete.items,
+            self.ed.cargo_complete.sel,
+            self.ed.cargo_complete.moved,
+            &items,
+        );
         self.ed.cargo_complete.items = items.clone();
 
-        if items.is_empty() && !loading {
-            if error.is_none() {
-                // Nothing matches the typed prefix — drop the popup.
-                self.ed.cargo_complete.open = false;
-                return;
-            }
+        if items.is_empty() && note.is_none() {
+            // Nothing matches and nothing to say about it — drop the popup.
+            self.ed.cargo_complete.open = false;
+            return;
         }
-        self.ed.cargo_complete.sel = self
-            .ed
-            .cargo_complete
-            .sel
-            .min(items.len().saturating_sub(1));
+        self.ed.cargo_complete.sel = sel;
 
-        self.render_cargo_popup(ui, editor_resp, &items, loading, error);
+        self.render_cargo_popup(ui, editor_resp, &items, note);
     }
 
     /// Configure the popup for a freshly detected context.
     fn open_cargo_popup(&mut self, ctx: &CargoCtx) {
         self.ed.cargo_complete.open = true;
         self.ed.cargo_complete.sel = 0;
+        self.ed.cargo_complete.moved = false;
+        // A fresh question: last popup's rows must not steer the selection.
+        self.ed.cargo_complete.items.clear();
         match ctx {
             CargoCtx::Version { crate_name, .. } | CargoCtx::Feature { crate_name, .. } => {
                 self.ensure_version_fetch(crate_name)
             }
-            CargoCtx::Name { .. } => {}
+            // An explicit Ctrl+Space is the user asking again — a search that
+            // failed offline gets another chance.
+            CargoCtx::Name { .. } => self.ed.cargo_complete.search.forget_errors(),
         }
     }
 
-    /// Build the filtered item list for the current context. Returns
-    /// `(items, loading, error)`.
-    fn cargo_items_for(&mut self, ctx: &CargoCtx) -> (Vec<CargoItem>, bool, Option<String>) {
+    /// Build the filtered item list for the current context, plus the one note
+    /// the popup shows beside it (loading, empty-because, or error).
+    fn cargo_items_for(&mut self, ctx: &CargoCtx) -> (Vec<CargoItem>, Option<PopupNote>) {
         match ctx {
-            CargoCtx::Name { prefix, .. } => (filter_crates(prefix), false, None),
+            CargoCtx::Name { prefix, .. } => self.crate_name_rows(prefix),
             CargoCtx::Version {
                 crate_name, prefix, ..
             } => {
@@ -218,9 +278,18 @@ impl AppIde {
                     .as_ref()
                     .map(|a| a.lock().unwrap());
                 match guard.as_deref() {
-                    Some(VersionFetch::Loading) | None => (Vec::new(), true, None),
-                    Some(VersionFetch::Error(e)) => (Vec::new(), false, Some(e.clone())),
+                    Some(VersionFetch::Loading) | None => (
+                        Vec::new(),
+                        Some(PopupNote::Loading("crates.io — fetching versions…")),
+                    ),
+                    Some(VersionFetch::Error(e)) => (
+                        Vec::new(),
+                        Some(PopupNote::Error(format!("crates.io: {e}"))),
+                    ),
                     Some(VersionFetch::Done(data)) => {
+                        if let Some(note) = spelling_note(data, crate_name) {
+                            return (Vec::new(), Some(note));
+                        }
                         let pl = prefix.to_lowercase();
                         let items = data
                             .versions
@@ -236,9 +305,10 @@ impl AppIde {
                                     String::new()
                                 },
                                 action: CargoAccept::Version(v.clone()),
+                                from_search: false,
                             })
                             .collect();
-                        (items, false, None)
+                        (items, None)
                     }
                 }
             }
@@ -248,6 +318,7 @@ impl AppIde {
                 already,
                 prefix,
                 quoted,
+                inherited,
                 ..
             } => {
                 self.ensure_version_fetch(crate_name);
@@ -258,23 +329,54 @@ impl AppIde {
                     .as_ref()
                     .map(|a| a.lock().unwrap());
                 match guard.as_deref() {
-                    Some(VersionFetch::Loading) | None => (Vec::new(), true, None),
-                    Some(VersionFetch::Error(e)) => (Vec::new(), false, Some(e.clone())),
+                    Some(VersionFetch::Loading) | None => (
+                        Vec::new(),
+                        Some(PopupNote::Loading("crates.io — fetching features…")),
+                    ),
+                    Some(VersionFetch::Error(e)) => (
+                        Vec::new(),
+                        Some(PopupNote::Error(format!("crates.io: {e}"))),
+                    ),
                     Some(VersionFetch::Done(data)) => {
+                        // An inherited entry's key is not a claim about the
+                        // spelling — the root manifest may rename it.
+                        if let Some(note) = spelling_note(data, crate_name).filter(|_| !inherited) {
+                            return (Vec::new(), Some(note));
+                        }
                         let ver = pick_version(&data.versions, version_req.as_deref());
                         let names = ver
                             .and_then(|v| data.features.get(v))
                             .cloned()
                             .unwrap_or_default();
-                        (
-                            filter_features(&names, prefix, already, *quoted),
-                            false,
-                            None,
-                        )
+                        (filter_features(&names, prefix, already, *quoted), None)
                     }
                 }
             }
         }
+    }
+
+    /// Crate-name rows: the curated list, then live crates.io hits below it.
+    fn crate_name_rows(&mut self, prefix: &str) -> (Vec<CargoItem>, Option<PopupNote>) {
+        let mut items = filter_crates(prefix);
+        let (view, fire) = self
+            .ed
+            .cargo_complete
+            .search
+            .view(prefix, std::time::Instant::now());
+        if let Some((query, slot)) = fire {
+            std::thread::spawn(move || super::crate_search::run(&query, &slot));
+        }
+        let live = live_rows(&view.hits, prefix, &items);
+        merge_name_rows(&mut items, live, prefix);
+
+        let note = if view.pending {
+            Some(PopupNote::Loading("crates.io — searching…"))
+        } else if let Some(e) = view.error {
+            Some(PopupNote::Error(format!("crates.io search: {e}")))
+        } else {
+            name_note(prefix, items.is_empty(), view.truncated)
+        };
+        (items, note)
     }
 
     /// Start a background fetch of `name`'s versions if not already cached.
@@ -306,6 +408,7 @@ impl AppIde {
         ui: &mut egui::Ui,
         editor_resp: &TextEditOutput,
         display_code: &mut String,
+        displayed_file: ProjectFileId,
         cursor: usize,
         accept: CargoAccept,
     ) {
@@ -330,11 +433,13 @@ impl AppIde {
                     // Cursor between the two quotes (just before the closing one).
                     let new_cursor = start + insert.chars().count() - 1;
                     self.store_cargo_cursor(ui, editor_resp, new_cursor);
-                    self.persist_cargo_toml(display_code);
+                    self.persist_cargo_toml(displayed_file, display_code);
                     // Switch straight to version completion for this crate.
                     self.ensure_version_fetch(&name);
                     self.ed.cargo_complete.open = true;
                     self.ed.cargo_complete.sel = 0;
+                    self.ed.cargo_complete.moved = false;
+                    self.ed.cargo_complete.items.clear();
                     ui.ctx().request_repaint();
                 }
             }
@@ -352,7 +457,7 @@ impl AppIde {
                     *display_code = format!("{before}{insert}{after}");
                     let new_cursor = start + insert.chars().count();
                     self.store_cargo_cursor(ui, editor_resp, new_cursor);
-                    self.persist_cargo_toml(display_code);
+                    self.persist_cargo_toml(displayed_file, display_code);
                     self.ed.cargo_complete.open = false;
                 }
             }
@@ -364,7 +469,7 @@ impl AppIde {
                     *display_code = format!("{before}{ver}{after}");
                     let new_cursor = start + ver.chars().count();
                     self.store_cargo_cursor(ui, editor_resp, new_cursor);
-                    self.persist_cargo_toml(display_code);
+                    self.persist_cargo_toml(displayed_file, display_code);
                     self.ed.cargo_complete.open = false;
                 }
             }
@@ -378,8 +483,11 @@ impl AppIde {
     /// completion, so an accepted suggestion would otherwise be dropped. A
     /// library crate's manifest is an ordinary user file — handling only
     /// `CargoToml` here silently lost every completion accepted there.
-    fn persist_cargo_toml(&mut self, display_code: &str) {
-        match self.selected_file {
+    ///
+    /// Keyed on the file the VIEW shows: the Reference view can show a library's
+    /// manifest while the main editor holds another file entirely.
+    fn persist_cargo_toml(&mut self, file: ProjectFileId, display_code: &str) {
+        match file {
             ProjectFileId::CargoToml => self.cargo_toml = display_code.to_owned(),
             ProjectFileId::UserFile(i) => {
                 if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
@@ -406,8 +514,7 @@ impl AppIde {
         ui: &mut egui::Ui,
         editor_resp: &TextEditOutput,
         items: &[CargoItem],
-        loading: bool,
-        error: Option<String>,
+        note: Option<PopupNote>,
     ) {
         let popup_pos = if let Some(char_range) = editor_resp.state.cursor.char_range() {
             let idx = char_range.primary.index;
@@ -433,93 +540,120 @@ impl AppIde {
                     ui.set_min_width(360.0);
                     ui.set_max_width(360.0);
 
-                    if loading {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
+                    if !items.is_empty() {
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| self.cargo_popup_rows(ui, items, sel));
+                    }
+
+                    match &note {
+                        None => {}
+                        Some(PopupNote::Loading(text)) => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(
+                                    egui::RichText::new(format!("  {text}"))
+                                        .size(11.5)
+                                        .color(egui::Color32::from_rgb(160, 175, 200)),
+                                );
+                            });
+                            ui.ctx().request_repaint();
+                        }
+                        Some(PopupNote::Info(text)) => {
                             ui.label(
-                                egui::RichText::new("  crates.io — fetching versions…")
-                                    .size(11.5)
-                                    .color(egui::Color32::from_rgb(160, 175, 200)),
+                                egui::RichText::new(text)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(140, 155, 180)),
                             );
-                        });
-                        ui.ctx().request_repaint();
-                        return;
+                        }
+                        Some(PopupNote::Error(text)) => {
+                            ui.label(
+                                egui::RichText::new(text)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(210, 120, 110)),
+                            );
+                        }
                     }
-                    if let Some(err) = &error {
-                        ui.label(
-                            egui::RichText::new(format!("crates.io: {err}"))
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(210, 120, 110)),
-                        );
-                        return;
-                    }
-
-                    egui::ScrollArea::vertical()
-                        .max_height(300.0)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            for (i, item) in items.iter().enumerate() {
-                                let selected = i == sel;
-                                let fg = if selected {
-                                    egui::Color32::WHITE
-                                } else {
-                                    egui::Color32::from_rgb(200, 210, 230)
-                                };
-                                let sel_bg = egui::Color32::from_rgb(40, 90, 160);
-                                let hover_bg = egui::Color32::from_rgb(50, 60, 80);
-                                let detail_fg = if selected {
-                                    egui::Color32::from_rgb(160, 195, 255)
-                                } else {
-                                    egui::Color32::from_rgb(110, 130, 155)
-                                };
-
-                                let row_h = 19.0;
-                                let avail_w = ui.available_width();
-                                let (rect, row_resp) = ui.allocate_exact_size(
-                                    egui::vec2(avail_w, row_h),
-                                    egui::Sense::click(),
-                                );
-                                if selected {
-                                    ui.painter().rect_filled(rect, 2.0, sel_bg);
-                                } else if row_resp.hovered() {
-                                    ui.painter().rect_filled(rect, 2.0, hover_bg);
-                                }
-                                let painter = ui.painter();
-                                painter.text(
-                                    rect.left_center() + egui::vec2(4.0, 0.0),
-                                    egui::Align2::LEFT_CENTER,
-                                    &item.label,
-                                    egui::FontId::monospace(12.0),
-                                    fg,
-                                );
-                                if !item.detail.is_empty() {
-                                    let det = {
-                                        let c: Vec<char> = item.detail.chars().collect();
-                                        if c.len() > 44 {
-                                            format!("{}…", c[..41].iter().collect::<String>())
-                                        } else {
-                                            item.detail.clone()
-                                        }
-                                    };
-                                    painter.text(
-                                        rect.right_center() - egui::vec2(4.0, 0.0),
-                                        egui::Align2::RIGHT_CENTER,
-                                        det,
-                                        egui::FontId::monospace(10.5),
-                                        detail_fg,
-                                    );
-                                }
-                                if row_resp.clicked() {
-                                    self.ed.cargo_complete.pending = Some(item.action.clone());
-                                    self.ed.cargo_complete.open = false;
-                                }
-                                if selected {
-                                    row_resp.scroll_to_me(None);
-                                }
-                            }
-                        });
                 });
             });
+    }
+
+    /// The selectable rows, with a divider above the first live crates.io row.
+    fn cargo_popup_rows(&mut self, ui: &mut egui::Ui, items: &[CargoItem], sel: usize) {
+        for (i, item) in items.iter().enumerate() {
+            if item.from_search && (i == 0 || !items[i - 1].from_search) {
+                if i > 0 {
+                    ui.separator();
+                }
+                ui.label(
+                    egui::RichText::new("crates.io")
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(120, 140, 165)),
+                );
+            }
+            let selected = i == sel;
+            let fg = if selected {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_rgb(200, 210, 230)
+            };
+            let sel_bg = egui::Color32::from_rgb(40, 90, 160);
+            let hover_bg = egui::Color32::from_rgb(50, 60, 80);
+            let detail_fg = if selected {
+                egui::Color32::from_rgb(160, 195, 255)
+            } else {
+                egui::Color32::from_rgb(110, 130, 155)
+            };
+
+            let row_h = 19.0;
+            let avail_w = ui.available_width();
+            let (rect, row_resp) =
+                ui.allocate_exact_size(egui::vec2(avail_w, row_h), egui::Sense::click());
+            if selected {
+                ui.painter().rect_filled(rect, 2.0, sel_bg);
+            } else if row_resp.hovered() {
+                ui.painter().rect_filled(rect, 2.0, hover_bg);
+            }
+            let painter = ui.painter();
+            let label =
+                painter.layout_no_wrap(item.label.clone(), egui::FontId::monospace(12.0), fg);
+            let label_w = label.size().x;
+            painter.galley(
+                rect.left_center() + egui::vec2(4.0, -label.size().y / 2.0),
+                label,
+                fg,
+            );
+            if !item.detail.is_empty() {
+                // A crates.io name can be long (`hmmd_mmwave_sensor_async`), so
+                // the detail gets what the label leaves, never a fixed width
+                // that would paint over the name.
+                let font = egui::FontId::monospace(10.5);
+                let char_w = painter
+                    .layout_no_wrap("0".into(), font.clone(), detail_fg)
+                    .size()
+                    .x
+                    .max(1.0);
+                let room = rect.width() - 8.0 - label_w - 16.0;
+                let max_chars = ((room / char_w).floor().max(0.0) as usize).min(44);
+                if let Some(det) = fit_detail(&item.detail, max_chars) {
+                    painter.text(
+                        rect.right_center() - egui::vec2(4.0, 0.0),
+                        egui::Align2::RIGHT_CENTER,
+                        det,
+                        font,
+                        detail_fg,
+                    );
+                }
+            }
+            if row_resp.clicked() {
+                self.ed.cargo_complete.pending = Some(item.action.clone());
+                self.ed.cargo_complete.open = false;
+            }
+            if selected {
+                row_resp.scroll_to_me(None);
+            }
+        }
     }
 }
 
@@ -567,8 +701,33 @@ pub(crate) fn cargo_context(text: &str, cursor: usize) -> Option<CargoCtx> {
         Some(eq) if col <= eq => name_ctx(&section, &line_chars, line_start, col),
         None => name_ctx(&section, &line_chars, line_start, col),
         // Cursor on the value side → version completion.
-        Some(eq) => version_ctx(&section, &line_chars, line_start, col, eq),
+        Some(eq) => match version_ctx(&section, &line_chars, line_start, col, eq)? {
+            CargoCtx::Version {
+                crate_name,
+                start,
+                prefix,
+            } => Some(CargoCtx::Version {
+                crate_name: crates_io_name(&entry_text(&chars, &section, line_start), crate_name)?,
+                start,
+                prefix,
+            }),
+            other => Some(other),
+        },
     }
+}
+
+/// The name to look `key`'s entry up under on crates.io, or `None` when
+/// crates.io is not where it comes from.
+///
+/// The KEY is only the local name. `embedded_io = { package = "embedded-io" }`
+/// is a crate called `embedded-io`, and looking the key up instead reported a
+/// perfectly valid line as misspelled. `registry = "…"` names another registry
+/// altogether, whose crates crates.io knows nothing about.
+fn crates_io_name(entry: &str, key: String) -> Option<String> {
+    if field_token(entry, "registry").is_some() || field_token(entry, "registry-index").is_some() {
+        return None;
+    }
+    Some(field_of(entry, "package").unwrap_or(key))
 }
 
 /// Is the caret inside a `features = [ … ]` array, and for which crate?
@@ -636,6 +795,7 @@ fn feature_ctx(chars: &[char], cursor: usize, section: &DepSection) -> Option<Ca
     if field_of(&entry, "path").is_some() || field_of(&entry, "git").is_some() {
         return None;
     }
+    let crate_name = crates_io_name(&entry, crate_name)?;
 
     // Everything already in the array, and where the current word starts.
     let already = quoted_strings(&chars[open + 1..cursor]);
@@ -667,6 +827,7 @@ fn feature_ctx(chars: &[char], cursor: usize, section: &DepSection) -> Option<Ca
         version_req: field_of(&entry, "version"),
         already,
         quoted,
+        inherited: field_token(&entry, "workspace").is_some_and(|(v, q)| !q && v == "true"),
         start: start.min(cursor),
         prefix,
     })
@@ -700,9 +861,12 @@ fn unclosed_bracket(chars: &[char], cursor: usize) -> Option<usize> {
     None
 }
 
-/// The text of the dependency entry that owns `key_line_start`: the whole line
-/// for an inline table, or the table body up to the next header for
+/// The text of the dependency entry that owns `key_line_start`: the line after
+/// its key for an inline table, or the table body up to the next header for
 /// `[dependencies.foo]`.
+///
+/// Without the key: a crate may well be CALLED `registry` or `package`, and
+/// its own name must not read as that field.
 fn entry_text(chars: &[char], section: &DepSection, key_line_start: usize) -> String {
     match section {
         DepSection::Table => {
@@ -711,14 +875,24 @@ fn entry_text(chars: &[char], section: &DepSection, key_line_start: usize) -> St
                 .position(|&c| c == '\n')
                 .map(|p| key_line_start + p)
                 .unwrap_or(chars.len());
-            chars[key_line_start..end].iter().collect()
+            let line = &chars[key_line_start..end];
+            let value = line.iter().position(|&c| c == '=').map_or(0, |eq| eq + 1);
+            line[value..].iter().collect()
         }
         DepSection::Entry(_) => {
-            let header = chars[..key_line_start]
-                .iter()
-                .collect::<String>()
-                .rfind('[')
-                .unwrap_or(0);
+            // The table's header is the last line STARTING with `[` — not merely
+            // the last `[`, which inside `[dependencies.foo]` is as likely the
+            // `features = [` array above the caret, and would hide every field
+            // (`package`, `path`, …) written before that array.
+            let before: String = chars[..key_line_start.min(chars.len())].iter().collect();
+            let mut header = 0;
+            let mut offset = 0;
+            for l in before.split_inclusive('\n') {
+                if l.trim_start().starts_with('[') {
+                    header = offset;
+                }
+                offset += l.chars().count();
+            }
             let text: String = chars[header..].iter().collect();
             // Up to the next table header.
             let mut out = String::new();
@@ -734,27 +908,62 @@ fn entry_text(chars: &[char], section: &DepSection, key_line_start: usize) -> St
     }
 }
 
-/// The quoted value of `key = "…"` inside a dependency entry.
-fn field_of(entry: &str, key: &str) -> Option<String> {
+/// The value of field `key` inside a dependency entry, and whether it was a
+/// quoted string: `version = "1"` is `("1", true)`, `workspace = true` is
+/// `("true", false)`.
+///
+/// A field starts only where a field CAN start — the beginning of the entry or
+/// a line, or right after `{` or `,`. Any looser and a dependency KEY reads as
+/// a field: `windows-registry = "0.5"` held a `registry = "0.5"`, which took
+/// version and feature completion away from `signal-hook-registry`,
+/// `oid-registry` and every other `*-registry` crate.
+fn field_token(entry: &str, key: &str) -> Option<(String, bool)> {
     let chars: Vec<char> = entry.chars().collect();
-    let mut i = 0;
-    while i + key.len() < chars.len() {
-        if chars[i..].starts_with(&key.chars().collect::<Vec<_>>()[..])
-            && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_'))
-        {
-            let mut j = i + key.chars().count();
-            while j < chars.len() && chars[j].is_whitespace() {
-                j += 1;
-            }
-            if chars.get(j) == Some(&'=') {
-                let rest: String = chars[j + 1..].iter().collect();
-                let val = rest.split('"').nth(1)?;
-                return Some(val.to_string());
-            }
+    let key: Vec<char> = key.chars().collect();
+    let blank = |c: &char| *c == ' ' || *c == '\t';
+    for i in 0..chars.len() {
+        if !chars[i..].starts_with(&key) {
+            continue;
         }
-        i += 1;
+        let prev = chars[..i].iter().rev().find(|c| !blank(c));
+        if !matches!(prev, None | Some('{') | Some(',') | Some('\n')) {
+            continue;
+        }
+        let mut j = i + key.len();
+        while chars.get(j).is_some_and(blank) {
+            j += 1;
+        }
+        if chars.get(j) != Some(&'=') {
+            continue;
+        }
+        j += 1;
+        while chars.get(j).is_some_and(blank) {
+            j += 1;
+        }
+        return match chars.get(j) {
+            // Basic `"…"` and literal `'…'` strings are both valid TOML. Taking
+            // "the next `\"`" instead read `package = 'x', version = "1"` as a
+            // crate called `1`.
+            Some(&q) if q == '"' || q == '\'' => {
+                let body: String = chars[j + 1..].iter().take_while(|&&c| c != q).collect();
+                Some((body, true))
+            }
+            _ => {
+                let raw: String = chars[j..]
+                    .iter()
+                    // `#` too: `workspace = true  # renamed in the root` is `true`.
+                    .take_while(|&&c| c != ',' && c != '}' && c != '\n' && c != '#')
+                    .collect();
+                Some((raw.trim().to_owned(), false))
+            }
+        };
     }
     None
+}
+
+/// The string value of `key = "…"` inside a dependency entry.
+fn field_of(entry: &str, key: &str) -> Option<String> {
+    field_token(entry, key).and_then(|(v, quoted)| quoted.then_some(v))
 }
 
 /// Every `"…"` string in `region`.
@@ -969,6 +1178,7 @@ fn filter_features(
                 name: n.clone(),
                 quoted,
             },
+            from_search: false,
         })
         .collect()
 }
@@ -1006,8 +1216,165 @@ fn filter_crates(prefix: &str) -> Vec<CargoItem> {
             label: name.to_string(),
             detail: desc.to_string(),
             action: CargoAccept::CrateName(name.to_string()),
+            from_search: false,
         })
         .collect()
+}
+
+/// Live crates.io rows for `prefix`, to go BELOW the curated `curated` rows.
+///
+/// Only names CONTAINING the prefix are kept (`-` and `_` read alike): the
+/// search also matches descriptions and keywords, and `q=embassy` alone answers
+/// 808 crates. Names the curated rows already show are dropped. Ranked exact
+/// name, then name-prefix, then substring; most downloaded first within each.
+/// The label is the name exactly as published — that is what gets inserted,
+/// and Cargo accepts no other spelling.
+fn live_rows(
+    hits: &[super::crate_search::Hit],
+    prefix: &str,
+    curated: &[CargoItem],
+) -> Vec<CargoItem> {
+    use super::crate_search::normalize;
+    let p = normalize(prefix);
+    // Below the search threshold no query of its own was sent, and the cached
+    // hits of every EARLIER query filtered by one or two letters would be
+    // hundreds of unrelated crates.
+    if p.chars().count() < super::crate_search::MIN_QUERY_CHARS {
+        return Vec::new();
+    }
+    let shown: std::collections::HashSet<String> =
+        curated.iter().map(|c| normalize(&c.label)).collect();
+    let mut rows: Vec<(u8, &super::crate_search::Hit)> = hits
+        .iter()
+        .filter_map(|h| {
+            let n = normalize(&h.name);
+            if shown.contains(&n) {
+                return None;
+            }
+            let rank = if n == p {
+                0
+            } else if n.starts_with(&p) {
+                1
+            } else if n.contains(&p) {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, h))
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(b.1.downloads.cmp(&a.1.downloads))
+            .then_with(|| a.1.name.cmp(&b.1.name))
+    });
+    // No cap: a silent `take(40)` hid name matches with nothing on screen to
+    // say so. Every row contains 3+ typed characters, so the list stays short
+    // in practice — and it scrolls.
+    rows.into_iter()
+        .map(|(_, h)| CargoItem {
+            label: h.name.clone(),
+            detail: h.description.clone(),
+            action: CargoAccept::CrateName(h.name.clone()),
+            from_search: true,
+        })
+        .collect()
+}
+
+/// What to say under the crate-name rows once nothing is pending or failed:
+/// why the list is empty, or that crates.io matched more than it listed.
+///
+/// Said out loud because the alternative — the popup vanishing — is exactly
+/// what made a freshly published crate look like a broken `Ctrl+Space`. And a
+/// truncated answer is flagged even with rows showing: a short word matches
+/// hundreds of crates (`pca`: 390), and the wanted one may be among those not
+/// fetched, so its absence must not read as "does not exist".
+fn name_note(prefix: &str, empty: bool, truncated: Option<u64>) -> Option<PopupNote> {
+    let min = super::crate_search::MIN_QUERY_CHARS;
+    let n = prefix.chars().count();
+    if n == 0 {
+        return None;
+    }
+    if n < min {
+        return empty
+            .then(|| PopupNote::Info(format!("Type {min}+ characters to search crates.io")));
+    }
+    if let Some(total) = truncated {
+        return Some(PopupNote::Info(format!(
+            "{total} matches on crates.io, not all listed — type more"
+        )));
+    }
+    // crates.io matches whole words: `hmm` does not find `hmmd_…`.
+    empty.then(|| {
+        PopupNote::Info(format!(
+            "No crates.io match for `{prefix}` — try a whole word"
+        ))
+    })
+}
+
+/// Put the live rows under the curated ones — except an EXACT live name when no
+/// curated row is exact: that one goes on top.
+///
+/// Typing all of `time` and pressing Enter must not give `embassy-time` just
+/// because the curated list contains it as a substring and leads the popup.
+fn merge_name_rows(items: &mut Vec<CargoItem>, mut live: Vec<CargoItem>, prefix: &str) {
+    use super::crate_search::normalize;
+    let p = normalize(prefix);
+    let exact = |i: &CargoItem| !p.is_empty() && normalize(&i.label) == p;
+    if !items.iter().any(exact) && live.first().is_some_and(exact) {
+        items.insert(0, live.remove(0));
+    }
+    items.extend(live);
+}
+
+/// The row to highlight after the list was rebuilt.
+///
+/// Before the user moves, row 0 stays row 0: the top row is simply the best
+/// match, whatever it now is. Once they have moved — back to row 0 included —
+/// the highlight follows the CRATE, not the index — a crates.io answer landing mid-navigation re-sorts
+/// the rows, and Enter would otherwise accept a crate the user never selected.
+fn keep_selection(old: &[CargoItem], sel: usize, moved: bool, new: &[CargoItem]) -> usize {
+    let last = new.len().saturating_sub(1);
+    if !moved {
+        return 0;
+    }
+    old.get(sel)
+        .and_then(|o| {
+            new.iter()
+                .position(|n| n.label == o.label && n.from_search == o.from_search)
+        })
+        .unwrap_or(sel.min(last))
+}
+
+/// Zero-based number of the line holding char index `cursor`.
+fn line_index_of(text: &str, cursor: usize) -> usize {
+    text.chars().take(cursor).filter(|&c| c == '\n').count()
+}
+
+/// The error to show when the index answered for a DIFFERENT spelling than the
+/// manifest wrote — offering its versions would look like success, and then
+/// Cargo rejects the line: `no matching package named …`.
+fn spelling_note(data: &IndexData, written: &str) -> Option<PopupNote> {
+    let published = data.name.as_deref()?;
+    (published != written).then(|| {
+        PopupNote::Error(format!(
+            "Published as `{published}` — Cargo accepts only that spelling"
+        ))
+    })
+}
+
+/// `detail` cut to `max_chars` with an ellipsis, or `None` when too little room
+/// is left for it to say anything.
+fn fit_detail(detail: &str, max_chars: usize) -> Option<String> {
+    let n = detail.chars().count();
+    if n <= max_chars {
+        return Some(detail.to_owned());
+    }
+    if max_chars < 6 {
+        return None;
+    }
+    let cut: String = detail.chars().take(max_chars - 1).collect();
+    Some(format!("{}…", cut.trim_end()))
 }
 
 /// Path of a crate inside the crates.io sparse index (lower-cased name).
@@ -1042,11 +1409,36 @@ pub(crate) fn known_features(name: &str, version_req: &str) -> Option<Vec<String
     data.features.get(version).cloned()
 }
 
-/// Fetch a crate's sparse-index entry (versions + per-version features).
+/// What [`fetch_versions_with_timeout`] reports for a 404.
+const CRATE_NOT_FOUND: &str = "crate not found";
+
+/// Fetch a crate's sparse-index entry (versions + per-version features),
+/// following a `-` / `_` misspelling to the name it was published under.
+///
+/// The index is keyed by the EXACT spelling — `hmmd-mmwave-sensor-async` is a
+/// 404 for a crate published as `hmmd_mmwave_sensor_async` — so on a 404 the
+/// crates.io API, which resolves either spelling, is asked for the published
+/// one. The answer's [`IndexData::name`] then differs from `name`, and each
+/// caller decides what that means: "Add dependency" writes the published name,
+/// `Ctrl+Space` on a written manifest line says the line is misspelled.
+///
+/// `known_features` deliberately does NOT follow: its question is about the
+/// manifest as written, and Cargo would reject that spelling.
 pub(super) fn fetch_versions(name: &str) -> Result<IndexData, String> {
     // The interactive completion has no deadline of its own — it already runs on
     // a background thread and the popup simply shows "Loading…".
-    fetch_versions_with_timeout(name, std::time::Duration::from_secs(30))
+    let timeout = std::time::Duration::from_secs(30);
+    match fetch_versions_with_timeout(name, timeout) {
+        Err(e) if e == CRATE_NOT_FOUND => match super::crate_search::canonical_name(name) {
+            Ok(Some(published)) if published != name => {
+                fetch_versions_with_timeout(&published, timeout)
+            }
+            // No such crate under any spelling — or the API could not say, in
+            // which case the index's own answer is still the truest one.
+            _ => Err(e),
+        },
+        other => other,
+    }
 }
 
 fn fetch_versions_with_timeout(
@@ -1059,7 +1451,7 @@ fn fetch_versions_with_timeout(
         .timeout(timeout)
         .call()
         .map_err(|e| match e {
-            ureq::Error::Status(404, _) => "crate not found".to_string(),
+            ureq::Error::Status(404, _) => CRATE_NOT_FOUND.to_string(),
             other => other.to_string(),
         })?
         .into_string()
@@ -1070,6 +1462,7 @@ fn fetch_versions_with_timeout(
 /// Parse a sparse-index body (newline-delimited JSON): non-yanked versions,
 /// newest first, plus each one's feature names.
 fn parse_index(body: &str) -> IndexData {
+    let mut name = None;
     let mut versions = Vec::new();
     let mut features = std::collections::BTreeMap::new();
     for line in body.lines() {
@@ -1078,6 +1471,11 @@ fn parse_index(body: &str) -> IndexData {
             continue;
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            // Every line carries it, yanked ones included — and it is the
+            // published spelling whatever case the (lower-cased) path had.
+            if let Some(n) = v.get("name").and_then(|n| n.as_str()) {
+                name = Some(n.to_owned());
+            }
             if v.get("yanked").and_then(|y| y.as_bool()).unwrap_or(false) {
                 continue;
             }
@@ -1089,7 +1487,11 @@ fn parse_index(body: &str) -> IndexData {
         }
     }
     versions.reverse(); // index lists oldest->newest; show newest first.
-    IndexData { versions, features }
+    IndexData {
+        name,
+        versions,
+        features,
+    }
 }
 
 /// The feature names of one index entry. `features2` is the newer index field
@@ -1496,6 +1898,375 @@ mod tests {
         let items = filter_crates("stm32f1");
         assert!(!items.is_empty());
         assert!(items[0].label.starts_with("stm32f1"));
+    }
+
+    // ── Live crates.io rows ──────────────────────────────────────────────────
+
+    fn hit(name: &str, downloads: u64) -> super::super::crate_search::Hit {
+        super::super::crate_search::Hit {
+            name: name.to_owned(),
+            description: format!("{name} description"),
+            downloads,
+        }
+    }
+
+    fn labels(items: &[CargoItem]) -> Vec<&str> {
+        items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    /// The reported case: a crate outside the curated list, published minutes
+    /// ago, reached by typing part of its name.
+    #[test]
+    fn a_crate_outside_the_curated_list_is_offered_under_it() {
+        let prefix = "hmmd";
+        let curated = filter_crates(prefix);
+        assert!(
+            curated.is_empty(),
+            "the fixture must be outside the curated list"
+        );
+        let rows = live_rows(&[hit("hmmd_mmwave_sensor_async", 0)], prefix, &curated);
+        assert_eq!(labels(&rows), ["hmmd_mmwave_sensor_async"]);
+        assert!(rows[0].from_search);
+        assert!(
+            matches!(&rows[0].action, CargoAccept::CrateName(n) if n == "hmmd_mmwave_sensor_async"),
+            "the PUBLISHED spelling is what gets inserted"
+        );
+    }
+
+    #[test]
+    fn a_dash_and_an_underscore_match_each_other() {
+        let rows = live_rows(&[hit("hmmd_mmwave_sensor_async", 0)], "hmmd-mmwave", &[]);
+        assert_eq!(labels(&rows), ["hmmd_mmwave_sensor_async"]);
+    }
+
+    /// The search matches descriptions and keywords too; a row whose NAME does
+    /// not contain what was typed is noise, and noise is what the curated list
+    /// was there to avoid.
+    #[test]
+    fn a_hit_whose_name_lacks_the_prefix_is_dropped() {
+        let rows = live_rows(&[hit("mr60fda2-proto", 900)], "mmwave", &[]);
+        assert!(rows.is_empty(), "{:?}", labels(&rows));
+    }
+
+    #[test]
+    fn a_curated_crate_is_not_listed_twice() {
+        let curated = filter_crates("embassy-sync");
+        let rows = live_rows(
+            &[hit("embassy_sync", 10), hit("embassy-sync-x", 1)],
+            "embassy-sync",
+            &curated,
+        );
+        assert_eq!(labels(&rows), ["embassy-sync-x"]);
+    }
+
+    #[test]
+    fn live_rows_rank_exact_then_prefix_then_substring() {
+        let hits = [
+            hit("my-hmmd", 1_000),
+            hit("hmmd-tools", 5),
+            hit("hmmd-core", 50),
+            hit("hmmd", 0),
+        ];
+        let rows = live_rows(&hits, "hmmd", &[]);
+        assert_eq!(
+            labels(&rows),
+            ["hmmd", "hmmd-core", "hmmd-tools", "my-hmmd"]
+        );
+    }
+
+    #[test]
+    fn an_empty_prefix_adds_no_live_rows() {
+        assert!(live_rows(&[hit("anything", 1)], "", &[]).is_empty());
+    }
+
+    /// One or two letters send no query, and the cached answers of earlier
+    /// queries filtered by `e` would flood the list with unrelated crates.
+    #[test]
+    fn a_prefix_below_the_search_threshold_adds_no_live_rows() {
+        let cached = [hit("embassy-dt", 5), hit("heapless-bytes", 9)];
+        assert!(live_rows(&cached, "e", &[]).is_empty());
+        assert!(live_rows(&cached, "em", &[]).is_empty());
+        assert_eq!(labels(&live_rows(&cached, "emb", &[])), ["embassy-dt"]);
+    }
+
+    /// An empty list must SAY why. Closing silently is what made a freshly
+    /// published crate look like a broken `Ctrl+Space`.
+    #[test]
+    fn an_empty_name_list_explains_itself() {
+        assert!(
+            matches!(name_note("hm", true, None), Some(PopupNote::Info(t)) if t.contains("3+"))
+        );
+        assert!(
+            matches!(name_note("zzqq", true, None), Some(PopupNote::Info(t)) if t.contains("zzqq"))
+        );
+        assert_eq!(name_note("stm", false, None), None);
+        assert_eq!(name_note("hm", false, None), None);
+        assert_eq!(name_note("", false, None), None);
+    }
+
+    /// A truncated answer is flagged even with rows on screen: `pca9685` was
+    /// outside both pages for `pca`, and its absence must not read as "gone".
+    #[test]
+    fn a_truncated_answer_is_flagged_even_with_rows() {
+        for empty in [false, true] {
+            assert!(
+                matches!(name_note("pca", empty, Some(390)), Some(PopupNote::Info(t)) if t.contains("390")),
+                "empty = {empty}"
+            );
+        }
+    }
+
+    fn row(label: &str, from_search: bool) -> CargoItem {
+        CargoItem {
+            label: label.to_owned(),
+            detail: String::new(),
+            action: CargoAccept::CrateName(label.to_owned()),
+            from_search,
+        }
+    }
+
+    /// Typing all of `time` and pressing Enter must give `time`, not the
+    /// curated `embassy-time` that merely contains it.
+    #[test]
+    fn an_exact_live_name_leads_unless_a_curated_row_is_exact() {
+        let mut items = vec![row("embassy-time", false)];
+        merge_name_rows(
+            &mut items,
+            vec![row("time", true), row("time-macros", true)],
+            "time",
+        );
+        assert_eq!(labels(&items), ["time", "embassy-time", "time-macros"]);
+
+        // A curated exact name keeps its place; the live rows stay below.
+        let mut items = vec![row("heapless", false)];
+        merge_name_rows(&mut items, vec![row("heapless-bytes", true)], "heapless");
+        assert_eq!(labels(&items), ["heapless", "heapless-bytes"]);
+
+        // No exact live row: plain append.
+        let mut items = vec![row("rtt-target", false)];
+        merge_name_rows(&mut items, vec![row("rtt-log", true)], "rtt");
+        assert_eq!(labels(&items), ["rtt-target", "rtt-log"]);
+    }
+
+    #[test]
+    fn a_moved_highlight_follows_its_crate_when_rows_resort() {
+        let old = [row("embassy-sync", false), row("embassy-foo", true)];
+        let new = [
+            row("embassy-sync", false),
+            row("embassy-embedded-hal", true),
+            row("embassy-foo", true),
+        ];
+        assert_eq!(keep_selection(&old, 1, true, &new), 2);
+        // Untouched, the top row stays the top row — the best match.
+        assert_eq!(keep_selection(&old, 0, false, &new), 0);
+        // Moved BACK to row 0 is a choice too: an exact name promoted above it
+        // must not take the highlight.
+        let promoted = [row("usb", true), row("usb-device", false)];
+        assert_eq!(
+            keep_selection(&[row("usb-device", false)], 0, true, &promoted),
+            1
+        );
+        // The crate is gone: clamp, never out of range.
+        assert_eq!(keep_selection(&old, 1, true, &[row("x", false)]), 0);
+    }
+
+    #[test]
+    fn line_index_of_counts_newlines_before_the_caret() {
+        let text = "[dependencies]\nțară = \"1\"\nhm";
+        assert_eq!(line_index_of(text, 0), 0);
+        assert_eq!(line_index_of(text, 14), 0);
+        assert_eq!(line_index_of(text, 15), 1);
+        assert_eq!(line_index_of(text, text.chars().count()), 2);
+        // Typing ABOVE (an extra caret) does not move the line the popup is on.
+        let typed_above = "[dependencies]\nțară = \"1\"x\nhm";
+        assert_eq!(line_index_of(typed_above, typed_above.chars().count()), 2);
+    }
+
+    /// The KEY is not a field: `windows-registry` is a crates.io crate, not an
+    /// entry pointing at another registry.
+    #[test]
+    fn a_key_ending_in_a_field_name_is_not_that_field() {
+        for src in [
+            "[dependencies]\nwindows-registry = \"0.|\"\n",
+            "[dependencies]\nsignal-hook-registry = { version = \"1.|\" }\n",
+            "[dependencies]\nregistry = \"0.|\"\n",
+        ] {
+            assert!(
+                matches!(ctx(src), Some(CargoCtx::Version { .. })),
+                "{src:?} lost version completion"
+            );
+        }
+        let (name, ..) =
+            feat("[dependencies]\noid-registry = { version = \"0.8\", features = [\"|\"] }\n")
+                .expect("features of a *-registry crate");
+        assert_eq!(name, "oid-registry");
+        assert!(
+            feat("[dependencies]\ntyped-path = { version = \"0.9\", features = [\"|\"] }\n")
+                .is_some(),
+            "a `*-path` crate is not a path dependency"
+        );
+    }
+
+    /// The boundary rule itself, where no key is around to hide behind: in a
+    /// `[dependencies.foo]` body `default-features` is not `features`.
+    #[test]
+    fn a_field_starts_only_where_a_field_can_start() {
+        let body = "[dependencies.foo]\nversion = \"1\"\ndefault-features = false\n";
+        assert_eq!(field_token(body, "features"), None);
+        assert_eq!(
+            field_token(body, "default-features"),
+            Some(("false".to_owned(), false))
+        );
+        assert_eq!(field_of(body, "version").as_deref(), Some("1"));
+        let inline = " { version = \"1\", path = \"../x\" }";
+        assert_eq!(field_of(inline, "path").as_deref(), Some("../x"));
+    }
+
+    #[test]
+    fn a_literal_string_package_is_read_whole() {
+        let c = ctx("[dependencies]\nio = { package = 'embedded-io', version = \"0.|\" }\n");
+        assert!(
+            matches!(&c, Some(CargoCtx::Version { crate_name, .. }) if crate_name == "embedded-io"),
+            "{c:?}"
+        );
+        assert_eq!(
+            ctx("[dependencies]\nacme-hal = { version = \"1.|\", registry = 'acme' }\n"),
+            None
+        );
+    }
+
+    /// `workspace = true` hands the real name to the root manifest, so a key
+    /// that differs from the published spelling is not a misspelling there.
+    #[test]
+    fn an_inherited_entry_is_marked() {
+        // Table form with a comment after the bool — the comment is not the value.
+        let c = ctx(
+            "[dependencies.embedded_io]\nworkspace = true  # renamed in the root\nfeatures = [\"|\"]\n",
+        );
+        assert!(
+            matches!(
+                c,
+                Some(CargoCtx::Feature {
+                    inherited: true,
+                    ..
+                })
+            ),
+            "{c:?}"
+        );
+        let c = ctx("[dependencies]\nembedded_io = { workspace = true, features = [\"|\"] }\n");
+        assert!(
+            matches!(
+                c,
+                Some(CargoCtx::Feature {
+                    inherited: true,
+                    ..
+                })
+            ),
+            "{c:?}"
+        );
+        let c = ctx("[dependencies]\nembedded-io = { version = \"0.6\", features = [\"|\"] }\n");
+        assert!(
+            matches!(
+                c,
+                Some(CargoCtx::Feature {
+                    inherited: false,
+                    ..
+                })
+            ),
+            "{c:?}"
+        );
+    }
+
+    /// `package` names the crate; the key is only the local name. Looking the key
+    /// up told a valid line it was misspelled.
+    #[test]
+    fn a_renamed_dependency_is_looked_up_by_its_package() {
+        let c =
+            ctx("[dependencies]\nembedded_io = { package = \"embedded-io\", version = \"0.|\" }\n");
+        assert!(
+            matches!(&c, Some(CargoCtx::Version { crate_name, .. }) if crate_name == "embedded-io"),
+            "{c:?}"
+        );
+        let (name, ..) = feat(
+            "[dependencies]\nio = { package = \"embedded-io\", version = \"0.6\", features = [\"a|\"] }\n",
+        )
+        .expect("features of a renamed dependency");
+        assert_eq!(name, "embedded-io");
+        // Table form, with the `package` ABOVE a features array.
+        let c = ctx(
+            "[dependencies.io]\npackage = \"embedded-io\"\nfeatures = [\"alloc\"]\nversion = \"0.|\"\n",
+        );
+        assert!(
+            matches!(&c, Some(CargoCtx::Version { crate_name, .. }) if crate_name == "embedded-io"),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn another_registry_is_not_asked_of_crates_io() {
+        assert_eq!(
+            ctx("[dependencies]\nacme_hal = { registry = \"acme\", version = \"1|\" }\n"),
+            None
+        );
+        assert!(
+            feat("[dependencies]\nacme = { registry = \"acme\", features = [\"a|\"] }\n").is_none()
+        );
+    }
+
+    #[test]
+    fn a_misspelled_manifest_line_is_told_the_published_name() {
+        let body = r#"{"name":"hmmd_mmwave_sensor_async","vers":"0.1.0","features":{}}"#;
+        let data = parse_index(body);
+        assert_eq!(data.name.as_deref(), Some("hmmd_mmwave_sensor_async"));
+        assert!(matches!(
+            spelling_note(&data, "hmmd-mmwave-sensor-async"),
+            Some(PopupNote::Error(t)) if t.contains("`hmmd_mmwave_sensor_async`")
+        ));
+        // The control: the right spelling gets its versions, no note.
+        assert_eq!(spelling_note(&data, "hmmd_mmwave_sensor_async"), None);
+    }
+
+    /// An entry without a `name` (every older fixture in this file) is not a
+    /// mismatch — there is nothing to say it is misspelled.
+    #[test]
+    fn an_entry_without_a_name_is_not_a_misspelling() {
+        let data = parse_index(r#"{"vers":"0.1.0"}"#);
+        assert_eq!(spelling_note(&data, "anything"), None);
+    }
+
+    #[test]
+    fn the_detail_yields_to_a_long_name() {
+        assert_eq!(fit_detail("short", 44).as_deref(), Some("short"));
+        assert_eq!(
+            fit_detail("Async, sync, and closure-based", 10).as_deref(),
+            Some("Async, sy…")
+        );
+        assert_eq!(fit_detail("Async driver for a sensor", 5), None);
+    }
+
+    /// What "Add dependency" leans on, against the real index: the dash guess
+    /// for `use hmmd_mmwave_sensor_async` is a 404, and the fetch comes back
+    /// under the published spelling instead of failing.
+    #[test]
+    #[ignore = "talks to crates.io; run with --ignored"]
+    fn live_a_dash_guess_is_followed_to_the_published_name() {
+        assert_eq!(
+            fetch_versions_with_timeout(
+                "hmmd-mmwave-sensor-async",
+                std::time::Duration::from_secs(20)
+            )
+            .err()
+            .as_deref(),
+            Some(CRATE_NOT_FOUND),
+            "the index itself is spelling-exact"
+        );
+        let data = fetch_versions("hmmd-mmwave-sensor-async").expect("resolved");
+        assert_eq!(data.name.as_deref(), Some("hmmd_mmwave_sensor_async"));
+        assert!(
+            data.versions.iter().any(|v| v == "0.1.0"),
+            "{:?}",
+            data.versions
+        );
     }
 
     /// A caret left over from a LONGER manifest must not index past the current

@@ -103,11 +103,13 @@ pub(crate) fn imported_crate(line: &str) -> Option<String> {
 /// `embedded-io-async`.
 ///
 /// The mapping Cargo applies is `-` → `_`, which is not reversible: the
-/// identifier could equally come from `embedded_io-async`. All-dashes is the
-/// overwhelmingly common form and the one crates.io canonicalises towards, so
-/// it leads the list — and it is also the ONLY route to a crate outside the
-/// curated set, since there is no crates.io search client here, just the sparse
-/// index, which needs an exact name.
+/// identifier could equally come from `embedded_io-async`, or name a crate
+/// published with underscores. All-dashes is the overwhelmingly common form, so
+/// it leads the list — but it is only a GUESS at the spelling. crates.io does
+/// not canonicalise towards dashes: `hmmd_mmwave_sensor_async` is published
+/// with underscores, `hmmd-mmwave-sensor-async` is a 404 in the sparse index,
+/// and Cargo rejects that line. `fetch_versions` corrects the guess to the
+/// published name, and the line is written with THAT.
 pub(crate) fn dash_form(ident: &str) -> String {
     ident.replace('_', "-")
 }
@@ -414,7 +416,13 @@ impl AppIde {
             Some((name, shared)) => match &*shared.lock().unwrap() {
                 VersionFetch::Loading => None,
                 VersionFetch::Done(d) => match d.versions.first() {
-                    Some(v) => Some(Ok((name.clone(), v.clone()))),
+                    // The PUBLISHED name, not the row's guess: the chooser
+                    // offers `foo-bar` for `use foo_bar`, and a crate published
+                    // as `foo_bar` would otherwise get a line Cargo rejects.
+                    Some(v) => Some(Ok((
+                        d.name.clone().unwrap_or_else(|| name.clone()),
+                        v.clone(),
+                    ))),
                     None => Some(Err(format!("{name}: no published versions"))),
                 },
                 VersionFetch::Error(e) => Some(Err(format!("{name}: {e}"))),
