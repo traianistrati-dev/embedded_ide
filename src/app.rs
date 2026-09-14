@@ -3423,8 +3423,17 @@ impl AppIde {
                         .map(|(_, body)| body.as_str()),
                 )
                 .collect();
+            // The HAL crate first: a Runtime switch swaps it on the boards that
+            // change HALs (nrf52833-hal / embassy-nrf, rp2040-hal / embassy-rp),
+            // and every `ensure_*` below edits the manifest that comes out of it.
+            let base_toml = match self.selected_build_cfg() {
+                Some((cfg, tc)) => {
+                    project_gen::refresh_hal_dependency(&self.cargo_toml, &cfg, &tc)
+                }
+                None => self.cargo_toml.clone(),
+            };
             let new_toml = project_gen::ensure_peripheral_deps(
-                &self.cargo_toml,
+                &base_toml,
                 needs_can,
                 needs_usart,
                 needs_spi,
@@ -3491,10 +3500,16 @@ impl AppIde {
             );
             // `static_cell`, when a raised task priority put an interrupt
             // executor in the generated code. Read off that code for the same
-            // reason as the line above.
+            // reason as the line above. An async nRF TWIM needs it too, for its
+            // `'static` RAM buffer; no config file names it, so `has_cfg` above
+            // cannot see it, the same gap the Pico's `BufferedUart` had.
             let new_toml = project_gen::ensure_task_priority_deps(
                 &new_toml,
-                self.generated_code.contains("InterruptExecutor"),
+                self.generated_code.contains("InterruptExecutor")
+                    || self
+                        .mcu
+                        .as_ref()
+                        .is_some_and(crate::panels::mcu_module::codegen::nrf::needs_static_cell),
                 &sources,
             );
             // The CYW43 radio, on a Pico W / Pico 2 W whose WL_LED is driven.

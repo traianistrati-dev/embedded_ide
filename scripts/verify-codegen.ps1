@@ -298,6 +298,16 @@ $ALL_CASES = @(
     # the degraded-vs-typed pin split are things only a compiler settles.
     @{ n = "BBC micro:bit v2 x2";          t = "emit_nrf_project";           e = @{};                       q = $true; fam = "nrf"; hk = $true }
 
+    # The same board on embassy-nrf, TWO projects again: every peripheral on
+    # the default branches, and one on the others (crystal HFCLK, synthesized
+    # LFCLK, armed pull-up and pull-down inputs, open-drain, an NFC pad,
+    # CTS/RTS, a TX-only SPIM in mode 3 LSB first, TWIM1, a center-aligned
+    # active-low open-drain PWM on a channel that is not its slot, and a PWM
+    # with no frequency). Both projects are reached through a runtime SWITCH
+    # from the blocking one, the path a user takes: main.rs keeps the header
+    # the two runtimes share, and Cargo.toml has its HAL crate swapped.
+    @{ n = "BBC micro:bit v2 async x2";    t = "emit_nrf_async_project";     e = @{};                       q = $true; fam = "nrf"; hk = $true }
+
     # The same two boards on embassy-rp, which is a DIFFERENT HAL crate, not a
     # feature of the first one. Every bus is wired, because that is where the
     # compiler found the two things reading could not: a DMA channel needs its

@@ -880,6 +880,10 @@ static ASYNC_EMBASSY_BACKEND: AsyncEmbassyBackend = AsyncEmbassyBackend;
 /// reason: a Pico on Async is a different HAL, not a different feature set.
 static ASYNC_RP_BACKEND: super::rp::AsyncRpBackend = super::rp::AsyncRpBackend;
 
+/// The micro:bit on embassy-nrf. Outside [`BACKENDS`] like the other async
+/// backends, and for the same reason as the RP one: it is a different HAL crate.
+static ASYNC_NRF_BACKEND: super::nrf::AsyncNrfBackend = super::nrf::AsyncNrfBackend;
+
 // ── RTIC (STM32F1) ──────────────────────────────────────────────────────────
 /// Same chip, same HAL, same init as the blocking backend — only the program
 /// shape differs (see [`super::rtic`]). It therefore reuses `Stm32f1Backend`'s
@@ -948,12 +952,14 @@ impl FamilyBackend for RticBackend {
 static RTIC_BACKEND: RticBackend = RticBackend;
 
 /// Whether an Async runtime has a backend for `family` — an embassy-capable
-/// STM32 family (embassy-stm32) or the ESP32-C3 (esp-rtos). Drives both codegen
-/// dispatch and the System-tab toggle's enabled state.
+/// STM32 family (embassy-stm32), an ESP part (esp-rtos), a Pico (embassy-rp) or
+/// an nRF52 (embassy-nrf). Drives both codegen dispatch and the System-tab
+/// toggle's enabled state.
 pub fn async_supported(family: &str) -> bool {
     ASYNC_EMBASSY_BACKEND.handles(family)
         || ASYNC_ESP_BACKEND.handles(family)
         || ASYNC_RP_BACKEND.handles(family)
+        || ASYNC_NRF_BACKEND.handles(family)
 }
 
 /// Whether `family`'s async path is the ESP one (esp-rtos + embassy-executor)
@@ -970,15 +976,20 @@ pub fn async_is_esp(family: &str) -> bool {
     ASYNC_ESP_BACKEND.handles(family)
 }
 
+/// Whether `family`'s async path is `embassy-nrf`: its own HAL crate, on the
+/// same executor version as embassy-rp.
+pub fn async_is_nrf(family: &str) -> bool {
+    ASYNC_NRF_BACKEND.handles(family)
+}
+
 /// The crate `family`'s async runtime is built on, for the System tab's Async
-/// card. Named per family, including one whose async backend is not written
-/// yet (nRF), so a greyed card does not name another vendor's HAL.
+/// card. Named per family, so a card never names another vendor's HAL.
 pub fn async_stack_name(family: &str) -> &'static str {
     if async_is_esp(family) {
         "esp-rtos"
     } else if async_is_rp(family) {
         "embassy-rp"
-    } else if super::nrf::is_nrf(family) {
+    } else if async_is_nrf(family) {
         "embassy-nrf"
     } else {
         "embassy-stm32"
@@ -1181,6 +1192,11 @@ pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
         // so its channels are only knowable by asking the generator what
         // it just allocated.
         Runtime::Async if super::rp::is_rp(&mcu.family) => super::rp::dma_uses(mcu),
+        // Before `async_supported` for the same reason as the RP arm, with the
+        // opposite answer: an nRF's EasyDMA is inside each peripheral, so there
+        // are no channels to take. Falling through ran the embassy-stm32 pass
+        // on a micro:bit.
+        Runtime::Async if async_is_nrf(&mcu.family) => Vec::new(),
         Runtime::Async if async_supported(&mcu.family) => async_periphs(mcu).dma_uses,
         // Only the F1 backend has a blocking DMA transport; every other family
         // reaches DMA through embassy, i.e. through the async runtime.
@@ -1210,13 +1226,9 @@ pub fn async_unavailable_reason(family: &str) -> Option<String> {
     Some(if family == "stm32f1" {
         "Not written for `stm32f1` yet: it is the one STM32 family this IDE builds on          stm32f1xx-hal (which is what gives it USB, the GPIO bridge and RTIC), while the          async runtime is embassy-stm32 throughout — and embassy-stm32 does support the          F1, so this is work, not a limit of the chip. The DMA transport and channel          pickers live on this runtime, so they are hidden here too."
             .to_owned()
-    } else if super::nrf::is_nrf(family) {
-        format!(
-            "No async backend for `{family}` yet: it would run on embassy-nrf, which is not written."
-        )
     } else {
         format!(
-            "No async backend for `{family}`: the runtime is embassy-stm32 on ARM and esp-rtos on the ESP parts."
+            "No async backend for `{family}`: the async runtimes here cover the STM32, ESP, Pico and nRF52 families."
         )
     })
 }
@@ -1392,7 +1404,7 @@ mod blocking_note_tests {
         use super::async_unavailable_reason;
         // Every family with a backend: nothing to explain.
         for family in [
-            "stm32f2", "stm32f4", "stm32g0", "stm32h5", "stm32wba", "esp32c3",
+            "stm32f2", "stm32f4", "stm32g0", "stm32h5", "stm32wba", "esp32c3", "rp2040", "nrf52833",
         ] {
             assert!(
                 async_unavailable_reason(family).is_none(),
@@ -1457,6 +1469,9 @@ pub fn backend_for_runtime(family: &str, runtime: Runtime) -> Option<&'static dy
     }
     if runtime == Runtime::Async && ASYNC_RP_BACKEND.handles(family) {
         return Some(&ASYNC_RP_BACKEND);
+    }
+    if runtime == Runtime::Async && ASYNC_NRF_BACKEND.handles(family) {
+        return Some(&ASYNC_NRF_BACKEND);
     }
     if runtime == Runtime::Async && async_supported(family) {
         return Some(&ASYNC_EMBASSY_BACKEND);
@@ -1568,6 +1583,25 @@ mod tests {
                 .family_id(),
             "rp2040"
         );
+        // The same for the nRF52 parts: embassy-nrf on Async, nrf-hal otherwise.
+        for family in ["nrf52833", "nrf52840"] {
+            assert!(async_supported(family), "{family}");
+            assert!(async_is_nrf(family), "{family}");
+            assert!(!async_is_rp(family) && !async_is_esp(family), "{family}");
+            assert_eq!(
+                backend_for_runtime(family, Runtime::Async)
+                    .unwrap()
+                    .family_id(),
+                "nrf-async"
+            );
+            assert_eq!(
+                backend_for_runtime(family, Runtime::Blocking)
+                    .unwrap()
+                    .family_id(),
+                "nrf52833"
+            );
+        }
+        assert!(!async_is_nrf("rp2040") && !async_is_nrf("stm32f4"));
 
         // Blocking always uses the family default.
         assert_eq!(

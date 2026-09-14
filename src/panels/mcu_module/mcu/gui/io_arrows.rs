@@ -579,7 +579,9 @@ pub fn draw_io_arrows(
                         "STM32F1 + RTIC: it becomes a #[task(binds = EXTIn)].\n",
                         "STM32F1 Blocking/Native: a #[interrupt] over a static holding the pin.
 ",
-                        "RP (Pico) + Async: the pin becomes its own task, awaiting the edge.",
+                        "RP (Pico) + Async: the pin becomes its own task, awaiting the edge.\n",
+                        "nRF (micro:bit) + Async: the pin becomes its own task, awaiting the edge.\n",
+                        "nRF (micro:bit) + Blocking: nothing is generated for it; poll the pin.",
                     ));
                 });
             }

@@ -165,8 +165,9 @@ USB serial link.
 |-------|------|------|-----------|--------|
 | **BBC micro:bit v2** | nRF52833 | Cortex-M4F | 64 MHz | `thumbv7em-none-eabihf` |
 
-Blocking builds on `nrf52833-hal`. Async is not written yet; the System tab says
-so.
+Blocking builds on `nrf52833-hal`, Async on `embassy-nrf`. Switching the Runtime
+on the System tab rewrites the generated block of `main.rs` (the two runtimes
+share its header) and swaps the HAL crate in `Cargo.toml`.
 
 The nRF52 has **no alternate-function table**: every peripheral signal can go to
 any pin, chosen by writing the pin number into a `PSEL` register. The definition
@@ -174,18 +175,23 @@ still offers SPI and I2C only on the pads the board labels for them, so autowire
 lands where accessories expect them. Three consequences worth knowing:
 
 - **UARTE, SPIM and TWIM take their pins by value**, so each bus is built in
-  `main.rs` from the pads you wired and configured in
-  `src/pins/configs/{uarte,spim,twim}N.rs`. SPIM0/1 share their peripheral IDs
-  with TWIM0/1, so SPI is offered on SPIM2 and I2C on TWIM0/1.
+  `main.rs` from the pads you wired. On Blocking they are configured in
+  `src/pins/configs/{uarte,spim,twim}N.rs`; on Async the config sits beside the
+  constructor, with the interrupt each driver needs bound in `main.rs`. SPIM0/1
+  share their peripheral IDs with TWIM0/1, so SPI is offered on SPIM2 and I2C
+  on TWIM0/1.
 - **PWM is four blocks of four channels**, any pad. The Peripherals tab picks
-  the block and channel; the config file carries the frequency, the prescaler
-  the frequency needs, and a duty per channel.
-- **Pads 8 and 9 are the NFC antenna** until the UICR says otherwise. Wire
-  them and the generated code tells you what to clear.
+  the block and channel, and the generated code carries the frequency, the
+  prescaler the frequency needs, and a duty per channel. Async also honors the
+  counter shape, open-drain and active-low.
+- **Pads 8 and 9 are the NFC antenna** until the UICR says otherwise. On
+  Blocking the generated code tells you what to clear; on Async embassy-nrf's
+  `nfc-pins-as-gpio` feature clears it at the first boot.
 
 No 32.768 kHz crystal is fitted, so the Clock tab offers the RC oscillator or
 the synthesized LFCLK; the tree's two muxes are exactly the two `Clocks` calls
-that reach `main.rs`.
+(or the two `Config` fields, on Async) that reach `main.rs`. There is no DMA
+channel to allocate on either runtime: EasyDMA is built into each peripheral.
 
 ---
 
@@ -320,8 +326,8 @@ compiler can tell you that text is a program. `scripts/verify-codegen.ps1` emits
 a matrix of configurations and cross-compiles each one:
 
 ```powershell
-pwsh scripts/verify-codegen.ps1          # representative subset (28 cases)
-pwsh scripts/verify-codegen.ps1 -Full    # every case (34)
+pwsh scripts/verify-codegen.ps1          # representative subset (29 cases)
+pwsh scripts/verify-codegen.ps1 -Full    # every case (35)
 ```
 
 Each case prints its own time, and the run ends with a total and the three most

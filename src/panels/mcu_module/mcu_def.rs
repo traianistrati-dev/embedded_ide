@@ -980,14 +980,6 @@ mod the_manifest_follows_the_runtime {
             let blocking = d.project.hal_dep.split_whitespace().next().unwrap_or("");
             assert_ne!(krate, blocking, "{}: the two lines differ", d.id);
 
-            // A definition may carry its async line before the backend that
-            // consumes it exists (the micro:bit's `embassy-nrf` line is staged
-            // for the nRF async backend). Until then the line is inert: the
-            // runtime cannot be switched, so there is no manifest to check.
-            if !crate::panels::mcu_module::codegen::family::async_supported(&d.family) {
-                continue;
-            }
-
             let mut mcu = d.build_mcu();
             mcu.runtime = Runtime::Async;
             assert!(mcu.is_async(), "{}: async is supported here", d.id);
@@ -1015,21 +1007,48 @@ mod the_manifest_follows_the_runtime {
             );
             checked += 1;
         }
-        assert!(checked >= 4, "the four RP boards at least, got {checked}");
+        assert!(
+            checked >= 5,
+            "the four RP boards and the micro:bit at least, got {checked}"
+        );
     }
 
     /// And the async line carries the feature embassy-time needs, or the project
-    /// links to nothing: `undefined symbol: _embassy_time_now`.
+    /// links to nothing: `undefined symbol: _embassy_time_now`. embassy-rp
+    /// spells it `time-driver`, embassy-nrf names the RTC it drives it from.
     #[test]
-    fn the_rp_async_line_enables_the_time_driver() {
+    fn an_embassy_async_line_enables_the_time_driver() {
+        let mut checked = 0;
         for d in builtin_definitions() {
             let Some(line) = &d.project.hal_dep_async else {
                 continue;
             };
-            if !line.starts_with("embassy-rp") {
+            if !line.starts_with("embassy-rp") && !line.starts_with("embassy-nrf") {
                 continue;
             }
-            assert!(line.contains("time-driver"), "{}: {line}", d.id);
+            assert!(line.contains("\"time-driver"), "{}: {line}", d.id);
+            checked += 1;
         }
+        assert!(
+            checked >= 5,
+            "the RP boards and the micro:bit, got {checked}"
+        );
+    }
+
+    /// Without `gpiote`, embassy-nrf has no `Input::wait_for_*`, which is what an
+    /// armed input's task awaits.
+    #[test]
+    fn the_nrf_async_line_enables_gpiote() {
+        let mut checked = 0;
+        for d in builtin_definitions() {
+            let Some(line) = &d.project.hal_dep_async else {
+                continue;
+            };
+            if line.starts_with("embassy-nrf") {
+                assert!(line.contains("\"gpiote\""), "{}: {line}", d.id);
+                checked += 1;
+            }
+        }
+        assert!(checked >= 1, "the micro:bit at least");
     }
 }
