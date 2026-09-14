@@ -37,6 +37,12 @@ const RP2350_PICO2_RON: &str = include_str!("../../../assets/mcus/rp2350_pico2.r
 const RP2040_PICO_W_RON: &str = include_str!("../../../assets/mcus/rp2040_pico_w.ron");
 const RP2350_PICO2_W_RON: &str = include_str!("../../../assets/mcus/rp2350_pico2_w.ron");
 
+// Nordic. A board again: the pads are the micro:bit's edge connector, and the
+// nets wired to the LED matrix, buttons, speaker, microphone and sensors sit on
+// `top`. Each name leads with the nRF port and pin the codegen reads.
+const NRF52833_MICROBIT_V2_RON: &str =
+    include_str!("../../../assets/mcus/nrf52833_microbit_v2.ron");
+
 /// Raw `(id, ron-text)` for every bundled chip.
 const BUILTINS: &[(&str, &str)] = &[
     ("stm32f103c8t6", STM32F103C8T6_RON),
@@ -53,6 +59,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("rp2350_pico2", RP2350_PICO2_RON),
     ("rp2040_pico_w", RP2040_PICO_W_RON),
     ("rp2350_pico2_w", RP2350_PICO2_W_RON),
+    ("nrf52833_microbit_v2", NRF52833_MICROBIT_V2_RON),
 ];
 
 /// Parse all bundled built-in MCU definitions (bad files are skipped + logged).

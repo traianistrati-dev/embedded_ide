@@ -730,8 +730,9 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
 /// The panel offers what the chip has, the same rule
 /// [`UsartDirection::options_for`] follows for the direction beside it.
 pub fn usart_data_bits(family: &str) -> &'static [u8] {
-    use crate::panels::mcu_module::codegen::{family as fam, rp};
-    if fam::is_esp(family) || rp::is_rp(family) {
+    use crate::panels::mcu_module::codegen::{family as fam, nrf, rp};
+    // The UARTE too: no 9-bit word length anywhere in its CONFIG register.
+    if fam::is_esp(family) || rp::is_rp(family) || nrf::is_nrf(family) {
         &[8]
     } else {
         &[8, 9]
@@ -1921,6 +1922,11 @@ impl UsartDirection {
         if crate::panels::mcu_module::codegen::rp::is_rp(family) {
             return &[UsartDirection::TxRx];
         }
+        // nRF: `uarte::Pins` takes `txd` and `rxd` outright, with no `Option`,
+        // so the pair is the one shape nrf-hal's constructor builds.
+        if crate::panels::mcu_module::codegen::nrf::is_nrf(family) {
+            return &[UsartDirection::TxRx];
+        }
         Self::options(transport)
     }
 
@@ -2042,6 +2048,12 @@ impl UsartFlow {
         // code.
         if crate::panels::mcu_module::codegen::rp::is_rp(family) {
             return &[UsartFlow::None];
+        }
+        // nRF: `uarte::Pins` carries `cts` and `rts` as options, and the HAL
+        // turns HWFC on only when it has BOTH - so the pair is the one flow
+        // form that changes anything. No driver-enable in the UARTE.
+        if crate::panels::mcu_module::codegen::nrf::is_nrf(family) {
+            return &[UsartFlow::None, UsartFlow::CtsRts];
         }
         Self::options(transport, direction)
     }

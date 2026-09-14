@@ -868,6 +868,7 @@ const BACKENDS: &[&dyn FamilyBackend] = &[
     // never see these anyway — kept adjacent so the list reads as "the specific
     // ones, then the catch-all".
     &super::rp::RpBackend,
+    &super::nrf::NrfBackend,
     &StmEmbassyBackend,
 ];
 
@@ -969,6 +970,21 @@ pub fn async_is_esp(family: &str) -> bool {
     ASYNC_ESP_BACKEND.handles(family)
 }
 
+/// The crate `family`'s async runtime is built on, for the System tab's Async
+/// card. Named per family, including one whose async backend is not written
+/// yet (nRF), so a greyed card does not name another vendor's HAL.
+pub fn async_stack_name(family: &str) -> &'static str {
+    if async_is_esp(family) {
+        "esp-rtos"
+    } else if async_is_rp(family) {
+        "embassy-rp"
+    } else if super::nrf::is_nrf(family) {
+        "embassy-nrf"
+    } else {
+        "embassy-stm32"
+    }
+}
+
 /// Whether an RTIC project can be generated for `family`.
 ///
 /// Narrow on purpose, for two reasons — neither of which is "RTIC cannot do it".
@@ -1028,6 +1044,10 @@ pub fn blocking_hal_note(family: &str) -> &'static str {
          executor, no .await"
     } else if family.starts_with("esp") {
         "esp-hal  ·  blocking drivers"
+    } else if family == "nrf52833" {
+        "nrf52833-hal  ·  blocking drivers (embedded-hal 1.0)"
+    } else if super::nrf::is_nrf(family) {
+        "nrf-hal  ·  blocking drivers (embedded-hal 1.0)"
     } else {
         "the family's HAL, blocking"
     }
@@ -1056,10 +1076,19 @@ pub fn native_unavailable_reason(family: &str) -> Option<String> {
         format!(
             "`{family}` uses the ESP HAL's own scheme — there are no portable bridges to opt out of."
         )
-    } else {
+    } else if family.starts_with("stm32") {
         format!(
             "`{family}` runs on embassy-stm32, whose blocking types are already concrete — \
              Blocking generates exactly that code, so Native would be identical to it."
+        )
+    } else {
+        // The Pico and nRF backends bind GPIO straight to their HAL's own
+        // types; there is no portable bridge to opt out of, so Blocking already
+        // IS the native form. The old else-branch said "embassy-stm32" here,
+        // which was wrong for both.
+        format!(
+            "`{family}` binds every pin to its HAL's own types — there are no portable \
+             bridges to opt out of, so Blocking already is the native form."
         )
     })
 }
@@ -1083,11 +1112,19 @@ pub fn rtic_unavailable_reason(family: &str) -> Option<String> {
         format!(
             "RTIC 2 ships Cortex-M backends only, so no Espressif part can use it - neither the RISC-V chips nor the Xtensa ones (`{family}`)."
         )
-    } else {
+    } else if family.starts_with("stm32") {
         format!(
             "Not written for `{family}` yet: the generated interrupt tasks use \
              stm32f1xx-hal's ExtiPin (make_interrupt_source / trigger_on_edge / \
              clear_interrupt_pending_bit), which embassy-stm32 does not expose."
+        )
+    } else {
+        // Not "nothing equivalent exists": nrf-hal has GPIOTE and rp-hal has
+        // pin interrupts. What is missing is templates, not the HAL.
+        format!(
+            "Not written for `{family}` yet: the RTIC templates exist for the STM32F1 only, \
+             whose interrupt tasks use stm32f1xx-hal's ExtiPin. This family would need its \
+             own, built on its HAL's pin interrupts."
         )
     })
 }
@@ -1173,6 +1210,10 @@ pub fn async_unavailable_reason(family: &str) -> Option<String> {
     Some(if family == "stm32f1" {
         "Not written for `stm32f1` yet: it is the one STM32 family this IDE builds on          stm32f1xx-hal (which is what gives it USB, the GPIO bridge and RTIC), while the          async runtime is embassy-stm32 throughout — and embassy-stm32 does support the          F1, so this is work, not a limit of the chip. The DMA transport and channel          pickers live on this runtime, so they are hidden here too."
             .to_owned()
+    } else if super::nrf::is_nrf(family) {
+        format!(
+            "No async backend for `{family}` yet: it would run on embassy-nrf, which is not written."
+        )
     } else {
         format!(
             "No async backend for `{family}`: the runtime is embassy-stm32 on ARM and esp-rtos on the ESP parts."
@@ -1315,6 +1356,32 @@ mod blocking_note_tests {
         // RISC-V is a different answer again.
         let esp = rtic_unavailable_reason("esp32c3").expect("greyed means it must explain itself");
         assert!(esp.contains("RISC-V"), "{esp}");
+
+        // A Cortex-M family outside STM32 is missing templates, not a HAL
+        // feature: nrf-hal has GPIOTE and rp-hal has pin interrupts.
+        for family in ["nrf52833", "rp2040", "rp235x"] {
+            let rtic =
+                rtic_unavailable_reason(family).expect("greyed means it must explain itself");
+            assert!(rtic.contains(family) && rtic.contains("yet"), "{rtic}");
+            assert!(rtic.contains("STM32F1 only"), "{rtic}");
+            assert!(!rtic.contains("nothing equivalent"), "{rtic}");
+            assert!(
+                !rtic.contains("  "),
+                "a joined continuation left a gap: {rtic}"
+            );
+        }
+    }
+
+    /// The Async card names the stack each family would actually build on.
+    #[test]
+    fn the_async_card_names_the_familys_own_stack() {
+        use super::async_stack_name;
+        assert_eq!(async_stack_name("stm32f4"), "embassy-stm32");
+        assert_eq!(async_stack_name("stm32f1"), "embassy-stm32");
+        assert_eq!(async_stack_name("rp2040"), "embassy-rp");
+        assert_eq!(async_stack_name("rp235x"), "embassy-rp");
+        assert_eq!(async_stack_name("nrf52833"), "embassy-nrf");
+        assert_eq!(async_stack_name("esp32c3"), "esp-rtos");
     }
 
     /// Async is greyed on exactly one family, and that card has to say why —
@@ -1415,7 +1482,16 @@ mod tests {
     fn unknown_family_is_none() {
         assert!(backend_for("stm8").is_none());
         assert!(backend_for("").is_none());
-        assert!(backend_for("nrf52840").is_none());
+        // Not an nRF52: those resolve through `is_nrf`'s prefix now.
+        assert!(backend_for("nrf51").is_none());
+        assert!(backend_for("nrf5340").is_none());
+    }
+
+    #[test]
+    fn the_nrf52_parts_resolve_to_the_nrf_backend() {
+        for fam in ["nrf52833", "nrf52840"] {
+            assert_eq!(backend_for(fam).unwrap().family_id(), "nrf52833", "{fam}");
+        }
     }
 
     /// Any other STM32 family routes to the generic embassy backend, and it

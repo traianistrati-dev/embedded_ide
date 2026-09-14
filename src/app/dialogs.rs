@@ -1068,7 +1068,11 @@ impl AppIde {
                             }
                             ui.label(
                                 egui::RichText::new(
-                                    "    Not a block: the rest still generates; these parts come out as comments or TODOs.",
+                                    if gaps.iter().any(|g| g.starts_with(BACKEND_GAP_PREFIX)) {
+                                        "    Not a block: the project is written with an empty main.rs."
+                                    } else {
+                                        "    Not a block: the rest still generates; these parts come out as comments or TODOs."
+                                    },
                                 )
                                 .size(10.5)
                                 .color(egui::Color32::GRAY),
@@ -1706,9 +1710,12 @@ pub(super) fn definitions_from_file(
 pub(super) fn uses_dma_def(family: &str) -> bool {
     // RP2040/RP2350 join F1 and ESP: their DMA comes from the chip's own HAL,
     // not from the definition's channel table, so an empty table means nothing.
+    // nRF52 has no channel table at all: its EasyDMA is built into each
+    // peripheral, so there is nothing to allocate and nothing to be missing.
     !(family == "stm32f1"
         || crate::panels::mcu_module::codegen::family::is_esp(family)
-        || crate::panels::mcu_module::codegen::rp::is_rp(family))
+        || crate::panels::mcu_module::codegen::rp::is_rp(family)
+        || crate::panels::mcu_module::codegen::nrf::is_nrf(family))
 }
 
 /// Everything about a chip that will not work, in one list.
@@ -1785,14 +1792,18 @@ impl AppIde {
                 .iter()
                 .find(|d| d.id == id)
                 .map(|d| {
-                    local_chip_gaps(
+                    let mut gaps = local_chip_gaps(
                         codegen::rcc::generates_clock_code_for(
                             &d.family,
                             &d.clock.to_config(&d.clock_limits),
                         ),
                         uses_dma_def(&d.family)
                             .then(|| d.dma.as_ref().map_or(0, |x| x.channels.len())),
-                    )
+                    );
+                    if let Some(g) = backend_gap(&d.family) {
+                        gaps.insert(0, g);
+                    }
+                    gaps
                 })
                 .unwrap_or_default();
             self.new_project_gaps = Some((id, gaps));
@@ -1841,6 +1852,40 @@ pub(super) fn verdict_for(
 /// is a commented skeleton and their DMA a `TODO`.
 pub(super) fn local_chip_gaps(clock_generates: bool, dma_channels: Option<usize>) -> Vec<String> {
     chip_gaps(&FeatureVerdict::Present, clock_generates, dma_channels)
+}
+
+/// The gap that swallows the others: a family with no code generator writes
+/// an EMPTY `main.rs`. Listed first, because the clock line on its own ("no
+/// clock code ... everything else still generates") then says the opposite of
+/// what happens - which is what the micro:bit reported while it had a
+/// definition and no backend.
+pub(super) fn backend_gap(family: &str) -> Option<String> {
+    codegen::family::backend_for(family)
+        .is_none()
+        .then(|| format!("{BACKEND_GAP_PREFIX} for the `{family}` family: main.rs comes out empty"))
+}
+
+/// How [`backend_gap`] starts, and what both dialogs look for to change their
+/// closing line from "the rest still generates" to "main.rs is empty".
+pub(super) const BACKEND_GAP_PREFIX: &str = "no code generator";
+
+#[cfg(test)]
+mod backend_gap_tests {
+    use super::*;
+
+    /// A family with a backend gets no gap; one without gets the line the
+    /// dialogs match on, and it names the family.
+    #[test]
+    fn the_gap_follows_the_registry() {
+        for fam in ["stm32f1", "stm32f4", "esp32c3", "rp2040", "nrf52833"] {
+            assert_eq!(backend_gap(fam), None, "{fam} has a backend");
+        }
+        for fam in ["nrf51", "stm8", "avr"] {
+            let g = backend_gap(fam).unwrap_or_else(|| panic!("{fam} has no backend"));
+            assert!(g.starts_with(BACKEND_GAP_PREFIX), "{g}");
+            assert!(g.contains(fam), "{g}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2666,7 +2711,7 @@ mod chip_gaps_tests {
     fn dma_is_not_asked_of_the_families_that_do_not_use_it() {
         for family in [
             "stm32f1", "esp32", "esp32c2", "esp32c3", "esp32c5", "esp32c6", "esp32c61", "esp32h2",
-            "esp32s2", "esp32s3",
+            "esp32s2", "esp32s3", "rp2040", "rp235x", "nrf52833",
         ] {
             assert!(!uses_dma_def(family), "{family} was asked about DMA");
         }

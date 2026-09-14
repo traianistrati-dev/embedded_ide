@@ -115,6 +115,8 @@ else
         case "$f" in
             src/panels/mcu_module/codegen/rp.rs)
                 fams="$fams rp" ;;
+            src/panels/mcu_module/codegen/nrf.rs)
+                fams="$fams nrf" ;;
             src/panels/mcu_module/codegen/stm32.rs|src/panels/mcu_module/codegen/rtic.rs)
                 fams="$fams f1" ;;
             src/panels/mcu_module/codegen/embassy_async.rs|            src/panels/mcu_module/codegen/embassy_common.rs|            src/panels/mcu_module/codegen/wba.rs|            src/panels/mcu_module/codegen/watchdog_gen.rs)

@@ -1582,7 +1582,9 @@ const EMBEDDED_CRATES: &[(&str, &str)] = &[
     // nRF
     ("nrf52840-hal", "HAL for nRF52840"),
     ("nrf52833-hal", "HAL for nRF52833"),
+    ("nrf52833-pac", "Peripheral access crate for nRF52833"),
     ("nrf-hal-common", "Common HAL code for nRF"),
+    ("microbit-v2", "Board support for the BBC micro:bit v2"),
     // AVR
     ("avr-device", "Register access for AVR microcontrollers"),
     // Logging / debug

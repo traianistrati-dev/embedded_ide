@@ -12,10 +12,10 @@ safe across regenerations.
 
 ![A tour of the Embedded IDE](docs/embedded_ide_tour.gif)
 
-> Status: early development (`v0.1`). **Fourteen chips ship built in** — one
-> STM32, nine ESP32 and all four Raspberry Pi Pico boards — and the rest of the
-> STM32 catalogue is reachable by importing a part from ST's own database. A new
-> chip inside a supported family is plain data, no rebuild.
+> Status: early development (`v0.1`). **Fifteen chips ship built in** — one
+> STM32, nine ESP32, all four Raspberry Pi Pico boards and the BBC micro:bit v2 —
+> and the rest of the STM32 catalogue is reachable by importing a part from ST's
+> own database. A new chip inside a supported family is plain data, no rebuild.
 
 ---
 
@@ -154,6 +154,39 @@ On RP the **PWM channel is welded to the pad** — slice `(n / 2) % 8`, channel 
 on even pads and B on odd — so unlike ESP there is nothing to choose. The IDE
 shows you the one channel that pad can be.
 
+### BBC micro:bit v2
+
+A board again: the pin map is the **edge connector** (rings 0/1/2, pads 3–22,
+3V and GND in their physical order), plus the nets wired to the LED matrix rows,
+buttons, speaker, microphone, logo touch pad, the internal sensor bus and the
+USB serial link.
+
+| Board | Chip | Core | Max clock | Target |
+|-------|------|------|-----------|--------|
+| **BBC micro:bit v2** | nRF52833 | Cortex-M4F | 64 MHz | `thumbv7em-none-eabihf` |
+
+Blocking builds on `nrf52833-hal`. Async is not written yet; the System tab says
+so.
+
+The nRF52 has **no alternate-function table**: every peripheral signal can go to
+any pin, chosen by writing the pin number into a `PSEL` register. The definition
+still offers SPI and I2C only on the pads the board labels for them, so autowire
+lands where accessories expect them. Three consequences worth knowing:
+
+- **UARTE, SPIM and TWIM take their pins by value**, so each bus is built in
+  `main.rs` from the pads you wired and configured in
+  `src/pins/configs/{uarte,spim,twim}N.rs`. SPIM0/1 share their peripheral IDs
+  with TWIM0/1, so SPI is offered on SPIM2 and I2C on TWIM0/1.
+- **PWM is four blocks of four channels**, any pad. The Peripherals tab picks
+  the block and channel; the config file carries the frequency, the prescaler
+  the frequency needs, and a duty per channel.
+- **Pads 8 and 9 are the NFC antenna** until the UICR says otherwise. Wire
+  them and the generated code tells you what to clear.
+
+No 32.768 kHz crystal is fitted, so the Clock tab offers the RC oscillator or
+the synthesized LFCLK; the tree's two muxes are exactly the two `Clocks` calls
+that reach `main.rs`.
+
 ---
 
 ## Visual MCU configuration
@@ -287,8 +320,8 @@ compiler can tell you that text is a program. `scripts/verify-codegen.ps1` emits
 a matrix of configurations and cross-compiles each one:
 
 ```powershell
-pwsh scripts/verify-codegen.ps1          # representative subset (27 cases)
-pwsh scripts/verify-codegen.ps1 -Full    # every case (33)
+pwsh scripts/verify-codegen.ps1          # representative subset (28 cases)
+pwsh scripts/verify-codegen.ps1 -Full    # every case (34)
 ```
 
 Each case prints its own time, and the run ends with a total and the three most
@@ -490,6 +523,7 @@ The bottom panel carries twelve tabs.
   - **ESP32** — via **espflash**, with an **ESP Monitor** in the right-hand half
     that auto-starts after a flash.
   - **Pico** — UF2 or probe-rs.
+  - **micro:bit** — probe-rs, through the on-board DAPLink (CMSIS-DAP).
   - One shared **probe selector** across Flash, RTT, Debug and Profile.
 - **RTT / defmt** — live logs streamed through the debug probe.
 - **Debug** — an on-target debugger over `probe-rs dap-server`: gutter
@@ -553,6 +587,7 @@ flash) builds `--release` and parses the ELF itself into Flash/RAM bars against
   - ESP32 RISC-V: `riscv32imc-unknown-none-elf` · `riscv32imac-unknown-none-elf`
   - ESP32 Xtensa: the `esp` toolchain from [espup](https://github.com/esp-rs/espup)
   - Pico: `thumbv6m-none-eabi` · Pico 2: `thumbv8m.main-none-eabihf`
+  - micro:bit v2: `thumbv7em-none-eabihf`
 - Flashing tools as needed: [`probe-rs`](https://probe.rs/),
   [OpenOCD](https://openocd.org/),
   [`espflash`](https://github.com/esp-rs/espflash), `dfu-util`. The **Required

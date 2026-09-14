@@ -980,6 +980,14 @@ mod the_manifest_follows_the_runtime {
             let blocking = d.project.hal_dep.split_whitespace().next().unwrap_or("");
             assert_ne!(krate, blocking, "{}: the two lines differ", d.id);
 
+            // A definition may carry its async line before the backend that
+            // consumes it exists (the micro:bit's `embassy-nrf` line is staged
+            // for the nRF async backend). Until then the line is inert: the
+            // runtime cannot be switched, so there is no manifest to check.
+            if !crate::panels::mcu_module::codegen::family::async_supported(&d.family) {
+                continue;
+            }
+
             let mut mcu = d.build_mcu();
             mcu.runtime = Runtime::Async;
             assert!(mcu.is_async(), "{}: async is supported here", d.id);

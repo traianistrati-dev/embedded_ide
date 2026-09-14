@@ -2750,10 +2750,13 @@ impl AppIde {
             // then, and forever on a chip whose HAL line has no feature to look
             // up. Never a guess in the gap: `local_chip_gaps` says nothing at
             // all about the HAL rather than assuming it is fine.
-            let gaps = match hal {
+            let mut gaps = match hal {
                 Some(v) => crate::app::dialogs::chip_gaps(&v, clock_ok, channels),
                 None => crate::app::dialogs::local_chip_gaps(clock_ok, channels),
             };
+            if let Some(g) = crate::app::dialogs::backend_gap(&mcu.family) {
+                gaps.insert(0, g);
+            }
             if !gaps.is_empty() {
                 ui.add_space(10.0);
                 egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -2779,7 +2782,14 @@ impl AppIde {
                     // find out now rather than from generated code.
                     ui.label(
                         egui::RichText::new(
-                            "    Everything else still generates; these parts come out as comments or TODOs.",
+                            if gaps
+                                .iter()
+                                .any(|g| g.starts_with(crate::app::dialogs::BACKEND_GAP_PREFIX))
+                            {
+                                "    main.rs is empty until a backend exists for this family."
+                            } else {
+                                "    Everything else still generates; these parts come out as comments or TODOs."
+                            },
                         )
                         .size(10.5)
                         .color(egui::Color32::GRAY),
@@ -2908,6 +2918,10 @@ impl AppIde {
             let esp_async = family::async_is_esp(&mcu.family);
             let async_sel = mcu.pending_runtime == Runtime::Async;
             let async_why = family::async_unavailable_reason(&mcu.family);
+            let async_subtitle = format!(
+                "#[embassy_executor::main] async fn main(Spawner)  ·  .await-able drivers on {}",
+                family::async_stack_name(&mcu.family)
+            );
             let mut async_resp = runtime_card(
                 ui,
                 async_sel,
@@ -2921,8 +2935,7 @@ impl AppIde {
                     "#[esp_rtos::main] async fn main(Spawner)  ·  \
                      embassy executor scheduled by esp-rtos"
                 } else {
-                    "#[embassy_executor::main] async fn main(Spawner)  ·  \
-                     .await-able drivers on embassy-stm32"
+                    &async_subtitle
                 },
             );
             if let Some(why) = &async_why {
