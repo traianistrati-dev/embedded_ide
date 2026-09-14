@@ -946,7 +946,9 @@ STM32F1 Series
         // Every STM32 must be reachable: probe-rs is the ONLY way those flash,
         // so a gap there would be a real regression rather than a version skew.
         for d in builtin_definitions() {
-            if d.family.starts_with("stm32") {
+            if d.family.starts_with("stm32")
+                || crate::panels::mcu_module::codegen::nrf::is_nrf(&d.family)
+            {
                 assert_eq!(
                     chip_gap(&d.project.probe_chip),
                     None,

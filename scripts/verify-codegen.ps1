@@ -32,8 +32,8 @@
 [CmdletBinding()]
 param(
     [switch]$Full,
-    # One representative case per named family (f1, esp, rp, embassy, import,
-    # n6) — what the pre-push hook runs. The full set stays a deliberate act:
+    # One representative case per named family (f1, esp, rp, nrf, embassy,
+    # import, n6) — what the pre-push hook runs. The full set stays a deliberate act:
     # a gate that costs twenty minutes is a gate people turn off, and this repo
     # already has the scar (`git push --no-verify`) to prove it.
     #
@@ -289,6 +289,14 @@ $ALL_CASES = @(
     # and `set_duty_cycle` both live on embedded-hal traits that have to be
     # imported, and neither failure is visible by reading.
     @{ n = "Raspberry Pi Pico x4";         t = "emit_rp_project";            e = @{};                       q = $true; fam = "rp" }
+
+    # The micro:bit on nrf52833-hal, TWO projects: every peripheral wired on the
+    # default branches, and a second on the other ones (crystal HFCLK,
+    # synthesized LFCLK, open-drain, pull-down, CTS/RTS, SCK-only SPI in mode 3,
+    # PWM with no frequency). Same reason as the Pico row: the HAL calls were
+    # read from nrf-hal-common's source, and the type-state on `Clocks` plus
+    # the degraded-vs-typed pin split are things only a compiler settles.
+    @{ n = "BBC micro:bit v2 x2";          t = "emit_nrf_project";           e = @{};                       q = $true; fam = "nrf"; hk = $true }
 
     # The same two boards on embassy-rp, which is a DIFFERENT HAL crate, not a
     # feature of the first one. Every bus is wired, because that is where the

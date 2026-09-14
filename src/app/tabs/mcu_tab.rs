@@ -1165,9 +1165,18 @@ mod tests {
             }
         }
         informative.sort();
+        // The micro:bit joins the F103 and the W boards: its on-board nets
+        // (MIC_RUN, LOGO, SENSOR_INT) are GPIO-only while every edge pad also
+        // serves two UARTEs and sixteen PWM channels, so the spread is real
+        // and the tiering says something.
         assert_eq!(
             informative,
-            ["rp2040_pico_w", "rp2350_pico2_w", "stm32f103c8t6"],
+            [
+                "nrf52833_microbit_v2",
+                "rp2040_pico_w",
+                "rp2350_pico2_w",
+                "stm32f103c8t6"
+            ],
             "which chips have a pin below the scarcity line changed - if a chip              joined or left, the legend it shows changed with it"
         );
     }

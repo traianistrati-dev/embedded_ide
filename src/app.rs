@@ -3309,7 +3309,16 @@ impl AppIde {
             let is_esp = self
                 .selected_build_cfg()
                 .is_some_and(|(_, tc)| tc == ToolchainKind::EspRust);
-            let needs_can = !is_async && !is_esp && has_cfg("can");
+            // The nRF config modules speak nrf-hal directly too (`Uarte<UARTE0>`,
+            // `Spim<SPIM2>`), so the same exclusion: without it a USART module
+            // on the micro:bit collected `embedded-io`, `embedded-hal-0-2` and
+            // `nb`, none of which the generated code names.
+            let is_nrf = self
+                .mcu
+                .as_ref()
+                .is_some_and(|m| crate::panels::mcu_module::codegen::nrf::is_nrf(&m.family));
+            let hal_direct = is_esp || is_nrf;
+            let needs_can = !is_async && !hal_direct && has_cfg("can");
             // Trait crates only for PORTABLE modules on the Blocking path.
             let (mut needs_usart, mut needs_spi, mut needs_i2c) = (false, false, false);
             // Async SPI/I2C deps: `embedded-hal` 1.0 for any bus, plus
@@ -3320,7 +3329,7 @@ impl AppIde {
             // stm32f1xx-hal `Tx`/`Rx` are nb-based (`nb::block!(rx.read())`).
             // (Async USART uses embedded-io-async → no nb.)
             let mut any_usart_blocking = false;
-            if let Some(m) = &self.mcu.as_ref().filter(|_| !is_esp) {
+            if let Some(m) = &self.mcu.as_ref().filter(|_| !hal_direct) {
                 use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode, ModuleConfig};
                 for md in &m.modules {
                     if is_async {

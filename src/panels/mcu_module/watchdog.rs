@@ -555,8 +555,9 @@ mod tests {
             assert!(is_esp(chip), "{chip}");
         }
         assert!(!is_esp("stm32f4"));
-        // A family the IDE does not generate for at all.
+        // Families whose backend generates no watchdog file.
         assert!(!codegen_supported("rp2040"));
+        assert!(!codegen_supported("nrf52833"));
     }
 
     /// The ESP32-C2 is the one part with a single timer group, so it is the

@@ -1802,14 +1802,28 @@ fn cargo_toml_embedded(c: &ProjectDef) -> String {
          cortex-m    = {{ version = \"0.7\", features = [\"critical-section-single-core\"] }}\n\
          cortex-m-rt = \"0.7\"\n\
          panic-halt  = \"0.2\"\n\
-         {hal}\n\
+         {eh}{hal}\n\
          \n\
          # Your own dependencies go BELOW the end marker: they continue this\n\
          # table, and anything written inside the block is replaced on refresh.\n",
         name = c.pkg_name,
+        // nrf-hal implements embedded-hal 1.0's pin traits without re-exporting
+        // them, and the generated `main.rs` imports them - the same reason the
+        // RP template carries the line.
+        eh = if is_nrf_hal(c) {
+            "embedded-hal = \"1.0\"\n"
+        } else {
+            ""
+        },
         hal = c.hal_dep,
         chip = c.probe_chip,
     )
+}
+
+/// Read off the HAL line, like [`is_rp_hal`]: `nrf52833-hal`, or any other
+/// `nrf52xxx-hal`.
+fn is_nrf_hal(c: &ProjectDef) -> bool {
+    c.hal_dep.starts_with("nrf52")
 }
 
 /// `Cargo.toml` for an RP2040 / RP2350 project.

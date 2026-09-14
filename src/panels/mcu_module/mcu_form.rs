@@ -1412,10 +1412,11 @@ mod tests {
     #[test]
     fn unknown_family_warns_but_does_not_block() {
         let mut f = McuForm::blank();
-        f.id = "nrf52840".into();
-        f.display_name = "RP2040".into();
-        f.probe_chip = "RP2040".into();
-        f.family = "nrf52840".into();
+        // An nRF51: the nRF52 parts have a backend now, this one does not.
+        f.id = "nrf51822".into();
+        f.display_name = "nRF51822".into();
+        f.probe_chip = "nRF51822_xxAA".into();
+        f.family = "nrf51".into();
         assert!(f.errors().is_empty());
         assert!(
             f.warnings()
