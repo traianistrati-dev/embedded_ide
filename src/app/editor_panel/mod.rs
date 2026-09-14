@@ -209,12 +209,20 @@ impl AppIde {
     /// caret actually moved this frame, so it never fights the user scrolling
     /// the wheel away from the caret. See the call site for why egui's built-in
     /// caret-follow doesn't reach the editor's outer (vertical) ScrollArea.
+    ///
+    /// "Moved" is decided in BUFFER space. The galley index is the projection's,
+    /// and a fold toggled above the caret shifts that index by every hidden
+    /// character without the caret going anywhere — comparing projection
+    /// indices read that as a move and jumped the view back down to a caret
+    /// the user had scrolled away from, right after they folded a block.
     fn scroll_caret_into_view(
         &mut self,
         ui: &egui::Ui,
         editor_resp: &egui::text_edit::TextEditOutput,
         editor_id: &str,
         visible: egui::Rect,
+        fold_map: &fold::FoldMap,
+        follow: bool,
     ) {
         let Some(range) = editor_resp.state.cursor.char_range() else {
             return;
@@ -228,9 +236,13 @@ impl AppIde {
             .min(editor_resp.galley.text().chars().count());
         // Only follow when the caret moved (typing / arrows / selection), so the
         // user can still freely scroll the wheel while the caret sits off-screen.
-        let moved = self.ed.last_caret_idx != Some(primary);
-        self.ed.last_caret_idx = Some(primary);
-        if !moved {
+        let in_buffer = fold_map.to_buffer(primary);
+        let moved = self.ed.last_caret_idx != Some(in_buffer);
+        self.ed.last_caret_idx = Some(in_buffer);
+        // `!follow`: a fold anchor just placed the view. Whatever moved the
+        // caret was the fold (clamped out of a hidden body onto its header),
+        // not the user, and following it would nudge the pinned header.
+        if !moved || !follow {
             return;
         }
 
@@ -702,8 +714,9 @@ impl AppIde {
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
         // Ctrl+Shift+Q → collapse every function body, or expand everything
         // if anything is folded. Consumed here with the other shortcuts and
-        // applied just before the fold projection is built, so the change
-        // shows on THIS frame.
+        // applied after the render (`toggle_fold_all`), where the galley of
+        // the current projection exists to anchor the view against — it lands
+        // next frame, exactly like a click on a fold caret.
         let fold_all_pressed = editor_kbd_active
             && ui.input_mut(|i| {
                 i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Q)
@@ -1179,18 +1192,16 @@ impl AppIde {
                 }
                 self.folds.remove(rel);
             }
-            // Ctrl+Shift+Q, applied before the projection below so it takes
-            // effect this frame. After the unfold-on-edit check: a frame
-            // that both edits and toggles should end up unfolded.
+            // Ctrl+Shift+Q. After the unfold-on-edit check: a frame that both
+            // edits and toggles should end up unfolded.
             if fold_all_pressed && !editing {
-                let current = self.folds.get(rel).cloned().unwrap_or_default();
-                let next = fold::toggle_all(&display_code, &current);
-                if next.is_empty() {
-                    self.folds.remove(rel);
-                } else {
-                    self.folds.insert(rel.clone(), next);
-                }
+                self.ed.fold_all_requested = Some(rel.clone());
             }
+        }
+        // A request belongs to the frame's file; it does not wait around for
+        // the next one that can consume it.
+        if fold_key.is_none() {
+            self.ed.fold_all_requested = None;
         }
         let mut fold_map = match &fold_key {
             Some(rel) => match self.folds.get(rel) {
@@ -1244,6 +1255,18 @@ impl AppIde {
                 }
             }
         }
+        // The outer scroll offset the galley is about to be laid out at. Read
+        // BEFORE the render: when the content shrinks, egui's `ScrollArea::end`
+        // clamps and stores a SMALLER one before this frame's code sees it, and
+        // a fold correction added to that clamped value undershot — collapse-all
+        // deep in a large file landed at the top of the file.
+        let drawn_offset = {
+            let scroll_id = ui
+                .id()
+                .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
+            egui::containers::scroll_area::State::load(ui.ctx(), scroll_id)
+                .map_or(0.0, |s| s.offset.y)
+        };
         let mut editor_resp = if is_rust_file {
             crate::editor::gui::code_editor::show_rust_with_completer(
                 ui,
@@ -1395,13 +1418,23 @@ impl AppIde {
         // drive the outer ScrollArea's offset ourselves.
         // A fold toggled last frame: put its header back at the same screen
         // position before anything else touches the scroll offset.
-        if let Some(rel) = &fold_key {
-            self.apply_fold_anchor(ui, &editor_resp, &editor_id, &fold_map, rel);
-        }
-        self.scroll_caret_into_view(ui, &editor_resp, &editor_id, editor_clip);
+        let anchored = match &fold_key {
+            Some(rel) => {
+                self.apply_fold_anchor(ui, &editor_resp, &editor_id, &fold_map, rel, drawn_offset)
+            }
+            None => false,
+        };
+        self.scroll_caret_into_view(
+            ui,
+            &editor_resp,
+            &editor_id,
+            editor_clip,
+            &fold_map,
+            !anchored,
+        );
         // Jump to a clicked diagnostic's line (queued by the bottom
         // panel). Runs after caret-follow so its precise offset wins.
-        self.apply_pending_scroll(ui, &editor_resp, &editor_id, displayed_file);
+        self.apply_pending_scroll(ui, &editor_resp, &editor_id, displayed_file, &fold_map);
 
         // The other half of the caret invariant (see the conversion before
         // the render): what the editor hands back is in projection space.
@@ -1629,6 +1662,23 @@ impl AppIde {
                 &rel,
                 font_size,
             );
+            // Ctrl+Shift+Q / the menu item, applied here where this frame's
+            // galley can be measured for an anchor. Lands next frame, like a
+            // gutter click.
+            let text_changed = self
+                .fold_guard
+                .get(&rel)
+                .is_some_and(|(_, prev)| *prev != fold_ui::text_sig(&display_code));
+            match fold_ui::fold_all_request(self.ed.fold_all_requested.take(), &rel, text_changed) {
+                Some(fold_ui::Request::Fire) => {
+                    self.toggle_fold_all(&editor_resp, editor_clip, &display_code, &fold_map, &rel);
+                }
+                // This frame also changed the text (a keystroke coalesced with
+                // the shortcut): `guard_folds` would read the fresh folds as
+                // "the file changed from outside" and drop them. Next frame.
+                Some(fold_ui::Request::Wait) => self.ed.fold_all_requested = Some(rel.clone()),
+                Some(fold_ui::Request::Drop) | None => {}
+            }
             // Last, so it sees every fold change this frame — including the
             // one the gutter just made.
             self.guard_folds(
@@ -1708,18 +1758,13 @@ impl AppIde {
                 Some(A::NextFile) => cycle_next_pressed = true,
                 Some(A::PrevFile) => cycle_prev_pressed = true,
                 Some(A::Format) => format_pressed = true,
+                // Picked up by `toggle_fold_all` next frame, once the galley
+                // to anchor against has been laid out — the keyboard flag
+                // takes the same route. Only for a file that can fold: a
+                // library manifest lists the item too.
                 Some(A::ToggleFoldAll) => {
-                    // Applied straight to the state, not via the keyboard
-                    // flag: this runs AFTER the fold projection was built,
-                    // so it lands on the next frame either way.
                     if let Some(rel) = &fold_key {
-                        let current = self.folds.get(rel).cloned().unwrap_or_default();
-                        let next = fold::toggle_all(&display_code, &current);
-                        if next.is_empty() {
-                            self.folds.remove(rel);
-                        } else {
-                            self.folds.insert(rel.clone(), next);
-                        }
+                        self.ed.fold_all_requested = Some(rel.clone());
                     }
                 }
                 Some(A::Rename) => ctrl_r_pressed = true,
@@ -2161,12 +2206,18 @@ impl AppIde {
     /// line sits on roughly the 10th row from the top. Only fires once the
     /// editor is displaying the target file (`displayed_file`), so a cross-file
     /// jump waits one frame for the file switch to take effect.
+    ///
+    /// The queued line is a BUFFER line; the scroll offset counts galley ROWS.
+    /// While folded those differ by every hidden line above the target, so the
+    /// line is translated through the projection first — a target inside a
+    /// folded block lands on that block's header.
     fn apply_pending_scroll(
         &mut self,
         ui: &egui::Ui,
         editor_resp: &egui::text_edit::TextEditOutput,
         editor_id: &str,
         displayed_file: ProjectFileId,
+        fold_map: &fold::FoldMap,
     ) {
         let Some((file, line_1based)) = self.ed.pending_scroll_to_line else {
             return;
@@ -2184,8 +2235,8 @@ impl AppIde {
             .pos_from_cursor(egui::text::CCursor::new(0))
             .height()
             .max(1.0);
-        let line0 = line_1based.saturating_sub(1) as f32;
-        let offset_y = ((line0 - ROWS_ABOVE) * row_h).max(0.0);
+        let row = fold_map.display_row_of(line_1based.saturating_sub(1)) as f32;
+        let offset_y = ((row - ROWS_ABOVE) * row_h).max(0.0);
 
         let scroll_id = ui
             .id()
@@ -2194,11 +2245,12 @@ impl AppIde {
             state.offset.y = offset_y;
             state.store(ui.ctx(), scroll_id);
             // Suppress caret-follow from snapping back to the (stale) caret.
+            // In buffer space, like every other reader of `last_caret_idx`.
             self.ed.last_caret_idx = editor_resp
                 .state
                 .cursor
                 .char_range()
-                .map(|r| r.primary.index);
+                .map(|r| fold_map.to_buffer(r.primary.index));
             ui.ctx().request_repaint();
         }
     }

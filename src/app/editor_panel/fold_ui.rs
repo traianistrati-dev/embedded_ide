@@ -188,22 +188,146 @@ impl AppIde {
             }
             // Pin the block's header where it is. Hiding (or restoring) a couple
             // of hundred lines changes what sits at every pixel below it, and
-            // egui also clamps the offset when the content shrinks — either way
             // the page slides out from under the pointer unless we correct it.
             self.ed.fold_anchor = Some((rel.to_owned(), head, y));
         }
     }
+
+    /// Ctrl+Shift+Q / "toggle collapse all", with the view kept in place.
+    ///
+    /// A gutter click pins the clicked header; there is no clicked line here,
+    /// so the CARET's line is pinned when it is on screen, else the first
+    /// visible row — an off-screen caret must not pull the view to itself,
+    /// which is the very jump this feature is being fixed for. A line about
+    /// to be hidden pins its block's header instead, at the header's own y
+    /// so nothing above it moves — or at the top edge when the header is
+    /// scrolled out above: pinned off-screen, the header would have taken the
+    /// user's whole block with it and the view would land on the functions
+    /// after it.
+    pub(super) fn toggle_fold_all(
+        &mut self,
+        editor_resp: &egui::text_edit::TextEditOutput,
+        clip: egui::Rect,
+        display_code: &str,
+        map: &FoldMap,
+        rel: &str,
+    ) {
+        let current = self.folds.get(rel).cloned().unwrap_or_default();
+        let next = super::fold::toggle_all(display_code, &current);
+        if next == current {
+            return;
+        }
+        let next_map = FoldMap::new(display_code, &next);
+
+        // Rows are uniform (monospace, no wrapping), which is what lets a row
+        // be turned into a y without walking the galley.
+        let gp = editor_resp.galley_pos;
+        let row_h = editor_resp
+            .galley
+            .pos_from_cursor(egui::text::CCursor::new(0))
+            .height()
+            .max(1.0);
+        let galley_len = editor_resp.galley.text().chars().count();
+        // The caret is in buffer space by now (converted after the render).
+        let caret_row = editor_resp.state.cursor.char_range().map(|r| {
+            let disp = map.to_display_clamped(r.primary.index).min(galley_len);
+            map.display()
+                .chars()
+                .take(disp)
+                .filter(|&c| c == '\n')
+                .count()
+        });
+        let first_row = ((clip.top() - gp.y) / row_h).ceil().max(0.0) as usize;
+        let last_row = ((clip.bottom() - gp.y) / row_h).floor() as usize;
+        let row = anchor_row(caret_row, first_row..last_row);
+
+        let mut line = map.buffer_line_of_row(row);
+        let mut y = gp.y + row as f32 * row_h;
+        if next_map.display_line_of(line).is_none() {
+            // About to be hidden: the header stands in for it, where it is now
+            // — but never above the viewport.
+            line = next_map.buffer_line_of_row(next_map.display_row_of(line));
+            y = (gp.y + map.display_row_of(line) as f32 * row_h).max(clip.top());
+        }
+
+        if next.is_empty() {
+            self.folds.remove(rel);
+        } else {
+            self.folds.insert(rel.to_owned(), next);
+        }
+        self.ed.fold_anchor = Some((rel.to_owned(), line, y));
+    }
+}
+
+/// The display row a "toggle collapse all" pins: the caret's when it is
+/// inside `visible` (rows `start..end`, `end` exclusive), else the first
+/// visible row.
+fn anchor_row(caret_row: Option<usize>, visible: std::ops::Range<usize>) -> usize {
+    match caret_row {
+        Some(r) if visible.contains(&r) => r,
+        _ => visible.start,
+    }
+}
+
+/// What becomes of a pending "toggle collapse all" on this frame.
+#[derive(Debug, PartialEq)]
+pub(super) enum Request {
+    Fire,
+    /// Same file, but the frame also changed its text: apply next frame.
+    Wait,
+    /// Raised on another file: a request never carries over to one the user
+    /// did not make it on.
+    Drop,
+}
+
+/// `requested_for`: the file the request was raised on, if any; `rel`: the
+/// file this frame shows; `text_changed`: the buffer differs from what the
+/// fold guard recorded last frame.
+pub(super) fn fold_all_request(
+    requested_for: Option<String>,
+    rel: &str,
+    text_changed: bool,
+) -> Option<Request> {
+    let for_rel = requested_for?;
+    Some(if for_rel != rel {
+        Request::Drop
+    } else if text_changed {
+        Request::Wait
+    } else {
+        Request::Fire
+    })
+}
+
+/// The fold guard's fingerprint of a buffer.
+pub(super) fn text_sig(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 impl AppIde {
-    /// Put the block whose caret was just clicked back where it was on screen.
+    /// Put the line a fold toggle pinned back where it was on screen. Returns
+    /// whether an anchor for this file was consumed — the caller then skips
+    /// caret-follow for the frame, since the fold, not the user, moved the
+    /// caret.
     ///
-    /// A toggle records the header's y; this runs the NEXT frame, once the
-    /// galley reflects the new fold state, and shifts the editor's outer scroll
-    /// offset by the difference. Folding 200 lines changes what sits at every
-    /// pixel below the header, and egui additionally clamps the offset when the
-    /// content shrinks — without this the page slides out from under the
+    /// A toggle records the line's y; this runs the NEXT frame, once the galley
+    /// reflects the new fold state, and shifts the editor's outer scroll offset
+    /// by the difference. Folding 200 lines changes what sits at every pixel
+    /// below the header — without this the page slides out from under the
     /// pointer and you lose the block you were looking at.
+    ///
+    /// The delta is added to `drawn_offset` — the offset the galley was laid
+    /// out at, read before the render — not to the stored one: when the content
+    /// shrank, egui's `ScrollArea::end` has already clamped and stored a smaller
+    /// offset by the time this runs, and adding the delta to THAT undershot all
+    /// the way to the top of the file on a collapse-all deep in a large file.
+    ///
+    /// What it cannot undo: egui clamps the offset when the content shrinks
+    /// below the viewport's reach, and there is no scrolling past the end, so
+    /// folding the LAST block while its header sits at the top of the view
+    /// still lets the header drop a few rows.
     ///
     /// Same one-frame lag as `apply_pending_scroll`: the correction lands after
     /// this frame was laid out, so a repaint is requested for it to show.
@@ -214,18 +338,19 @@ impl AppIde {
         editor_id: &str,
         map: &FoldMap,
         rel: &str,
-    ) {
+        drawn_offset: f32,
+    ) -> bool {
         let Some((anchor_rel, line, old_y)) = self.ed.fold_anchor.clone() else {
-            return;
+            return false;
         };
         if anchor_rel != rel {
-            return; // the view moved to another file first
+            return false; // the view moved to another file first
         }
         self.ed.fold_anchor = None;
 
-        let Some(disp_line) = map.display_line_of(line) else {
-            return; // the header ended up inside another fold
-        };
+        // Total: a line that ended up inside another fold pins that fold's
+        // header, the row now standing in for it.
+        let disp_line = map.display_row_of(line);
         // Char index of that display line's first character.
         let mut ci = 0usize;
         let mut seen = 0usize;
@@ -247,16 +372,17 @@ impl AppIde {
         let new_y = editor_resp.galley_pos.y + loc.min.y;
         let delta = new_y - old_y;
         if delta.abs() < 0.5 {
-            return;
+            return true;
         }
         let scroll_id = ui
             .id()
             .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
         if let Some(mut state) = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id) {
-            state.offset.y = (state.offset.y + delta).max(0.0);
+            state.offset.y = (drawn_offset + delta).max(0.0);
             state.store(ui.ctx(), scroll_id);
             ui.ctx().request_repaint();
         }
+        true
     }
 }
 
@@ -301,11 +427,7 @@ impl AppIde {
             }
             h.finish()
         };
-        let text_sig = {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            text.hash(&mut h);
-            h.finish()
-        };
+        let text_sig = text_sig(text);
 
         if let Some((prev_folds, prev_text)) = self.fold_guard.get(rel).copied() {
             if prev_text != text_sig && !own_edit && self.folds.contains_key(rel) {
@@ -326,5 +448,53 @@ impl AppIde {
         }
         self.fold_guard
             .insert(rel.to_owned(), (folds_sig(self), text_sig));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Request, anchor_row, fold_all_request};
+
+    /// A request raised on one file must never fold another: via the menu on
+    /// a library's `Cargo.toml` it used to sit armed until the next Rust file
+    /// opened, and collapse every function there unasked.
+    #[test]
+    fn a_request_from_another_file_is_dropped_not_carried_over() {
+        assert_eq!(
+            fold_all_request(Some("mylib/Cargo.toml".into()), "mylib/src/lib.rs", false),
+            Some(Request::Drop)
+        );
+        assert_eq!(fold_all_request(None, "src/main.rs", false), None);
+    }
+
+    /// A keystroke coalesced into the shortcut's frame would make the fold
+    /// guard read the new folds as a change from outside and drop them.
+    #[test]
+    fn a_request_on_a_frame_that_edited_waits_one_frame() {
+        assert_eq!(
+            fold_all_request(Some("src/main.rs".into()), "src/main.rs", true),
+            Some(Request::Wait)
+        );
+        assert_eq!(
+            fold_all_request(Some("src/main.rs".into()), "src/main.rs", false),
+            Some(Request::Fire)
+        );
+    }
+
+    /// The reported jump, on the toggle-all path: a caret the user scrolled
+    /// away from must not pull the view back to itself.
+    #[test]
+    fn an_off_screen_caret_does_not_choose_the_anchor() {
+        assert_eq!(anchor_row(Some(328), 100..140), 100);
+        assert_eq!(anchor_row(Some(3), 100..140), 100);
+        assert_eq!(anchor_row(None, 100..140), 100);
+    }
+
+    #[test]
+    fn a_visible_caret_is_the_anchor() {
+        assert_eq!(anchor_row(Some(120), 100..140), 120);
+        assert_eq!(anchor_row(Some(100), 100..140), 100);
+        // `end` is exclusive: a row cut off at the bottom is not "on screen".
+        assert_eq!(anchor_row(Some(140), 100..140), 100);
     }
 }

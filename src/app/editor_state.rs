@@ -35,6 +35,17 @@ pub(crate) struct EditorState {
     /// so that line stays exactly where it was — folding 200 lines otherwise
     /// slides the whole page under the pointer.
     pub(crate) fold_anchor: Option<(String, usize, f32)>,
+    /// Ctrl+Shift+Q or the menu's "toggle collapse all" was asked for, and
+    /// the file it was asked on. Applied after the render, where the current
+    /// galley exists to measure a fold anchor against — the way a gutter click
+    /// already works. Without an anchor, expanding every function above the
+    /// caret left the scroll offset alone and the caret slid off the bottom of
+    /// the view.
+    ///
+    /// Keyed by file, and dropped on any frame showing another one: a request
+    /// raised on a library's `Cargo.toml` (where nothing consumes it) used to
+    /// fire on the next Rust file opened, folding every function unasked.
+    pub(crate) fold_all_requested: Option<String>,
 
     /// Code-completion engine — stores the trie, current prefix and popup state.
     /// Must live in the App (not a local) so state is preserved across frames.
@@ -76,9 +87,11 @@ pub(crate) struct EditorState {
     /// versions). Independent of rust-analyzer.
     pub(crate) cargo_complete: editor_panel::cargo_complete::CargoCompleteState,
 
-    /// Primary caret char-index from the previous frame, used to scroll the
-    /// editor so the caret stays in view when it moves off-screen (e.g.
-    /// Shift+Up/Down selection past the visible area).
+    /// Primary caret char-index from the previous frame, in BUFFER space, used
+    /// to scroll the editor so the caret stays in view when it moves off-screen
+    /// (e.g. Shift+Up/Down selection past the visible area). Buffer space, not
+    /// the galley's: a fold toggled above the caret shifts the galley index
+    /// without the caret going anywhere.
     pub(crate) last_caret_idx: Option<usize>,
 
     /// Pending "jump to this diagnostic": the target file and its 1-based line.
@@ -250,6 +263,7 @@ impl EditorState {
             diff_gutter: editor_panel::diff_gutter::DiffGutter::default(),
             editor_widget_id: None,
             fold_anchor: None,
+            fold_all_requested: None,
             // Completer: seeded with Rust keywords/types + learns words from code
             completer: Completer::new_with_syntax(&Syntax::rust())
                 .with_auto_indent()

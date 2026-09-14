@@ -526,6 +526,32 @@ impl FoldMap {
         self.vis.iter().position(|v| v.buf_line == buf_line)
     }
 
+    /// Like [`display_line_of`](Self::display_line_of), but total: a hidden
+    /// buffer line answers with the row of the last visible line before it —
+    /// the header of the block hiding it. Past the end, the last row.
+    ///
+    /// For the scroll-to-line paths, which count galley ROWS: while folded a
+    /// buffer line number is off by every hidden line above it, and a jump to
+    /// a diagnostic used to overshoot by exactly that much.
+    pub fn display_row_of(&self, buf_line: usize) -> usize {
+        if self.identity {
+            return buf_line;
+        }
+        let pos = self.vis.partition_point(|v| v.buf_line <= buf_line);
+        pos.saturating_sub(1)
+    }
+
+    /// The 0-based buffer line shown on display row `row` (clamped to the last
+    /// row). The inverse of [`display_row_of`](Self::display_row_of) for
+    /// visible lines.
+    pub fn buffer_line_of_row(&self, row: usize) -> usize {
+        if self.identity {
+            return row;
+        }
+        let last = self.vis.len().saturating_sub(1);
+        self.vis.get(row.min(last)).map_or(0, |v| v.buf_line)
+    }
+
     /// Translate analysis ranges into display space, dropping those that fall in
     /// a folded block. The fade / underline marks go through this.
     pub fn map_ranges(&self, ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
@@ -745,6 +771,63 @@ Xafter
         // A visible index still round-trips exactly.
         let after = src.find("after").expect("visible");
         assert_eq!(m.to_buffer(m.to_display_clamped(after)), after);
+    }
+
+    /// What caret-follow leans on. A fold toggled ABOVE the caret changes the
+    /// caret's projection index by every hidden character, and its buffer
+    /// index not at all — so "did the caret move?" is only answerable in
+    /// buffer space. Asked in projection space, every fold toggle read as a
+    /// move and the view jumped back down to a caret the user had scrolled
+    /// away from.
+    #[test]
+    fn a_fold_above_the_caret_shifts_its_display_index_not_its_buffer_index() {
+        let src = "fn a() {\n    x;\n    y;\n}\nafter\n";
+        let caret = src.find("after").expect("below the block");
+        let open = FoldMap::identity(src);
+        let folded = folded_of(src, &[0]);
+        assert_eq!(open.to_display_clamped(caret), caret);
+        assert_ne!(
+            folded.to_display_clamped(caret),
+            caret,
+            "the projection moved"
+        );
+        assert_eq!(
+            folded.to_buffer(folded.to_display_clamped(caret)),
+            open.to_buffer(open.to_display_clamped(caret)),
+            "the buffer position did not"
+        );
+    }
+
+    #[test]
+    fn display_row_of_counts_galley_rows_not_buffer_lines() {
+        // Lines: 0 `fn a() {`, 1 `x;`, 2 `y;`, 3 `}`, 4 `after`, 5 `` — folded
+        // the rows are `fn a() {`, `}`, `after`, ``.
+        let src = "fn a() {\n    x;\n    y;\n}\nafter\n";
+        let m = folded_of(src, &[0]);
+        assert_eq!(m.display_row_of(0), 0);
+        // A hidden line answers with its header's row.
+        assert_eq!(m.display_row_of(1), 0);
+        assert_eq!(m.display_row_of(2), 0);
+        assert_eq!(m.display_row_of(3), 1);
+        // Two hidden lines above: the buffer line is two rows off.
+        assert_eq!(m.display_row_of(4), 2);
+        // Past the end: the last row, never out of range.
+        assert_eq!(m.display_row_of(99), 3);
+        assert_eq!(FoldMap::identity(src).display_row_of(4), 4);
+    }
+
+    #[test]
+    fn buffer_line_of_row_inverts_display_row_of_for_visible_lines() {
+        let src = "fn a() {\n    x;\n    y;\n}\nafter\n";
+        let m = folded_of(src, &[0]);
+        for line in [0, 3, 4, 5] {
+            assert_eq!(m.buffer_line_of_row(m.display_row_of(line)), line);
+        }
+        // A hidden line maps to its header's row, and back to the HEADER.
+        assert_eq!(m.buffer_line_of_row(m.display_row_of(2)), 0);
+        // Past the end: the last row, never out of range.
+        assert_eq!(m.buffer_line_of_row(99), 5);
+        assert_eq!(FoldMap::identity(src).buffer_line_of_row(4), 4);
     }
 
     #[test]
