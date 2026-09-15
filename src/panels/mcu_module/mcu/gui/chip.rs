@@ -106,20 +106,13 @@ pub fn draw_board_features(
     // ── The chip itself ─────────────────────────────────────────────────────
     // A square, because a package is square-ish and because the label inside it
     // has to stay readable when the board is narrow.
-    let side = (chip_rect.width() * 0.42).clamp(48.0, 150.0);
-    let chip_sq = egui::Rect::from_center_size(
-        egui::pos2(
-            name_center.x,
-            name_center.y - name_height * 0.5 - side * 0.62,
-        ),
-        egui::vec2(side, side),
-    );
+    let chip_sq = board_chip_square(chip_rect, name_center, name_height);
     painter.rect_filled(chip_sq, 3.0, CHIP_FILL);
     painter.text(
         chip_sq.center(),
         egui::Align2::CENTER_CENTER,
         part,
-        egui::FontId::proportional((side * 0.22).clamp(9.0, 20.0)),
+        egui::FontId::proportional((chip_sq.width() * 0.22).clamp(9.0, 20.0)),
         egui::Color32::WHITE,
     );
 
@@ -143,6 +136,31 @@ pub fn draw_board_features(
         2.0,
         egui::Color32::from_rgb(200, 200, 200),
     );
+}
+
+/// Room kept along the body's top edge for the pin numbers painted there.
+const NUM_BAND: f32 = super::geometry::NUM_MARGIN + 16.0;
+
+/// Where a board's chip square goes: above the name, a gap of 12 % of its side
+/// away from it.
+///
+/// Its side is capped by the room between the name and the band of pin numbers
+/// along the top edge. On a short, wide board (the micro:bit) the width-derived
+/// size is taller than that room, and the square covered the top pins.
+fn board_chip_square(
+    chip_rect: egui::Rect,
+    name_center: egui::Pos2,
+    name_height: f32,
+) -> egui::Rect {
+    let name_top = name_center.y - name_height * 0.5;
+    let room = name_top - (chip_rect.top() + NUM_BAND);
+    let side = (chip_rect.width() * 0.42)
+        .clamp(48.0, 150.0)
+        .min(room / 1.12);
+    egui::Rect::from_center_size(
+        egui::pos2(name_center.x, name_top - side * 0.62),
+        egui::vec2(side, side),
+    )
 }
 
 /// The header pins the radio module sits between on a Pico W.
@@ -624,6 +642,42 @@ mod a_rotated_ball {
             "a quad'd ball spans {} against the circle's {BALL_D}",
             as_stub.width()
         );
+    }
+}
+
+#[cfg(test)]
+mod the_board_chip_square {
+    use super::super::geometry::body_layout;
+    use super::*;
+    use crate::panels::mcu_module::builtins;
+
+    /// On every board, the square sits below the band of top pin numbers and
+    /// above the name, whatever the body's proportions.
+    #[test]
+    fn clears_the_top_pin_numbers_and_the_name() {
+        const NAME_PT: f32 = 22.0;
+        for def in builtins::builtin_definitions()
+            .into_iter()
+            .filter(|d| d.board_chip.is_some())
+        {
+            let mcu = def.build_mcu();
+            let (w, h, ..) = body_layout(&mcu);
+            let body = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+            let sq = board_chip_square(body, body.center(), NAME_PT);
+            assert!(
+                sq.top() >= body.top() + NUM_BAND - 0.01,
+                "{}: square top {} is inside the pin-number band",
+                def.id,
+                sq.top()
+            );
+            assert!(sq.bottom() < body.center().y - NAME_PT / 2.0, "{}", def.id);
+            assert!(
+                sq.width() >= 48.0,
+                "{}: square shrank to {}",
+                def.id,
+                sq.width()
+            );
+        }
     }
 }
 

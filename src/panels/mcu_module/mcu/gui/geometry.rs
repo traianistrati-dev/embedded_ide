@@ -95,10 +95,12 @@ fn offset(i: usize) -> f32 {
 /// somewhere else on the board" without a word of explanation.
 pub const BOARD_EDGE_PAD: usize = 2;
 
-/// How far in the top and bottom rows start, in pin slots.
+/// Blank slots kept at each end of the top and bottom rows' body span.
 ///
 /// A board pads; a bare chip does not. Read from the same field the green fill
 /// and the chip square read, so the three cannot disagree about what a board is.
+/// Where each row actually starts is [`row_start`], which on a board also
+/// centers the shorter row.
 pub fn top_pad(mcu: &Mcu) -> usize {
     if mcu.board_chip.is_some() {
         BOARD_EDGE_PAD
@@ -107,9 +109,54 @@ pub fn top_pad(mcu: &Mcu) -> usize {
     }
 }
 
-/// Geometry of the `i`-th pin on `side`. `pad` shifts the top and bottom rows
-/// inward; it is zero for a bare chip, and ignored on the left and right edges.
-fn geom<'a>(side: PinSide, i: usize, pin: &'a Pin, chip: egui::Rect, pad: usize) -> PinGeom<'a> {
+/// Least body height of a BOARD, in pin slots.
+///
+/// A board with no pins down its sides (the micro:bit's edge connector) would
+/// otherwise take the bare-chip floor of three slots, and the chip square drawn
+/// above the name would not fit between the two rows of pin numbers.
+const BOARD_MIN_ROWS: usize = 8;
+
+/// The body's size in pin slots: `(across, down)`.
+///
+/// Each is the LONGER of its two opposite rows, so neither row runs off the
+/// body when a board carries more pads along one edge than the other.
+fn body_slots(mcu: &Mcu) -> (usize, usize) {
+    let across = mcu.top_pins.len().max(mcu.bottom_pins.len());
+    let down = mcu.left_pins.len().max(mcu.right_pins.len());
+    if mcu.board_chip.is_some() {
+        (across, down.max(BOARD_MIN_ROWS))
+    } else {
+        (across, down)
+    }
+}
+
+/// How many slots in the top or bottom row starts.
+///
+/// On a board, the shorter of the two rows is also centered under the longer
+/// one, in whole slots so the two rows keep one column grid. A bare chip is
+/// never shifted: its pins run on around the corners, and centering one edge
+/// would break that.
+fn row_start(mcu: &Mcu, len: usize) -> usize {
+    let pad = top_pad(mcu);
+    if pad == 0 {
+        return 0;
+    }
+    pad + (body_slots(mcu).0 - len) / 2
+}
+
+/// Body and canvas size of an edge-pin package: `(body_w, body_h, canvas_w,
+/// canvas_h)`.
+///
+/// The one place the body is sized from the pins, so `Mcu::draw` and the tests
+/// that check pins and the chip square against the body cannot size it apart.
+pub fn body_layout(mcu: &Mcu) -> (f32, f32, f32, f32) {
+    let (across, down) = body_slots(mcu);
+    super::layout::calculate_layout(across, down, top_pad(mcu))
+}
+
+/// Geometry of the `i`-th pin on `side`. `start` is the slot a top or bottom
+/// row begins at ([`row_start`]); it is ignored on the left and right edges.
+fn geom<'a>(side: PinSide, i: usize, pin: &'a Pin, chip: egui::Rect, start: usize) -> PinGeom<'a> {
     let (rect, outward, num_pos, num_align) = match side {
         PinSide::Right => {
             let y = chip.top() + offset(i);
@@ -136,7 +183,7 @@ fn geom<'a>(side: PinSide, i: usize, pin: &'a Pin, chip: egui::Rect, pad: usize)
             )
         }
         PinSide::Top => {
-            let x = chip.left() + offset(i + pad);
+            let x = chip.left() + offset(i + start);
             (
                 egui::Rect::from_min_size(
                     egui::pos2(x, chip.top() - PIN_HEIGHT),
@@ -148,7 +195,7 @@ fn geom<'a>(side: PinSide, i: usize, pin: &'a Pin, chip: egui::Rect, pad: usize)
             )
         }
         PinSide::Bottom => {
-            let x = chip.left() + offset(i + pad);
+            let x = chip.left() + offset(i + start);
             (
                 egui::Rect::from_min_size(
                     egui::pos2(x, chip.bottom()),
@@ -211,27 +258,28 @@ fn ball_geom<'a>(cell: &'a GridCell, grid: &PinGrid, chip: egui::Rect) -> PinGeo
 /// loops, and allocating a vector for each of those would make a cheap query
 /// quadratic.
 pub fn pin_geometry(mcu: &Mcu, chip: egui::Rect) -> impl Iterator<Item = PinGeom<'_>> {
-    let pad = top_pad(mcu);
+    let top_start = row_start(mcu, mcu.top_pins.len());
+    let bottom_start = row_start(mcu, mcu.bottom_pins.len());
     let right = mcu
         .right_pins
         .iter()
         .enumerate()
-        .map(move |(i, p)| geom(PinSide::Right, i, p, chip, pad));
+        .map(move |(i, p)| geom(PinSide::Right, i, p, chip, 0));
     let left = mcu
         .left_pins
         .iter()
         .enumerate()
-        .map(move |(i, p)| geom(PinSide::Left, i, p, chip, pad));
+        .map(move |(i, p)| geom(PinSide::Left, i, p, chip, 0));
     let top = mcu
         .top_pins
         .iter()
         .enumerate()
-        .map(move |(i, p)| geom(PinSide::Top, i, p, chip, pad));
+        .map(move |(i, p)| geom(PinSide::Top, i, p, chip, top_start));
     let bottom = mcu
         .bottom_pins
         .iter()
         .enumerate()
-        .map(move |(i, p)| geom(PinSide::Bottom, i, p, chip, pad));
+        .map(move |(i, p)| geom(PinSide::Bottom, i, p, chip, bottom_start));
     // Balls last: they are drawn INSIDE the body, over it.
     let balls = mcu
         .grid
@@ -306,6 +354,71 @@ mod board_layout {
         // A bare chip is NOT inset — the padding is a property of boards.
         let chip = board("stm32f103c8t6");
         assert_eq!(top_pad(&chip), 0);
+    }
+
+    /// The body a board is drawn with, sized by the same call `Mcu::draw` makes.
+    fn body(mcu: &Mcu) -> egui::Rect {
+        let (w, h, ..) = body_layout(mcu);
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, h))
+    }
+
+    /// Every top and bottom pad of every board lies within the body's width,
+    /// with the edge padding kept at both ends of the longer row.
+    ///
+    /// The micro:bit carries 25 pads on its edge connector and 14 on top; the
+    /// body used to be sized from the top row alone, so the connector ran off it.
+    #[test]
+    fn a_boards_longer_row_sets_its_width() {
+        let boards: Vec<Mcu> = builtins::builtin_definitions()
+            .into_iter()
+            .filter(|d| d.board_chip.is_some())
+            .map(|d| d.build_mcu())
+            .collect();
+        assert!(boards.len() >= 5, "the Picos and the micro:bit");
+        for mcu in &boards {
+            let id = &mcu.name;
+            let rect = body(mcu);
+            // The body holds `n + 2 * pad` slots plus a PIN_SPACING at each
+            // end, and a row of `n` pads ends one PIN_SPACING short of its
+            // last slot, so the padded row's right margin is one spacing wider
+            // than its left.
+            let min_left = rect.left() + offset(BOARD_EDGE_PAD) - 0.01;
+            let max_right = rect.right() - offset(BOARD_EDGE_PAD) - PIN_SPACING + 0.01;
+            for g in pin_geometry(mcu, rect) {
+                if matches!(g.side(), Some(PinSide::Top | PinSide::Bottom)) {
+                    assert!(
+                        g.rect.left() >= min_left && g.rect.right() <= max_right,
+                        "{id}: pin {} at {:?} is outside {rect:?}",
+                        g.pin.number,
+                        g.rect
+                    );
+                }
+            }
+        }
+    }
+
+    /// The shorter row is centered under the longer one, on the same columns.
+    #[test]
+    fn a_boards_shorter_row_is_centered() {
+        let mcu = board("nrf52833_microbit_v2");
+        let rect = body(&mcu);
+        let span = |side: PinSide| {
+            let xs: Vec<f32> = pin_geometry(&mcu, rect)
+                .filter(|g| g.side() == Some(side))
+                .map(|g| g.rect.center().x)
+                .collect();
+            let lo = xs.iter().cloned().fold(f32::MAX, f32::min);
+            let hi = xs.iter().cloned().fold(f32::MIN, f32::max);
+            (lo, hi)
+        };
+        let (top, bottom) = (span(PinSide::Top), span(PinSide::Bottom));
+        let slot = PIN_WIDTH + PIN_SPACING;
+        // Within half a slot of centered, since shifts are whole slots.
+        let off_center = ((top.0 + top.1) - (bottom.0 + bottom.1)) / 2.0;
+        assert!(off_center.abs() <= slot / 2.0 + 0.01, "{off_center}");
+        // And on the bottom row's column grid.
+        let cols = (top.0 - bottom.0) / slot;
+        assert!((cols - cols.round()).abs() < 0.01, "{cols}");
     }
 
     /// And the body grows by the padding, rather than squeezing the pins.
