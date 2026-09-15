@@ -384,6 +384,11 @@ impl ProjectTreeState {
     /// constants-only splice would leave the old implementation in place. A
     /// normal (baud/param) change passes `false` so user edits below the markers
     /// survive.
+    ///
+    /// A Custom module's file is the exception to both: it is written only when
+    /// it does not exist yet, and never touched again — not spliced, not forced.
+    /// Every Update produces a new revision file, so a pin change still reaches
+    /// the code, while whatever the user wrote into an existing one stays.
     pub fn sync_config_files(
         &mut self,
         files: &[(String, String)],
@@ -449,6 +454,14 @@ impl ProjectTreeState {
         //    just that constants block, so the user's edits to the rest survive.
         for (name, body) in files {
             let file_path = src_path(&format!("pins/configs/{name}"));
+            // A Custom module's file belongs to the user once it exists. Splicing
+            // it ran on every regeneration — the first frame after the IDE starts
+            // included — and wiped any field added to the struct.
+            if is_custom_stem(name.trim_end_matches(".rs"))
+                && self.user_src_files.iter().any(|(p, _)| p == &file_path)
+            {
+                continue;
+            }
             if let Some((_, content)) = self
                 .user_src_files
                 .iter_mut()
@@ -1154,6 +1167,67 @@ mod tests {
         assert!(mod_rs.contains("pub use custom_led_2::*;"), "{mod_rs}");
         assert!(mod_rs.contains("pub mod usart1;"), "{mod_rs}");
         assert!(!mod_rs.contains("pub use usart1::*;"), "{mod_rs}");
+    }
+
+    /// A Custom module's file is written once and then left alone: neither a
+    /// normal regeneration nor a forced one (Runtime Apply) may touch it. The
+    /// reported case — a field added to the struct gone after every IDE start.
+    #[test]
+    fn an_existing_custom_module_file_is_never_rewritten() {
+        let mut state = ProjectTreeState::new();
+        let path = "src/pins/configs/custom_menu_nav.rs";
+        let keep = ["custom_menu_nav".to_string()];
+        let generated = "pub struct Encoder<A> {\n    pub a: A,\n}\n";
+        state.sync_config_files(
+            &[("custom_menu_nav.rs".to_string(), generated.to_string())],
+            false,
+            &keep,
+        );
+        let edited = "pub struct Encoder<A> {\n    pub a: A,\n    pub was_pressed: bool,\n}\n";
+        state
+            .user_src_files
+            .iter_mut()
+            .find(|(p, _)| p == path)
+            .expect("written on first sync")
+            .1 = edited.to_string();
+
+        for force in [false, true] {
+            state.sync_config_files(
+                &[("custom_menu_nav.rs".to_string(), generated.to_string())],
+                force,
+                &keep,
+            );
+            let body = &state
+                .user_src_files
+                .iter()
+                .find(|(p, _)| p == path)
+                .unwrap()
+                .1;
+            assert_eq!(body, edited, "force = {force}");
+        }
+
+        // An Update is a new revision file: written, and the old one kept.
+        state.sync_config_files(
+            &[("custom_menu_nav_1.rs".to_string(), generated.to_string())],
+            false,
+            &keep,
+        );
+        let new = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "src/pins/configs/custom_menu_nav_1.rs")
+            .expect("the new revision is written");
+        assert_eq!(new.1, generated);
+        let old = &state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == path)
+            .unwrap()
+            .1;
+        assert_eq!(
+            old, edited,
+            "the previous revision stays as the user left it"
+        );
     }
 
     /// A config file's constants (inside the GENERATED block) regenerate on a

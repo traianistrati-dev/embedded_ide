@@ -329,8 +329,7 @@ impl Mcu {
             // The struct itself stays bound-free (bounds on a struct propagate
             // everywhere); the READY-TO-EDIT impl below carries them, chosen per
             // pin direction: an input pin gets `InputPin`, an output `OutputPin`.
-            // Written into the editable tail, so it is created once and then it
-            // is the user's — a later pin change only re-splices the GEN block.
+            // Part of a file written ONCE — see the body below.
             let bounds: Vec<Option<&str>> = cfg
                 .applied_pins
                 .iter()
@@ -373,8 +372,8 @@ impl Mcu {
                 "{use_line}\
                  // Your own methods for this module. The bounds come from each pin's\n\
                  // direction, so `.is_high()` / `.set_high()` are available here.\n\
-                 // NB: if you add or remove pins and press Update, adjust this generic\n\
-                 // list to match the regenerated struct above.\n\
+                 // NB: after a pin change, Update writes a NEW `custom_<name>_<n>.rs`\n\
+                 // and main.rs switches to it; this file is left exactly as it is.\n\
                  impl<{bounded_list}> {struct_name}<{gen_list}> {{\n\
                  \x20   pub fn update(&mut self) {{\n\
                  {examples}\n\
@@ -387,11 +386,19 @@ impl Mcu {
                     examples.join("\n")
                 },
             );
+            // No GENERATED markers: the whole file is the user's from the moment
+            // it exists. It is written once per Update (every Update is a new
+            // revision file) and `ProjectTree::sync_config_files` never touches an
+            // existing one — before, every regeneration (including the one on the
+            // first frame after the IDE starts) re-spliced the struct and `new()`,
+            // deleting any field the user had added.
             let body = format!(
-                "{begin}\n\
-                 // Custom module \"{name}\" — one field per pin, in the order they\n\
+                "// Custom module \"{name}\" — one field per pin, in the order they\n\
                  // were added in the Virtual-module panel. Generic over each pin's\n\
                  // type, so it compiles whatever the pins bind to.\n\
+                 // The whole file is yours: it is never regenerated. Extra fields are\n\
+                 // fine — initialise them inside `new()`, since main.rs calls `new()`\n\
+                 // with exactly one argument per pin.\n\
                  pub struct {struct_name}<{gen_list}> {{\n\
                  {decl}\n\
                  }}\n\
@@ -403,19 +410,8 @@ impl Mcu {
                  \x20       }}\n\
                  \x20   }}\n\
                  }}\n\
-                 {end}\n\
                  \n\
-                 // Everything below is editable — your changes are preserved on\n\
-                 // regeneration.\n\
                  {skeleton}",
-                // A `pins/configs/*.rs` file must carry the CONFIG-file markers —
-                // `ProjectTree::sync_config_files` re-splices the block it finds
-                // between exactly these. Using main.rs's longer `GEN_BEGIN` made
-                // `extract_gen_block` return None, so an existing file was never
-                // updated: the struct regenerated only when the module was newly
-                // added (that path writes the whole file).
-                begin = "// <<< GENERATED>>>",
-                end = common::GEN_END,
                 name = m.config.custom_label(),
             );
             out.push((
@@ -1397,8 +1393,8 @@ mod tests {
         assert_contains_substring(body, "pub fn new(pa0_out: PA0, pa1_in: PA1) -> Self");
         // No HAL type is named — that is what makes it work on every family.
         assert_not_contains_substring(body, "stm32f1xx_hal");
-        // Editable tail after the generated block, like every config file.
-        assert_contains_substring(body, GEN_END);
+        // The whole file is the user's: no region that regeneration owns.
+        assert_not_contains_substring(body, "GENERATED");
     }
 
     /// Editing the pin list is a DRAFT: nothing is generated until Update
@@ -1525,12 +1521,13 @@ mod tests {
         assert_not_contains_substring(&mcu.custom_module_inits(), "custom_menu::");
     }
 
-    /// The custom file must carry the CONFIG-file GEN markers, or
-    /// `ProjectTree::sync_config_files` can't find the block to re-splice — the
-    /// struct then regenerates only when the module is first added (the reported
-    /// bug: editing a pin afterwards changed nothing on disk).
+    /// The custom file carries NO GENERATED markers. With them, every
+    /// regeneration re-spliced the struct and `new()` — including the one on the
+    /// first frame after the IDE starts — so a field the user added vanished on
+    /// every launch. A pin change reaches the code through Update, which writes a
+    /// new revision file, never by rewriting this one.
     #[test]
-    fn custom_file_uses_the_config_gen_markers() {
+    fn custom_file_has_no_generated_markers() {
         use super::super::mock_mcu;
         use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
 
@@ -1553,12 +1550,9 @@ mod tests {
             .find(|(n, _)| n.starts_with("custom_"))
             .unwrap();
 
-        // EXACTLY the marker `extract_gen_block` looks for (not main.rs's longer
-        // "GENERATED BEGIN — do not edit…" form).
-        assert_contains_substring(body, "// <<< GENERATED>>>");
-        assert_not_contains_substring(body, "GENERATED BEGIN");
-        assert_contains_substring(body, "// <<< GENERATED END >>>");
-        // Same shape as the other config files, so the splice path treats it alike.
+        assert_not_contains_substring(body, "<<< GENERATED");
+        assert_not_contains_substring(body, "GENERATED END");
+        // The peripheral config files keep theirs — only the custom one changed.
         let other = files.iter().find(|(n, _)| n == "io.rs");
         if let Some((_, io)) = other {
             assert!(io.contains("// <<< GENERATED>>>"));
@@ -1775,16 +1769,16 @@ mod tests {
             "Encoder::new(pa0_in_clk, pa1_in_dt, pa2_out_led)",
         );
 
-        // Editable tail: bounds per direction + the import, outside the GEN block.
+        // The skeleton impl: bounds per direction + the import, after the struct.
         assert_contains_substring(body, "use embedded_hal::digital::{InputPin, OutputPin};");
         assert_contains_substring(
             body,
             "impl<PA0: InputPin, PA1: InputPin, PA2: OutputPin> Encoder<PA0, PA1, PA2>",
         );
-        let end = body.find(GEN_END).unwrap();
+        let strukt = body.find("pub struct Encoder").unwrap();
         assert!(
-            body.find("impl<PA0: InputPin").unwrap() > end,
-            "skeleton must be in the editable tail"
+            body.find("impl<PA0: InputPin").unwrap() > strukt,
+            "skeleton follows the struct"
         );
     }
 
