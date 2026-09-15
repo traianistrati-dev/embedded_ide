@@ -371,8 +371,10 @@ pub(super) fn render_size_bar(ui: &mut egui::Ui, state: &SizeState, flash: bool)
     };
     match state {
         SizeState::Idle => {
-            muted(ui, "—".to_owned(), egui::Color32::from_gray(110))
-                .on_hover_text("Not measured yet — press Size (it also runs after every flash).");
+            muted(ui, "—".to_owned(), egui::Color32::from_gray(110)).on_hover_text(
+                "Not measured yet — press Size. It also runs after each flash started \
+                 with a Flash button, but not after a Debug or RTT session flashes the board.",
+            );
         }
         SizeState::Building => {
             muted(ui, "measuring…".to_owned(), egui::Color32::from_gray(170));

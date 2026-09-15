@@ -1460,7 +1460,8 @@ fn size_button(ui: &mut egui::Ui, busy: bool, enabled: bool) -> bool {
     .on_hover_text(
         "Measure Flash/RAM usage: `cargo build --release`, then read the ELF \
          section sizes against the memory.x limits.\nRuns automatically after \
-         every flash.",
+         each flash started with a Flash button, but not after a Debug or RTT \
+         session flashes the board.",
     )
     .clicked()
 }
