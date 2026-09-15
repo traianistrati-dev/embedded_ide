@@ -495,6 +495,9 @@ impl AppIde {
         self.cargo_toml = plan.root_cargo_toml;
         self.reselect_after_tree_change();
         self.request_save = true;
+        // The save's RA flush sends buffers only: the root manifest and the
+        // deleted files reach the RA workspace through a rewrite.
+        self.workspace_write_requested = true;
         Ok(())
     }
 
@@ -536,6 +539,8 @@ impl AppIde {
         self.cargo_toml = plan.root_cargo_toml;
         self.cached_project_files = None;
         self.request_save = true;
+        // The root manifest is not among the buffers the RA flush sends.
+        self.workspace_write_requested = true;
         Ok(())
     }
 
@@ -760,6 +765,8 @@ impl AppIde {
             self.selected_file = ProjectFileId::UserFile(i);
         }
         self.request_save = true;
+        // The root manifest is not among the buffers the RA flush sends.
+        self.workspace_write_requested = true;
         Ok(())
     }
 
@@ -879,8 +886,11 @@ impl AppIde {
             })
             .map_or(ProjectFileId::MainRs, ProjectFileId::UserFile);
 
-        // The manifest changed and files moved — get it all on disk.
+        // The manifest changed and files moved — get it all on disk. The RA
+        // flush sends buffers only, so the manifest and the moved-away files
+        // reach the RA workspace through a rewrite.
         self.request_save = true;
+        self.workspace_write_requested = true;
         Ok(())
     }
 }

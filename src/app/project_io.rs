@@ -7,7 +7,6 @@
 use super::AppIde;
 use super::ProjectFileId;
 use crate::project_tree::ProjectTreeState;
-use notify::Watcher as _;
 
 impl AppIde {
     // ── Project load ──────────────────────────────────────────────────────────
@@ -408,20 +407,23 @@ impl AppIde {
         let workspace_root = crate::workspace::dir();
         let workspace_src = workspace_root.join("src");
 
-        // If the watcher hasn't started watching yet (dir didn't exist on
-        // startup), try to attach now that write_project may have created it.
-        if let (Some(w), true) = (self._fs_watcher.as_mut(), workspace_src.exists()) {
-            // `watch` is idempotent for already-watched paths.
-            let _ = w.watch(&workspace_src, notify::RecursiveMode::Recursive);
-        }
+        self.sync_fs_watch(&workspace_src);
 
         let Some(rx) = self.fs_rx.as_ref() else {
             return;
         };
 
         let mut events = Vec::new();
+        let mut src_root_removed = false;
+        let mut drained = 0usize;
 
-        for event in rx.try_iter().flatten() {
+        // Bounded: a burst larger than this finishes on the next frames instead
+        // of stalling one of them.
+        for event in rx.try_iter().take(FS_EVENTS_PER_FRAME) {
+            drained += 1;
+            let Ok(event) = event else {
+                continue;
+            };
             match event.kind {
                 Create(_) => {
                     for abs in &event.paths {
@@ -440,29 +442,37 @@ impl AppIde {
                         // whole folder as one extension-less "file" until the
                         // project was reopened.
                         let is_dir = abs.is_dir();
-                        let content = if is_dir {
-                            None
-                        } else {
-                            // LF-normalized (phantom-gutter rule).
-                            std::fs::read_to_string(abs)
-                                .ok()
-                                .map(|s| s.replace("\r\n", "\n"))
-                        };
                         apply_fs_create(
                             &mut self.project_tree.user_src_files,
                             &mut self.project_tree.user_src_folders,
                             &rel,
                             is_dir,
-                            content,
+                            // LF-normalized (phantom-gutter rule).
+                            || {
+                                std::fs::read_to_string(abs)
+                                    .ok()
+                                    .map(|s| s.replace("\r\n", "\n"))
+                            },
                         );
                     }
                 }
                 Remove(_) => {
                     for abs in &event.paths {
+                        if *abs == workspace_src {
+                            src_root_removed = true;
+                        }
                         let Ok(rel) = abs.strip_prefix(&workspace_root) else {
                             continue;
                         };
                         let rel = rel.to_string_lossy().replace('\\', "/");
+                        // Windows reports one change as several records; the
+                        // same removal twice in a row is one removal.
+                        if events
+                            .last()
+                            .is_some_and(|(p, k)| p == &rel && matches!(k, FsEventKind::Remove))
+                        {
+                            continue;
+                        }
                         events.push((rel, FsEventKind::Remove));
                     }
                 }
@@ -493,6 +503,133 @@ impl AppIde {
         if !events.is_empty() {
             self.project_tree.handle_fs_events(events);
         }
+
+        if drained == FS_EVENTS_PER_FRAME {
+            self.egui_ctx.request_repaint();
+        }
+
+        // The watched directory itself went away. Its handle is dead even if a
+        // new `src/` appears under the same name, so drop it now and re-attach
+        // on the next check. Only backends that report the root's own removal
+        // (inotify's DELETE_SELF) get here: notify's Windows backend never names
+        // the watched directory in an event, so there the throttled
+        // `sync_fs_watch` check (`is_dir()` false -> Unwatch) does the recovery.
+        if src_root_removed {
+            self.release_fs_watch();
+            self.request_fs_watch_check();
+        }
+    }
+
+    /// Keeps exactly ONE live watch on `workspace/src`.
+    ///
+    /// notify 6.1.1's Windows backend is not idempotent: every `watch()` on an
+    /// already-watched path opens another directory handle and replaces the map
+    /// entry WITHOUT stopping the old one. Calling it every frame, as this used
+    /// to, left one live recursive watch per frame. A single write to `src/`
+    /// then fired two callbacks per leaked watch, and the next frame's `watch()`
+    /// blocked in its acknowledgement until the watcher thread had run all of
+    /// them. Measured: 35 ms at 1 000 leaked watches, 2.6 s at 12 000. That was
+    /// the freeze after Ctrl+S on a MODIFIED file (the RA flush writes it into
+    /// `src/`); an unmodified save writes nothing, so it returned at once. The
+    /// leaked handles cannot be reclaimed at runtime (neither `unwatch` nor
+    /// dropping the watcher frees them), so the only fix is never to leak.
+    ///
+    /// Throttled to [`FS_WATCH_RECHECK`]; the steady state makes no notify call,
+    /// only one `is_dir` stat per check. [`Self::request_fs_watch_check`] skips
+    /// the wait after the IDE writes the workspace itself.
+    pub(super) fn sync_fs_watch(&mut self, workspace_src: &std::path::Path) {
+        let now = std::time::Instant::now();
+        if now < self.fs_watch_next_check {
+            return;
+        }
+        self.fs_watch_next_check = now + FS_WATCH_RECHECK;
+        let Some(w) = self._fs_watcher.as_mut() else {
+            return;
+        };
+        let exists = workspace_src.is_dir();
+        sync_watch(w, &mut self.fs_watched, workspace_src, exists);
+    }
+
+    /// Stops the current watch, if any, closing its directory handle. That
+    /// handle is what keeps a deleted `src/` pending deletion.
+    fn release_fs_watch(&mut self) {
+        if let Some(w) = self._fs_watcher.as_mut() {
+            release_watch(w, &mut self.fs_watched);
+        }
+    }
+
+    /// Re-check the watch on the next frame rather than after the throttle.
+    /// Called after the IDE (re)writes the workspace, which may have just
+    /// created `src/`.
+    pub(super) fn request_fs_watch_check(&mut self) {
+        self.fs_watch_next_check = std::time::Instant::now();
+    }
+}
+
+/// How often [`AppIde::sync_fs_watch`] looks at the disk.
+const FS_WATCH_RECHECK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Most watcher events handled in one frame.
+const FS_EVENTS_PER_FRAME: usize = 2000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WatchAction {
+    /// Nothing to do — the steady state.
+    Keep,
+    Watch,
+    Unwatch,
+    /// Watching a different path than the target.
+    Rewatch,
+}
+
+/// What to do with the watch, given what is watched now and whether the target
+/// directory exists. Never asks to watch a path that is already watched: that
+/// is the call that leaks on Windows.
+pub(super) fn watch_action(
+    watched: Option<&std::path::Path>,
+    target: &std::path::Path,
+    target_exists: bool,
+) -> WatchAction {
+    match (watched, target_exists) {
+        (None, true) => WatchAction::Watch,
+        (None, false) => WatchAction::Keep,
+        (Some(_), false) => WatchAction::Unwatch,
+        (Some(w), true) if w == target => WatchAction::Keep,
+        (Some(_), true) => WatchAction::Rewatch,
+    }
+}
+
+/// Applies [`watch_action`] to a watcher and the path it is known to watch.
+/// Generic over the watcher so a counting mock can prove the call count.
+pub(super) fn sync_watch<W: notify::Watcher>(
+    w: &mut W,
+    watched: &mut Option<std::path::PathBuf>,
+    target: &std::path::Path,
+    target_exists: bool,
+) {
+    match watch_action(watched.as_deref(), target, target_exists) {
+        WatchAction::Keep => {}
+        WatchAction::Unwatch => release_watch(w, watched),
+        action @ (WatchAction::Watch | WatchAction::Rewatch) => {
+            if action == WatchAction::Rewatch {
+                release_watch(w, watched);
+            }
+            // A failed `watch` returns before notify stores anything, so
+            // retrying leaks nothing; the caller's throttle keeps a path that
+            // keeps failing from paying the blocking round trip every frame.
+            if w.watch(target, notify::RecursiveMode::Recursive).is_ok() {
+                *watched = Some(target.to_path_buf());
+            }
+        }
+    }
+}
+
+fn release_watch<W: notify::Watcher>(w: &mut W, watched: &mut Option<std::path::PathBuf>) {
+    if let Some(old) = watched.take() {
+        // Result ignored: on Windows `unwatch` only queues the request (Err
+        // means the watcher thread is gone); elsewhere Err means the entry was
+        // already removed. Nothing left to free either way.
+        let _ = w.unwatch(&old);
     }
 }
 
@@ -1486,16 +1623,20 @@ pub(super) fn rename_project_dir(
 }
 
 /// Apply one watcher CREATE event to the tree state. A directory is tracked as
-/// a FOLDER (never a file); a file needs readable `content` (`None` — deleted
-/// meanwhile, or unreadable — is skipped, NOT pushed as an empty phantom).
+/// a FOLDER (never a file); a file needs `read` to return its content (`None` —
+/// deleted meanwhile, or unreadable — is skipped, NOT pushed as an empty phantom).
 /// Duplicates of already-tracked entries are ignored. Pure, so the
 /// directory-pushed-as-file regression stays covered by tests.
+///
+/// `read` runs only for a file the tree does not know yet: Windows reports one
+/// creation as several records, and the IDE's own writes echo back, so reading
+/// before the check read the same file once per duplicate on the UI thread.
 pub(super) fn apply_fs_create(
     user_src_files: &mut Vec<(String, String)>,
     user_src_folders: &mut Vec<String>,
     rel: &str,
     is_dir: bool,
-    content: Option<String>,
+    read: impl FnOnce() -> Option<String>,
 ) {
     if is_dir {
         if !user_src_folders.iter().any(|f| f == rel) {
@@ -1503,10 +1644,10 @@ pub(super) fn apply_fs_create(
         }
         return;
     }
-    let Some(content) = content else {
+    if user_src_files.iter().any(|(p, _)| p == rel) {
         return;
-    };
-    if !user_src_files.iter().any(|(p, _)| p == rel) {
+    }
+    if let Some(content) = read() {
         user_src_files.push((rel.to_owned(), content));
     }
 }
@@ -1688,14 +1829,14 @@ mod fs_create_tests {
     fn directory_create_is_tracked_as_folder_not_file() {
         let mut files = Vec::new();
         let mut folders = Vec::new();
-        apply_fs_create(&mut files, &mut folders, "folder1", true, None);
+        apply_fs_create(&mut files, &mut folders, "folder1", true, || None);
         assert!(
             files.is_empty(),
             "a directory must never become a file entry"
         );
         assert_eq!(folders, vec!["folder1".to_owned()]);
         // Re-delivered event (or our own create + the watcher's) → no dupe.
-        apply_fs_create(&mut files, &mut folders, "folder1", true, None);
+        apply_fs_create(&mut files, &mut folders, "folder1", true, || None);
         assert_eq!(folders.len(), 1);
     }
 
@@ -1703,26 +1844,18 @@ mod fs_create_tests {
     fn file_create_adds_once_with_content() {
         let mut files = Vec::new();
         let mut folders = Vec::new();
-        apply_fs_create(
-            &mut files,
-            &mut folders,
-            "folder1/file1.rs",
-            false,
-            Some("// x\n".into()),
-        );
+        apply_fs_create(&mut files, &mut folders, "folder1/file1.rs", false, || {
+            Some("// x\n".into())
+        });
         assert_eq!(
             files,
             vec![("folder1/file1.rs".to_owned(), "// x\n".to_owned())]
         );
         // The IDE's own inline-create already tracked it → the watcher's echo
         // must not duplicate (or overwrite newer in-memory content).
-        apply_fs_create(
-            &mut files,
-            &mut folders,
-            "folder1/file1.rs",
-            false,
-            Some("stale".into()),
-        );
+        apply_fs_create(&mut files, &mut folders, "folder1/file1.rs", false, || {
+            Some("stale".into())
+        });
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].1, "// x\n");
         assert!(folders.is_empty());
@@ -1732,9 +1865,195 @@ mod fs_create_tests {
     fn unreadable_file_is_skipped_not_pushed_empty() {
         let mut files = Vec::new();
         let mut folders = Vec::new();
-        apply_fs_create(&mut files, &mut folders, "ghost.rs", false, None);
+        apply_fs_create(&mut files, &mut folders, "ghost.rs", false, || None);
         assert!(files.is_empty(), "no phantom (\"ghost.rs\", \"\") entries");
         assert!(folders.is_empty());
+    }
+
+    /// Windows delivers one creation as several records. Each used to read the
+    /// file on the UI thread before the duplicate check threw the result away.
+    #[test]
+    fn duplicate_creates_read_the_file_once() {
+        let mut files = Vec::new();
+        let mut folders = Vec::new();
+        let mut reads = 0;
+        for _ in 0..50 {
+            apply_fs_create(&mut files, &mut folders, "new.rs", false, || {
+                reads += 1;
+                Some("fn f() {}\n".into())
+            });
+        }
+        assert_eq!(reads, 1);
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn a_file_the_tree_already_has_is_never_read() {
+        let mut files = vec![("known.rs".to_owned(), "in memory\n".to_owned())];
+        let mut folders = Vec::new();
+        apply_fs_create(&mut files, &mut folders, "known.rs", false, || {
+            panic!("an echo of a tracked file must not touch the disk")
+        });
+        assert_eq!(files[0].1, "in memory\n");
+    }
+}
+
+#[cfg(test)]
+mod fs_watch_tests {
+    use super::{WatchAction, sync_watch, watch_action};
+    use std::path::{Path, PathBuf};
+
+    /// Counts what the real backend would be asked to do.
+    #[derive(Default)]
+    struct CountingWatcher {
+        watches: Vec<PathBuf>,
+        unwatches: Vec<PathBuf>,
+    }
+
+    impl notify::Watcher for CountingWatcher {
+        fn new<F: notify::EventHandler>(_: F, _: notify::Config) -> notify::Result<Self> {
+            Ok(Self::default())
+        }
+        fn watch(&mut self, path: &Path, _: notify::RecursiveMode) -> notify::Result<()> {
+            self.watches.push(path.to_path_buf());
+            Ok(())
+        }
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.unwatches.push(path.to_path_buf());
+            Ok(())
+        }
+        fn kind() -> notify::WatcherKind {
+            notify::WatcherKind::NullWatcher
+        }
+    }
+
+    /// Every frame used to call `watch()`; each call leaked a live watch on
+    /// Windows. However often the check runs, the backend sees ONE call.
+    #[test]
+    fn five_hundred_checks_watch_once() {
+        let mut w = CountingWatcher::default();
+        let mut watched = None;
+        let src = Path::new("ws/src");
+        for _ in 0..500 {
+            sync_watch(&mut w, &mut watched, src, true);
+        }
+        assert_eq!(w.watches.len(), 1);
+        assert!(w.unwatches.is_empty());
+        assert_eq!(watched.as_deref(), Some(src));
+    }
+
+    #[test]
+    fn a_vanished_dir_is_released_once_and_rewatched_when_it_returns() {
+        let mut w = CountingWatcher::default();
+        let mut watched = None;
+        let src = Path::new("ws/src");
+        sync_watch(&mut w, &mut watched, src, true);
+        for _ in 0..10 {
+            sync_watch(&mut w, &mut watched, src, false);
+        }
+        assert_eq!(w.unwatches, vec![src.to_path_buf()]);
+        assert_eq!(watched, None);
+        sync_watch(&mut w, &mut watched, src, true);
+        assert_eq!(w.watches.len(), 2);
+    }
+
+    #[test]
+    fn a_new_target_releases_the_old_watch_first() {
+        let mut w = CountingWatcher::default();
+        let mut watched = None;
+        sync_watch(&mut w, &mut watched, Path::new("old/src"), true);
+        sync_watch(&mut w, &mut watched, Path::new("new/src"), true);
+        assert_eq!(w.unwatches, vec![PathBuf::from("old/src")]);
+        assert_eq!(w.watches.len(), 2);
+        assert_eq!(watched.as_deref(), Some(Path::new("new/src")));
+    }
+
+    /// A failed `watch` must leave nothing recorded, so the next check retries
+    /// instead of believing the directory is covered.
+    #[test]
+    fn a_failed_watch_is_not_recorded() {
+        struct Failing;
+        impl notify::Watcher for Failing {
+            fn new<F: notify::EventHandler>(_: F, _: notify::Config) -> notify::Result<Self> {
+                Ok(Self)
+            }
+            fn watch(&mut self, _: &Path, _: notify::RecursiveMode) -> notify::Result<()> {
+                Err(notify::Error::path_not_found())
+            }
+            fn unwatch(&mut self, _: &Path) -> notify::Result<()> {
+                Ok(())
+            }
+            fn kind() -> notify::WatcherKind {
+                notify::WatcherKind::NullWatcher
+            }
+        }
+        let mut watched = None;
+        sync_watch(&mut Failing, &mut watched, Path::new("ws/src"), true);
+        assert_eq!(watched, None);
+    }
+
+    /// The regression this guards: the same path, still there, must produce
+    /// no notify call at all. Asking again is what leaked a watch per frame.
+    #[test]
+    fn an_already_watched_existing_dir_is_left_alone() {
+        let src = Path::new("ws/src");
+        assert_eq!(watch_action(Some(src), src, true), WatchAction::Keep);
+    }
+
+    #[test]
+    fn a_dir_that_appears_is_watched_once() {
+        let src = Path::new("ws/src");
+        assert_eq!(watch_action(None, src, true), WatchAction::Watch);
+        assert_eq!(watch_action(None, src, false), WatchAction::Keep);
+    }
+
+    #[test]
+    fn a_watched_dir_that_vanished_is_released() {
+        let src = Path::new("ws/src");
+        assert_eq!(watch_action(Some(src), src, false), WatchAction::Unwatch);
+    }
+
+    #[test]
+    fn a_different_target_replaces_the_old_watch() {
+        assert_eq!(
+            watch_action(Some(Path::new("old/src")), Path::new("new/src"), true),
+            WatchAction::Rewatch
+        );
+    }
+
+    /// End to end against the real Windows backend, the one that leaked: many
+    /// checks on one directory, then one write, must deliver a handful of
+    /// events, not two per check. (inotify reuses the watch for a duplicate
+    /// path, so elsewhere this could not tell the two apart.)
+    #[cfg(windows)]
+    #[test]
+    fn repeated_checks_do_not_multiply_events() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut w = notify::recommended_watcher(move |ev| {
+            let _ = tx.send(ev);
+        })
+        .unwrap();
+        let mut watched = None;
+        for _ in 0..500 {
+            sync_watch(&mut w, &mut watched, &src, src.is_dir());
+        }
+        std::fs::write(src.join("a.rs"), "fn a() {}\n").unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the single watch must still deliver"
+        );
+        let mut events = 1;
+        while rx.recv_timeout(Duration::from_millis(300)).is_ok() {
+            events += 1;
+        }
+        assert!(
+            events <= 10,
+            "{events} events from one write: the watch was re-added per check"
+        );
     }
 }
 

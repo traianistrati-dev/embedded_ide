@@ -1639,7 +1639,8 @@ pub struct AppIde {
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
-    /// Set by a Project Save (Ctrl+S / Save button / project reload). RA
+    /// Set by a Project Save (Ctrl+S / Save button / a save started from a
+    /// prompt or dialog — see `flush_after_save`) or a workspace rewrite. RA
     /// re-verifies (didChange + workspace disk write + didSave) ONLY when this is
     /// set — never while typing, so editing stays light. See `init_frame`.
     lsp_flush_requested: bool,
@@ -1952,6 +1953,12 @@ pub struct AppIde {
     fs_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
     /// Kept alive so the watcher thread lives as long as the app.
     _fs_watcher: Option<notify::RecommendedWatcher>,
+    /// The path `_fs_watcher` is watching, `None` until a `watch` succeeds.
+    /// `sync_fs_watch` must never watch it a second time: on Windows that
+    /// leaks a live watch per call.
+    fs_watched: Option<std::path::PathBuf>,
+    /// When `sync_fs_watch` next looks at the disk.
+    fs_watch_next_check: std::time::Instant,
 
     /// A project chosen from "Open Recent", waiting for the unsaved-changes
     /// gate. Consumed by `pick_and_open_project`, which opens the folder picker
@@ -1963,7 +1970,9 @@ pub struct AppIde {
     startup_picker: Option<startup_picker::StartupPicker>,
 
     /// Set by code that runs OUTSIDE the frame's `save_project_needed` local
-    /// (the startup picker) to ask for the same workspace rewrite. OR-ed into
+    /// (startup picker, file rename/move, publish, the crate dialogs, add
+    /// dependency) to ask for the same workspace rewrite — the save's RA flush
+    /// sends buffers only, never the root manifest or removed files. OR-ed into
     /// that flag for one frame.
     workspace_write_requested: bool,
 
@@ -2123,11 +2132,15 @@ impl AppIde {
             let _ = fs_tx.send(ev);
             ctx_clone.request_repaint(); // wake the UI thread on fs event
         });
+        // Watched once here if the dir already exists; otherwise
+        // `sync_fs_watch` attaches after write_project creates it.
+        let mut fs_watched = None;
         if let Ok(ref mut w) = watcher {
-            // Watch even if the dir doesn't exist yet — we'll re-watch after
-            // write_project creates it for the first time.
-            if workspace_src.exists() {
-                let _ = w.watch(&workspace_src, notify::RecursiveMode::Recursive);
+            if workspace_src.is_dir()
+                && w.watch(&workspace_src, notify::RecursiveMode::Recursive)
+                    .is_ok()
+            {
+                fs_watched = Some(workspace_src.clone());
             }
         }
 
@@ -2369,6 +2382,8 @@ impl AppIde {
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
             _fs_watcher: watcher.ok(),
+            fs_watched,
+            fs_watch_next_check: std::time::Instant::now(),
             pending_open_dir: None,
             startup_picker: None,
             workspace_write_requested: false,
@@ -3655,6 +3670,7 @@ impl AppIde {
                         )
                         .is_ok()
                         {
+                            self.request_fs_watch_check();
                             self.lsp_indexing_since = None; // fresh session
                             lsp::start(
                                 &build_dir,
@@ -3686,7 +3702,8 @@ impl AppIde {
                 // of any rust-prefixed token, e.g. "Fetching metadata").
                 self.open_main_rs_when_indexed();
                 // RA re-verifies ONLY on an explicit Project Save (Ctrl+S / Save
-                // button / project reload) — never while typing, so editing stays
+                // button / a save started from a prompt or dialog / project
+                // reload) — never while typing, so editing stays
                 // light. The Save re-syncs every file to RA and re-runs its checks
                 // (didChange + workspace disk write + didSave). Completions still
                 // sync their own text on demand (see completion.rs), so they work
@@ -5035,6 +5052,9 @@ impl eframe::App for AppIde {
         } else {
             self.save_held = false;
         }
+        // A save worker was spawned THIS frame — not merely requested (a held,
+        // dropped or chip-less request writes nothing).
+        let mut save_started = false;
         // Auto-build after this Save when a library changed in Cargo.toml.
         let mut auto_build_after_save = false;
         let mut auto_build_release = false;
@@ -5142,6 +5162,7 @@ impl eframe::App for AppIde {
                     ctx.request_repaint();
                 });
                 self.save_in_progress = Some(shared);
+                save_started = true;
                 self.save_dest = Some(dest);
                 // Start the user-perceived save clock (see `SaveWall`).
                 // Sampled NOW, not when the flush finally runs: by then RA is
@@ -5168,6 +5189,13 @@ impl eframe::App for AppIde {
         if auto_build_after_save {
             self.start_build(auto_build_release);
         }
+
+        // What follows this frame's save, read BEFORE its result is applied:
+        // a worker fast enough to finish on its spawn frame clears both flags
+        // below, and the flush gate must still see the close or open it
+        // belongs to.
+        let close_pending = self.close_after_save;
+        let open_pending = self.open_after_save;
 
         // Apply a finished async save (set the result message / project home).
         let save_finished = self
@@ -5221,7 +5249,15 @@ impl eframe::App for AppIde {
                     if self.open_after_save {
                         self.open_after_save = false;
                         self.open_prompt = false;
-                        self.pick_and_open_project(&mut save_project_needed);
+                        let mut opened = false;
+                        self.pick_and_open_project(&mut opened);
+                        save_project_needed |= opened;
+                        // Picker cancelled: the project this save wrote is
+                        // still open, and its flush was held back only in
+                        // case it was about to be replaced.
+                        if !opened {
+                            self.lsp_flush_requested = true;
+                        }
                     }
                     if self.new_after_save {
                         self.new_after_save = false;
@@ -5292,13 +5328,21 @@ impl eframe::App for AppIde {
                     &self.mcu_config_text(),
                     &self.structure_config_text(),
                 );
+                // The first write creates `src/`; watch it from the next frame.
+                self.request_fs_watch_check();
             }
         }
 
         // A Project Save (or a tree change that rewrote the workspace) flushes
         // pending edits to rust-analyzer next frame — the ONLY moment RA
         // re-verifies (no typing-time evaluation, so editing stays light).
-        if save_project_clicked || save_project_needed {
+        if flush_after_save(
+            save_project_clicked,
+            save_project_needed,
+            save_started,
+            close_pending,
+            open_pending,
+        ) {
             self.lsp_flush_requested = true;
         }
 
@@ -5412,6 +5456,63 @@ mod flush_cache_tests {
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "world");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Whether this frame's save hands the edits to rust-analyzer.
+///
+/// `clicked` is Ctrl+S / the Save button and `tree_changed` a workspace
+/// rewrite — both flushed before, and still do. `started` covers every other
+/// route into a save (the unsaved-changes prompts, add dependency, the crate
+/// dialogs, git restore, a save held for a publish upload): it is true only on
+/// the frame the worker actually spawns, so a held or dropped request flushes
+/// nothing. Two of those are excluded, both because what follows the save
+/// makes the flush wrong: "Save and close" closes the window and kills RA, and
+/// "Save and open…" replaces the project, so a flush of the OLD buffers could
+/// land in the new project's workspace. The new project flushes on its own;
+/// a cancelled picker flushes where the save result is applied. Both pending
+/// flags are sampled before that result is applied, which can happen on the
+/// spawn frame itself and clears them.
+fn flush_after_save(
+    clicked: bool,
+    tree_changed: bool,
+    started: bool,
+    close_pending: bool,
+    open_pending: bool,
+) -> bool {
+    clicked || tree_changed || (started && !close_pending && !open_pending)
+}
+
+#[cfg(test)]
+mod flush_after_save_tests {
+    use super::flush_after_save;
+
+    #[test]
+    fn ctrl_s_and_tree_changes_flush_as_before() {
+        assert!(flush_after_save(true, false, false, false, false));
+        assert!(flush_after_save(false, true, false, false, false));
+        // A Ctrl+S that happens while a prompt waits keeps today's behaviour.
+        assert!(flush_after_save(true, false, true, true, false));
+    }
+
+    #[test]
+    fn a_save_started_from_a_prompt_or_dialog_flushes() {
+        assert!(flush_after_save(false, false, true, false, false));
+    }
+
+    #[test]
+    fn a_request_that_started_nothing_flushes_nothing() {
+        assert!(!flush_after_save(false, false, false, false, false));
+    }
+
+    #[test]
+    fn save_and_close_does_not_flush() {
+        assert!(!flush_after_save(false, false, true, true, false));
+    }
+
+    #[test]
+    fn save_and_open_does_not_flush_the_old_project() {
+        assert!(!flush_after_save(false, false, true, false, true));
     }
 }
 

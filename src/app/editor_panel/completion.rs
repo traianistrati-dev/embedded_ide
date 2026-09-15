@@ -169,8 +169,8 @@ impl AppIde {
 
                 // Persist the change in memory so the write-back picks it up; the
                 // LSP flush on Project Save handles disk + RA. There is no idle
-                // debounce: `lsp_flush_requested` is set in exactly one place,
-                // `app.rs`, under a Save.
+                // debounce: `lsp_flush_requested` is set only under a Save or a
+                // workspace rewrite (`flush_after_save` in `app.rs`).
                 // Keyed on the OWNER: an accept driven from the Reference editor
                 // must land in ITS file, never in whatever the main editor shows.
                 if let ProjectFileId::UserFile(i) = owner_file {

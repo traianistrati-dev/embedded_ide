@@ -1,8 +1,8 @@
 //! Hand rust-analyzer the visible file once typing has paused.
 //!
 //! Without this, `last_sent_matches` is false from a user's first keystroke
-//! until they press Ctrl+S — `lsp_flush_requested` is set in exactly one place
-//! in the whole tree, under a Save. Everything gated on that predicate is
+//! until they press Ctrl+S — `lsp_flush_requested` is set only under a Save or a
+//! workspace rewrite (`flush_after_save`). Everything gated on that predicate is
 //! therefore dark for the entire editing session: the inline diagnostic
 //! overlay, and the inferred-type ghost hint. Three comments in this crate
 //! promised the diagnostics would "reappear once the LSP debounce re-verifies

@@ -1327,6 +1327,10 @@ impl AppIde {
                         self.active_tab = McuTab::System;
                         self.lsp_state.lock().unwrap().reset();
                         self.lsp_selected_diagnostic = None;
+                        // Same reason as in `load_project_from_dir`: the RA
+                        // workspace content changes wholesale, so the flush must
+                        // not trust what it wrote for the previous project.
+                        self.flushed_hashes.lock().unwrap().clear();
                         // ── Reset project files ───────────────────────────
                         self.project_tree.user_src_files.clear();
                         self.project_tree.user_src_folders.clear();

@@ -463,6 +463,10 @@ impl AppIde {
         }
         if path == "Cargo.toml" {
             self.cargo_toml = new;
+            // The root manifest is not among the buffers the save's RA flush
+            // sends; without a rewrite RA would not see the dependency until
+            // an auto-build or a restart.
+            self.workspace_write_requested = true;
         } else if let Some(slot) = self
             .project_tree
             .user_src_files
