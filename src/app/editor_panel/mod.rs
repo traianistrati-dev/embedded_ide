@@ -424,6 +424,11 @@ impl AppIde {
             // would leave the Reference editor's open and eating Enter.
             let owner = self.completion_owner;
             let ed = self.ed_of(owner);
+            if ed.completion_open {
+                crate::lsp::debug_log(&format!(
+                    "COMPLETION_CLOSE reason=owner-lost-keyboard owner={owner:?} main_pass={is_main}"
+                ));
+            }
             ed.completion_open = false;
             ed.completion_note = None;
         }
@@ -469,6 +474,7 @@ impl AppIde {
                         &mut self.ed_ref
                     };
                     if inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                        crate::lsp::debug_log("COMPLETION_CLOSE reason=escape");
                         ed.completion_open = false;
                     } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
                         // Clamp against the FILTERED count so selection never

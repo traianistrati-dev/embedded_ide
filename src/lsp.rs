@@ -2215,6 +2215,11 @@ fn handle_incoming(
                                 .collect()
                         })
                         .unwrap_or_default();
+                    lsp_log(&format!(
+                        "COMPLETION_RESP id={req_id} items={} null={}",
+                        s.completion_items.len(),
+                        result.is_null()
+                    ));
                     ctx.request_repaint();
                 }
             }

@@ -197,6 +197,14 @@ impl AppIde {
             let lsp_ready = lsp_file_tracked
                 && current_rel_path.is_some()
                 && matches!(self.lsp_state.lock().unwrap().status, lsp::LspStatus::Ready);
+            if ctrl_space_pressed {
+                let lsp = self.lsp_state.lock().unwrap();
+                crate::lsp::debug_log(&format!(
+                    "COMPLETION_TRIGGER slot={slot:?} ed_slot={:?} file={current_rel_path:?} \
+                     ready={lsp_ready} status={:?} caret={cursor_char_idx:?} open_before={}",
+                    self.ed_slot, lsp.status, self.ed.completion_open
+                ));
+            }
             if lsp_ready {
                 let rel = current_rel_path.as_deref().unwrap_or("src/main.rs");
                 // Manual Ctrl+Space
@@ -286,6 +294,9 @@ impl AppIde {
                     // delta < 0  → user deleted back past trigger point
                     // delta > 80 → user moved far forward (switched context)
                     if delta < 0 || delta > 80 {
+                        crate::lsp::debug_log(&format!(
+                            "COMPLETION_CLOSE reason=caret-moved delta={delta} slot={slot:?}"
+                        ));
                         self.ed.completion_open = false;
                     }
                 }
@@ -710,7 +721,12 @@ impl AppIde {
             }
             // all_items is empty: either RA hasn't responded yet, or
             // it responded with no completions / an error.
-            else if lsp_file_tracked {
+            else if !lsp_file_tracked {
+                // Nothing below would ever close it or say why.
+                crate::lsp::debug_log(&format!(
+                    "COMPLETION_STUCK reason=file-not-tracked owner_file={owner_file:?}"
+                ));
+            } else {
                 let (resp_received, timed_out, failure) = {
                     let lsp = self.lsp_state.lock().unwrap();
                     let received = lsp.completion_response_received;
@@ -728,6 +744,10 @@ impl AppIde {
                     // common real cause is a file that no `mod …;` declares —
                     // rust-analyzer detaches it and answers `null` to every
                     // completion request in it.
+                    crate::lsp::debug_log(&format!(
+                        "COMPLETION_CLOSE reason=no-items received={resp_received} \
+                         timed_out={timed_out} failure={failure:?}"
+                    ));
                     self.ed.completion_open = false;
                     // Each cause named apart: one note for all of them hid a
                     // refused request behind "no suggestions here".
