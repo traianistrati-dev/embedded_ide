@@ -4425,7 +4425,20 @@ pub fn module_config_ui(
                     if rp_dma {
                         out.skip("RX DMA buffer", docs::SKIP_USART_BUF_RP_DMA);
                     }
-                    if is_async && !tx_only_dma && !rp_dma {
+                    // embassy-nrf's `Uarte` has no ring on either transport,
+                    // and the nRF backend reads neither `mode` nor `buf_len`.
+                    let nrf = crate::panels::mcu_module::codegen::nrf::is_nrf(family);
+                    if is_async && nrf && !tx_only_dma {
+                        out.skip(
+                            if cfg.mode == UsartMode::Dma {
+                                "RX DMA buffer"
+                            } else {
+                                "RX/TX buffer"
+                            },
+                            docs::SKIP_USART_BUF_NRF,
+                        );
+                    }
+                    if is_async && !tx_only_dma && !rp_dma && !nrf {
                         let dma = cfg.mode == UsartMode::Dma;
                         // The label AND the sentence both turn on the transport
                         // — the field means two different things, and the pane
@@ -4546,8 +4559,13 @@ pub fn module_config_ui(
                         api_row_locked(ui, out);
                     } else if is_async {
                         // The API style is fixed on async (embedded-io-async
-                        // either way); what IS a choice is the transport.
-                        usart_mode_row(ui, out, &mut cfg.mode, family);
+                        // either way); what IS a choice is the transport -
+                        // except on an nRF, whose UARTE has EasyDMA built in.
+                        if nrf {
+                            out.skip("Async transport", docs::SKIP_USART_TRANSPORT_NRF);
+                        } else {
+                            usart_mode_row(ui, out, &mut cfg.mode, family);
+                        }
                         // The transport decides which directions exist, and the
                         // pair decides which flow options do — so this order is
                         // load-bearing, not cosmetic.
@@ -4574,7 +4592,8 @@ pub fn module_config_ui(
                             if cfg.mode == UsartMode::Dma {
                                 out.note(RP_DMA_NOTE);
                             }
-                        } else if cfg.mode == UsartMode::Dma {
+                        } else if cfg.mode == UsartMode::Dma && !nrf {
+                            // Never on an nRF: there are no channels to pick.
                             let inst = cfg.instance;
                             dma_row(ui, out, uart_bus, inst, &mut cfg.dma_tx, &mut cfg.dma_rx);
                         }
@@ -4754,6 +4773,8 @@ pub fn module_config_ui(
                         if crate::panels::mcu_module::codegen::rp::is_rp(family) {
                             rp_spi_init_locked(ui, out);
                             out.note(RP_DMA_NOTE);
+                        } else if crate::panels::mcu_module::codegen::nrf::is_nrf(family) {
+                            out.skip("Async init", docs::SKIP_ASYNC_INIT_NRF);
                         } else {
                             // NOT folded into the chain above: dropping this
                             // call took the Async-init combo off every STM32,
@@ -5184,10 +5205,12 @@ pub fn module_config_ui(
                     // `RpBackend::config_files` writes `pins/configs/pwm<slice>.rs`
                     // on Blocking, so telling a Pico owner that nothing is
                     // generated sent them to a runtime they did not need. The gate
-                    // was written before the RP backend existed.
+                    // was written before the RP backend existed. The nRF is the
+                    // same case: `NrfBackend::config_files` writes `pwm<n>.rs`.
                     if !is_async
                         && !family.starts_with("esp")
                         && !crate::panels::mcu_module::codegen::rp::is_rp(family)
+                        && !crate::panels::mcu_module::codegen::nrf::is_nrf(family)
                     {
                         ui.label("");
                         let why = if family == "stm32f1" {
@@ -6170,10 +6193,14 @@ pub fn module_config_ui(
                     // carries the frequency and nothing else. `timeout_ms` is
                     // read by one emitter, and it is embassy-stm32's.
                     let rp_i2c = crate::panels::mcu_module::codegen::rp::is_rp(family);
+                    let nrf_i2c = crate::panels::mcu_module::codegen::nrf::is_nrf(family);
                     if is_async && rp_i2c {
                         out.skip("Timeout", docs::SKIP_I2C_TIMEOUT_RP);
                     }
-                    if is_async && !rp_i2c {
+                    if is_async && nrf_i2c {
+                        out.skip("Timeout", docs::SKIP_I2C_TIMEOUT_NRF);
+                    }
+                    if is_async && !rp_i2c && !nrf_i2c {
                         out.field("Timeout", docs::I2C_TIMEOUT);
                         ui.label("Timeout");
                         ui.horizontal(|ui| {
@@ -6207,8 +6234,10 @@ pub fn module_config_ui(
                             .hexadecimal(2, false, true),
                     );
                     ui.end_row();
-                    if is_async && crate::panels::mcu_module::codegen::rp::is_rp(family) {
+                    if is_async && rp_i2c {
                         out.note(RP_I2C_NOTE);
+                    } else if is_async && nrf_i2c {
+                        out.skip("Async init", docs::SKIP_ASYNC_INIT_NRF);
                     } else if is_async {
                         async_row(ui, out, &mut pending.1);
                         if pending.1 == AsyncBusMode::AsyncDma {
@@ -7121,7 +7150,7 @@ mod tests {
     #[test]
     fn every_field_doc_is_a_named_const() {
         for kind in ModuleKind::ALL {
-            for family in ["stm32f1", "stm32g0", "esp32c3", "rp2040"] {
+            for family in ["stm32f1", "stm32g0", "esp32c3", "rp2040", "nrf52833"] {
                 for (is_async, is_native) in [(false, false), (true, false), (false, true)] {
                     for extras in [false, true] {
                         let out = drive(
@@ -7188,7 +7217,9 @@ mod tests {
     fn every_cell() -> Vec<(ModuleKind, &'static str, bool, bool)> {
         let mut out = Vec::new();
         for kind in ModuleKind::ALL {
-            for family in ["stm32f1", "stm32g0", "esp32", "esp32c3", "rp2040"] {
+            for family in [
+                "stm32f1", "stm32g0", "esp32", "esp32c3", "rp2040", "nrf52833",
+            ] {
                 for (a, n) in [(false, false), (true, false), (false, true)] {
                     out.push((kind, family, a, n));
                 }
@@ -7395,6 +7426,8 @@ mod tests {
         ("esp32c3", false, false),
         ("esp32c3", true, false),
         ("rp2040", true, false),
+        ("nrf52833", false, false),
+        ("nrf52833", true, false),
     ];
 
     /// A row is drawn only where the backend can pass its value to something.
@@ -7489,6 +7522,66 @@ mod tests {
         fn an_async_stm32_keeps_the_i2c_timeout() {
             let (drawn, _) = i2c_labels("stm32g0", true);
             assert!(drawn.iter().any(|l| l == "Timeout"), "{drawn:?}");
+        }
+
+        /// On an async nRF the UARTE has EasyDMA built in: no transport to
+        /// pick, no ring to size and no channels, on either `mode` a project
+        /// might carry. Direction and flow control stay, because the
+        /// constructor reads them.
+        #[test]
+        fn an_async_nrf_uart_offers_no_transport_buffer_or_channels() {
+            for mode in [UsartMode::Buffered, UsartMode::Dma] {
+                let out = drive_usart("nrf52833", true, false, false, |c| c.mode = mode);
+                let drawn = labels_of(&out);
+                let skipped = skipped_of(&out);
+                for gone in ["Async transport", "RX/TX buffer", "RX DMA buffer"] {
+                    assert!(!drawn.contains(&gone), "{mode:?}: {gone} drawn: {drawn:?}");
+                }
+                assert!(skipped.contains(&"Async transport"), "{skipped:?}");
+                assert!(
+                    skipped.contains(&"RX/TX buffer") || skipped.contains(&"RX DMA buffer"),
+                    "{skipped:?}"
+                );
+                assert!(drawn.contains(&"Data direction"), "{drawn:?}");
+                assert!(drawn.contains(&"Hardware flow control"), "{drawn:?}");
+                assert!(
+                    !drawn.iter().any(|l| l.contains("DMA")),
+                    "no DMA row of any kind: {drawn:?}"
+                );
+            }
+        }
+
+        /// embassy-nrf's TWIM has no timeout and one init form, and says so.
+        #[test]
+        fn an_async_nrf_i2c_has_no_timeout_and_no_init_choice() {
+            let (drawn, skipped) = i2c_labels("nrf52833", true);
+            for gone in ["Timeout", "Async init"] {
+                assert!(!drawn.iter().any(|l| l == gone), "{gone}: {drawn:?}");
+                assert!(skipped.iter().any(|l| l == gone), "{gone}: {skipped:?}");
+            }
+        }
+
+        /// The SPIM likewise, while bit order stays: embassy-nrf's `Config`
+        /// carries it and the backend writes it.
+        #[test]
+        fn an_async_nrf_spi_has_no_init_choice_but_keeps_bit_order() {
+            let out = drive(
+                ModuleKind::GenericInterfaceSpi,
+                ModuleKind::GenericInterfaceSpi.default_config(1),
+                "nrf52833",
+                true,
+                false,
+                false,
+            );
+            let drawn: Vec<&str> = out
+                .fields()
+                .expect("the SPI arm marks itself documented")
+                .iter()
+                .map(|f| f.label.as_str())
+                .collect();
+            assert!(!drawn.contains(&"Async init"), "{drawn:?}");
+            assert!(skipped_of(&out).contains(&"Async init"));
+            assert!(drawn.contains(&"Bit order"), "{drawn:?}");
         }
 
         /// Nine data bits is an STM32 word length. Neither the RP's PL011 nor

@@ -324,6 +324,10 @@ pub const ALL_DOCS: &[(&str, &str)] = &[
     ("SKIP_USART_BUF_TX_ONLY", SKIP_USART_BUF_TX_ONLY),
     ("SKIP_USART_BUF_RP_DMA", SKIP_USART_BUF_RP_DMA),
     ("SKIP_I2C_TIMEOUT_RP", SKIP_I2C_TIMEOUT_RP),
+    ("SKIP_USART_BUF_NRF", SKIP_USART_BUF_NRF),
+    ("SKIP_USART_TRANSPORT_NRF", SKIP_USART_TRANSPORT_NRF),
+    ("SKIP_ASYNC_INIT_NRF", SKIP_ASYNC_INIT_NRF),
+    ("SKIP_I2C_TIMEOUT_NRF", SKIP_I2C_TIMEOUT_NRF),
     ("SKIP_SPI_BIT_ORDER", SKIP_SPI_BIT_ORDER),
     ("SKIP_SPI_ROLE", SKIP_SPI_ROLE),
     ("SKIP_TOUCH_SLEEP", SKIP_TOUCH_SLEEP),
@@ -1435,6 +1439,28 @@ pub const SKIP_I2C_TIMEOUT_RP: &str = "embassy-rp's I2C takes no timeout. Its `C
                                        stretched clock hangs - the row was a control with \
                                        nothing to pass it to. On an STM32 the timeout is part of \
                                        embassy-stm32's own `Config`.";
+
+pub const SKIP_USART_BUF_NRF: &str = "No buffer to size on an nRF. embassy-nrf's `Uarte` reads \
+                                      straight into the slice you pass `read`, through EasyDMA, \
+                                      with no ring behind it. Its `BufferedUarte`, which keeps \
+                                      receiving between reads, needs a TIMER and PPI channels and \
+                                      is not what this backend builds.";
+
+pub const SKIP_USART_TRANSPORT_NRF: &str = "Nothing to choose on an nRF: the UARTE moves bytes by \
+                                            EasyDMA, which is part of the peripheral, so there is \
+                                            no DMA channel to take or give back. This backend \
+                                            builds embassy-nrf's async `Uarte`.";
+
+pub const SKIP_ASYNC_INIT_NRF: &str = "One form on an nRF. embassy-nrf's SPIM and TWIM are async \
+                                       drivers that move bytes by EasyDMA, which is part of each \
+                                       peripheral, and the same handle has `blocking_*` methods \
+                                       for when you want to wait. No channel is taken either way, \
+                                       so the two choices would build the same code.";
+
+pub const SKIP_I2C_TIMEOUT_NRF: &str = "embassy-nrf's TWIM `Config` has no timeout, so the row had \
+                                        nothing to pass it to. An async transfer that hangs on a \
+                                        stretched clock waits until it is dropped: wrap the call \
+                                        in `embassy_time::with_timeout` to bound it.";
 
 pub const SKIP_SPI_BIT_ORDER: &str = "Only the async path can set it: stm32f1xx-hal's blocking \
                                       SPI takes no bit-order argument, so the row would be a \

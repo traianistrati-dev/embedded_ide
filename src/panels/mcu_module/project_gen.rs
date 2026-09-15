@@ -246,6 +246,43 @@ pub fn splice_config(
     }
 }
 
+/// `cargo_toml` with its generated block re-spliced from `c`, when that block
+/// names a different HAL CRATE than `c` does; otherwise unchanged.
+///
+/// A Runtime switch changes the crate on the boards that swap HALs:
+/// `nrf52833-hal` for `embassy-nrf`, `rp2040-hal` for `embassy-rp`. The app
+/// used to refresh the block only on New Project and on open, so after Apply
+/// the `ensure_*` chain added the embassy executor to a manifest that still
+/// named the blocking HAL, and `main.rs` failed on `embassy_nrf` until the
+/// project was reopened.
+///
+/// Keyed on the crate, not the whole line, so a version the user set on the
+/// HAL line is not undone on every sync (the splice keeps it anyway, see
+/// [`keep_user_dep_edits`]), and the STM32 and ESP families, whose crate is
+/// the same on both runtimes, never re-splice here. A file without the
+/// markers is not the IDE's to change.
+pub fn refresh_hal_dependency(
+    cargo_toml: &str,
+    c: &ProjectDef,
+    toolchain: &ToolchainKind,
+) -> String {
+    let Some(want) = dep_key(&c.hal_dep) else {
+        return cargo_toml.to_owned();
+    };
+    if *toolchain != ToolchainKind::RustEmbedded {
+        return cargo_toml.to_owned();
+    }
+    let (begin, end) = (Cmt::Hash.begin(), Cmt::Hash.end());
+    let block = match (cargo_toml.find(begin), cargo_toml.find(end)) {
+        (Some(b), Some(e)) if b < e => &cargo_toml[b..e],
+        _ => return cargo_toml.to_owned(),
+    };
+    if block.lines().any(|l| dep_key(l) == Some(want)) {
+        return cargo_toml.to_owned();
+    }
+    splice_config(ConfigFile::CargoToml, cargo_toml, c, toolchain)
+}
+
 /// Carry a user's edit of a GENERATED dependency line through the refresh.
 ///
 /// The generated block is rewritten wholesale on every splice, which is right
@@ -608,6 +645,13 @@ pub enum AsyncFlavor<'a> {
     /// `hal_dep_async`, because the feature is per-board (`rp235xa` vs
     /// `rp235xb`) and cannot be derived from the family.
     Rp,
+    /// `embassy-nrf`.
+    ///
+    /// On the same executor line as [`Self::Rp`], and kept a variant of its own
+    /// anyway: the two only happen to agree today, and a shared variant would
+    /// make the next embassy bump move both boards at once. The `embassy-nrf`
+    /// line itself comes from the chip's `hal_dep_async`, like the RP one.
+    Nrf,
 }
 
 impl AsyncFlavor<'_> {
@@ -624,7 +668,7 @@ impl AsyncFlavor<'_> {
             // those features between 0.9 and 0.10, and the STM32 line above is
             // still on 0.9. Cargo refuses to resolve the wrong one, which is the
             // only reason this was caught — nothing about the name looks wrong.
-            Self::Rp => {
+            Self::Rp | Self::Nrf => {
                 "embassy-executor = { version = \"0.10\", features = [\"platform-cortex-m\", \"executor-thread\"] }"
             }
         }
@@ -636,8 +680,8 @@ impl AsyncFlavor<'_> {
         let chip = match self {
             Self::Stm32 => "esp32c3",
             Self::Esp(chip) => chip,
-            // Never read: the caller gates this on the flavour.
-            Self::Rp => "esp32c3",
+            // Never read: the caller gates this on the flavor.
+            Self::Rp | Self::Nrf => "esp32c3",
         };
         format!(
             "esp-rtos = {{ version = \"{ESP_RTOS_REQ}\", features = [\"{chip}\", \"embassy\"] }}"
@@ -794,6 +838,8 @@ pub fn async_flavor_for<'a>(family: &str, esp_chip: &'a str) -> AsyncFlavor<'a> 
         AsyncFlavor::Esp(esp_chip)
     } else if fam::async_is_rp(family) {
         AsyncFlavor::Rp
+    } else if fam::async_is_nrf(family) {
+        AsyncFlavor::Nrf
     } else {
         AsyncFlavor::Stm32
     }
@@ -815,6 +861,7 @@ mod async_flavor_choice {
     fn each_family_gets_its_own_stack() {
         assert!(matches!(async_flavor_for("rp2040", ""), AsyncFlavor::Rp));
         assert!(matches!(async_flavor_for("rp235x", ""), AsyncFlavor::Rp));
+        assert!(matches!(async_flavor_for("nrf52833", ""), AsyncFlavor::Nrf));
         assert!(matches!(
             async_flavor_for("esp32c3", "esp32c3"),
             AsyncFlavor::Esp("esp32c3")
@@ -856,6 +903,194 @@ mod async_flavor_choice {
             &[],
         );
         assert!(stm.contains("arch-cortex-m"), "{stm}");
+    }
+
+    /// embassy-nrf 0.11 sits on the 0.10 executor, like embassy-rp, and gets
+    /// none of the STM32 or ESP extras.
+    #[test]
+    fn the_nrf_stack_is_on_the_010_executor() {
+        let nrf = ensure_async_deps(
+            "[dependencies]\n",
+            true,
+            AsyncFlavor::Nrf,
+            false,
+            false,
+            false,
+            &[],
+        );
+        assert!(nrf.contains("platform-cortex-m"), "{nrf}");
+        assert!(nrf.contains("version = \"0.10\""), "{nrf}");
+        assert!(!nrf.contains("esp-rtos"), "{nrf}");
+        assert!(!nrf.contains("time-driver-any"), "{nrf}");
+    }
+}
+
+/// A Runtime switch swaps the HAL crate in a manifest that already exists.
+#[cfg(test)]
+mod the_hal_crate_follows_a_runtime_switch {
+    use super::*;
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::mcu_def::build_cfg;
+
+    /// What a built-in board's manifest is built from: the Blocking and Async
+    /// configs, the toolchain, and the board's own async flavor.
+    struct Board {
+        blocking: ProjectDef,
+        asynchronous: ProjectDef,
+        tc: ToolchainKind,
+        flavor: AsyncFlavor<'static>,
+    }
+
+    fn board(id: &str) -> Board {
+        let def = builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"));
+        let mut mcu = def.build_mcu();
+        mcu.runtime = Runtime::Blocking;
+        let blocking = build_cfg(&def, Some(&mcu));
+        mcu.runtime = Runtime::Async;
+        let asynchronous = build_cfg(&def, Some(&mcu));
+        Board {
+            blocking,
+            asynchronous,
+            tc: def.toolchain,
+            flavor: async_flavor_for(&def.family, ""),
+        }
+    }
+
+    /// The manifest a Blocking project has after a few syncs: the template,
+    /// an IDE-added line (`embedded-hal-async`, marked), and a crate the user
+    /// added below the marker.
+    fn lived_in(b: &Board) -> String {
+        let toml = gen_config(ConfigFile::CargoToml, &b.blocking, &b.tc);
+        let toml = ensure_async_deps(&toml, false, b.flavor, false, true, true, &[]);
+        assert_eq!(
+            ide_added(&toml),
+            1,
+            "one IDE-added embedded-hal-async:\n{toml}"
+        );
+        format!("{toml}heapless = \"0.8\"\n")
+    }
+
+    /// How many marked `embedded-hal-async` lines `toml` has.
+    fn ide_added(toml: &str) -> usize {
+        toml.lines()
+            .filter(|l| l.trim_start().starts_with("embedded-hal-async") && l.contains(DEP_MARKER))
+            .count()
+    }
+
+    /// One app sync on the Async runtime, in the app's order: the HAL crate,
+    /// then the dependency chain, still asking for `embedded-hal-async`.
+    fn async_sync(b: &Board, toml: &str) -> String {
+        let toml = refresh_hal_dependency(toml, &b.asynchronous, &b.tc);
+        ensure_async_deps(&toml, true, b.flavor, false, true, true, &[])
+    }
+
+    /// What the reported bug looked like, and what it has to become: the
+    /// micro:bit's manifest names embassy-nrf after Apply, not nrf52833-hal,
+    /// and the user's crate is still there.
+    #[test]
+    fn the_microbit_swaps_nrf_hal_for_embassy_nrf_and_back() {
+        let b = board("nrf52833_microbit_v2");
+        let before = lived_in(&b);
+        assert!(before.contains("nrf52833-hal"), "{before}");
+
+        // The splice rewrites the block, so the IDE-added line goes with it...
+        let spliced = refresh_hal_dependency(&before, &b.asynchronous, &b.tc);
+        assert_eq!(ide_added(&spliced), 0, "{spliced}");
+        // ...and the chain that runs right after puts it back, once.
+        let after = async_sync(&b, &before);
+        assert_eq!(ide_added(&after), 1, "{after}");
+        assert!(after.contains("embassy-nrf = "), "{after}");
+        assert!(!after.contains("nrf52833-hal"), "{after}");
+        assert!(after.contains("heapless = \"0.8\""), "{after}");
+        assert!(
+            after.contains("embedded-hal = \"1.0\""),
+            "the shared header's import:\n{after}"
+        );
+        assert!(after.contains("embassy-executor"), "{after}");
+        // Settled: a whole second sync, splice check and chain, changes nothing.
+        assert_eq!(async_sync(&b, &after), after);
+
+        let back = refresh_hal_dependency(&after, &b.blocking, &b.tc);
+        assert!(back.contains("nrf52833-hal"), "{back}");
+        assert!(!back.contains("embassy-nrf = "), "{back}");
+        assert!(back.contains("heapless = \"0.8\""), "{back}");
+    }
+
+    /// The Pico had the same gap, and its template differs by the boot stage.
+    #[test]
+    fn the_pico_swaps_rp_hal_for_embassy_rp() {
+        let b = board("rp2040_pico");
+        let before = lived_in(&b);
+        assert!(
+            before.contains("rp2040-hal") && before.contains("rp2040-boot2"),
+            "{before}"
+        );
+        let after = async_sync(&b, &before);
+        assert_eq!(ide_added(&after), 1, "{after}");
+        assert!(after.contains("embassy-rp = "), "{after}");
+        assert!(
+            !after.contains("rp2040-hal") && !after.contains("rp2040-boot2"),
+            "{after}"
+        );
+        assert!(after.contains("heapless = \"0.8\""), "{after}");
+    }
+
+    /// A pristine manifest switched is the fresh one for the new runtime, which
+    /// is what the emit harness relies on to build through the switch.
+    #[test]
+    fn a_pristine_manifest_switched_is_the_fresh_one() {
+        let b = board("nrf52833_microbit_v2");
+        let switched = refresh_hal_dependency(
+            &gen_config(ConfigFile::CargoToml, &b.blocking, &b.tc),
+            &b.asynchronous,
+            &b.tc,
+        );
+        assert_eq!(
+            switched,
+            gen_config(ConfigFile::CargoToml, &b.asynchronous, &b.tc)
+        );
+    }
+
+    /// Nothing to do where the crate stays: an STM32 keeps embassy-stm32 on both
+    /// runtimes, and a HAL line the user re-versioned is not re-spliced.
+    #[test]
+    fn the_same_crate_is_left_alone() {
+        let b = board("nrf52833_microbit_v2");
+        let fresh = gen_config(ConfigFile::CargoToml, &b.asynchronous, &b.tc);
+        let pinned = fresh.replace("version = \"0.11\"", "version = \"=0.11.0\"");
+        assert_ne!(pinned, fresh, "the edit landed");
+        assert_eq!(
+            refresh_hal_dependency(&pinned, &b.asynchronous, &b.tc),
+            pinned
+        );
+
+        for d in builtin_definitions()
+            .into_iter()
+            .filter(|d| d.family.starts_with("stm32"))
+        {
+            let mut mcu = d.build_mcu();
+            mcu.runtime = Runtime::Blocking;
+            let b = build_cfg(&d, Some(&mcu));
+            mcu.runtime = Runtime::Async;
+            let a = build_cfg(&d, Some(&mcu));
+            let toml = gen_config(ConfigFile::CargoToml, &b, &d.toolchain);
+            assert_eq!(
+                refresh_hal_dependency(&toml, &a, &d.toolchain),
+                toml,
+                "{}",
+                d.id
+            );
+        }
+
+        // And a manifest the user took the markers out of is theirs.
+        let hand = gen_config(ConfigFile::CargoToml, &b.blocking, &b.tc)
+            .replace(Cmt::Hash.begin(), "")
+            .replace(Cmt::Hash.end(), "");
+        assert_eq!(refresh_hal_dependency(&hand, &b.asynchronous, &b.tc), hand);
     }
 }
 
@@ -1809,7 +2044,8 @@ fn cargo_toml_embedded(c: &ProjectDef) -> String {
         name = c.pkg_name,
         // nrf-hal implements embedded-hal 1.0's pin traits without re-exporting
         // them, and the generated `main.rs` imports them - the same reason the
-        // RP template carries the line.
+        // RP template carries the line. Kept beside embassy-nrf too: the nRF
+        // header is shared by both runtimes and survives a switch between them.
         eh = if is_nrf_hal(c) {
             "embedded-hal = \"1.0\"\n"
         } else {
@@ -1820,10 +2056,10 @@ fn cargo_toml_embedded(c: &ProjectDef) -> String {
     )
 }
 
-/// Read off the HAL line, like [`is_rp_hal`]: `nrf52833-hal`, or any other
-/// `nrf52xxx-hal`.
+/// Read off the HAL line, like [`is_rp_hal`]: `nrf52833-hal` (or any other
+/// `nrf52xxx-hal`) on Blocking, `embassy-nrf` on Async.
 fn is_nrf_hal(c: &ProjectDef) -> bool {
-    c.hal_dep.starts_with("nrf52")
+    c.hal_dep.starts_with("nrf52") || c.hal_dep.starts_with("embassy-nrf")
 }
 
 /// `Cargo.toml` for an RP2040 / RP2350 project.
@@ -2834,6 +3070,7 @@ fn f() {}
         for flavor in [
             AsyncFlavor::Stm32,
             AsyncFlavor::Rp,
+            AsyncFlavor::Nrf,
             AsyncFlavor::Esp("esp32c3"),
         ] {
             let out = ensure_async_deps(base, true, flavor, false, false, false, &[]);
