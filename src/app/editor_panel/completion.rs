@@ -711,14 +711,14 @@ impl AppIde {
             // all_items is empty: either RA hasn't responded yet, or
             // it responded with no completions / an error.
             else if lsp_file_tracked {
-                let (resp_received, timed_out) = {
+                let (resp_received, timed_out, failure) = {
                     let lsp = self.lsp_state.lock().unwrap();
                     let received = lsp.completion_response_received;
                     let timeout = lsp
                         .completion_request_sent_at
                         .map(|t| t.elapsed().as_secs() > 6)
                         .unwrap_or(false);
-                    (received, timeout)
+                    (received, timeout, lsp.completion_failure.clone())
                 };
 
                 if resp_received || timed_out {
@@ -729,11 +729,25 @@ impl AppIde {
                     // rust-analyzer detaches it and answers `null` to every
                     // completion request in it.
                     self.ed.completion_open = false;
+                    // Each cause named apart: one note for all of them hid a
+                    // refused request behind "no suggestions here".
                     let note = if timed_out && !resp_received {
                         "rust-analyzer did not answer (busy / indexing) — try again".to_owned()
                     } else {
-                        self.unlinked_module_hint()
-                            .unwrap_or_else(|| "no suggestions here".to_owned())
+                        match failure {
+                            Some(lsp::CompletionFailure::Error { code, message }) => {
+                                empty_completion_note_for_error(code, &message)
+                            }
+                            Some(lsp::CompletionFailure::Null) => {
+                                self.unlinked_module_hint().unwrap_or_else(|| {
+                                    "rust-analyzer does not analyse this file here (null answer)"
+                                        .to_owned()
+                                })
+                            }
+                            None => self
+                                .unlinked_module_hint()
+                                .unwrap_or_else(|| "no suggestions here".to_owned()),
+                        }
                     };
                     self.ed.completion_note = Some((note, std::time::Instant::now()));
                 } else {
@@ -1149,6 +1163,19 @@ fn line_is_gone(text: &str, line: u32) -> bool {
             t.is_empty() || t.starts_with("//")
         }
         None => true, // the line was deleted outright
+    }
+}
+
+/// The note for a completion request rust-analyzer answered with an error.
+/// A transient code only gets here after its retries ran out, so it says so.
+fn empty_completion_note_for_error(code: i64, message: &str) -> String {
+    let message = message.trim();
+    if lsp::is_transient_lsp_error(code) {
+        "rust-analyzer kept cancelling the request (files changing) — try again".to_owned()
+    } else if message.is_empty() {
+        format!("rust-analyzer refused the request (error {code})")
+    } else {
+        format!("rust-analyzer refused the request: {message}")
     }
 }
 

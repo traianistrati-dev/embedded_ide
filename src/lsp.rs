@@ -114,6 +114,31 @@ impl LspDiagnostic {
     }
 }
 
+/// Why a completion request came back with nothing to show. Kept apart from an
+/// empty list because the three have different cures, and a note reading "no
+/// suggestions here" for all of them made a refused request undiagnosable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompletionFailure {
+    /// `result: null` — rust-analyzer does not analyse the file at this point
+    /// (most often: no `mod …;` declares it).
+    Null,
+    /// An error reply that survived the automatic retries.
+    Error { code: i64, message: String },
+}
+
+/// LSP error codes meaning "asked at a bad moment, ask again": the document
+/// changed under the request (`ContentModified`), or the server dropped it
+/// (`RequestCancelled`, `ServerCancelled`). A `didChange` for ANY file — a Save
+/// flush, the idle re-sync of another view, a settle re-verify — makes
+/// rust-analyzer answer an in-flight completion this way within milliseconds.
+pub fn is_transient_lsp_error(code: i64) -> bool {
+    // -32802 ServerCancelled, -32801 ContentModified, -32800 RequestCancelled.
+    (-32802..=-32800).contains(&code)
+}
+
+/// How many times a cancelled completion is re-sent before it is reported.
+const COMPLETION_RETRIES: u8 = 3;
+
 /// A single item returned by a `textDocument/completion` response.
 #[derive(Clone, Debug, Default)]
 pub struct CompletionItem {
@@ -334,6 +359,14 @@ pub struct LspState {
     next_req_id: u64,
     /// When the last completion request was sent (for spinner timeout).
     pub completion_request_sent_at: Option<std::time::Instant>,
+    /// Why the last answered completion request produced no items, if it
+    /// failed rather than returning an empty list. Cleared by each new request.
+    pub completion_failure: Option<CompletionFailure>,
+    /// `(rel_path, line, character, trigger)` of the last completion request,
+    /// so a cancelled one can be re-sent without the UI asking again.
+    completion_params: Option<(String, u32, u32, Option<char>)>,
+    /// Re-sends already spent on the current completion request.
+    completion_retries: u8,
     /// The request id of the pending `textDocument/rename`, if any.
     rename_req_id: Option<u64>,
     /// In-flight `workspace/willRenameFiles` (a FILE rename, not a symbol one).
@@ -461,6 +494,9 @@ impl Default for LspState {
             completion_req_id: None,
             next_req_id: 1,
             completion_request_sent_at: None,
+            completion_failure: None,
+            completion_params: None,
+            completion_retries: 0,
             rename_req_id: None,
             will_rename_req_id: None,
             will_rename_response_received: false,
@@ -708,15 +744,44 @@ impl LspState {
         if self.sender.is_none() {
             return;
         }
-        self.next_req_id += 1;
-        let id = self.next_req_id;
-        self.completion_req_id = Some(id);
+        self.completion_params = Some((rel_path.to_owned(), line, character, trigger_char));
+        self.completion_retries = 0;
+        self.completion_failure = None;
         self.completion_items.clear();
         self.completion_response_received = false;
         self.completion_request_sent_at = Some(std::time::Instant::now());
+        self.send_completion();
+    }
+
+    /// Re-send the last completion request after a transient error reply.
+    /// Returns `false` once the retries are spent (or there is nothing to
+    /// re-send), in which case the caller reports the error.
+    fn retry_completion(&mut self) -> bool {
+        if self.sender.is_none()
+            || self.completion_params.is_none()
+            || self.completion_retries >= COMPLETION_RETRIES
+        {
+            return false;
+        }
+        self.completion_retries += 1;
+        // The spinner's timeout restarts: a retry is a fresh wait, not the tail
+        // of the refused one.
+        self.completion_request_sent_at = Some(std::time::Instant::now());
+        self.send_completion();
+        true
+    }
+
+    fn send_completion(&mut self) {
+        let Some((rel_path, line, character, trigger_char)) = self.completion_params.clone() else {
+            return;
+        };
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.completion_req_id = Some(id);
         lsp_log(&format!(
             "COMPLETION_REQ id={id} file={rel_path} line={line} char={character} \
-             trigger={trigger_char:?}"
+             trigger={trigger_char:?} retry={}",
+            self.completion_retries
         ));
         let uri = format!("{}/{}", self.root_uri, rel_path);
         let trigger_kind: u32 = if trigger_char.is_some() { 2 } else { 1 };
@@ -1296,6 +1361,9 @@ impl LspState {
         self.finished_checks.clear();
         self.completion_items.clear();
         self.completion_req_id = None;
+        self.completion_failure = None;
+        self.completion_params = None;
+        self.completion_retries = 0;
         self.rename_req_id = None;
         self.rename_response_received = false;
         self.rename_edits.clear();
@@ -2133,7 +2201,11 @@ fn handle_incoming(
                     s.completion_response_received = true;
                     let result = &msg["result"];
                     // CompletionList { items: [...] }  OR  [...] directly
-                    // `result` may also be JSON null — treat as empty list.
+                    // `result` may also be JSON null — treat as empty list, but
+                    // remember it was null: that one has its own cause.
+                    if result.is_null() {
+                        s.completion_failure = Some(CompletionFailure::Null);
+                    }
                     let items_arr = result["items"].as_array().or_else(|| result.as_array());
                     s.completion_items = items_arr
                         .map(|arr| {
@@ -2206,6 +2278,20 @@ fn handle_incoming(
                     ctx.request_repaint();
                 } else if s.completion_req_id == Some(req_id) {
                     s.completion_req_id = None;
+                    let code = msg["error"]["code"].as_i64().unwrap_or(0);
+                    let message = msg["error"]["message"].as_str().unwrap_or("").to_owned();
+                    lsp_log(&format!(
+                        "COMPLETION_ERR id={req_id} code={code} msg={message}"
+                    ));
+                    // A document changed under the request — a Save flush or the
+                    // other view's idle re-sync is enough. Ask again: the
+                    // `didChange` that cancelled it is already ahead of the new
+                    // request in rust-analyzer's queue. Answering the popup with
+                    // "nothing" instead was the spinner that vanished at once.
+                    if is_transient_lsp_error(code) && s.retry_completion() {
+                        return;
+                    }
+                    s.completion_failure = Some(CompletionFailure::Error { code, message });
                     s.completion_response_received = true;
                     // completion_items stays empty — App will close the popup.
                     ctx.request_repaint();
@@ -3145,6 +3231,124 @@ mod document_symbol_tests {
         flag("new_parser", true, 1); // impl-for member
         flag("decode", true, 0); // impl-for member
         flag("helper", false, 0); // inherent impl member
+    }
+}
+
+#[cfg(test)]
+mod completion_retry_tests {
+    use super::*;
+
+    /// A state with a live (captured) channel and one completion in flight.
+    /// Returns the state, the receiver of everything sent, and the request id.
+    fn in_flight() -> (
+        Arc<Mutex<LspState>>,
+        mpsc::Receiver<String>,
+        mpsc::Sender<String>,
+        u64,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        let mut s = LspState::default();
+        s.sender = Some(tx.clone());
+        s.request_completion("src/main.rs", 4, 7, None);
+        let id = s.completion_req_id.unwrap();
+        (Arc::new(Mutex::new(s)), rx, tx, id)
+    }
+
+    fn reply(state: &Arc<Mutex<LspState>>, tx: &mpsc::Sender<String>, msg: serde_json::Value) {
+        let generation = state.lock().unwrap().generation;
+        handle_incoming(
+            msg,
+            state,
+            &eframe::egui::Context::default(),
+            tx,
+            "file:///w",
+            generation,
+        );
+    }
+
+    fn error(id: u64, code: i64) -> serde_json::Value {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": "content modified" } })
+    }
+
+    /// The reported symptom: a `didChange` elsewhere cancels the request and the
+    /// spinner closed on the "empty" answer. It must be asked again instead.
+    #[test]
+    fn a_cancelled_completion_is_resent_not_reported() {
+        let (state, rx, tx, id) = in_flight();
+        let _ = rx.try_recv(); // the original request
+        reply(&state, &tx, error(id, -32801));
+
+        let s = state.lock().unwrap();
+        assert!(
+            !s.completion_response_received,
+            "the popup must keep waiting"
+        );
+        assert!(s.completion_failure.is_none());
+        let new_id = s.completion_req_id.expect("a retry is in flight");
+        assert_ne!(new_id, id);
+        let sent: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(sent["method"], "textDocument/completion");
+        assert_eq!(sent["id"], new_id);
+        assert_eq!(sent["params"]["position"]["line"], 4);
+        assert_eq!(sent["params"]["position"]["character"], 7);
+    }
+
+    #[test]
+    fn retries_are_bounded_then_the_error_is_reported() {
+        let (state, _rx, tx, mut id) = in_flight();
+        for _ in 0..COMPLETION_RETRIES {
+            reply(&state, &tx, error(id, -32801));
+            id = state.lock().unwrap().completion_req_id.unwrap();
+        }
+        reply(&state, &tx, error(id, -32801));
+        let s = state.lock().unwrap();
+        assert!(s.completion_response_received);
+        assert!(s.completion_req_id.is_none());
+        assert!(matches!(
+            s.completion_failure,
+            Some(CompletionFailure::Error { code: -32801, .. })
+        ));
+    }
+
+    #[test]
+    fn a_real_error_is_reported_at_once() {
+        let (state, _rx, tx, id) = in_flight();
+        reply(&state, &tx, error(id, -32603));
+        let s = state.lock().unwrap();
+        assert!(s.completion_response_received);
+        assert!(matches!(
+            s.completion_failure,
+            Some(CompletionFailure::Error { code: -32603, .. })
+        ));
+    }
+
+    #[test]
+    fn a_null_answer_is_told_apart_from_an_empty_list() {
+        let (state, _rx, tx, id) = in_flight();
+        reply(
+            &state,
+            &tx,
+            serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": null }),
+        );
+        assert_eq!(
+            state.lock().unwrap().completion_failure,
+            Some(CompletionFailure::Null)
+        );
+
+        let mut s = state.lock().unwrap();
+        s.request_completion("src/main.rs", 4, 7, None);
+        assert!(
+            s.completion_failure.is_none(),
+            "a new request forgets the old cause"
+        );
+        let id = s.completion_req_id.unwrap();
+        drop(s);
+        reply(
+            &state,
+            &tx,
+            serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": [] }),
+        );
+        assert!(state.lock().unwrap().completion_failure.is_none());
     }
 }
 
