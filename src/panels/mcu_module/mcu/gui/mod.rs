@@ -35,9 +35,6 @@ impl Mcu {
         &mut self,
         ui: &mut egui::Ui,
     ) -> (Option<(usize, String, PinFunction)>, egui::Rect) {
-        let top_count = self.top_pins.len();
-        let left_count = self.left_pins.len();
-
         // Drop any module wire whose pin was re-purposed away from USART.
         self.reconcile_modules();
 
@@ -45,7 +42,7 @@ impl Mcu {
             // A ball-grid package has no edge pins to size the body from — the
             // body must instead be big enough to HOLD the grid.
             Some(g) => layout::calculate_grid_layout(geometry::grid_body_size(g)),
-            None => layout::calculate_layout(top_count, left_count, geometry::top_pad(self)),
+            None => geometry::body_layout(self),
         };
 
         // Diagram rotation (view-only): a 2-sided chip turns 90°, while a
