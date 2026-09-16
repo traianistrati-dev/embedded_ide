@@ -348,6 +348,9 @@ pub fn show_diagnostics_overlay(
     // Lines that already drew an inline message — a line can carry several
     // diagnostics, but a second message would overlap the first, so show one.
     let mut msg_lines: Vec<u32> = Vec::new();
+    // `(index into diags, hover rect)` of every visible diagnostic, grouped into
+    // tooltips after the drawing pass.
+    let mut hover_spans: Vec<(usize, egui::Rect)> = Vec::new();
 
     // One measurement for the whole pass. The message font is monospace, so a
     // single glyph's advance sizes every message; measuring inside the loop laid
@@ -480,75 +483,195 @@ pub fn show_diagnostics_overlay(
             }
         }
 
-        // ── Hover tooltip (full message + docs link) ──────────────────────
-        let hover_rect =
-            egui::Rect::from_min_max(egui::pos2(sx, sy_top), egui::pos2(ex, sy_bot + 3.0));
+        // The hover region is collected, not interacted with here: several
+        // diagnostics on one span each opened their OWN tooltip at the same
+        // spot, drawn on top of each other. See the grouping pass below.
+        hover_spans.push((
+            di,
+            egui::Rect::from_min_max(egui::pos2(sx, sy_top), egui::pos2(ex, sy_bot + 3.0)),
+        ));
+    }
+
+    // ── Hover tooltip: ONE per group of overlapping spans ─────────────────
+    // Grouped by geometry, never by where the pointer is. The tooltip is
+    // interactive — the user moves into it to click a docs link — and at that
+    // moment the pointer has left every span; a group chosen from the pointer
+    // would dissolve right then and close the tooltip under the click.
+    let rects: Vec<egui::Rect> = hover_spans.iter().map(|(_, r)| *r).collect();
+    for group in group_overlapping(&rects) {
+        let members: Vec<usize> = group.iter().map(|&k| hover_spans[k].0).collect();
+        let area = group
+            .iter()
+            .map(|&k| hover_spans[k].1)
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(egui::Rect::NOTHING);
+        // Keyed by the group's first diagnostic, so the id — and with it the
+        // open tooltip — holds steady while the set does not change.
         let hover = ui.interact(
-            hover_rect,
-            egui::Id::new("inline_diag").with(di),
+            area,
+            egui::Id::new("inline_diag").with(members[0]),
             egui::Sense::hover(),
         );
+        let shown = tooltip_order(diags, &members);
 
-        // Ctrl+C while hovering copies the message + the error code (overwrites
-        // any selection the editor copied earlier this frame, so the error wins).
+        // Ctrl+C while hovering copies every message of the group with its code
+        // (overwrites any selection the editor copied earlier this frame, so
+        // the diagnostics win).
         if hover.hovered() && copy_requested {
-            let text = match &diag.code {
-                Some(c) => format!("{} [{c}]", diag.message),
-                None => diag.message.clone(),
-            };
+            let text = shown
+                .iter()
+                .map(|&i| {
+                    let d = &diags[i];
+                    match &d.code {
+                        Some(c) => format!("{} [{c}]", d.message),
+                        None => d.message.clone(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             ui.ctx().copy_text(text);
         }
 
-        let icon = match diag.severity {
-            crate::lsp::DiagSeverity::Error => ph::X_CIRCLE,
-            crate::lsp::DiagSeverity::Warning => ph::WARNING,
-            crate::lsp::DiagSeverity::Info => ph::INFO,
-            crate::lsp::DiagSeverity::Hint => ph::DOT_OUTLINE,
-        };
-        let msg = format!("{icon}  {}", diag.message);
-        let code = diag.code.clone();
-        // Interactive tooltip — the user can move into it to click the docs link.
         hover.on_hover_ui(|ui: &mut egui::Ui| {
             ui.set_max_width(420.0);
-            ui.label(egui::RichText::new(&msg).size(12.0));
-            if let Some(c) = &code {
-                match rustc_error_doc_url(c) {
-                    // Clickable link → opens the rust error index in the browser.
-                    Some(url) => {
-                        ui.hyperlink_to(
-                            // `ARROW_SQUARE_OUT`, not a raw `↗`. Reading the
-                            // bundled fonts' cmaps afterwards showed U+2197 is
-                            // one of the ten arrows NotoEmoji does carry, so
-                            // this one was probably rendering — the guard
-                            // flagged it on the block rule, not on measured
-                            // tofu. Kept as phosphor anyway: the standing rule
-                            // is icons in UI text, whatever the font happens to
-                            // cover today.
-                            egui::RichText::new(format!(
-                                "[{c}]  open docs {}",
-                                egui_phosphor::regular::ARROW_SQUARE_OUT
-                            ))
-                            .size(10.5)
-                            .color(egui::Color32::from_rgb(110, 165, 240)),
-                            url,
-                        );
-                    }
-                    None => {
-                        ui.label(
-                            egui::RichText::new(format!("[{c}]"))
-                                .size(10.5)
-                                .color(egui::Color32::from_rgb(140, 150, 170)),
-                        );
-                    }
+            for (n, &i) in shown.iter().enumerate() {
+                if n > 0 {
+                    ui.separator();
                 }
+                diagnostic_tooltip_entry(ui, &diags[i]);
             }
             ui.label(
-                egui::RichText::new("Ctrl+C to copy")
-                    .size(9.0)
-                    .color(egui::Color32::from_rgb(110, 120, 140)),
+                egui::RichText::new(if shown.len() > 1 {
+                    "Ctrl+C to copy all"
+                } else {
+                    "Ctrl+C to copy"
+                })
+                .size(9.0)
+                .color(egui::Color32::from_rgb(110, 120, 140)),
             );
         });
     }
+}
+
+/// One diagnostic inside the hover tooltip: icon + full message, then its code
+/// (a docs link for a rustc error code).
+fn diagnostic_tooltip_entry(ui: &mut egui::Ui, diag: &LspDiagnostic) {
+    let icon = match diag.severity {
+        crate::lsp::DiagSeverity::Error => ph::X_CIRCLE,
+        crate::lsp::DiagSeverity::Warning => ph::WARNING,
+        crate::lsp::DiagSeverity::Info => ph::INFO,
+        crate::lsp::DiagSeverity::Hint => ph::DOT_OUTLINE,
+    };
+    ui.label(egui::RichText::new(format!("{icon}  {}", diag.message)).size(12.0));
+    let Some(c) = &diag.code else {
+        return;
+    };
+    match rustc_error_doc_url(c) {
+        // Clickable link → opens the rust error index in the browser.
+        Some(url) => {
+            ui.hyperlink_to(
+                // `ARROW_SQUARE_OUT`, not a raw `↗`. Reading the bundled fonts'
+                // cmaps afterwards showed U+2197 is one of the ten arrows
+                // NotoEmoji does carry, so this one was probably rendering — the
+                // guard flagged it on the block rule, not on measured tofu. Kept
+                // as phosphor anyway: the standing rule is icons in UI text,
+                // whatever the font happens to cover today.
+                egui::RichText::new(format!(
+                    "[{c}]  open docs {}",
+                    egui_phosphor::regular::ARROW_SQUARE_OUT
+                ))
+                .size(10.5)
+                .color(egui::Color32::from_rgb(110, 165, 240)),
+                url,
+            );
+        }
+        None => {
+            ui.label(
+                egui::RichText::new(format!("[{c}]"))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(140, 150, 170)),
+            );
+        }
+    }
+}
+
+/// Partition hover spans into groups that share a tooltip: two spans belong
+/// together when they OVERLAP, and the relation is transitive (A–B and B–C put
+/// all three in one group). Spans that merely touch at an edge — two adjacent
+/// diagnostics on one line — stay apart. Each group lists indices into `rects`
+/// in ascending order; groups are ordered by their first index.
+pub(crate) fn group_overlapping(rects: &[egui::Rect]) -> Vec<Vec<usize>> {
+    let overlaps = |a: &egui::Rect, b: &egui::Rect| {
+        a.min.x < b.max.x && b.min.x < a.max.x && a.min.y < b.max.y && b.min.y < a.max.y
+    };
+    // Union-find over a handful of spans: the visible diagnostics of a screen.
+    let mut parent: Vec<usize> = (0..rects.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for i in 0..rects.len() {
+        for j in i + 1..rects.len() {
+            if overlaps(&rects[i], &rects[j]) {
+                let (ri, rj) = (root(&mut parent, i), root(&mut parent, j));
+                if ri != rj {
+                    parent[ri.max(rj)] = ri.min(rj);
+                }
+            }
+        }
+    }
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut slot_of_root: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+    for i in 0..rects.len() {
+        let r = root(&mut parent, i);
+        let slot = *slot_of_root.entry(r).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[slot].push(i);
+    }
+    groups
+}
+
+/// The diagnostics of one tooltip, in the order they are listed: most severe
+/// first, then by position — so the order never depends on which source
+/// published first. The same finding reported twice (rust-analyzer's native
+/// pass AND cargo check both emit `unused_mut`) is listed once: same range, same
+/// code, same first line. The copy with the longer message wins, since rustc
+/// appends its `note:` / `help:` lines to the same headline.
+pub(crate) fn tooltip_order(diags: &[LspDiagnostic], members: &[usize]) -> Vec<usize> {
+    fn rank(s: crate::lsp::DiagSeverity) -> u8 {
+        match s {
+            crate::lsp::DiagSeverity::Error => 0,
+            crate::lsp::DiagSeverity::Warning => 1,
+            crate::lsp::DiagSeverity::Info => 2,
+            crate::lsp::DiagSeverity::Hint => 3,
+        }
+    }
+    let mut kept: Vec<usize> = Vec::new();
+    for &i in members {
+        let d = &diags[i];
+        let twin = kept.iter().position(|&k| {
+            let o = &diags[k];
+            (o.line, o.col, o.end_line, o.end_col) == (d.line, d.col, d.end_line, d.end_col)
+                && o.code == d.code
+                && o.headline() == d.headline()
+        });
+        match twin {
+            Some(p) if diags[kept[p]].message.len() < d.message.len() => kept[p] = i,
+            Some(_) => {}
+            None => kept.push(i),
+        }
+    }
+    kept.sort_by_key(|&i| {
+        let d = &diags[i];
+        (rank(d.severity), d.line, d.col, i)
+    });
+    kept
 }
 
 /// Draw a single inferred-type inlay hint as dim ghost text just past the END
@@ -638,6 +761,128 @@ pub fn show_inlay_hint(
             egui::Sense::hover(),
         )
         .on_hover_text(label);
+    }
+}
+
+#[cfg(test)]
+mod tooltip_group_tests {
+    use super::{group_overlapping, tooltip_order};
+    use crate::lsp::{DiagSeverity, LspDiagnostic};
+    use eframe::egui::{Rect, pos2};
+
+    fn r(x0: f32, x1: f32, y0: f32) -> Rect {
+        Rect::from_min_max(pos2(x0, y0), pos2(x1, y0 + 20.0))
+    }
+
+    fn diag(sev: DiagSeverity, col: u32, code: &str, message: &str, source: &str) -> LspDiagnostic {
+        LspDiagnostic {
+            severity: sev,
+            message: message.to_owned(),
+            line: 289,
+            col,
+            end_line: 289,
+            end_col: col + 29,
+            code: Some(code.to_owned()),
+            source: source.to_owned(),
+        }
+    }
+
+    /// The report: three diagnostics on one variable name opened three
+    /// tooltips on top of each other. They must share one.
+    #[test]
+    fn spans_on_the_same_name_share_one_tooltip() {
+        let rects = [
+            r(100.0, 400.0, 0.0),
+            r(100.0, 400.0, 0.0),
+            r(100.0, 400.0, 0.0),
+        ];
+        assert_eq!(group_overlapping(&rects), vec![vec![0, 1, 2]]);
+    }
+
+    #[test]
+    fn a_chain_of_overlaps_is_one_group() {
+        let rects = [r(0.0, 50.0, 0.0), r(200.0, 300.0, 0.0), r(40.0, 210.0, 0.0)];
+        assert_eq!(group_overlapping(&rects), vec![vec![0, 1, 2]]);
+    }
+
+    /// Two neighbouring diagnostics that only touch keep their own tooltips —
+    /// and so do the same columns on different lines.
+    #[test]
+    fn touching_or_other_line_spans_stay_apart() {
+        let rects = [r(0.0, 50.0, 0.0), r(50.0, 90.0, 0.0), r(0.0, 50.0, 20.0)];
+        assert_eq!(group_overlapping(&rects), vec![vec![0], vec![1], vec![2]]);
+    }
+
+    #[test]
+    fn no_spans_no_groups() {
+        assert!(group_overlapping(&[]).is_empty());
+    }
+
+    /// rust-analyzer and cargo check both report `unused_mut`: listed once, and
+    /// the copy carrying rustc's extra `note:` line is the one kept.
+    #[test]
+    fn the_same_finding_from_two_sources_is_listed_once() {
+        let diags = vec![
+            diag(
+                DiagSeverity::Warning,
+                9,
+                "unused_mut",
+                "variable does not need to be mutable",
+                "rust-analyzer",
+            ),
+            diag(
+                DiagSeverity::Warning,
+                9,
+                "unused_mut",
+                "variable does not need to be mutable\n`#[warn(unused_mut)]` on by default",
+                "rustc",
+            ),
+        ];
+        assert_eq!(tooltip_order(&diags, &[0, 1]), vec![1]);
+        assert_eq!(tooltip_order(&diags, &[1, 0]), vec![1]);
+    }
+
+    /// Different codes on the same span are different findings.
+    #[test]
+    fn different_codes_on_one_span_are_all_listed() {
+        let diags = vec![
+            diag(
+                DiagSeverity::Warning,
+                9,
+                "unused_mut",
+                "variable does not need to be mutable",
+                "rustc",
+            ),
+            diag(
+                DiagSeverity::Warning,
+                9,
+                "unused_variables",
+                "unused variable: `x`",
+                "rustc",
+            ),
+        ];
+        assert_eq!(tooltip_order(&diags, &[0, 1]).len(), 2);
+    }
+
+    /// "indiferent de ordine": whatever order the sources published in, the
+    /// error leads and the rest follow by position.
+    #[test]
+    fn errors_lead_whatever_the_arrival_order() {
+        let diags = vec![
+            diag(DiagSeverity::Hint, 5, "h", "hint", "rust-analyzer"),
+            diag(DiagSeverity::Warning, 20, "w2", "later warning", "rustc"),
+            diag(DiagSeverity::Warning, 9, "w1", "earlier warning", "rustc"),
+            diag(
+                DiagSeverity::Error,
+                30,
+                "E0308",
+                "mismatched types",
+                "rustc",
+            ),
+        ];
+        let expect = vec![3, 2, 1, 0];
+        assert_eq!(tooltip_order(&diags, &[0, 1, 2, 3]), expect);
+        assert_eq!(tooltip_order(&diags, &[3, 1, 0, 2]), expect);
     }
 }
 
