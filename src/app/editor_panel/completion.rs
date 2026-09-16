@@ -221,8 +221,12 @@ impl AppIde {
                         }
                         self.ed.completion_trigger_idx = idx;
                         self.ed.completion_sel = 0;
+                        // The last popup's rows: left in place they made the
+                        // key block treat the spinner as a list, so Enter
+                        // accepted an item from the PREVIOUS popup.
+                        self.ed.completion_filtered_items.clear();
                         self.ed.completion_open = true;
-                        self.completion_owner = slot;
+                        self.take_completion_ownership(slot);
                         self.ed.completion_note = None;
                     }
                 }
@@ -245,8 +249,12 @@ impl AppIde {
                         }
                         self.ed.completion_trigger_idx = idx;
                         self.ed.completion_sel = 0;
+                        // The last popup's rows: left in place they made the
+                        // key block treat the spinner as a list, so Enter
+                        // accepted an item from the PREVIOUS popup.
+                        self.ed.completion_filtered_items.clear();
                         self.ed.completion_open = true;
-                        self.completion_owner = slot;
+                        self.take_completion_ownership(slot);
                     }
                 }
 
@@ -272,8 +280,12 @@ impl AppIde {
                         }
                         self.ed.completion_trigger_idx = idx;
                         self.ed.completion_sel = 0;
+                        // The last popup's rows: left in place they made the
+                        // key block treat the spinner as a list, so Enter
+                        // accepted an item from the PREVIOUS popup.
+                        self.ed.completion_filtered_items.clear();
                         self.ed.completion_open = true;
-                        self.completion_owner = slot;
+                        self.take_completion_ownership(slot);
                     }
                 }
             }
@@ -759,13 +771,13 @@ impl AppIde {
                                 empty_completion_note_for_error(code, &message)
                             }
                             Some(lsp::CompletionFailure::Null) => {
-                                self.unlinked_module_hint().unwrap_or_else(|| {
+                                self.unlinked_module_hint(owner_file).unwrap_or_else(|| {
                                     "rust-analyzer does not analyse this file here (null answer)"
                                         .to_owned()
                                 })
                             }
                             None => self
-                                .unlinked_module_hint()
+                                .unlinked_module_hint(owner_file)
                                 .unwrap_or_else(|| "no suggestions here".to_owned()),
                         }
                     };
@@ -1104,14 +1116,34 @@ impl AppIde {
         }
     }
 
+    /// Hand the completion popup to `slot`, closing the other view's list.
+    ///
+    /// Only the OWNER's popup is ever closed or drawn, so a list the other view
+    /// still had open would otherwise stay flagged open for good, with nothing
+    /// on screen: that view's idle re-sync waits on it, Tab stops accepting a
+    /// type hint and Escape stops dropping extra carets there.
+    fn take_completion_ownership(&mut self, slot: crate::app::EditorSlot) {
+        let previous = self.completion_owner;
+        if previous != slot {
+            let ed = self.ed_of(previous);
+            ed.completion_open = false;
+            ed.completion_note = None;
+        }
+        self.completion_owner = slot;
+    }
+
     /// If the displayed file is NOT declared by its parent module (`mod x;`
     /// missing in the folder's `mod.rs`, or in `main.rs` for top-level files),
     /// return a hint naming the exact missing line. rust-analyzer detaches
     /// such files — no completions, no diagnostics — and every completion
     /// request in them answers `null`, which used to read as a popup that
     /// "appears and instantly disappears".
-    fn unlinked_module_hint(&self) -> Option<String> {
-        let ProjectFileId::UserFile(i) = self.selected_file else {
+    ///
+    /// `file` is the file the popup was opened in — the Reference editor's
+    /// own, not `selected_file`, which is always the MAIN editor's and made the
+    /// note describe a file the user was not looking at.
+    fn unlinked_module_hint(&self, file: ProjectFileId) -> Option<String> {
+        let ProjectFileId::UserFile(i) = file else {
             return None; // main.rs (and config files) are always linked
         };
         let (name, _) = self.project_tree.user_src_files.get(i)?;

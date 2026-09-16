@@ -23,6 +23,10 @@ use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 /// that lands on one of those is silently dead. See `extract_fn_key_survives`.
 const EXTRACT_FN_KEY: egui::Key = egui::Key::M;
 
+/// The key for "toggle the case of the selection", with Ctrl. Named for the same
+/// guard test as [`EXTRACT_FN_KEY`].
+const TOGGLE_CASE_KEY: egui::Key = egui::Key::U;
+
 pub(crate) mod add_dep;
 mod brace_block;
 mod breakpoint_gutter;
@@ -49,11 +53,13 @@ mod generics;
 mod idle_sync;
 pub(crate) mod impl_picker;
 mod inlay_hint;
+mod kbd_scope;
 mod let_annotation;
 mod move_lines;
 pub(crate) mod multi_cursor;
 mod rename;
 mod snippet;
+mod toggle_case;
 mod toolbar;
 pub(crate) mod usages;
 mod word_select;
@@ -371,7 +377,17 @@ impl AppIde {
         // here, but Ctrl+Space is FORWARDED to it (it renders later in
         // the frame, so it cannot consume the key itself — the event is
         // swallowed below before any TextEdit sees it).
-        let reference_owns_kbd = self.reference_was_focused;
+        //
+        // Only while the Reference view is still drawing: its pass is the one
+        // place that refreshes the flag, so once it stops running (MCU zone
+        // collapsed, reference file gone) a `true` would otherwise stick and
+        // keep the main editor's keyboard switched off for good.
+        let frame = ui.ctx().cumulative_frame_nr();
+        if !is_main {
+            self.reference_drawn_frame = Some(frame);
+        }
+        let reference_live = kbd_scope::reference_view_live(self.reference_drawn_frame, frame);
+        let reference_owns_kbd = self.reference_was_focused && reference_live;
         // Every shortcut below is gated on this, and `&&` short-circuits —
         // so when it is false `consume_key` is never called and the event
         // SURVIVES for the other view, which runs later in the frame. That
@@ -379,14 +395,15 @@ impl AppIde {
         // the other's keys. (Ctrl+Space is the exception: it is swallowed
         // unconditionally to silence the built-in completer, so it has to be
         // forwarded by hand — see below.)
+        // No text field holds the keyboard: nothing focused, or a button / menu
+        // item is. A context-menu action lands exactly here.
+        let no_text_focus = match ui.ctx().memory(|m| m.focused()) {
+            None => true,
+            Some(fid) => egui::TextEdit::load_state(ui.ctx(), fid).is_none(),
+        };
         let editor_kbd_active = if is_main {
             !reference_owns_kbd
-                && (self.ed.editor_was_focused
-                    || self.ed.find.had_focus
-                    || match ui.ctx().memory(|m| m.focused()) {
-                        None => true,
-                        Some(fid) => egui::TextEdit::load_state(ui.ctx(), fid).is_none(),
-                    })
+                && (self.ed.editor_was_focused || self.ed.find.had_focus || no_text_focus)
         } else {
             // The second view owns the keyboard exactly when it is focused.
             // The "nobody is focused" fallback above belongs to the main
@@ -411,15 +428,18 @@ impl AppIde {
         // Close a popup whose OWNER no longer holds the keyboard: it
         // would eat Enter/Escape for a caret the user has left.
         //
-        // Scoped BY OWNER, not by `editor_kbd_active`. This panel runs
-        // every frame including while the Reference editor has focus —
-        // which is exactly when ITS popup is up — so an unscoped close
-        // killed that popup one frame after it opened (reported as
-        // "the list appears and disappears").
-        let owner_lost_kbd = match self.completion_owner {
-            crate::app::EditorSlot::Main => !editor_kbd_active,
-            crate::app::EditorSlot::Reference => !reference_owns_kbd,
-        };
+        // Scoped BY OWNER, not by `editor_kbd_active` — that is THIS pass's
+        // scope, and both passes run every frame. See `owner_lost_keyboard`
+        // for the two ways reading the wrong one killed a popup one frame
+        // after it opened.
+        let owner_lost_kbd = kbd_scope::owner_lost_keyboard(
+            self.completion_owner,
+            is_main,
+            editor_kbd_active,
+            reference_owns_kbd,
+            reference_live,
+            no_text_focus,
+        );
         if owner_lost_kbd {
             // The owner's popup, which is not necessarily this editor's:
             // each view keeps its own list now, so closing `self.ed`'s here
@@ -462,9 +482,32 @@ impl AppIde {
         // editors, because this block runs before either one renders and the
         // Reference editor's `TextEdit` would otherwise see Enter first.
         let owner = self.completion_owner;
-        if self.ed_of(owner).completion_open {
+        // Never in the Reference pass for the MAIN editor's list. The main pass
+        // always runs first and already consumed what was meant for it; by the
+        // time the Reference pass runs, the main `TextEdit` has acted on every
+        // key left over, so taking one here would use the same Enter twice —
+        // a newline in the buffer AND an accept of a list that only just
+        // arrived. (The main pass does serve the Reference list: that view
+        // renders later, and its `TextEdit` must not see the key first.)
+        let serves_owner = owner == slot || (is_main && owner == crate::app::EditorSlot::Reference);
+        if serves_owner && self.ed_of(owner).completion_open {
             let has_items = !self.ed_of(owner).completion_filtered_items.is_empty();
-            if has_items {
+            // Escape closes the popup whether it holds rows or is still the
+            // "rust-analyzer…" spinner. Gating it on rows too left a slow answer
+            // impossible to dismiss: the list popped up anyway once it arrived.
+            if !has_items {
+                ui.input_mut(|inp| {
+                    if inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                        crate::lsp::debug_log("COMPLETION_CLOSE reason=escape-while-waiting");
+                        let ed = if owner == self.ed_slot {
+                            &mut self.ed
+                        } else {
+                            &mut self.ed_ref
+                        };
+                        ed.completion_open = false;
+                    }
+                });
+            } else {
                 let count = self.ed_of(owner).completion_filtered_items.len();
                 ui.input_mut(|inp| {
                     // `ed_of` inlined: the borrow has to span the whole block.
@@ -859,6 +902,20 @@ impl AppIde {
         // Ctrl+D → duplicate the line(s) at the cursor / selection.
         let mut ctrl_d_pressed = editor_kbd_active
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::D));
+        // Ctrl+U → toggle the case of the selection, or of the identifier
+        // under the caret. Consumed even when there is nothing to toggle:
+        // egui's own TextEdit binds Ctrl+U to "delete from the line start to
+        // the selection end", and letting it through erased code.
+        //
+        // Not while the Find bar is typing: there the press would rewrite a
+        // selection out of sight, so it stays with that field.
+        //
+        // Only a FIRST press acts. `consume_key` counts key repeats, and a held
+        // toggle would flip at the repeat rate and stop on whichever case the
+        // release happened to land.
+        let mut toggle_case_pressed = editor_kbd_active
+            && !self.ed.find.had_focus
+            && ui.input_mut(|i| consume_first_press(i, egui::Modifiers::CTRL, TOGGLE_CASE_KEY));
         // Shift+Alt+F → re-indent the whole file by block nesting.
         // (Moved off Ctrl+Shift+F, which now opens project-wide search.)
         // Unlike the Ctrl-based shortcuts, Alt+Shift doesn't suppress the
@@ -1175,11 +1232,32 @@ impl AppIde {
                     Some(fid) != self.ed.editor_widget_id
                         && egui::TextEdit::load_state(ui.ctx(), fid).is_some()
                 });
-                !self.reference_was_focused && !other_text_field
+                // The OTHER view owning the keys — which only the main pass can
+                // be told about. In the Reference pass `reference_was_focused`
+                // is this view's own focus, and reading it raw made a folded
+                // Reference file skip the unfold before Copy/Cut/line ops. The
+                // latched `reference_owns_kbd` also stops a stale flag (MCU zone
+                // collapsed) from blocking the main editor's unfold.
+                !(is_main && reference_owns_kbd) && !other_text_field
             } else {
                 editor_kbd_active
             };
-            let editing = owns_kbd && (line_op || fold::edit_pending(ui));
+            // Ctrl+U counts only when it will really change the text: a press
+            // on whitespace, or on `123`, must not expand every block for
+            // nothing. Read from the STORED caret, which between frames is in
+            // buffer space — the same text `display_code` holds.
+            let case_edit = toggle_case_pressed
+                && self.folds.contains_key(rel)
+                && self
+                    .fold_ids
+                    .get(&editor_id)
+                    .and_then(|&id| egui::TextEdit::load_state(ui.ctx(), id))
+                    .is_some_and(|st| {
+                        let carets =
+                            self.case_toggle_carets(st.cursor.char_range(), displayed_file);
+                        toggle_case::toggle_case(&display_code, &carets).is_some()
+                    });
+            let editing = owns_kbd && (line_op || case_edit || fold::edit_pending(ui));
             if editing && self.folds.contains_key(rel) {
                 // The caret needs no translation here: between frames it is
                 // always in BUFFER space (see the two conversion points
@@ -1759,6 +1837,7 @@ impl AppIde {
                 Some(A::ExtractFn) => extract_pressed = true,
                 Some(A::DeleteLine) => cut_line_pressed = true,
                 Some(A::DuplicateLine) => ctrl_d_pressed = true,
+                Some(A::ToggleCase) => toggle_case_pressed = true,
                 Some(A::Comment) => ctrl_slash_pressed = true,
                 Some(A::BlockComment) => ctrl_shift_slash_pressed = true,
                 Some(A::MoveUp) => ctrl_up_pressed = true,
@@ -2016,6 +2095,29 @@ impl AppIde {
                 egui::text::CCursor::new(new_hi),
             )));
             st.store(ui.ctx(), editor_resp.response.id);
+        }
+
+        // ── Ctrl+U: toggle case ───────────────────────────────────────
+        // Not through `line_op`, which re-stores the selection as
+        // `CCursorRange::two(lo, hi)` and so always puts the caret on the
+        // right end: a selection made leftwards would come back reversed, and
+        // Shift+Left would shrink it instead of growing it. The toggle never
+        // changes the text's length (see `toggle_case`), so the selection and
+        // every extra caret are already correct — nothing is stored at all.
+        // Skipped when `mc_replayed`, like the line ops.
+        if toggle_case_pressed && !mc_replayed {
+            let carets =
+                self.case_toggle_carets(editor_resp.state.cursor.char_range(), displayed_file);
+            if let Some(new_code) = toggle_case::toggle_case(&display_code, &carets) {
+                display_code = new_code;
+                // An accept from a list left open replaces `[word start..caret]`
+                // and would throw the toggled word away.
+                if self.ed.completion_open {
+                    crate::lsp::debug_log("COMPLETION_CLOSE reason=toggle-case");
+                    self.ed.completion_open = false;
+                }
+                self.ed.cargo_complete.open = false;
+            }
         }
 
         // ── Select the current Find match ─────────────────────────────
@@ -2381,6 +2483,51 @@ fn show_file_cycle_overlay(ctx: &egui::Context, fc: &file_cycle::FileCycle) {
         });
 }
 
+impl AppIde {
+    /// Every caret Ctrl+U acts on, as `(anchor, head)`: the primary, plus the
+    /// multi-cursor extras when they belong to `file` (they are only cleared
+    /// on a file switch later in the frame).
+    fn case_toggle_carets(
+        &self,
+        primary: Option<egui::text::CCursorRange>,
+        file: ProjectFileId,
+    ) -> Vec<(usize, usize)> {
+        let mut carets: Vec<(usize, usize)> = primary
+            .map(|r| (r.secondary.index, r.primary.index))
+            .into_iter()
+            .collect();
+        if self.ed.extra_cursors_file == Some(file) {
+            carets.extend(self.ed.extra_cursors.iter().map(|c| (c.anchor, c.head)));
+        }
+        carets
+    }
+}
+
+/// Consume every press of `key` matching `modifiers` — key repeats included —
+/// and report whether one of them was a FIRST press. `consume_key` treats a
+/// repeat like a press, which is wrong for a toggle held down.
+fn consume_first_press(
+    i: &mut egui::InputState,
+    modifiers: egui::Modifiers,
+    key: egui::Key,
+) -> bool {
+    let mut first = false;
+    i.events.retain(|e| match e {
+        egui::Event::Key {
+            key: k,
+            pressed: true,
+            repeat,
+            modifiers: m,
+            ..
+        } if *k == key && m.matches_logically(modifiers) => {
+            first |= !*repeat;
+            false
+        }
+        _ => true,
+    });
+    first
+}
+
 /// The text of the line containing char index `idx` (no trailing newline).
 /// Used by the context-menu "Copy" when there is no selection.
 fn current_line(chars: &[char], idx: usize) -> String {
@@ -2399,8 +2546,74 @@ fn current_line(chars: &[char], idx: usize) -> String {
 }
 
 #[cfg(test)]
+mod first_press_tests {
+    use super::consume_first_press;
+    use eframe::egui::{Event, InputState, Key, Modifiers};
+
+    fn key(k: Key, repeat: bool, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat,
+            modifiers,
+        }
+    }
+
+    fn run(events: Vec<Event>) -> (bool, usize) {
+        let mut i = InputState::default();
+        i.events = events;
+        let hit = consume_first_press(&mut i, Modifiers::CTRL, Key::U);
+        (hit, i.events.len())
+    }
+
+    #[test]
+    fn a_press_fires_and_its_repeats_are_swallowed() {
+        let events = vec![
+            key(Key::U, false, Modifiers::CTRL),
+            key(Key::U, true, Modifiers::CTRL),
+        ];
+        assert_eq!(run(events), (true, 0));
+    }
+
+    /// Holding the key: later frames carry only repeats. They must neither
+    /// toggle again nor reach egui's own Ctrl+U, which deletes text.
+    #[test]
+    fn a_frame_of_repeats_is_swallowed_without_firing() {
+        let events = vec![
+            key(Key::U, true, Modifiers::CTRL),
+            key(Key::U, true, Modifiers::CTRL),
+        ];
+        assert_eq!(run(events), (false, 0));
+    }
+
+    #[test]
+    fn other_keys_and_a_bare_u_are_left_alone() {
+        let events = vec![
+            key(Key::D, false, Modifiers::CTRL),
+            key(Key::U, false, Modifiers::NONE),
+        ];
+        assert_eq!(run(events), (false, 2));
+    }
+
+    /// Lenient like `consume_key`: egui's delete binding ignores Shift and Alt,
+    /// so a stricter match would let Ctrl+Shift+U keep erasing code.
+    #[test]
+    fn extra_shift_or_alt_still_matches() {
+        assert_eq!(
+            run(vec![key(Key::U, false, Modifiers::CTRL | Modifiers::SHIFT)]),
+            (true, 0)
+        );
+        assert_eq!(
+            run(vec![key(Key::U, false, Modifiers::CTRL | Modifiers::ALT)]),
+            (true, 0)
+        );
+    }
+}
+
+#[cfg(test)]
 mod shortcut_guard {
-    use super::EXTRACT_FN_KEY;
+    use super::{EXTRACT_FN_KEY, TOGGLE_CASE_KEY};
     use eframe::egui::Key;
 
     /// Keys `egui-winit` REWRITES into a clipboard event before egui ever sees
@@ -2429,6 +2642,17 @@ mod shortcut_guard {
         assert!(
             !REWRITTEN_WITH_SHIFT.contains(&ERROR_STEP_KEY),
             "Shift+{ERROR_STEP_KEY:?} is rewritten into a clipboard event by              egui-winit — the key event never reaches egui, so stepping backwards              would silently do nothing"
+        );
+    }
+
+    /// On X/C/V/Insert the toggle would never fire, and a chord rewritten into
+    /// Cut or Paste would edit the selection instead of re-casing it.
+    #[test]
+    fn toggle_case_key_survives_the_clipboard_rewrite() {
+        assert!(
+            !REWRITTEN_WITH_CTRL.contains(&TOGGLE_CASE_KEY),
+            "{TOGGLE_CASE_KEY:?} with Ctrl is rewritten into a clipboard event by \
+             egui-winit — the key event never reaches egui, so the shortcut is dead"
         );
     }
 

@@ -2502,7 +2502,24 @@ impl AppIde {
                                     outer.center().to_vec2() - scale * scene.center().to_vec2(),
                                 ) * egui::emath::TSTransform::from_scaling(scale)
                             };
-                            let ptr = ui.input(|i| i.pointer.hover_pos());
+                            // Only when this panel is the TOPMOST thing under
+                            // the pointer, which a bare `outer.contains` never
+                            // asked. Whatever is drawn over the canvas - the New
+                            // Project chip list, a window, a popup - scrolls its
+                            // own content with that wheel, and the part it does
+                            // not use would zoom the chip behind it.
+                            let hover = ui.input(|i| i.pointer.hover_pos());
+                            let ptr = hover.filter(|_| ui.rect_contains_pointer(outer));
+                            // Refused, the wheel must not reach the Scene either:
+                            // its hit test reaches a few points in under the edge
+                            // of whatever covers the canvas, and it would PAN by
+                            // the wheel there. Held back, then handed back after
+                            // it for anything drawn later in the frame.
+                            let held = if ptr.is_none() && hover.is_some_and(|p| outer.contains(p)) {
+                                ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta))
+                            } else {
+                                egui::Vec2::ZERO
+                            };
                             let (scroll_y, ctrl) =
                                 ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
                             // Over the pin-function list inside the chip the wheel
@@ -2555,6 +2572,9 @@ impl AppIde {
                                     content_bounds = ui.min_rect();
                                     r
                                 });
+                            if held != egui::Vec2::ZERO {
+                                ui.input_mut(|i| i.smooth_scroll_delta += held);
+                            }
                             let (inner, fn_rect) = scene.inner;
                             // Screen rect of the function list — next frame's wheel
                             // uses it to tell "scroll the list" from "zoom".

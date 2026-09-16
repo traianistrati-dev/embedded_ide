@@ -16,6 +16,9 @@ pub(super) enum EditorAction {
     Comment,
     /// Wrap the selected lines in one `/* … */` (Ctrl+Shift+/).
     BlockComment,
+    /// UPPER / lower case of the selection, or of the identifier at the caret
+    /// (Ctrl+U).
+    ToggleCase,
     MoveUp,
     MoveDown,
     Format,
@@ -96,6 +99,13 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
             EditorAction::BlockComment,
         );
     }
+    item(
+        ui,
+        ph::TEXT_AA,
+        "Toggle case",
+        "Ctrl+U",
+        EditorAction::ToggleCase,
+    );
     item(
         ui,
         ph::ARROW_UP,

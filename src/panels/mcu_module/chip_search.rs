@@ -83,7 +83,10 @@ pub struct Hit {
 ///
 /// A borrowed row rather than the real `McuDefinition`, so the ranking can be
 /// tested without building chip definitions.
-#[derive(Clone, Copy, Debug)]
+///
+/// `Hash` so the list can tell a re-imported definition from the old one: the
+/// registry keeps its length when a chip is replaced in place.
+#[derive(Clone, Copy, Debug, Hash)]
 pub struct RegistryRow<'a> {
     pub id: &'a str,
     pub name: &'a str,

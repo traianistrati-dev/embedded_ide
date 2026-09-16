@@ -528,7 +528,19 @@ pub fn draw_graph_clock(
             outer.center().to_vec2() - scale * scene.center().to_vec2(),
         ) * egui::emath::TSTransform::from_scaling(scale)
     };
-    let ptr = ui.input(|i| i.pointer.hover_pos());
+    // Only when the diagram is the TOPMOST thing under the pointer: anything
+    // drawn over it (the New Project chip list, a window) scrolls its own
+    // content, and what it leaves of the wheel must not zoom the diagram.
+    let hover = ui.input(|i| i.pointer.hover_pos());
+    let ptr = hover.filter(|_| ui.rect_contains_pointer(outer));
+    // Refused, the wheel must not reach the Scene either: its hit test reaches a
+    // few points in under the edge of whatever covers the diagram, and it would
+    // PAN by the wheel there. Held back, then handed back after it.
+    let held = if ptr.is_none() && hover.is_some_and(|p| outer.contains(p)) {
+        ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta))
+    } else {
+        egui::Vec2::ZERO
+    };
     let (scroll_y, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
     if let Some(ptr) = ptr
         && scroll_y != 0.0
@@ -585,6 +597,9 @@ pub fn draw_graph_clock(
                 }
             });
         });
+    if held != egui::Vec2::ZERO {
+        ui.input_mut(|i| i.smooth_scroll_delta += held);
+    }
 
     // A drag moved boxes: rebuild the primitives from them and record the
     // positions for `project_structure.config`. NOT `changed` — the layout is
