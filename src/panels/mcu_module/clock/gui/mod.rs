@@ -528,7 +528,12 @@ pub fn draw_graph_clock(
             outer.center().to_vec2() - scale * scene.center().to_vec2(),
         ) * egui::emath::TSTransform::from_scaling(scale)
     };
-    let ptr = ui.input(|i| i.pointer.hover_pos());
+    // Only when the diagram is the TOPMOST thing under the pointer: anything
+    // drawn over it (the New Project chip list, a window) scrolls its own
+    // content, and what it leaves of the wheel must not zoom the diagram.
+    let ptr = ui
+        .input(|i| i.pointer.hover_pos())
+        .filter(|_| ui.rect_contains_pointer(outer));
     let (scroll_y, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
     if let Some(ptr) = ptr
         && scroll_y != 0.0

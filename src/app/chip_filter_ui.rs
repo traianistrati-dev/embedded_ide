@@ -353,31 +353,29 @@ pub(super) fn show_filters(
                         "Presence only. Derived from the vendor data on this machine, \
                          so it lists exactly what your CubeMX knows about.",
                     ));
-                    egui::ScrollArea::vertical()
-                        .id_salt("chip_filter_advanced_scroll")
-                        .max_height(160.0)
-                        .show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                for (ty, parts) in &facets.presence {
-                                    let mut on = f.present.contains(ty);
-                                    if ui
-                                        .add(
-                                            egui::Button::new(egui::RichText::new(ty).size(10.5))
-                                                .selected(on),
-                                        )
-                                        .on_hover_text(format!("{parts} parts have it"))
-                                        .clicked()
-                                    {
-                                        on = !on;
-                                        if on {
-                                            f.present.insert(ty.clone());
-                                        } else {
-                                            f.present.remove(ty);
-                                        }
-                                    }
+                    // No scroll area of its own: the dialog body already
+                    // scrolls, and a scroll area inside another splits the
+                    // wheel between them - the same trap that hid the results.
+                    ui.horizontal_wrapped(|ui| {
+                        for (ty, parts) in &facets.presence {
+                            let mut on = f.present.contains(ty);
+                            if ui
+                                .add(
+                                    egui::Button::new(egui::RichText::new(ty).size(10.5))
+                                        .selected(on),
+                                )
+                                .on_hover_text(format!("{parts} parts have it"))
+                                .clicked()
+                            {
+                                on = !on;
+                                if on {
+                                    f.present.insert(ty.clone());
+                                } else {
+                                    f.present.remove(ty);
                                 }
-                            });
-                        });
+                            }
+                        }
+                    });
                 });
             }
         });

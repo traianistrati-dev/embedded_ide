@@ -5,6 +5,7 @@
 //! `ui` plus a `save_project_needed` flag that the caller acts on afterwards
 //! (writing the whole project to disk when the tree changed).
 
+use super::chip_search_ui;
 use super::{AppIde, McuTab, ProjectFileId};
 use crate::panels::mcu_module::{codegen, registry, stm32_pin_data};
 use eframe::egui;
@@ -973,10 +974,35 @@ impl AppIde {
         // already borrows `self`; acted on after it returns).
         let mut open_form_blank = false;
         let mut open_form_edit: Option<String> = None;
-        egui::Window::new("New Project")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::RIGHT_TOP, [20.0, 10.0])
+
+        // ── Where the chip matches go ────────────────────────────────────
+        // Beside the dialog when the screen has room for a real column there,
+        // inside it otherwise. Decided up front from the width the dialog is
+        // pinned to, because the body's height depends on the answer.
+        let content = ui.ctx().content_rect();
+        let dialog_outer_w = chip_search_ui::DIALOG_W
+            + egui::Frame::window(&ui.ctx().global_style())
+                .total_margin()
+                .sum()
+                .x;
+        let beside = chip_search_ui::side_list_fits(content.width(), dialog_outer_w);
+        // Inside the dialog the list shares the 70% the body had: a short box
+        // while nothing is asked, most of it once there are matches to show.
+        let list_h = if beside {
+            0.0
+        } else if self.chip_search.is_asking() {
+            content.height() * 0.35
+        } else {
+            (content.height() * 0.12).max(80.0)
+        };
+        let body_h = (content.height() * 0.70 - list_h).max(content.height() * 0.30);
+        // Above the status bar, which is already laid out by now.
+        let list_bottom = ui
+            .available_rect_before_wrap()
+            .bottom()
+            .min(content.bottom());
+
+        let dialog_rect = new_project_window()
             .show(ui.ctx(), |ui| {
                 // The dialog outgrew the screen. It is anchored and NOT
                 // resizable, so a window taller than the viewport simply has an
@@ -984,10 +1010,12 @@ impl AppIde {
                 // five sliders, a ten-cell grid and fifty chips at once.
                 //
                 // The ACTION ROW stays outside this: a Create button that
-                // scrolls away is the same bug wearing a smaller hat.
+                // scrolls away is the same bug wearing a smaller hat. So do
+                // the chip matches, which are never nested in this scroll
+                // area - see `chip_search_ui`.
                 egui::ScrollArea::vertical()
                     .id_salt("new_project_body")
-                    .max_height(ui.ctx().content_rect().height() * 0.70)
+                    .max_height(body_h)
                     .show(ui, |ui| {
                         ui.add_space(4.0);
                         ui.label("This will clear all user files and folders.");
@@ -1085,7 +1113,7 @@ impl AppIde {
                         // rather than by hunting for the file that happens to hold it.
                         ui.add_space(6.0);
                         ui.separator();
-                        self.show_chip_search(ui);
+                        self.show_chip_search_controls(ui);
                         ui.separator();
                         // ── Imports ───────────────────────────────────────────────
                         // Collapsed by default: these four are how chip data GETS
@@ -1275,6 +1303,14 @@ impl AppIde {
                             ui.label(egui::RichText::new(msg).size(11.0).color(col));
                         }
                     });
+                if !beside {
+                    ui.separator();
+                    chip_search_ui::results_host(
+                        ui,
+                        egui::vec2(chip_search_ui::DIALOG_W, list_h),
+                        |ui| self.show_chip_results(ui, false),
+                    );
+                }
                 ui.separator();
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1381,7 +1417,8 @@ impl AppIde {
                     }
                 });
                 ui.add_space(4.0);
-            });
+            })
+            .map(|r| r.response.rect);
 
         // ── Act on deferred form-open requests ─────────────────────────────
         if open_form_blank {
@@ -1392,7 +1429,35 @@ impl AppIde {
                 self.open_mcu_form(Some(seed));
             }
         }
+
+        // ── The chip matches, left of the dialog ───────────────────────────
+        // After the window, so the column follows THIS frame's dialog rect;
+        // and only while the dialog is still open, so New Project and Cancel
+        // take it away on the same frame.
+        if beside
+            && self.confirm_new_project
+            && let Some(dialog) = dialog_rect
+        {
+            let rect = chip_search_ui::list_rect(content, dialog, list_bottom);
+            if rect.is_positive() {
+                chip_search_ui::list_surface(ui.ctx(), rect, |ui| self.show_chip_results(ui, true));
+            }
+        }
     }
+}
+
+/// The New Project window, as every frame and the layout tests build it.
+///
+/// Pinned to [`chip_search_ui::DIALOG_W`]. The pin alone does not make the
+/// window that wide - a non-resizable window takes its CONTENT's width - so
+/// the separator above the action row, which fills the width, is part of it.
+pub(super) fn new_project_window() -> egui::Window<'static> {
+    egui::Window::new("New Project")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::RIGHT_TOP, [20.0, 10.0])
+        .min_width(chip_search_ui::DIALOG_W)
+        .max_width(chip_search_ui::DIALOG_W)
 }
 
 /// What the crates.io index says about one chip's `embassy-stm32` feature.

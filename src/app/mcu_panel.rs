@@ -2502,7 +2502,15 @@ impl AppIde {
                                     outer.center().to_vec2() - scale * scene.center().to_vec2(),
                                 ) * egui::emath::TSTransform::from_scaling(scale)
                             };
-                            let ptr = ui.input(|i| i.pointer.hover_pos());
+                            // Only when this panel is the TOPMOST thing under
+                            // the pointer, which a bare `outer.contains` never
+                            // asked. Whatever is drawn over the canvas - the New
+                            // Project chip list, a window, a popup - scrolls its
+                            // own content with that wheel, and the part it does
+                            // not use would zoom the chip behind it.
+                            let ptr = ui
+                                .input(|i| i.pointer.hover_pos())
+                                .filter(|_| ui.rect_contains_pointer(outer));
                             let (scroll_y, ctrl) =
                                 ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
                             // Over the pin-function list inside the chip the wheel
