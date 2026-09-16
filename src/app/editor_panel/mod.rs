@@ -53,6 +53,7 @@ mod generics;
 mod idle_sync;
 pub(crate) mod impl_picker;
 mod inlay_hint;
+mod kbd_scope;
 mod let_annotation;
 mod move_lines;
 pub(crate) mod multi_cursor;
@@ -374,7 +375,17 @@ impl AppIde {
         // here, but Ctrl+Space is FORWARDED to it (it renders later in
         // the frame, so it cannot consume the key itself — the event is
         // swallowed below before any TextEdit sees it).
-        let reference_owns_kbd = self.reference_was_focused;
+        //
+        // Only while the Reference view is still drawing: its pass is the one
+        // place that refreshes the flag, so once it stops running (MCU zone
+        // collapsed, reference file gone) a `true` would otherwise stick and
+        // keep the main editor's keyboard switched off for good.
+        let frame = ui.ctx().cumulative_frame_nr();
+        if !is_main {
+            self.reference_drawn_frame = Some(frame);
+        }
+        let reference_live = kbd_scope::reference_view_live(self.reference_drawn_frame, frame);
+        let reference_owns_kbd = self.reference_was_focused && reference_live;
         // Every shortcut below is gated on this, and `&&` short-circuits —
         // so when it is false `consume_key` is never called and the event
         // SURVIVES for the other view, which runs later in the frame. That
@@ -382,14 +393,15 @@ impl AppIde {
         // the other's keys. (Ctrl+Space is the exception: it is swallowed
         // unconditionally to silence the built-in completer, so it has to be
         // forwarded by hand — see below.)
+        // No text field holds the keyboard: nothing focused, or a button / menu
+        // item is. A context-menu action lands exactly here.
+        let no_text_focus = match ui.ctx().memory(|m| m.focused()) {
+            None => true,
+            Some(fid) => egui::TextEdit::load_state(ui.ctx(), fid).is_none(),
+        };
         let editor_kbd_active = if is_main {
             !reference_owns_kbd
-                && (self.ed.editor_was_focused
-                    || self.ed.find.had_focus
-                    || match ui.ctx().memory(|m| m.focused()) {
-                        None => true,
-                        Some(fid) => egui::TextEdit::load_state(ui.ctx(), fid).is_none(),
-                    })
+                && (self.ed.editor_was_focused || self.ed.find.had_focus || no_text_focus)
         } else {
             // The second view owns the keyboard exactly when it is focused.
             // The "nobody is focused" fallback above belongs to the main
@@ -414,15 +426,18 @@ impl AppIde {
         // Close a popup whose OWNER no longer holds the keyboard: it
         // would eat Enter/Escape for a caret the user has left.
         //
-        // Scoped BY OWNER, not by `editor_kbd_active`. This panel runs
-        // every frame including while the Reference editor has focus —
-        // which is exactly when ITS popup is up — so an unscoped close
-        // killed that popup one frame after it opened (reported as
-        // "the list appears and disappears").
-        let owner_lost_kbd = match self.completion_owner {
-            crate::app::EditorSlot::Main => !editor_kbd_active,
-            crate::app::EditorSlot::Reference => !reference_owns_kbd,
-        };
+        // Scoped BY OWNER, not by `editor_kbd_active` — that is THIS pass's
+        // scope, and both passes run every frame. See `owner_lost_keyboard`
+        // for the two ways reading the wrong one killed a popup one frame
+        // after it opened.
+        let owner_lost_kbd = kbd_scope::owner_lost_keyboard(
+            self.completion_owner,
+            is_main,
+            editor_kbd_active,
+            reference_owns_kbd,
+            reference_live,
+            no_text_focus,
+        );
         if owner_lost_kbd {
             // The owner's popup, which is not necessarily this editor's:
             // each view keeps its own list now, so closing `self.ed`'s here
@@ -465,9 +480,32 @@ impl AppIde {
         // editors, because this block runs before either one renders and the
         // Reference editor's `TextEdit` would otherwise see Enter first.
         let owner = self.completion_owner;
-        if self.ed_of(owner).completion_open {
+        // Never in the Reference pass for the MAIN editor's list. The main pass
+        // always runs first and already consumed what was meant for it; by the
+        // time the Reference pass runs, the main `TextEdit` has acted on every
+        // key left over, so taking one here would use the same Enter twice —
+        // a newline in the buffer AND an accept of a list that only just
+        // arrived. (The main pass does serve the Reference list: that view
+        // renders later, and its `TextEdit` must not see the key first.)
+        let serves_owner = owner == slot || (is_main && owner == crate::app::EditorSlot::Reference);
+        if serves_owner && self.ed_of(owner).completion_open {
             let has_items = !self.ed_of(owner).completion_filtered_items.is_empty();
-            if has_items {
+            // Escape closes the popup whether it holds rows or is still the
+            // "rust-analyzer…" spinner. Gating it on rows too left a slow answer
+            // impossible to dismiss: the list popped up anyway once it arrived.
+            if !has_items {
+                ui.input_mut(|inp| {
+                    if inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                        crate::lsp::debug_log("COMPLETION_CLOSE reason=escape-while-waiting");
+                        let ed = if owner == self.ed_slot {
+                            &mut self.ed
+                        } else {
+                            &mut self.ed_ref
+                        };
+                        ed.completion_open = false;
+                    }
+                });
+            } else {
                 let count = self.ed_of(owner).completion_filtered_items.len();
                 ui.input_mut(|inp| {
                     // `ed_of` inlined: the borrow has to span the whole block.
@@ -1192,7 +1230,13 @@ impl AppIde {
                     Some(fid) != self.ed.editor_widget_id
                         && egui::TextEdit::load_state(ui.ctx(), fid).is_some()
                 });
-                !self.reference_was_focused && !other_text_field
+                // The OTHER view owning the keys — which only the main pass can
+                // be told about. In the Reference pass `reference_was_focused`
+                // is this view's own focus, and reading it raw made a folded
+                // Reference file skip the unfold before Copy/Cut/line ops. The
+                // latched `reference_owns_kbd` also stops a stale flag (MCU zone
+                // collapsed) from blocking the main editor's unfold.
+                !(is_main && reference_owns_kbd) && !other_text_field
             } else {
                 editor_kbd_active
             };

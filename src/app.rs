@@ -1628,6 +1628,12 @@ pub struct AppIde {
     /// that editor renders; read by the main editor's keyboard-scope gate,
     /// which runs earlier in the frame — hence "last frame".
     reference_was_focused: bool,
+    /// `cumulative_frame_nr` of the last frame the Reference editor actually
+    /// drew. `reference_was_focused` only means anything while that view keeps
+    /// drawing: collapsing the MCU zone, or the reference file disappearing,
+    /// stops the Reference pass without anything clearing the flag, and a stale
+    /// `true` handed every main-editor keystroke to a view that no longer runs.
+    reference_drawn_frame: Option<u64>,
     /// Ctrl+Space arrived while the Reference editor owned the keyboard.
     /// Consumed by that editor when it renders, later in the same frame.
     reference_ctrl_space: bool,
@@ -2261,6 +2267,7 @@ impl AppIde {
             completion_owner: EditorSlot::Main,
             build_text_snapshot: HashMap::new(),
             reference_was_focused: false,
+            reference_drawn_frame: None,
             reference_ctrl_space: false,
             reference_escape: false,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
