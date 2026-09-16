@@ -255,21 +255,32 @@ pub(super) fn list_rect(content: egui::Rect, dialog: egui::Rect, bottom: f32) ->
     )
 }
 
-/// The results column's own surface, at `rect`.
+/// The id of the results column's layer.
+pub(super) const LIST_AREA: &str = "new_project_chip_list";
+
+/// The results column's own surface, at `rect`, stacked with `dialog` — the
+/// New Project window's layer.
 ///
-/// An `Area` on the BACKGROUND order rather than a second window. It paints
-/// over the panels, whose layer is never raised, and under every window — so
-/// the New MCU form opened from this dialog stays on top of it, whichever of
-/// the two was clicked last.
+/// A SUBLAYER of the dialog, which egui re-seats directly above its parent at
+/// the end of every frame, so the pair stack as one window: above the panels
+/// and their floating overlays, under any window raised over the dialog (the
+/// New MCU form opened from it), and a click on the column does not lift it
+/// past its parent. It was on the Background order first, under every Area -
+/// and the editor's error list is a Middle-order Area that then covered the
+/// rows and took their clicks.
 pub(super) fn list_surface<R>(
     ctx: &egui::Context,
     rect: egui::Rect,
+    dialog: egui::LayerId,
     add: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    let id = egui::Id::new(LIST_AREA);
+    // Every frame: egui drops the parent links once it has applied them.
+    ctx.set_sublayer(dialog, egui::LayerId::new(egui::Order::Middle, id));
     let frame = egui::Frame::window(&ctx.global_style());
     let inner = (rect.size() - frame.total_margin().sum()).max(egui::Vec2::ZERO);
-    egui::Area::new(egui::Id::new("new_project_chip_list"))
-        .order(egui::Order::Background)
+    egui::Area::new(id)
+        .order(egui::Order::Middle)
         // The default LEFT_TOP pivot keeps the position independent of the
         // size, which an Area only learns at the END of a frame: any other
         // pivot places it from last frame's size.
@@ -736,10 +747,10 @@ impl super::AppIde {
 
     /// The other half: what matched, wherever the dialog put it.
     ///
-    /// `beside_dialog` is true for the column left of the dialog. There the
-    /// last import's outcome is repeated at the top, next to the row that was
-    /// clicked — the dialog's own copy is a screen width away.
-    pub(super) fn show_chip_results(&mut self, ui: &mut egui::Ui, beside_dialog: bool) {
+    /// The last import's outcome is repeated at the top, next to the row that
+    /// was clicked: the dialog's own copy is a screen width away beside it, and
+    /// scrolled out of sight under the Filters inside it.
+    pub(super) fn show_chip_results(&mut self, ui: &mut egui::Ui) {
         let mut action: Option<Action> = None;
         let mut add_folder = false;
 
@@ -761,7 +772,7 @@ impl super::AppIde {
             ..
         } = chip_search;
 
-        if beside_dialog && let Some(msg) = mcu_import_status.as_deref() {
+        if let Some(msg) = mcu_import_status.as_deref() {
             // One line: the report can run to four paragraphs, and the whole of
             // it is on hover and in the dialog.
             ui.add(
@@ -1002,7 +1013,9 @@ mod tests {
     use crate::panels::mcu_module::chip_filter::RowMetrics;
     use crate::panels::mcu_module::chip_sources::{ChipSource, SourceKind};
 
-    const LIST_LAYER: &str = "new_project_chip_list";
+    fn list_layer() -> egui::LayerId {
+        egui::LayerId::new(egui::Order::Middle, egui::Id::new(LIST_AREA))
+    }
 
     fn app_ctx() -> egui::Context {
         let ctx = egui::Context::default();
@@ -1097,13 +1110,15 @@ mod tests {
         }
     }
 
-    /// One pass of the New Project layout: the real window builder around the
-    /// real Filters panel (held open), the dialog's action-row tail, then the
-    /// column, placed as the dialog places it.
+    /// One pass of the New Project layout: `before` (what the app draws earlier
+    /// in the frame), the real window builder around the real Filters panel,
+    /// the dialog's action-row tail, the column placed as the dialog places it,
+    /// then `after`.
     fn dialog_pass(
         ctx: &egui::Context,
         raw: egui::RawInput,
         hits: &[Hit],
+        before: &mut dyn FnMut(&mut egui::Ui),
         after: &mut dyn FnMut(&mut egui::Ui),
     ) -> Measured {
         let mut m = Measured::default();
@@ -1111,8 +1126,9 @@ mod tests {
         let mut applied = ChipFilter::default();
         let facets = Facets::default();
         let out = ctx.run_ui(raw, |ui| {
+            before(ui);
             let content = ui.ctx().content_rect();
-            m.dialog = crate::app::dialogs::new_project_window()
+            let dialog = crate::app::dialogs::new_project_window()
                 .show(ui.ctx(), |ui| {
                     let body = egui::ScrollArea::vertical()
                         .id_salt("new_project_body")
@@ -1130,10 +1146,11 @@ mod tests {
                     });
                     ui.add_space(4.0);
                 })
-                .map(|r| r.response.rect)
-                .unwrap_or(egui::Rect::NOTHING);
+                .expect("nothing closes the dialog here")
+                .response;
+            m.dialog = dialog.rect;
             m.list = list_rect(content, m.dialog, content.bottom());
-            let out = list_surface(ui.ctx(), m.list, |ui| {
+            let out = list_surface(ui.ctx(), m.list, dialog.layer_id, |ui| {
                 m.row_h = row_height(ui);
                 results_list(ui, hits, None)
             });
@@ -1219,7 +1236,13 @@ mod tests {
                     (7, Some(at)) => click(at, false),
                     _ => vec![],
                 };
-                let m = dialog_pass(&ctx, input(screen, pass, events), rows, &mut |_| {});
+                let m = dialog_pass(
+                    &ctx,
+                    input(screen, pass, events),
+                    rows,
+                    &mut |_| {},
+                    &mut |_| {},
+                );
                 // Last frame's position: the first frame after the wide
                 // window still draws the dialog where the old width put it.
                 header = m.filters_header.map(|r| r.center());
@@ -1288,11 +1311,8 @@ mod tests {
             let inside = m.list.left_top() + egui::vec2(20.0, 20.0);
             assert_eq!(
                 ctx.layer_id_at(inside),
-                Some(egui::LayerId::new(
-                    egui::Order::Background,
-                    egui::Id::new(LIST_LAYER)
-                )),
-                "the point is on the column's own layer, not just any background one"
+                Some(list_layer()),
+                "the point is on the column's own layer"
             );
         }
     }
@@ -1312,7 +1332,13 @@ mod tests {
         };
         let mut pass = 0;
         let mut run = |events: Vec<egui::Event>| {
-            let m = dialog_pass(&ctx, input(screen, pass, events), &rows, &mut form);
+            let m = dialog_pass(
+                &ctx,
+                input(screen, pass, events),
+                &rows,
+                &mut |_| {},
+                &mut form,
+            );
             pass += 1;
             m
         };
@@ -1352,12 +1378,48 @@ mod tests {
                 egui::Id::new("New MCU")
             ))
         );
+        assert_eq!(ctx.layer_id_at(on_list), Some(list_layer()));
+    }
+
+    #[test]
+    fn a_panel_overlay_never_covers_the_list() {
+        // The editor's error list: an Area of its own on the Middle order,
+        // on screen before the dialog opens and drawn earlier in every frame.
+        let screen = egui::vec2(1366.0, 768.0);
+        let ctx = app_ctx();
+        let rows = hits(30);
+        let overlay_rect =
+            egui::Rect::from_min_size(egui::pos2(395.0, 50.0), egui::vec2(272.0, 150.0));
+        let mut overlay = |ui: &mut egui::Ui| {
+            egui::Area::new(egui::Id::new("editor_error_list"))
+                .fixed_pos(overlay_rect.min)
+                .order(egui::Order::Middle)
+                .show(ui.ctx(), |ui| {
+                    ui.set_min_size(overlay_rect.size());
+                });
+        };
+        for pass in 0..3 {
+            let _ = ctx.run_ui(input(screen, pass, vec![]), |ui| overlay(ui));
+        }
+        let mut m = Measured::default();
+        for pass in 3..9 {
+            m = dialog_pass(
+                &ctx,
+                input(screen, pass, vec![]),
+                &rows,
+                &mut overlay,
+                &mut |_| {},
+            );
+        }
+        let both = overlay_rect.center();
+        assert!(
+            m.list.contains(both),
+            "the two must overlap for this to test anything"
+        );
         assert_eq!(
-            ctx.layer_id_at(on_list),
-            Some(egui::LayerId::new(
-                egui::Order::Background,
-                egui::Id::new(LIST_LAYER)
-            ))
+            ctx.layer_id_at(both),
+            Some(list_layer()),
+            "the overlay covers the rows, and would take their clicks"
         );
     }
 
@@ -1368,7 +1430,13 @@ mod tests {
         let rows = hits(60);
         let mut last = Measured::default();
         for pass in 0..4 {
-            last = dialog_pass(&ctx, input(screen, pass, vec![]), &rows, &mut |_| {});
+            last = dialog_pass(
+                &ctx,
+                input(screen, pass, vec![]),
+                &rows,
+                &mut |_| {},
+                &mut |_| {},
+            );
         }
         let over = last.list.center();
         let mut max_offset = 0.0_f32;
@@ -1383,6 +1451,7 @@ mod tests {
                 &ctx,
                 input(screen, pass, vec![egui::Event::PointerMoved(over), wheel]),
                 &rows,
+                &mut |_| {},
                 &mut |_| {},
             );
             assert!(
@@ -1405,6 +1474,7 @@ mod tests {
             &ctx,
             input(screen, 200, vec![egui::Event::PointerMoved(beside)]),
             &rows,
+            &mut |_| {},
             &mut |_| {},
         );
         assert!(m.canvas_has_pointer);

@@ -1308,7 +1308,7 @@ impl AppIde {
                     chip_search_ui::results_host(
                         ui,
                         egui::vec2(chip_search_ui::DIALOG_W, list_h),
-                        |ui| self.show_chip_results(ui, false),
+                        |ui| self.show_chip_results(ui),
                     );
                 }
                 ui.separator();
@@ -1418,7 +1418,7 @@ impl AppIde {
                 });
                 ui.add_space(4.0);
             })
-            .map(|r| r.response.rect);
+            .map(|r| (r.response.rect, r.response.layer_id));
 
         // ── Act on deferred form-open requests ─────────────────────────────
         if open_form_blank {
@@ -1436,11 +1436,13 @@ impl AppIde {
         // take it away on the same frame.
         if beside
             && self.confirm_new_project
-            && let Some(dialog) = dialog_rect
+            && let Some((dialog, layer)) = dialog_rect
         {
             let rect = chip_search_ui::list_rect(content, dialog, list_bottom);
             if rect.is_positive() {
-                chip_search_ui::list_surface(ui.ctx(), rect, |ui| self.show_chip_results(ui, true));
+                chip_search_ui::list_surface(ui.ctx(), rect, layer, |ui| {
+                    self.show_chip_results(ui)
+                });
             }
         }
     }

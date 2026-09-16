@@ -244,7 +244,13 @@ pub fn show(
 
     // Which box is under the pointer (boxes are drawn after edges, so the
     // hit-test uses the same rectangles the user sees).
-    let pointer = ui.ctx().pointer_latest_pos().filter(|p| rect.contains(*p));
+    // `rect_contains_pointer`, not `rect.contains`: it also asks whether the
+    // chart is the topmost thing there, so a box under the New Project chip
+    // list or a window does not light up and pop its tooltip over it.
+    let pointer = ui
+        .ctx()
+        .pointer_latest_pos()
+        .filter(|_| ui.rect_contains_pointer(rect));
     let mut hovered: Option<usize> = None;
     for (i, b) in lay.boxes.iter().enumerate() {
         let r = box_rect(b, &to_screen, scale);

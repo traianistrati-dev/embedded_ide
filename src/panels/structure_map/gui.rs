@@ -1372,7 +1372,13 @@ fn show_canvas(
         // Edges are painter shapes, not widgets, so hover is a distance test
         // against the routed polylines (suppressed while the pointer is over
         // a node — its own interactions win there).
-        let pointer = ui.ctx().pointer_latest_pos();
+        // Only while the canvas is the topmost thing under the pointer: an
+        // edge found under the New Project chip list, or a window, would pop
+        // its tooltip over it and take the click meant for it.
+        let pointer = ui
+            .ctx()
+            .pointer_latest_pos()
+            .filter(|_| ui.rect_contains_pointer(rect));
         let over_node = pointer
             .map(|p| node_rects.iter().any(|r| r.contains(p)))
             .unwrap_or(false);

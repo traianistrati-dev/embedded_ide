@@ -461,6 +461,7 @@ the chip's data.
 | `Ctrl+Shift+/` | Wrap the selected lines in one `/* … */` |
 | `Ctrl+↑` / `Ctrl+↓` | Move the selected line(s) up / down |
 | `Ctrl+D` | Duplicate the line(s) at the cursor / selection |
+| `Ctrl+U` | Toggle UPPER / lower case of the selection, or of the identifier under the caret (every cursor) |
 | `Ctrl+Shift+X` | Cut the whole line(s) — plain `Ctrl+X` still cuts the selection |
 | `Ctrl+←` / `Ctrl+→` | Word movement (add `Shift` to select) |
 | `Ctrl+Shift+↑` / `Ctrl+Shift+↓` | Add / remove a cursor (multi-cursor) |
