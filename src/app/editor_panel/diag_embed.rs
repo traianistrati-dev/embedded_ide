@@ -283,6 +283,13 @@ impl AppIde {
 
                 // ── Content ────────────────────────────────
                 let toolchain = self.selected_toolchain().unwrap_or(ToolchainKind::SdccC);
+                // The DFU config row belongs to the STM32 ROM bootloader, and
+                // its flash address means nothing on any other part.
+                let dfu_addr = self
+                    .mcu
+                    .as_ref()
+                    .is_some_and(|m| crate::dfu::has_usb_dfu_bootloader(&m.family))
+                    .then_some(&mut self.dfu_flash_addr);
                 show_diag_panel(
                     ui,
                     &self.egui_ctx,
@@ -292,7 +299,7 @@ impl AppIde {
                     &self.dfu_log,
                     &self.dfu_programmers,
                     &mut self.dfu_sel_programmer,
-                    &mut self.dfu_flash_addr,
+                    dfu_addr,
                     &self.openocd_state,
                     &mut self.openocd_target_cfg,
                     &self.espflash_state,

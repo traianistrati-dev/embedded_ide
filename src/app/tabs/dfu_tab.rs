@@ -15,7 +15,11 @@ pub fn show_dfu_tab(
     dfu_log: &Arc<Mutex<Vec<String>>>,
     dfu_programmers: &Arc<Mutex<HashMap<String, dfu::ProgrammerInfo>>>,
     dfu_sel_programmer: &mut String,
-    dfu_flash_addr: &mut String,
+    // `None` when the chip has no USB DFU ROM bootloader (see
+    // `dfu::has_usb_dfu_bootloader`). The DFU config is then left off the row
+    // below: a flash address the part does not have, and the phases of a run
+    // its ROM cannot start.
+    dfu_flash_addr: Option<&mut String>,
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
     espflash_state: &Arc<Mutex<EspFlashState>>,
@@ -536,7 +540,7 @@ pub fn show_dfu_tab(
                 _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
             };
             phase_widget(ui, f_icon, "Flash SWD", f_col);
-        } else {
+        } else if let Some(dfu_flash_addr) = dfu_flash_addr {
             // ── DFU config ────────────────────────────────────────────────────
             ui.label(
                 egui::RichText::new("Flash addr:")
@@ -617,6 +621,20 @@ pub fn show_dfu_tab(
                 _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
             };
             phase_widget(ui, f_icon, "Flash", f_col);
+        } else {
+            // No ROM bootloader to hand a flash address to, and no DFU phases
+            // to show: this chip is programmed over the probe instead.
+            ui.label(
+                egui::RichText::new("No USB DFU bootloader on this chip")
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(140)),
+            )
+            .on_hover_text(
+                "The DFU path programs an STM32's ROM bootloader with dfu-util, at a \
+                 flash address this part does not have.\n\
+                 Flash this chip with Flash (probe-rs), or pick an ST-Link / J-Link / \
+                 CMSIS-DAP above for Flash SWD.",
+            );
         }
 
         // Right-aligned tail of the config row: Size · Info · Clear. Laid out
@@ -1822,9 +1840,9 @@ const FLASH_NOTES: &[&str] = &[
     "Only ONE process can hold a probe: stop a Debug or RTT session before \
      flashing, or the flash fails with \"probe in use\". A Flash button turns RED \
      with the reason when that is the case.",
-    "DFU is a third path and needs no probe at all: the MCU's own USB bootloader \
-     (BOOT0 = 1 + reset) writes the .bin at the Flash address set below. That is \
-     what the DFU-specific fields are for.",
+    "DFU is a third path and needs no probe at all: an STM32's own USB bootloader \
+     (BOOT0 = 1 + reset) writes the .bin at a flash address. Those fields sit \
+     on the row below, for those chips only.",
     "Flash ESP32 (espflash) replaces Flash SWD on the ESP toolchain: it goes over \
      the serial port with the board in download mode, not over SWD.",
 ];

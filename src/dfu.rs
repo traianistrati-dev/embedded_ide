@@ -700,6 +700,17 @@ pub(crate) const KNOWN_PROGRAMMERS: &[(&str, &str, &str)] = &[
     // through a CP210x or CH340, matched as "USB-Serial" above.
 ];
 
+/// Does this chip family have the USB DFU ROM bootloader `dfu-util` programs?
+///
+/// Only the STM32s here. The Flash tab's DFU config exists for that bootloader:
+/// its address box defaults to `0x0800_0000`, where an STM32's flash begins,
+/// and the +BL preset offsets it past an 8 KiB bootloader. On the micro:bit and
+/// the Picos the row offered an address that means nothing on the part, over a
+/// path their ROM cannot enter - they are programmed over SWD instead.
+pub fn has_usb_dfu_bootloader(family: &str) -> bool {
+    family.starts_with("stm32")
+}
+
 /// Whether espflash can talk to this device — the Flash tab's filter on an
 /// Espressif project.
 ///
@@ -1253,6 +1264,34 @@ mod espressif_usb_tests {
         );
         for c in ["esp32c3", "esp32c6", "esp32h2", "esp32s3"] {
             assert!(with_block.contains(&c), "{c} should have USB_DEVICE");
+        }
+    }
+}
+
+#[cfg(test)]
+mod usb_dfu_bootloader {
+    use super::has_usb_dfu_bootloader;
+
+    /// The STM32s enter their ROM bootloader with BOOT0 = 1 and a reset, and
+    /// dfu-util writes the raw binary at the flash start.
+    #[test]
+    fn the_stm32s_have_one() {
+        for f in ["stm32f1", "stm32f4", "stm32h7", "stm32wba", "stm32c0"] {
+            assert!(has_usb_dfu_bootloader(f), "{f}");
+        }
+    }
+
+    /// Nothing else does, so the DFU address row is not drawn for them.
+    ///
+    /// The nRF52833 is the one that prompted this: the micro:bit showed
+    /// "Flash addr: 0x08000000", an STM32 address, on a part whose flash
+    /// starts at 0.
+    #[test]
+    fn the_other_families_do_not() {
+        for f in [
+            "nrf52833", "nrf52840", "rp2040", "rp2350", "esp32c3", "esp32", "",
+        ] {
+            assert!(!has_usb_dfu_bootloader(f), "{f}");
         }
     }
 }

@@ -34,7 +34,8 @@ pub(super) fn show_diag_panel(
     dfu_log: &Arc<Mutex<Vec<String>>>,
     dfu_programmers: &Arc<Mutex<HashMap<String, dfu::ProgrammerInfo>>>,
     dfu_sel_programmer: &mut String,
-    dfu_flash_addr: &mut String,
+    // `None` on a chip with no USB DFU ROM bootloader - see `show_dfu_tab`.
+    dfu_flash_addr: Option<&mut String>,
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
     espflash_state: &Arc<Mutex<EspFlashState>>,
