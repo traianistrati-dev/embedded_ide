@@ -371,8 +371,10 @@ pub(super) fn render_size_bar(ui: &mut egui::Ui, state: &SizeState, flash: bool)
     };
     match state {
         SizeState::Idle => {
-            muted(ui, "—".to_owned(), egui::Color32::from_gray(110))
-                .on_hover_text("Not measured yet — press Size (it also runs after every flash).");
+            muted(ui, "—".to_owned(), egui::Color32::from_gray(110)).on_hover_text(
+                "Not measured yet — press Size. It also runs after each flash started \
+                 with a Flash button, but not after a Debug or RTT session flashes the board.",
+            );
         }
         SizeState::Building => {
             muted(ui, "measuring…".to_owned(), egui::Color32::from_gray(170));
@@ -446,10 +448,10 @@ fn usage_bar(
 
     let text = match limit {
         Some(l) => format!(
-            "{} / {} · {:.0}%",
+            "{} / {} · {}",
             fmt_bytes(used),
             fmt_bytes(l),
-            (used as f64 / l.max(1) as f64) * 100.0
+            fmt_pct(used, l)
         ),
         None => fmt_bytes(used),
     };
@@ -485,6 +487,26 @@ fn section_breakdown(usage: &MemUsage, flash: bool) -> String {
         out.push_str("\nStatic RAM only (.data + .bss) — stack and heap come on top.");
     }
     out
+}
+
+/// How full a memory is, as a whole percent.
+///
+/// Rounding alone read wrong at both ends: a micro:bit blink is 2.5 KB of
+/// 512 KB, which rounds to `0%` and says the firmware takes no flash at all,
+/// and a part with a handful of bytes left rounds to `100%` and says it is
+/// full. Neither end rounds past its own boundary, so `0%` means empty and
+/// `100%` means no room left.
+fn fmt_pct(used: u64, limit: u64) -> String {
+    let pct = used as f64 / limit.max(1) as f64 * 100.0;
+    if used == 0 {
+        "0%".to_owned()
+    } else if pct < 1.0 {
+        "<1%".to_owned()
+    } else if pct < 100.0 && pct.round() >= 100.0 {
+        ">99%".to_owned()
+    } else {
+        format!("{pct:.0}%")
+    }
 }
 
 /// `812 B`, `34.2 KB`, `1.25 MB`.
@@ -649,5 +671,47 @@ pub(crate) fn render_diagnostics(
                     );
                 });
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_percent {
+    use super::fmt_pct;
+
+    /// The reading that prompted this: a blink on a 512 KiB part, and its
+    /// 540 bytes of RAM out of 128 KiB. Both used to print `0%`.
+    #[test]
+    fn a_nearly_empty_chip_is_not_empty() {
+        assert_eq!(fmt_pct(2_560, 512 * 1024), "<1%");
+        assert_eq!(fmt_pct(540, 128 * 1024), "<1%");
+        // A single byte still counts as used.
+        assert_eq!(fmt_pct(1, 512 * 1024), "<1%");
+    }
+
+    /// `0%` is kept for the one case that means it: nothing used at all.
+    #[test]
+    fn nothing_used_is_zero() {
+        assert_eq!(fmt_pct(0, 512 * 1024), "0%");
+        assert_eq!(fmt_pct(0, 0), "0%");
+    }
+
+    /// And `100%` only when the memory is genuinely out of room.
+    #[test]
+    fn full_is_the_only_hundred() {
+        let limit = 512 * 1024;
+        assert_eq!(fmt_pct(limit, limit), "100%");
+        assert_eq!(fmt_pct(limit - 1, limit), ">99%");
+        // Over the limit is reported as it is - the build will not link, and
+        // rounding that down to 100% would hide by how much.
+        assert_eq!(fmt_pct(limit * 2, limit), "200%");
+    }
+
+    /// Everything in between still rounds to a whole percent.
+    #[test]
+    fn the_middle_rounds_as_before() {
+        let limit = 1_000u64;
+        assert_eq!(fmt_pct(500, limit), "50%");
+        assert_eq!(fmt_pct(704, limit), "70%");
+        assert_eq!(fmt_pct(15, limit), "2%", "1.5% rounds up");
     }
 }

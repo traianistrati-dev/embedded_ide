@@ -58,6 +58,8 @@ mod toolbar;
 pub(crate) mod usages;
 mod word_select;
 
+pub(crate) use toolbar::FLASH_PIPELINES;
+
 /// Default code-editor font size (points); the zoom baseline (Ctrl+0 resets to it).
 pub(crate) const DEFAULT_EDITOR_FONT_SIZE: f32 = 13.0;
 /// Zoom clamp range for the editor font.

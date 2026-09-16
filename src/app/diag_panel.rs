@@ -16,6 +16,7 @@ use crate::espflash::EspFlashState;
 use crate::lsp::{self, LspStatus};
 use crate::openocd::OpenOcdState;
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+use crate::probe_flash::ProbeFlashState;
 use crate::required_tools;
 use crate::serial::SerialMonitor;
 use crate::terminal::TerminalConsole;
@@ -33,7 +34,8 @@ pub(super) fn show_diag_panel(
     dfu_log: &Arc<Mutex<Vec<String>>>,
     dfu_programmers: &Arc<Mutex<HashMap<String, dfu::ProgrammerInfo>>>,
     dfu_sel_programmer: &mut String,
-    dfu_flash_addr: &mut String,
+    // `None` on a chip with no USB DFU ROM bootloader - see `show_dfu_tab`.
+    dfu_flash_addr: Option<&mut String>,
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
     espflash_state: &Arc<Mutex<EspFlashState>>,
@@ -370,17 +372,23 @@ pub(super) fn show_diag_panel(
             let dfu = dfu_state.lock().unwrap();
             let ocd = openocd_state.lock().unwrap();
             let esp = espflash_state.lock().unwrap();
-            let any_busy = dfu.is_busy() || ocd.is_busy() || esp.is_busy();
+            // probe-rs too: `cargo flash` builds and flashes in one `Flashing`
+            // state, so a probe-rs run shows the flashing color throughout.
+            let probe = probe_flash_state.lock().unwrap();
+            let any_busy = dfu.is_busy() || ocd.is_busy() || esp.is_busy() || probe.is_busy();
             let any_success = matches!(*dfu, DfuState::Success)
                 || matches!(*ocd, OpenOcdState::Success)
-                || matches!(*esp, EspFlashState::Success);
+                || matches!(*esp, EspFlashState::Success)
+                || matches!(*probe, ProbeFlashState::Success);
             let any_error = matches!(*dfu, DfuState::Error(_))
                 || matches!(*ocd, OpenOcdState::Error(_))
-                || matches!(*esp, EspFlashState::Error(_));
+                || matches!(*esp, EspFlashState::Error(_))
+                || matches!(*probe, ProbeFlashState::Error(_));
             let (badge, col) = if any_busy {
                 if matches!(*dfu, DfuState::Flashing)
                     || matches!(*ocd, OpenOcdState::Flashing)
                     || matches!(*esp, EspFlashState::Flashing)
+                    || matches!(*probe, ProbeFlashState::Flashing)
                 {
                     (" …".to_owned(), egui::Color32::from_rgb(100, 180, 255))
                 } else {
@@ -399,6 +407,7 @@ pub(super) fn show_diag_panel(
             } else {
                 (String::new(), egui::Color32::DARK_GRAY)
             };
+            drop(probe);
             drop(esp);
             drop(ocd);
             drop(dfu);

@@ -387,36 +387,51 @@ impl AppIde {
     /// there would just block on the target-dir lock. Afterwards the build is
     /// warm, so the measurement is near-instant.
     pub(crate) fn poll_flash_finished_size(&mut self) {
-        let (dfu_busy, dfu_ok) = {
+        let dfu = {
             let s = self.dfu_state.lock().unwrap();
-            (s.is_busy(), matches!(*s, crate::dfu::DfuState::Success))
+            FlashNow {
+                busy: s.is_busy(),
+                ok: matches!(*s, DfuState::Success),
+            }
         };
-        let (ocd_busy, ocd_ok) = {
+        let openocd = {
             let s = self.openocd_state.lock().unwrap();
-            (
-                s.is_busy(),
-                matches!(*s, crate::openocd::OpenOcdState::Success),
-            )
+            FlashNow {
+                busy: s.is_busy(),
+                ok: matches!(*s, OpenOcdState::Success),
+            }
         };
-        let (esp_busy, esp_ok) = {
+        let espflash = {
             let s = self.espflash_state.lock().unwrap();
-            (
-                s.is_busy(),
-                matches!(*s, crate::espflash::EspFlashState::Success),
-            )
+            FlashNow {
+                busy: s.is_busy(),
+                ok: matches!(*s, EspFlashState::Success),
+            }
         };
-        let busy = dfu_busy || ocd_busy || esp_busy;
-        let finished = self.flash_was_busy && !busy;
-        self.flash_was_busy = busy;
+        let probe_rs = {
+            let s = self.probe_flash_state.lock().unwrap();
+            FlashNow {
+                busy: s.is_busy(),
+                ok: matches!(*s, crate::probe_flash::ProbeFlashState::Success),
+            }
+        };
+        // A literal, so a pipeline added to FLASH_PIPELINES without a reading
+        // here fails to compile. Its order is the index order, pinned by the
+        // assertion so renumbering the indexes fails to compile too.
+        const _: () = assert!(DFU == 0 && OPENOCD == 1 && ESPFLASH == 2 && PROBE_RS == 3);
+        let now: [FlashNow; FLASH_PIPELINES] = [dfu, openocd, espflash, probe_rs];
+        let Some(ok) = flash_finished(&mut self.flash_ran, &now) else {
+            return;
+        };
         // Only on success — a failed flash usually means the build failed, and
         // measuring would just repeat the same cargo error in a second place.
-        if finished && (dfu_ok || ocd_ok || esp_ok) {
+        if ok.iter().any(|&o| o) {
             self.start_size_measure_quiet();
         }
         // ESP only: attach the device console to the board just programmed. The
         // flash left the chip in reset for exactly this (`monitor_follows`), so
         // the monitor resets it and catches the output from the first line.
-        if finished && esp_ok && self.esp_monitor_auto {
+        if ok[ESPFLASH] && self.esp_monitor_auto {
             self.start_esp_monitor(true);
         }
     }
@@ -1013,6 +1028,47 @@ fn analysis_badge(a: Analysis) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// The flash pipelines [`AppIde::poll_flash_finished_size`] watches, as indexes
+/// into its [`FlashNow`] array and into `AppIde::flash_ran`.
+const DFU: usize = 0;
+const OPENOCD: usize = 1;
+const ESPFLASH: usize = 2;
+const PROBE_RS: usize = 3;
+pub(crate) const FLASH_PIPELINES: usize = 4;
+
+/// One flash pipeline, as read this frame.
+#[derive(Clone, Copy)]
+struct FlashNow {
+    busy: bool,
+    /// Its state is `Success`, from this run or from an earlier one.
+    ok: bool,
+}
+
+/// One frame of the "a flash just finished" edge detector.
+///
+/// `ran` marks every pipeline seen busy since the last frame on which none was.
+/// It returns `None` while any pipeline is still busy, and on idle frames with
+/// no run behind them. When the last busy pipeline stops, it returns which of
+/// the ones that ran ended in `Success`, and clears `ran`.
+///
+/// Only the pipelines that RAN count: a `Success` stays in a pipeline's state
+/// until its next run, so a board flashed over OpenOCD earlier and then over
+/// probe-rs with a build error would otherwise still read as a success.
+fn flash_finished(
+    ran: &mut [bool; FLASH_PIPELINES],
+    now: &[FlashNow; FLASH_PIPELINES],
+) -> Option<[bool; FLASH_PIPELINES]> {
+    for (r, n) in ran.iter_mut().zip(now) {
+        *r |= n.busy;
+    }
+    if now.iter().any(|n| n.busy) || !ran.iter().any(|&r| r) {
+        return None;
+    }
+    let ok = std::array::from_fn(|i| ran[i] && now[i].ok);
+    *ran = [false; FLASH_PIPELINES];
+    Some(ok)
+}
+
 /// Longest path drawn in the title before it is shortened.
 ///
 /// The title now shares one row with the whole right-hand button group, so an
@@ -1115,6 +1171,98 @@ mod tests {
         let out = elide_path_left(long, 24);
         assert_eq!(out.chars().count(), 24);
         assert!(out.ends_with(".rs"));
+    }
+
+    mod flash_finished {
+        use super::super::{
+            DFU, ESPFLASH, FLASH_PIPELINES, FlashNow, OPENOCD, PROBE_RS, flash_finished,
+        };
+
+        const IDLE: FlashNow = FlashNow {
+            busy: false,
+            ok: false,
+        };
+        const BUSY: FlashNow = FlashNow {
+            busy: true,
+            ok: false,
+        };
+        const OK: FlashNow = FlashNow {
+            busy: false,
+            ok: true,
+        };
+
+        /// Every pipeline idle except `i`, which is `state`.
+        fn only(i: usize, state: FlashNow) -> [FlashNow; FLASH_PIPELINES] {
+            let mut now = [IDLE; FLASH_PIPELINES];
+            now[i] = state;
+            now
+        }
+
+        /// The bug this exists for: a probe-rs flash that succeeds measures
+        /// Flash/RAM, as every other flash path already did.
+        #[test]
+        fn a_probe_rs_flash_that_succeeds_is_measured() {
+            let mut ran = [false; FLASH_PIPELINES];
+            assert_eq!(flash_finished(&mut ran, &only(PROBE_RS, BUSY)), None);
+            let ok = flash_finished(&mut ran, &only(PROBE_RS, OK)).expect("finished");
+            assert!(ok[PROBE_RS]);
+            // Fires once, not on every idle frame after it.
+            assert_eq!(flash_finished(&mut ran, &only(PROBE_RS, OK)), None);
+        }
+
+        /// The existing paths still fire, each on its own index, so the ESP
+        /// monitor still follows an espflash run and only that.
+        #[test]
+        fn every_pipeline_reports_on_its_own_index() {
+            for i in [DFU, OPENOCD, ESPFLASH, PROBE_RS] {
+                let mut ran = [false; FLASH_PIPELINES];
+                flash_finished(&mut ran, &only(i, BUSY));
+                let ok = flash_finished(&mut ran, &only(i, OK)).expect("finished");
+                let mut want = [false; FLASH_PIPELINES];
+                want[i] = true;
+                assert_eq!(ok, want, "pipeline {i}");
+            }
+        }
+
+        /// A failed flash finishes without a success, so nothing is measured.
+        #[test]
+        fn a_failed_flash_is_not_a_success() {
+            let mut ran = [false; FLASH_PIPELINES];
+            flash_finished(&mut ran, &only(PROBE_RS, BUSY));
+            let ok = flash_finished(&mut ran, &only(PROBE_RS, IDLE)).expect("finished");
+            assert!(!ok.iter().any(|&o| o));
+        }
+
+        /// A `Success` left over from an earlier flash on another path does not
+        /// turn this run's failure into one.
+        #[test]
+        fn a_stale_success_on_another_path_does_not_count() {
+            let mut ran = [false; FLASH_PIPELINES];
+            let mut now = only(DFU, OK);
+            now[PROBE_RS] = BUSY;
+            flash_finished(&mut ran, &now);
+            now[PROBE_RS] = IDLE;
+            let ok = flash_finished(&mut ran, &now).expect("finished");
+            assert!(!ok[DFU], "DFU did not run this time");
+            assert!(!ok.iter().any(|&o| o));
+        }
+
+        /// Nothing fires while any pipeline is still busy, and nothing fires on
+        /// idle frames that no run preceded.
+        #[test]
+        fn waits_for_the_last_busy_pipeline() {
+            let mut ran = [false; FLASH_PIPELINES];
+            assert_eq!(flash_finished(&mut ran, &only(DFU, OK)), None);
+
+            let mut now = only(PROBE_RS, BUSY);
+            now[OPENOCD] = BUSY;
+            assert_eq!(flash_finished(&mut ran, &now), None);
+            now[PROBE_RS] = OK;
+            assert_eq!(flash_finished(&mut ran, &now), None, "OpenOCD still busy");
+            now[OPENOCD] = OK;
+            let ok = flash_finished(&mut ran, &now).expect("finished");
+            assert!(ok[PROBE_RS] && ok[OPENOCD]);
+        }
     }
 
     /// The boundary: exactly at the cap nothing is touched, one past it is cut.
