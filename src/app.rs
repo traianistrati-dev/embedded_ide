@@ -1499,9 +1499,10 @@ pub struct AppIde {
     profile_mode: crate::profile::ProfileMode,
     /// On-target flamegraph sampling state (Runtime mode; see `crate::flamegraph`).
     flame_state: Arc<Mutex<crate::flamegraph::FlameState>>,
-    /// Was any flash pipeline busy last frame? Edge-detects "flash finished" to
+    /// Which flash pipelines (DFU, OpenOCD, espflash, probe-rs) have been busy
+    /// since every one was last idle. Edge-detects "flash finished" to
     /// re-measure Flash/RAM automatically (see `poll_flash_finished_size`).
-    flash_was_busy: bool,
+    flash_ran: [bool; editor_panel::FLASH_PIPELINES],
     /// Which bottom tab was active last frame — edge-detects "this tab was just
     /// opened", which the Git tab uses to refresh its status automatically.
     last_build_tab: BuildPanelTab,
@@ -2223,7 +2224,7 @@ impl AppIde {
             profile_by_crate: false,
             profile_mode: crate::profile::ProfileMode::Static,
             flame_state: Arc::new(Mutex::new(crate::flamegraph::FlameState::Idle)),
-            flash_was_busy: false,
+            flash_ran: [false; editor_panel::FLASH_PIPELINES],
             last_build_tab: BuildPanelTab::RustAnalyzer,
             clippy_sel: None,
             selected_diagnostic: None,
