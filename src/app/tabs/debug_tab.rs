@@ -523,6 +523,9 @@ pub fn show_debug_tab(
     };
 
     // ── Empty-state hint ──────────────────────────────────────────────────────
+    // The console's reader repaints only a view drawn lately — and the hint
+    // below replaces the console while it is empty, so stamp it here.
+    crate::terminal::mark_drawn(&dbg.console, ui.ctx());
     let no_content = {
         let st = dbg.state.lock().unwrap();
         st.stack.is_empty() && dbg.console.lock().unwrap().lines.is_empty()

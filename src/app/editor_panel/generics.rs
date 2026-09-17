@@ -36,10 +36,11 @@ const PULSE_HZ: f64 = 0.8;
 /// parameter the brightest thing on its line while staying readable.
 const PULSE_ALPHA: f32 = 55.0;
 
-/// Animation frame budget: ~30 fps is plenty for a slow breathing highlight,
-/// and asking for repaints at this rate (instead of every frame) keeps a file
-/// with unused parameters from pinning the render loop at full speed.
-const PULSE_FRAME_MS: u64 = 33;
+/// Animation step: 10 fps. At 0.8 Hz that is about twelve shades per breath,
+/// which still reads as smooth. It used to be 33 ms, and because an unused
+/// import is on screen in most files mid-edit, an idle window redrew the WHOLE
+/// app 30 times a second, every per-frame editor pass included.
+const PULSE_FRAME_MS: u64 = 100;
 
 /// What the editor should mark, by treatment.
 #[derive(Default, Debug, PartialEq)]
@@ -531,6 +532,14 @@ fn find_word<'a>(
 
 // ── Pulsing highlight ─────────────────────────────────────────────────────────
 
+/// `seconds` snapped to the animation step, so a frame triggered by anything
+/// else (typing, the mouse) draws the same shade as the scheduled one instead
+/// of advancing the pulse mid-step.
+fn pulse_clock(seconds: f64) -> f64 {
+    let step = PULSE_FRAME_MS as f64 / 1000.0;
+    (seconds / step).floor() * step
+}
+
 /// Highlight alpha at `seconds`: a cosine so it breathes in and out rather than
 /// switching on and off, starting (and returning) at fully transparent.
 fn pulse_alpha(seconds: f64) -> u8 {
@@ -583,7 +592,14 @@ pub(super) fn show_unused_pulse_overlay(
         return;
     }
     let total_chars = display_code.chars().count();
-    let alpha = pulse_alpha(ui.input(|i| i.time));
+    // A window in the background animates nothing: it holds the peak shade,
+    // and only a focus change (itself a frame) starts the breathing again.
+    let focused = ui.input(|i| i.viewport().focused) != Some(false);
+    let alpha = if focused {
+        pulse_alpha(pulse_clock(ui.input(|i| i.time)))
+    } else {
+        PULSE_ALPHA as u8
+    };
     let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
     let painter = ui.painter().with_clip_rect(clip);
     let mut painted = false;
@@ -612,7 +628,7 @@ pub(super) fn show_unused_pulse_overlay(
     }
 
     // Keep frames coming only while something is actually pulsing on screen.
-    if painted {
+    if painted && focused {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(PULSE_FRAME_MS));
     }
@@ -948,6 +964,24 @@ where DECODER: PayloadDecoder
         assert_eq!(pulse_alpha(1.0 / (2.0 * PULSE_HZ)), PULSE_ALPHA as u8);
         // …and comes back to transparent one full period later.
         assert_eq!(pulse_alpha(1.0 / PULSE_HZ), 0);
+    }
+
+    /// Frames that arrive between two scheduled steps — typing, the mouse —
+    /// draw the step's shade, and the animation cadence stays at 10 fps.
+    #[test]
+    fn the_pulse_clock_moves_in_whole_steps() {
+        const {
+            assert!(
+                PULSE_FRAME_MS >= 100,
+                "an idle window must not redraw at 30 fps"
+            )
+        };
+        let step = PULSE_FRAME_MS as f64 / 1000.0;
+        assert_eq!(
+            pulse_clock(3.0 * step + step * 0.9),
+            pulse_clock(3.0 * step)
+        );
+        assert!(pulse_clock(4.0 * step + 1e-9) > pulse_clock(3.0 * step));
     }
 
     #[test]

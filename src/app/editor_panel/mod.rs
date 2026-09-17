@@ -1166,8 +1166,13 @@ impl AppIde {
         // without a Ctrl+S. Placed BEFORE the usages pass below and before
         // `handle_editor_completion`, and on a shorter timer than either: a
         // version bump must never cancel the very requests this sync enables.
+        //
+        // `.rs` only — the predicate `LspState::did_change` itself applies.
+        // `is_rust_file` also admits a user file like a `.md` or a library's
+        // `memory.x`, which rust-analyzer never holds, so the sync could never
+        // finish and kept a repaint scheduled for as long as it was shown.
         if let Some(rel) = &usages_rel_path {
-            if is_rust_file {
+            if is_rust_file && rel.ends_with(".rs") {
                 self.tick_idle_sync(ui.ctx(), rel, &display_code);
             }
         }

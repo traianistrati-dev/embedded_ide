@@ -989,6 +989,8 @@ fn flash_log_view(ui: &mut egui::Ui, log: &[String], height: f32, toolchain: &To
 
 /// The device console's scrollback, or a hint at what would fill it.
 fn monitor_view(ui: &mut egui::Ui, monitor: &crate::esp_monitor::EspMonitor, height: f32) {
+    // On screen, empty or not: the reader repaints only a view drawn lately.
+    crate::terminal::mark_drawn(&monitor.state, ui.ctx());
     let empty = monitor.state.lock().unwrap().lines.is_empty();
     if empty {
         egui::ScrollArea::vertical()

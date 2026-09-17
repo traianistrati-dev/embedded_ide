@@ -41,6 +41,16 @@ pub(super) const IDLE: std::time::Duration = std::time::Duration::from_millis(60
 /// which is exactly the file where a blank overlay hurts most.
 const RETRY: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// How soon to look again when rust-analyzer cannot take the file at all: not
+/// Ready (stopped, failed, still starting) or not holding this document yet.
+///
+/// Those end on a status change or a Save, not on a timer, and polling them at
+/// [`RETRY`] kept an idle window redrawing five times a second for as long as
+/// the analyzer was down. Still a timer rather than nothing: a cross-thread
+/// wake-up can be dropped (eframe discards "outdated" repaint events), and this
+/// is the net under the one that would have ended the wait.
+const DORMANT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How soon to look again after sending, so rust-analyzer's publish is picked up
 /// even if its cross-thread repaint request is dropped — the lost-wake-up this
 /// app has already been bitten by once.
@@ -56,6 +66,9 @@ pub(super) enum Decision {
     InSync,
     /// Still settling, or the moment is wrong; look again shortly.
     Wait,
+    /// rust-analyzer cannot take this file yet (not Ready, or never opened it);
+    /// look again rarely — see [`DORMANT`].
+    Dormant,
     /// Send `didChange` for this file now.
     Send,
 }
@@ -85,7 +98,7 @@ pub(super) fn decide(
     // auto-opens, and auto-opening before the index is built is what produces
     // phantom type errors on a detached file. The same gate F12 uses.
     if !ready || !usable {
-        return Decision::Wait;
+        return Decision::Dormant;
     }
     // A Save is about to do this properly; a second version bump under it is
     // noise. And never cut across the user's own popup.
@@ -155,6 +168,10 @@ impl crate::app::AppIde {
                 drop(lsp);
                 ctx.request_repaint_after(RETRY);
             }
+            Decision::Dormant => {
+                drop(lsp);
+                ctx.request_repaint_after(DORMANT);
+            }
             Decision::Send => {
                 // `force = false` on purpose. A forced re-send skips the
                 // `changed` branch, so `awaiting_diagnostics` is never set and
@@ -171,7 +188,7 @@ impl crate::app::AppIde {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decision, IDLE, decide};
+    use super::{DORMANT, Decision, IDLE, RETRY, decide};
     use std::time::Duration;
 
     /// Every input in the "all clear" position, so each test below can move one.
@@ -262,7 +279,7 @@ mod tests {
     fn a_file_the_analyzer_has_not_opened_is_never_auto_opened_here() {
         assert_eq!(
             decide(false, IDLE * 10, false, true, false, false, false, false),
-            Decision::Wait
+            Decision::Dormant
         );
     }
 
@@ -270,8 +287,16 @@ mod tests {
     fn a_stopped_analyzer_is_not_talked_to() {
         assert_eq!(
             decide(false, IDLE * 10, false, false, true, false, false, false),
-            Decision::Wait
+            Decision::Dormant
         );
+    }
+
+    /// Dormant is the slow poll: it must not be the 200 ms retry, or an idle
+    /// window with the analyzer down redraws five times a second again.
+    #[test]
+    fn a_dormant_wait_polls_rarely() {
+        assert!(DORMANT >= std::time::Duration::from_secs(1));
+        assert!(DORMANT > RETRY);
     }
 
     /// The ordering that makes this safe, pinned rather than commented: an edit

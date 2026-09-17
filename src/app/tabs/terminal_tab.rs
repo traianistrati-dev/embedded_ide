@@ -21,6 +21,8 @@ pub(crate) fn render_scrollback(
         .auto_shrink([false, false])
         .stick_to_bottom(true)
         .show(ui, |ui| {
+            // Tells the reader thread this view is on screen (its repaints).
+            crate::terminal::mark_drawn(state, ui.ctx());
             let st = state.lock().unwrap();
             for line in &st.lines {
                 let default_col = match line.kind {

@@ -3,10 +3,54 @@
 //! goes. Populated by [`crate::activity`]; newest action first, each showing its
 //! phases with durations, the exact command line, and exit code.
 
-use crate::activity::{ActivityLog, fmt_clock, fmt_dur};
+use crate::activity::{ActivityLog, FRAME_WINDOW, fmt_clock, fmt_dur, fmt_frame_ms};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
+
+/// One row: the UI thread's frame rate and update cost over the last
+/// [`FRAME_WINDOW`], plus egui's layer count.
+///
+/// The tab refreshes itself once a second while it is shown, so with the mouse
+/// still a healthy idle app reads **0.5 to 1 fps** — that refresh alone: the 2 s
+/// window holds one or two of them, depending on how long the frame took to
+/// reach this row. Anything well above it is something redrawing on its own. The layer count is egui's
+/// remembered popups and tooltips; it only grows within a session.
+fn frame_counters(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) {
+    let summary = activity
+        .lock()
+        .unwrap()
+        .frames
+        .summary(std::time::Instant::now());
+    let layers = ui.ctx().memory(|m| m.layer_ids().len());
+    let text = match summary {
+        Some(s) => format!(
+            "{} {:.1} fps (last {}s)  ·  update avg {}  p95 {}  max {}  ·  {} egui layers",
+            ph::GAUGE,
+            s.fps,
+            FRAME_WINDOW.as_secs(),
+            fmt_frame_ms(s.avg),
+            fmt_frame_ms(s.p95),
+            fmt_frame_ms(s.max),
+            layers,
+        ),
+        None => format!("{} no frames yet  ·  {layers} egui layers", ph::GAUGE),
+    };
+    ui.label(
+        // Not `.monospace()`: the phosphor icon font is registered for the
+        // proportional family only, and would draw as a box.
+        egui::RichText::new(text)
+            .size(10.5)
+            .color(egui::Color32::from_rgb(150, 170, 150)),
+    )
+    .on_hover_text(
+        "The IDE's own frames. Keep the mouse still: 0.5 to 1 fps (this row's own \
+         refresh) means nothing redraws on its own. \"update\" is the app's frame \
+         code only, not egui's painting.",
+    );
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs(1));
+}
 
 pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) {
     ui.horizontal(|ui| {
@@ -27,6 +71,7 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
             }
         });
     });
+    frame_counters(ui, activity);
     ui.separator();
 
     let log = activity.lock().unwrap();

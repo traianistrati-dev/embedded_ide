@@ -354,9 +354,19 @@ pub(crate) fn winusb_instances(dump: &str, device_key: &str) -> Vec<WinUsbInstan
 /// Immediate subkeys of a registry key, as full `HKEY_…` paths. Empty when `reg`
 /// is missing or refuses - indistinguishable from "no such devices", and both
 /// mean the caller must not conclude anything.
+///
+/// A SHALLOW query. It used to go through [`reg_dump`], whose `/s` walks the
+/// whole tree: for `Enum\USB` that was 1,664 lines and about 58 s on the bench,
+/// against 46 lines and 55 ms for this one. The nested keys it also returned
+/// passed [`device_keys`] and cost one more recursive dump each, 23 instead of
+/// 3 on an ESP32-C3, while never producing an instance.
 pub(crate) fn reg_subkeys(key: &str) -> Vec<String> {
-    reg_dump(key)
-        .lines()
+    hkey_lines(&reg_query(key, false))
+}
+
+/// The key-path lines of `reg query` output, dropping the value lines under them.
+fn hkey_lines(text: &str) -> Vec<String> {
+    text.lines()
         .map(str::trim)
         .filter(|l| l.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("HKEY_")))
         .map(str::to_owned)
@@ -368,8 +378,16 @@ pub(crate) fn reg_subkeys(key: &str) -> Vec<String> {
 /// and `reg /v` matches value names EXACTLY, which would miss `…GUIDs` when
 /// asked for `…GUID`.
 pub(crate) fn reg_dump(key: &str) -> String {
-    no_window(&mut Command::new("reg"))
-        .args(["query", key, "/s"])
+    reg_query(key, true)
+}
+
+fn reg_query(key: &str, recursive: bool) -> String {
+    let mut cmd = Command::new("reg");
+    cmd.args(["query", key]);
+    if recursive {
+        cmd.arg("/s");
+    }
+    no_window(&mut cmd)
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
@@ -520,6 +538,26 @@ mod guid_tests {
         let mine = device_keys(&all, "303A", "1001");
         assert_eq!(mine.len(), 3, "{mine:?}");
         assert!(mine.iter().all(|k| k.contains("VID_303A")), "{mine:?}");
+    }
+
+    /// A shallow `reg query` lists the key's own values (when it has any), then
+    /// one line per immediate subkey. Only the subkeys are keys to follow.
+    #[test]
+    fn a_shallow_listing_yields_its_subkeys_only() {
+        let out = concat!(
+            "\r\n",
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB",
+            "\r\n    Stray    REG_SZ    value\r\n\r\n",
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001",
+            "\r\n",
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\USB\VID_303A&PID_1001&MI_02",
+            "\r\n",
+        );
+        let keys = hkey_lines(out);
+        assert_eq!(keys.len(), 3, "{keys:?}");
+        assert!(keys.iter().all(|k| k.starts_with("HKEY_")), "{keys:?}");
+        // The key itself matches no VID:PID, so it never reaches a dump.
+        assert_eq!(device_keys(&keys, "303A", "1001").len(), 2);
     }
 
     #[test]

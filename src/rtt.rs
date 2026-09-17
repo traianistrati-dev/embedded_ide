@@ -264,19 +264,23 @@ pub(crate) fn cargo_build_streamed(
         .ok_or_else(|| "build produced no executable artifact".to_string())
 }
 
-/// The tagged explanation for whatever probe-rs failure is visible in `console`
-/// — a crash, or a probe that enumerates but won't open. `None` when the output
-/// shows neither, so the caller keeps its own error text.
+/// The tagged explanation for whatever probe-rs failure is visible in `tail` —
+/// the console's last lines (`TerminalState::tail_text(60)`) — a crash, or a
+/// probe that enumerates but won't open. `None` when the output shows neither,
+/// so the caller keeps its own error text.
 ///
 /// Shared with the Debug tab: probe-rs dying of its own bug looks exactly like
 /// an ordinary exit / socket close, so both orchestrators have to go looking for
 /// the real reason themselves.
-pub(crate) fn probe_rs_failure(console: &TerminalState, probe: Option<&str>) -> Option<String> {
-    let tail = console.tail_text(60);
-    if let Some(detail) = crate::failure_hint::probe_rs_panic(&tail) {
+///
+/// Takes the TEXT, not the console: the open-failure branch runs registry
+/// queries, and the UI thread locks that console every frame to draw it. Called
+/// with the guard held, it froze the Debug and RTT tabs for the whole query.
+pub(crate) fn probe_rs_failure(tail: &str, probe: Option<&str>) -> Option<String> {
+    if let Some(detail) = crate::failure_hint::probe_rs_panic(tail) {
         return Some(crate::failure_hint::probe_rs_panic_message(&detail));
     }
-    crate::failure_hint::probe_open_failure(&tail).map(|d| {
+    crate::failure_hint::probe_open_failure(tail).map(|d| {
         crate::failure_hint::probe_open_message(
             &d,
             crate::probe::missing_device_interface_guid(probe),
@@ -406,7 +410,10 @@ fn run_session(
         Some(Ok(st)) => {
             // probe-rs can die of its own panic, or refuse to open a probe it
             // just listed — neither is "check your wiring", so say what it was.
-            if let Some(msg) = probe_rs_failure(&state.lock().unwrap(), probe) {
+            // The tail is copied out first: the classifier may query the
+            // registry, and the RTT tab locks this state every frame.
+            let tail = state.lock().unwrap().tail_text(60);
+            if let Some(msg) = probe_rs_failure(&tail, probe) {
                 return Err(msg);
             }
             Err(format!(

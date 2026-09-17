@@ -21,6 +21,19 @@ const RX_CAP: usize = 64_000;
 /// Cap on the retained bridge log, in BYTES across all chunks.
 const LOG_CAP: usize = RX_CAP;
 
+/// Largest block a burst may JOIN into. Past it, the next burst starts a new
+/// block even inside the gap.
+///
+/// Trimming drops whole blocks and keeps the last one, so a device that never
+/// pauses longer than the gap — a 100 Hz sensor line, back-to-back binary
+/// frames — used to build ONE block that no cap ever touched, and the Time view
+/// laid all of it out on every frame. Capped, the log is bounded again; the cost
+/// is that such a stream, or a single reply longer than this, shows as
+/// consecutive stamped blocks. A quarter of the log, so an ordinary reply stays
+/// one block. Framing is not affected: the Frames view joins each direction
+/// before it looks for frames.
+const MAX_BLOCK: usize = LOG_CAP / 4;
+
 /// Which way a logged burst was travelling in Bridge mode.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dir {
@@ -109,6 +122,9 @@ pub struct SerialState {
     /// gaps between blocks immune to the wall clock being stepped (NTP, DST)
     /// mid-capture.
     pub epoch: Option<(Instant, std::time::SystemTime)>,
+    /// egui pass of the last frame the Serial tab drew; the readers repaint
+    /// only while it is recent (`terminal::drawn_recently`).
+    pub drawn_pass: u64,
 }
 
 impl Default for SerialState {
@@ -121,6 +137,7 @@ impl Default for SerialState {
             log: Vec::new(),
             block_gap_ms: DEFAULT_BLOCK_GAP_MS,
             epoch: None,
+            drawn_pass: 0,
         }
     }
 }
@@ -137,7 +154,9 @@ impl SerialState {
     pub fn push_log(&mut self, dir: Dir, bytes: &[u8], now: Instant, gap: Duration) {
         let join = matches!(
             self.log.last(),
-            Some(last) if last.dir == dir && now.saturating_duration_since(last.last) <= gap
+            Some(last) if last.dir == dir
+                && now.saturating_duration_since(last.last) <= gap
+                && last.bytes.len() + bytes.len() <= MAX_BLOCK
         );
         if join {
             let last = self.log.last_mut().expect("checked above");
@@ -231,6 +250,11 @@ pub struct SerialMonitor {
     tx_next_at: Option<Instant>,
     /// Cached list of available ports (refreshed on demand).
     pub ports: Vec<String>,
+    /// `refresh_ports` has run at least once. The Serial tab used an EMPTY
+    /// `ports` as "never scanned" — and on a machine with no serial port the
+    /// list stays empty, so it rescanned on every frame: a SetupAPI walk plus two
+    /// `reg query /s` processes (com0com) on the UI thread, per mouse move.
+    ports_scanned: bool,
     /// Port name -> what is on the other end of it, for the ports that say.
     /// Filled by the same pass as [`SerialMonitor::ports`]; see [`port_label`].
     pub port_labels: HashMap<String, String>,
@@ -301,6 +325,7 @@ impl Default for SerialMonitor {
             tx_queue: std::collections::VecDeque::new(),
             tx_next_at: None,
             ports: Vec::new(),
+            ports_scanned: false,
             port_labels: HashMap::new(),
             baud_seeded: false,
             plot_on: false,
@@ -355,6 +380,7 @@ fn port_label(info: &serialport::SerialPortInfo) -> Option<String> {
 impl SerialMonitor {
     /// Re-enumerate the available serial ports; pick the first one if none chosen.
     pub fn refresh_ports(&mut self) {
+        self.ports_scanned = true;
         let found = serialport::available_ports().unwrap_or_default();
         self.port_labels = found
             .iter()
@@ -369,6 +395,12 @@ impl SerialMonitor {
         // Same trigger, same cadence: a com0com pair appearing IS a port-list
         // change, so there is no case where one is stale and the other fresh.
         self.com0com_pairs = crate::serial_bridge::com0com_pairs(&self.ports);
+    }
+
+    /// No scan has run yet. A board plugged in later shows up on Refresh — an
+    /// automatic rescan on a timer would still freeze a frame on the UI thread.
+    pub fn ports_never_scanned(&self) -> bool {
+        !self.ports_scanned
     }
 
     pub fn is_connected(&self) -> bool {
@@ -676,9 +708,15 @@ fn spawn_reader(
                     // plotter.
                     let gap = Duration::from_millis(s.block_gap_ms);
                     s.push_log(Dir::SensorToApp, &buf[..n], Instant::now(), gap);
+                    let drawn_pass = s.drawn_pass;
                     drop(s);
-                    // Coalesce repaints: at most one ~every 33 ms while streaming.
-                    if last_repaint.elapsed() >= REPAINT_EVERY {
+                    // Coalesce repaints: at most one ~every 33 ms while streaming,
+                    // and none while the Serial tab is not on screen. Errors
+                    // below still repaint unconditionally.
+                    let now_pass = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+                    if !crate::terminal::drawn_recently(drawn_pass, now_pass) {
+                        // Hidden: the bytes wait in `rx` / `log`.
+                    } else if last_repaint.elapsed() >= REPAINT_EVERY {
                         ctx.request_repaint();
                         last_repaint = Instant::now();
                     } else {
@@ -729,7 +767,7 @@ fn spawn_bridge_reader(
                     // other side's.
                     let now = Instant::now();
                     let relayed = to.write_all(&buf[..n]).and_then(|()| to.flush());
-                    {
+                    let drawn_pass = {
                         let mut s = state.lock().unwrap();
                         let gap = Duration::from_millis(s.block_gap_ms);
                         s.push_log(dir, &buf[..n], now, gap);
@@ -738,8 +776,12 @@ fn spawn_bridge_reader(
                             // bridge still shows what the live side is saying.
                             s.error = Some(format!("relay write failed: {e}"));
                         }
-                    }
-                    if last_repaint.elapsed() >= REPAINT_EVERY {
+                        s.drawn_pass
+                    };
+                    let now_pass = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+                    if !crate::terminal::drawn_recently(drawn_pass, now_pass) {
+                        // Hidden: the relay goes on, only the redraw waits.
+                    } else if last_repaint.elapsed() >= REPAINT_EVERY {
                         ctx.request_repaint();
                         last_repaint = Instant::now();
                     } else {
@@ -1305,6 +1347,39 @@ mod bridge_tests {
         assert!(total <= LOG_CAP, "log not trimmed: {total}");
         assert!(s.log.iter().all(|c| c.bytes.len() == LOG_CAP / 8));
         assert_eq!(s.log.last().unwrap().bytes[0], 39);
+    }
+
+    /// A device that never pauses past the gap no longer builds one endless
+    /// block: joining stops at `MAX_BLOCK`, and the whole-block trim then keeps
+    /// the log under its cap.
+    #[test]
+    fn a_stream_without_pauses_is_still_capped() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        for i in 0..2_000u64 {
+            push(&mut s, &c, Dir::SensorToApp, &[0x55; 100], i);
+        }
+        assert!(s.log.len() > 1, "one block took the whole stream");
+        assert!(s.log.iter().all(|b| b.bytes.len() <= MAX_BLOCK));
+        let total: usize = s.log.iter().map(|b| b.bytes.len()).sum();
+        assert!(total <= LOG_CAP, "log not trimmed: {total}");
+    }
+
+    /// The time view exists to show a command next to its reply. A reply that
+    /// fits in one block stays one block after the command, so both lines — and
+    /// the delay between them — are laid out.
+    #[test]
+    fn a_command_and_its_reply_stay_side_by_side() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        push(&mut s, &c, Dir::AppToSensor, b"GET\r\n", 0);
+        for i in 0..50u64 {
+            push(&mut s, &c, Dir::SensorToApp, &[0x41; 100], 5 + i * 5);
+        }
+        assert_eq!(s.log.len(), 2, "one command, one reply block");
+        let hex = text_of(&s, true, b"", b"");
+        assert!(hex.contains(">>"), "{hex}");
+        assert!(hex.contains("<<"), "{hex}");
     }
 
     /// A single block larger than the cap must not be dropped to nothing —

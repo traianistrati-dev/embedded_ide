@@ -59,6 +59,37 @@ pub struct TerminalState {
     /// be worse than no stamp. Time SINCE THE BOARD STARTED TALKING is also the
     /// number you actually want when watching a loop.
     pub stamp_from: Option<Instant>,
+    /// egui pass number of the last frame that DREW these lines — set by the
+    /// renderer. Readers repaint only while it is recent, see
+    /// [`drawn_recently`].
+    pub drawn_pass: u64,
+}
+
+/// Is a stream's view on screen, going by the pass that last drew it?
+///
+/// A reader thread cannot ask whether its tab is visible, and each of its
+/// repaints runs a whole app frame. Asked unconditionally, a serial port, an
+/// RTT session or a monitor streaming into a HIDDEN tab kept the app redrawing
+/// at 30 fps for nothing. The renderer stamps the pass it drew in; two passes of
+/// slack cover egui's discard-and-redraw passes.
+///
+/// While the app is idle the pass counter does not move, so a view that is
+/// shown stays "recent" and keeps getting its repaints. Showing a hidden one is
+/// a click, which is a frame of its own.
+pub(crate) fn drawn_recently(drawn_pass: u64, now_pass: u64) -> bool {
+    now_pass <= drawn_pass.saturating_add(2)
+}
+
+/// Stamp `state` as on screen this pass — see [`drawn_recently`].
+///
+/// Every view of a stream calls it, INCLUDING its empty placeholder ("Nothing
+/// from the device yet"): a view that shows the hint and returns is still on
+/// screen, and without the stamp the first line after a Clear never repainted.
+pub(crate) fn mark_drawn(state: &Mutex<TerminalState>, ctx: &egui::Context) {
+    let pass = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+    if let Ok(mut st) = state.lock() {
+        st.drawn_pass = pass;
+    }
 }
 
 /// Colour of the `[  1.234]` prefix — dim enough to read past, present enough
@@ -463,11 +494,18 @@ pub(crate) fn spawn_reader(
                     let terminated = raw.trim_end_matches('\n').trim_end_matches('\r');
                     let line = terminated.rsplit('\r').next().unwrap_or(terminated);
                     let spans = parse_ansi(line);
-                    {
+                    let drawn_pass = {
                         let mut s = state.lock().unwrap();
                         s.push(kind, spans);
-                    }
-                    if last_repaint.elapsed() >= REPAINT_EVERY {
+                        s.drawn_pass
+                    };
+                    // Asked with the state lock released. EOF below repaints
+                    // unconditionally: a finished command changes what the
+                    // rest of the UI shows.
+                    let now_pass = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+                    if !drawn_recently(drawn_pass, now_pass) {
+                        // Nobody is looking; the lines are in the buffer.
+                    } else if last_repaint.elapsed() >= REPAINT_EVERY {
                         ctx.request_repaint();
                         last_repaint = Instant::now();
                     } else {
@@ -579,6 +617,19 @@ fn sgr_color(params: &str, prev: Option<egui::Color32>) -> Option<egui::Color32>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stream_repaints_only_a_view_drawn_lately() {
+        // Idle app, view on screen: the pass counter has not moved since.
+        assert!(drawn_recently(40, 40));
+        // egui's discard-and-redraw passes are allowed for.
+        assert!(drawn_recently(40, 42));
+        // Another tab has been drawing for a while: hidden.
+        assert!(!drawn_recently(40, 43));
+        // Never drawn this session (the default 0), app long past startup.
+        assert!(!drawn_recently(0, 500));
+        assert!(drawn_recently(u64::MAX, u64::MAX), "no overflow");
+    }
 
     /// `stamp_from` prefixes each line with the time since the session attached,
     /// as its OWN span — so the stamp keeps its dim colour while the line below

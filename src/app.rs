@@ -2074,6 +2074,18 @@ impl AppIde {
         cc.egui_ctx
             .global_style_mut(|s| s.visuals.text_cursor.blink = false);
 
+        // Drop every popup, tooltip and window position egui carried over from
+        // earlier sessions. egui never forgets an `Area` (each tooltip is one),
+        // and eframe persists them, so the pile only grew across launches: 2,778
+        // layers in a month, walked on every frame by hit-testing and painting,
+        // and ~0.5 MB rewritten into `app.ron` by every 30 s autosave. eframe
+        // restores memory before this constructor runs, so this clears it once.
+        //
+        // Areas only. Panel widths, collapsing headers and scroll offsets live in
+        // egui's `data` map and survive, which is why persistence stays on: turned
+        // off, every resizable panel would reset to its default width on launch.
+        cc.egui_ctx.memory_mut(|m| m.reset_areas());
+
         // ── Load persisted project state ─────────────────────────────────────
         let mut persisted: PersistedState = cc
             .storage
@@ -3169,8 +3181,21 @@ impl AppIde {
             pin.io_mode.hash(&mut hasher);
         }
 
-        // Hash clock config
-        format!("{:?}", mcu.clock).hash(&mut hasher);
+        // Hash clock config — what codegen reads of it: the graph (topology and
+        // node states) and the node bindings. NOT `layout`: it is the diagram's
+        // geometry, which no code generator reads, and it is most of the tree
+        // (~155 KB of an imported STM32's ~217 KB clock). Hashing it Debug-
+        // formatted the whole diagram into a String on every frame, and made a
+        // box dragged in the Clock tab regenerate the project on every frame of
+        // the drag — the `module.pos` bug below, in the other tab.
+        match &mcu.clock {
+            crate::panels::mcu_module::clock::ClockConfig::Graph(gc) => {
+                0u8.hash(&mut hasher);
+                hash_debug(&mut hasher, &gc.graph);
+                hash_debug(&mut hasher, &gc.bindings);
+            }
+            crate::panels::mcu_module::clock::ClockConfig::None => 1u8.hash(&mut hasher),
+        }
         // ...and whether the Clock tab is allowed to drive it at all.
         // `keep_manual_clock` (family.rs) reads this on all three STM32 paths:
         // with it set, the fenced clock block in main.rs is left exactly as the
@@ -3184,7 +3209,7 @@ impl AppIde {
         // (async entry) and the embassy deps, so it must trigger regeneration.
         mcu.runtime.as_token().hash(&mut hasher);
         // Hash the GPIO api — Portable⇄Native flips the io.rs bridge + bindings.
-        format!("{:?}", mcu.gpio_api).hash(&mut hasher);
+        hash_debug(&mut hasher, &mcu.gpio_api);
         // Strict-lints toggle: flipping it adds/removes the Cargo.toml
         // `[lints.clippy]` block AND the `#[allow]` exemptions injected into the
         // generated main.rs / config files, so it must trigger regeneration.
@@ -3196,7 +3221,7 @@ impl AppIde {
         // Watchdogs: codegen input, so a change here must regenerate. Without
         // this the Configuration tab would edit a value that never reaches the
         // generated project until something else happened to bump the hash.
-        format!("{:?}", mcu.watchdog).hash(&mut hasher);
+        hash_debug(&mut hasher, &mcu.watchdog);
 
         // Comparators, for exactly the same reason and from the same tab.
         // `family.rs` passes `settings: &mcu.comp` into the emitter, and the
@@ -3204,7 +3229,7 @@ impl AppIde {
         // codegen input in every sense, and it was the one such value this
         // number did not see. Ticking COMP1 wrote no `configs/comp1.rs` and
         // changed no line of main.rs.
-        format!("{:?}", mcu.comp).hash(&mut hasher);
+        hash_debug(&mut hasher, &mcu.comp);
 
         // Device groups. A group changes no binding and no init call - but it
         // does write `device_comment` into the generated main.rs, so renaming or
@@ -3214,7 +3239,7 @@ impl AppIde {
         // whose name the user cleared, produces no comment and no mat - hashing
         // it forced a full regeneration that emitted identical bytes.
         for g in mcu.groups.iter().filter(|g| g.is_live()) {
-            format!("{:?}", g).hash(&mut hasher);
+            hash_debug(&mut hasher, g);
         }
 
         // Hash modules
@@ -3234,7 +3259,8 @@ impl AppIde {
             // — they must bump the hash, or the hash-gated regeneration in
             // `init_frame` would miss a module edit and keep emitting the old
             // configs/*.rs content.
-            format!("{:?}{:?}", module.config, module.connections).hash(&mut hasher);
+            hash_debug(&mut hasher, &module.config);
+            hash_debug(&mut hasher, &module.connections);
         }
 
         hasher.finish()
@@ -4369,6 +4395,24 @@ impl AppIde {
     }
 }
 
+/// Feed `value`'s `Debug` text into `hasher` without building the `String`.
+///
+/// Same bytes as `format!("{value:?}").hash(hasher)` minus the allocation, which
+/// ran for every hashed field on every frame. The trailing byte keeps two
+/// adjacent fields from hashing alike when text moves across their boundary.
+fn hash_debug(hasher: &mut impl Hasher, value: &impl std::fmt::Debug) {
+    use std::fmt::Write as _;
+    struct Sink<'a, H: Hasher>(&'a mut H);
+    impl<H: Hasher> std::fmt::Write for Sink<'_, H> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0.write(s.as_bytes());
+            Ok(())
+        }
+    }
+    let _ = write!(Sink(&mut *hasher), "{value:?}");
+    hasher.write_u8(0xff);
+}
+
 impl eframe::App for AppIde {
     // ── Persistence: called by eframe on app exit (and periodically) ──────────
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -4443,6 +4487,10 @@ impl eframe::App for AppIde {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Timed to the last line of this function (see the end), for the frame
+        // counters in the Activity tab.
+        let frame_started = std::time::Instant::now();
+
         // ── Closing with unsaved work? Ask before losing it ───────────────────
         // Cancel the close and put a prompt up; `allow_close` marks the close
         // WE send after the user decided, so we don't intercept ourselves.
@@ -5377,6 +5425,13 @@ impl eframe::App for AppIde {
         // alike) while a project change is still loading, and its lift decision
         // needs this frame's final busy state.
         self.show_project_loading_overlay(ui);
+
+        // No `return` above: every frame reaches this line.
+        self.activity
+            .lock()
+            .unwrap()
+            .frames
+            .record(frame_started, frame_started.elapsed());
     }
 }
 
@@ -5999,6 +6054,44 @@ mod the_state_hash_is_the_codegen_inputs {
             m.pos = (37.0 + i as f32, -12.5);
         }
         assert_eq!(before, h(&mcu), "the boxes moved, the project did not");
+    }
+
+    /// The Clock tab's diagram is not code either: dragging a box there rewrites
+    /// `gc.layout` and nothing a generator reads. It was hashed, through a Debug
+    /// dump of the whole clock, so the drag regenerated the project on every
+    /// frame. The graph beside it still counts.
+    #[test]
+    fn dragging_a_clock_box_regenerates_nothing() {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::clock::graph::layout::NodeBox;
+        let mut mcu = chip("stm32f103c8t6");
+        let before = h(&mcu);
+        let ClockConfig::Graph(gc) = &mut mcu.clock else {
+            panic!("the F103 carries a clock graph");
+        };
+        gc.layout.nodes.push(NodeBox {
+            node: "moved".into(),
+            x: 12.0,
+            y: 34.0,
+            w: 56.0,
+            h: 78.0,
+        });
+        if let Some(wire) = gc.layout.wires.first_mut() {
+            wire.push((1.0, 2.0));
+        }
+        assert_eq!(before, h(&mcu), "the diagram moved, the project did not");
+
+        let ClockConfig::Graph(gc) = &mut mcu.clock else {
+            unreachable!()
+        };
+        let node = gc.graph.nodes.first_mut().expect("a node");
+        node.state = match node.state {
+            crate::panels::mcu_module::clock::graph::model::NodeState::Unset => {
+                crate::panels::mcu_module::clock::graph::model::NodeState::Fixed
+            }
+            _ => crate::panels::mcu_module::clock::graph::model::NodeState::Unset,
+        };
+        assert_ne!(before, h(&mcu), "a node state is codegen input");
     }
 
     /// The guard against the opposite mistake: the parts of a module that a

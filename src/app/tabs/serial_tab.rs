@@ -52,9 +52,12 @@ pub fn show_serial_tab(
     // way out.
     held_port: Option<(&str, &str)>,
 ) {
-    if serial.ports.is_empty() {
+    if serial.ports_never_scanned() {
         serial.refresh_ports();
     }
+    // Tells the reader threads this tab is on screen, so they keep repainting
+    // (`terminal::drawn_recently`).
+    serial.state.lock().unwrap().drawn_pass = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
     let connected = serial.is_connected();
     // Matched on the SELECTED port, not on the holder alone: another board on
     // another port is not a conflict, and saying so would be noise.
@@ -556,7 +559,9 @@ fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
         resp.on_hover_text(
             "Silence that ends a block. Bytes arriving closer than this join the 
              block in progress - a frame delivered in several reads stays one 
-             block. Raise it if frames get split, lower it if they run together.",
+             block. Raise it if frames get split, lower it if they run together.
+             A block also ends at 16 KB whatever the gap, so a stream that never
+             pauses stays bounded.",
         );
         // Say so when the view is filtered — an empty log because a filter is
         // on looks exactly like an empty log because nothing is happening.

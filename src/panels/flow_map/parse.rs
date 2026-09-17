@@ -228,6 +228,13 @@ pub struct SyntaxError {
 /// `mod` blocks — which is what makes RTIC readable, since `#[rtic::app] mod
 /// app { … }` puts the whole application inside one module item.
 pub fn charts_of(src: &str) -> Result<Vec<Chart>, SyntaxError> {
+    // `span-locations` makes proc-macro2 keep a copy of EVERY parsed source, plus
+    // its line table, in a thread-local map that nothing else ever empties. The
+    // Flow tab parses the live buffer on the UI thread at each edit, so a long
+    // session with the tab open held one full copy of the file per keystroke.
+    // Safe here: no span outlives a call — charts, nodes and the syntax error
+    // carry plain line numbers, read before this function returns.
+    proc_macro2::extra::invalidate_current_thread_spans();
     let file = syn::parse_file(src).map_err(|e| SyntaxError {
         line: e.span().start().line.max(1),
         message: e.to_string(),
@@ -931,6 +938,20 @@ mod tests {
 
     fn chart(src: &str) -> Chart {
         charts_of(src).expect("parses").pop().expect("one chart")
+    }
+
+    /// `charts_of` empties proc-macro2's span map before each parse, so every
+    /// line number has to come out of the parse that produced it — a repeated
+    /// parse, and a failing one in between, must not shift them.
+    #[test]
+    fn line_numbers_survive_repeated_parses() {
+        let src = "\n\nfn first() {}\n\n\nfn second() {}\n";
+        let lines = |cs: Vec<Chart>| cs.iter().map(|c| c.line).collect::<Vec<_>>();
+        let once = lines(charts_of(src).expect("parses"));
+        assert_eq!(once, [3, 6]);
+        let err = charts_of("\n\n\nfn broken( {").expect_err("a syntax error");
+        assert_eq!(err.line, 4);
+        assert_eq!(lines(charts_of(src).expect("parses")), once);
     }
 
     fn seq(f: &Flow) -> &[Flow] {

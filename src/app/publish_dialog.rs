@@ -869,7 +869,10 @@ impl AppIde {
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let guard = log.lock().unwrap();
+                        let mut guard = log.lock().unwrap();
+                        // The reader thread repaints only a view drawn lately.
+                        guard.drawn_pass =
+                            ui.ctx().cumulative_pass_nr_for(egui::ViewportId::ROOT);
                         for line in &guard.lines {
                             // A terminal line is coloured SPANS (cargo's ANSI
                             // is parsed on the way in); the kind's colour is

@@ -261,6 +261,8 @@ pub fn show_rtt_tab(
     }
 
     // ── Log scrollback ────────────────────────────────────────────────────────
+    // On screen, empty or not: the reader repaints only a view drawn lately.
+    crate::terminal::mark_drawn(&rtt.state, ui.ctx());
     if rtt.state.lock().unwrap().lines.is_empty() {
         ui.add_space(8.0);
         ui.label(

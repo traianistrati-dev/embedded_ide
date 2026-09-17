@@ -63,7 +63,27 @@ const BUILTINS: &[(&str, &str)] = &[
 ];
 
 /// Parse all bundled built-in MCU definitions (bad files are skipped + logged).
+///
+/// The app calls this once, at startup. The tests call it about a hundred
+/// times, and every call used to deserialise all 1.78 MB of RON again — so
+/// under `cfg(test)` the parse runs once per test binary and each caller gets
+/// its own clone. The running app keeps no second, cached copy.
 pub fn builtin_definitions() -> Vec<McuDefinition> {
+    if cfg!(test) {
+        parsed_once().to_vec()
+    } else {
+        parse_all()
+    }
+}
+
+/// [`parse_all`], run at most once per process. Test-only in effect: see
+/// [`builtin_definitions`].
+fn parsed_once() -> &'static [McuDefinition] {
+    static PARSED: std::sync::OnceLock<Vec<McuDefinition>> = std::sync::OnceLock::new();
+    PARSED.get_or_init(parse_all)
+}
+
+fn parse_all() -> Vec<McuDefinition> {
     BUILTINS
         .iter()
         .filter_map(|(id, ron)| match ron::from_str::<McuDefinition>(ron) {
@@ -81,6 +101,11 @@ pub fn builtin_definitions() -> Vec<McuDefinition> {
 
 /// Find a built-in definition by its `id` (e.g. "stm32f103c8t6").
 pub fn builtin_for(id: &str) -> Option<McuDefinition> {
+    if cfg!(test) {
+        // Same cache as `builtin_definitions`. Matching the parsed `def.id` is
+        // the table id: `every_table_id_is_its_definitions_id` pins that.
+        return parsed_once().iter().find(|d| d.id == id).cloned();
+    }
     BUILTINS
         .iter()
         .find(|(bid, _)| *bid == id)
@@ -90,6 +115,19 @@ pub fn builtin_for(id: &str) -> Option<McuDefinition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `builtin_for` looks a chip up by the table id in the app, and by the
+    /// parsed definition's id through the test cache. Both must name the same
+    /// chip, and every bundled file must still parse.
+    #[test]
+    fn every_table_id_is_its_definitions_id() {
+        for (id, ron) in BUILTINS {
+            let def = ron::from_str::<McuDefinition>(ron)
+                .unwrap_or_else(|e| panic!("built-in {id} does not parse: {e}"));
+            assert_eq!(def.id, *id);
+        }
+        assert_eq!(builtin_definitions().len(), BUILTINS.len());
+    }
     use crate::panels::mcu_module::clock::ClockConfig;
     use crate::panels::mcu_module::mcu::Mcu;
     use crate::panels::mcu_module::mcu_def::{

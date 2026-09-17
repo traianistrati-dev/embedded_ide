@@ -56,6 +56,9 @@ pub struct Action {
 #[derive(Default)]
 pub struct ActivityLog {
     pub actions: Vec<Action>,
+    /// The UI thread's per-frame cost; not touched by `clear`, which empties
+    /// the action list only.
+    pub frames: FrameStats,
 }
 
 const MAX_ACTIONS: usize = 200;
@@ -260,9 +263,147 @@ pub fn fmt_dur(d: Duration) -> String {
     }
 }
 
+/// How far back the frame counters look.
+pub const FRAME_WINDOW: Duration = Duration::from_secs(2);
+
+/// Upper bound on remembered frames, whatever the frame rate — the window is
+/// time-based, but a runaway repaint loop must not grow this without limit.
+const MAX_FRAMES: usize = 2048;
+
+/// The UI thread's own cost, frame by frame: when each `update` started and
+/// how long it ran. Shown at the top of the Activity tab so an optimisation can
+/// be judged by numbers instead of by feel.
+///
+/// Two different questions, answered by two numbers. The frame RATE while the
+/// user does nothing says whether something keeps the app redrawing on its own
+/// (a pulse, a poll, a stream); the update TIME says how expensive each of
+/// those frames is. Only `update` is timed — egui's tessellation and the GPU
+/// submit run after it, inside eframe.
+#[derive(Default)]
+pub struct FrameStats {
+    frames: std::collections::VecDeque<(Instant, Duration)>,
+}
+
+/// A summary of the frames inside [`FRAME_WINDOW`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameSummary {
+    pub frames: usize,
+    pub fps: f32,
+    pub avg: Duration,
+    pub p95: Duration,
+    pub max: Duration,
+}
+
+impl FrameStats {
+    pub fn record(&mut self, started: Instant, work: Duration) {
+        self.frames.push_back((started, work));
+        while self.frames.len() > MAX_FRAMES
+            || self
+                .frames
+                .front()
+                .is_some_and(|(at, _)| started.saturating_duration_since(*at) > FRAME_WINDOW)
+        {
+            self.frames.pop_front();
+        }
+    }
+
+    /// The frames that started within [`FRAME_WINDOW`] of `now`, or `None` when
+    /// there are none.
+    pub fn summary(&self, now: Instant) -> Option<FrameSummary> {
+        let mut works: Vec<Duration> = self
+            .frames
+            .iter()
+            .filter(|(at, _)| now.saturating_duration_since(*at) <= FRAME_WINDOW)
+            .map(|(_, w)| *w)
+            .collect();
+        if works.is_empty() {
+            return None;
+        }
+        works.sort_unstable();
+        let n = works.len();
+        let total: Duration = works.iter().sum();
+        // Nearest-rank percentile: the smallest value at or above 95 % of them.
+        let p95 = works[(n * 95).div_ceil(100).clamp(1, n) - 1];
+        Some(FrameSummary {
+            frames: n,
+            fps: n as f32 / FRAME_WINDOW.as_secs_f32(),
+            avg: total / n as u32,
+            p95,
+            max: works[n - 1],
+        })
+    }
+}
+
+/// `12.3ms`: frame costs sit well under a second, where [`fmt_dur`]'s whole
+/// milliseconds hide the difference an optimisation makes.
+pub fn fmt_frame_ms(d: Duration) -> String {
+    format!("{:.1}ms", d.as_secs_f64() * 1000.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn frame_summary_covers_only_the_window() {
+        let t0 = Instant::now();
+        let mut s = FrameStats::default();
+        s.record(t0, ms(50)); // falls out of the window below
+        for i in 0..20u64 {
+            s.record(t0 + ms(1000 + i * 100), ms(i + 1));
+        }
+        let now = t0 + ms(3000);
+        let sum = s.summary(now).expect("frames in window");
+        assert_eq!(sum.frames, 20);
+        assert_eq!(sum.fps, 10.0);
+        assert_eq!(sum.max, ms(20));
+        assert_eq!(sum.p95, ms(19));
+        assert_eq!(sum.avg, Duration::from_micros(10_500));
+    }
+
+    /// The Activity tab's own once-a-second refresh, with the mouse still: the
+    /// window holds one or two of those frames, so the rate is fractional and
+    /// has to be shown with a decimal, not rounded to 0.
+    #[test]
+    fn an_idle_refresh_reads_as_half_to_one_fps() {
+        let t0 = Instant::now();
+        let mut s = FrameStats::default();
+        for k in 0..5u64 {
+            s.record(t0 + ms(k * 1_010), ms(8));
+        }
+        let fps = s.summary(t0 + ms(4 * 1_010 + 5)).expect("frames").fps;
+        assert!((0.5..=1.0).contains(&fps), "{fps}");
+        assert_eq!(format!("{fps:.1}"), "1.0");
+    }
+
+    #[test]
+    fn no_recent_frames_is_no_summary() {
+        let t0 = Instant::now();
+        let mut s = FrameStats::default();
+        assert_eq!(s.summary(t0), None);
+        s.record(t0, ms(5));
+        assert_eq!(s.summary(t0 + FRAME_WINDOW + ms(1)), None);
+    }
+
+    /// A runaway repaint loop must not grow the buffer without bound.
+    #[test]
+    fn the_frame_buffer_is_capped() {
+        let t0 = Instant::now();
+        let mut s = FrameStats::default();
+        for _ in 0..(MAX_FRAMES + 500) {
+            s.record(t0, ms(1));
+        }
+        assert_eq!(s.frames.len(), MAX_FRAMES);
+    }
+
+    #[test]
+    fn frame_ms_keeps_a_decimal() {
+        assert_eq!(fmt_frame_ms(Duration::from_micros(12_345)), "12.3ms");
+    }
 
     #[test]
     fn fmt_dur_scales() {
