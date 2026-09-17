@@ -621,3 +621,39 @@ mod list_label_tests {
         // it so nobody reuses the predicate somewhere it could.
     }
 }
+
+#[cfg(test)]
+mod config_label_round_trip {
+    use super::super::enum_::PinFunction;
+
+    /// `@pins` in `mcu.config` stores a function as `label()` and reads it
+    /// back with `from_label`. The reverse was written for the codegen
+    /// comments, which only the STM32 and ESP shapes ever went through - so
+    /// every function the micro:bit offers is checked here, before the nRF
+    /// store is allowed to depend on it.
+    #[test]
+    fn every_function_the_microbit_offers_survives_from_label_of_label() {
+        let mcu = crate::panels::mcu_module::builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "nrf52833_microbit_v2")
+            .expect("built-in micro:bit v2")
+            .build_mcu();
+        let mut seen = 0;
+        for pin in mcu.iter_all_pins().filter(|p| !p.reserved) {
+            for f in &pin.available_functions {
+                if *f == PinFunction::Unset {
+                    continue;
+                }
+                seen += 1;
+                assert_eq!(
+                    PinFunction::from_label(&f.label()).as_ref(),
+                    Some(f),
+                    "{}: {f:?} is written as {:?} and does not read back",
+                    pin.name,
+                    f.label()
+                );
+            }
+        }
+        assert!(seen > 0, "the board offers functions");
+    }
+}
