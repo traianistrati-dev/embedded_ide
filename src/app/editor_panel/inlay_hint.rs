@@ -17,8 +17,9 @@
 //!     write-back can't revert it (the same rule code actions follow).
 
 use super::AppIde;
-use crate::editor::gui::text_pos::lsp_cursor_pos;
+use crate::editor::gui::text_pos::{LineIndex, LineIndexCache, lsp_cursor_pos};
 use crate::lsp;
+use std::sync::Arc;
 
 impl AppIde {
     /// (Re)issue or clear the cursor-line inlay request. `cursor_char_idx` is the
@@ -41,16 +42,19 @@ impl AppIde {
             self.clear_inlay_hint();
             return None;
         };
-        let chars: Vec<char> = display_code.chars().collect();
         // Only untyped `let` bindings get a hint. `let_binding_pos` returns the
         // name position from anywhere on the (possibly multi-line) statement and
         // yields `None` once an explicit type is present — so the hint clears
         // itself the instant a type is inserted.
-        let Some(target) = super::let_annotation::let_binding_pos(&chars, idx) else {
+        let Some((line, col)) = caret_binding(
+            &mut self.ed.inlay_scan,
+            &mut self.ed.line_index,
+            display_code,
+            idx,
+        ) else {
             self.clear_inlay_hint();
             return None;
         };
-        let (line, col) = lsp_cursor_pos(display_code, target);
 
         // CRITICAL — we send NO `did_change` here. A did_change bumps RA's
         // document version, and every request issued against the older version
@@ -169,6 +173,53 @@ impl AppIde {
     }
 }
 
+/// The last caret scan of one view: which text and caret it read, and what it
+/// found.
+///
+/// Finding the caret's `let` lexes the whole file, and this runs every frame a
+/// caret exists, although the text and the caret rarely change between frames.
+pub(crate) struct InlayScan {
+    /// The text scanned, held through the view's line index, which already
+    /// owns a copy of exactly that text.
+    text: Arc<LineIndex>,
+    caret: usize,
+    /// 0-based `(line, UTF-16 column)` of the untyped binding's name.
+    binding: Option<(u32, u32)>,
+}
+
+/// 0-based `(line, UTF-16 column)` of the name of the untyped `let` the caret
+/// at char `idx` sits in, or `None`.
+fn scan_binding(display_code: &str, idx: usize) -> Option<(u32, u32)> {
+    let chars: Vec<char> = display_code.chars().collect();
+    let target = super::let_annotation::let_binding_pos(&chars, idx)?;
+    Some(lsp_cursor_pos(display_code, target))
+}
+
+/// [`scan_binding`], rescanned only when the text or the caret differs from the
+/// last call's. Keyed on the text itself, not a hash of it, so a type typed in
+/// clears the hint on that same frame. `line_index` is the view's cache; it is
+/// asked only on a rescan, with the text just scanned.
+fn caret_binding(
+    memo: &mut Option<InlayScan>,
+    line_index: &mut LineIndexCache,
+    display_code: &str,
+    idx: usize,
+) -> Option<(u32, u32)> {
+    if let Some(scan) = memo
+        && scan.caret == idx
+        && scan.text.text() == display_code
+    {
+        return scan.binding;
+    }
+    let binding = scan_binding(display_code, idx);
+    *memo = Some(InlayScan {
+        text: line_index.get(display_code),
+        caret: idx,
+        binding,
+    });
+    binding
+}
+
 /// The hint on `line` that belongs to the binding at `want_col`.
 ///
 /// Nearest at-or-after the name wins; if none sits at or after it (a hint
@@ -195,8 +246,70 @@ fn pick_hint(
 
 #[cfg(test)]
 mod tests {
-    use super::pick_hint;
+    use super::{caret_binding, pick_hint, scan_binding};
+    use crate::editor::gui::text_pos::LineIndexCache;
     use crate::lsp::InlayHint;
+
+    /// Two `let`s on a line, a `let` inside a comment, a multi-line chain after
+    /// an astral char (two UTF-16 units), and a typed binding.
+    const SRC: &str = "fn f() {\n    let a = 1; let b = 2;\n    // set x; let y = 5\n    \
+                       /* 😀 */ let șx = x\n        .y();\n    let c: u8 = 3;\n}\n";
+
+    /// Every text and caret, asked in an order that repeats pairs, moves the
+    /// caret on one text, and changes the text under one caret (a type typed
+    /// in): the memo answers exactly what a fresh scan does.
+    #[test]
+    fn the_memo_answers_what_a_fresh_scan_does() {
+        let typed = SRC.replace("let a = 1", "let a: i32 = 1");
+        let texts = [SRC.to_owned(), typed, String::new(), "let z = 0".to_owned()];
+        let mut memo = None;
+        let mut cache = LineIndexCache::default();
+        let mut found = 0;
+        for idx in 0..SRC.chars().count() + 2 {
+            for text in texts.iter().chain(texts.iter().rev()) {
+                for _ in 0..2 {
+                    let got = caret_binding(&mut memo, &mut cache, text, idx);
+                    assert_eq!(got, scan_binding(text, idx), "{text:?} caret {idx}");
+                    found += usize::from(got.is_some());
+                }
+            }
+        }
+        assert!(found > 100, "only {found} carets sat in an untyped let");
+    }
+
+    /// The key is BOTH the caret and the text: a planted answer is returned
+    /// only while neither changes.
+    #[test]
+    fn the_memo_is_reused_only_for_the_same_text_and_caret() {
+        let mut memo = None;
+        let mut cache = LineIndexCache::default();
+        // On the `=` of `let b = 2` (ASCII before it, so bytes are chars). Not
+        // on `let` itself: once `b` is typed, a caret there falls back to the
+        // `let a` just before the `;`.
+        let caret = SRC.find("b = 2").unwrap() + 2;
+        assert_eq!(
+            caret_binding(&mut memo, &mut cache, SRC, caret),
+            Some((1, 19))
+        );
+        memo.as_mut().unwrap().binding = Some((99, 99));
+        assert_eq!(
+            caret_binding(&mut memo, &mut cache, SRC, caret),
+            Some((99, 99))
+        );
+        let copy = SRC.to_owned();
+        assert_eq!(
+            caret_binding(&mut memo, &mut cache, &copy, caret),
+            Some((99, 99)),
+            "an equal text in another allocation is the same text"
+        );
+        let typed = SRC.replace("let b = 2", "let b: u8 = 2");
+        assert_eq!(caret_binding(&mut memo, &mut cache, &typed, caret), None);
+        memo.as_mut().unwrap().binding = Some((99, 99));
+        assert_eq!(
+            caret_binding(&mut memo, &mut cache, &typed, caret + 1),
+            None
+        );
+    }
 
     fn hint(line: u32, character: u32, label: &str) -> InlayHint {
         InlayHint {

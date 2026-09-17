@@ -24,6 +24,8 @@
 //! *not* fading: a name collision (a module-level `T` used in the body) merely
 //! loses us one fade, it never dims live code.
 
+use crate::editor::gui::text_pos::{GalleyRows, LineIndex};
+
 /// Pulse rate of the highlight behind an unused parameter. Slower than the
 /// pin-jump band's 1.5 Hz ([`PIN_PULSE_HZ`](crate::app)): that one runs for
 /// 2.5 s and stops, this one keeps going while the code is on screen, and a
@@ -550,21 +552,23 @@ fn pulse_alpha(seconds: f64) -> u8 {
 /// Split `[start, end)` into one span per screen row, i.e. cut it at newlines —
 /// a parameter list broken over several lines would otherwise be painted as one
 /// rectangle running off the right edge.
-fn row_spans(display_code: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+///
+/// The newlines are found through the line index instead of walking the text
+/// from its start to `start` for every range, every frame.
+fn row_spans(index: &LineIndex, start: usize, end: usize) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut seg = start;
-    for (i, c) in display_code
-        .chars()
-        .enumerate()
-        .skip(start)
-        .take(end.saturating_sub(start))
+    // A line starting at `ls` has its '\n' at `ls - 1`, which is inside
+    // `[start, end)` exactly when `start < ls <= end`.
+    let mut line = index.line_of_char(start) + 1;
+    while let Some(ls) = index.line_start_char(line)
+        && ls <= end
     {
-        if c == '\n' {
-            if i > seg {
-                out.push((seg, i));
-            }
-            seg = i + 1;
+        if ls - 1 > seg {
+            out.push((seg, ls - 1));
         }
+        seg = ls;
+        line += 1;
     }
     if end > seg {
         out.push((seg, end));
@@ -584,14 +588,15 @@ pub(super) fn show_unused_pulse_overlay(
     ui: &egui::Ui,
     galley_pos: egui::Pos2,
     clip: egui::Rect,
-    galley: &egui::text::Galley,
-    display_code: &str,
+    // The rows of the editor's galley, and the index of the text it shows.
+    rows: &GalleyRows,
+    index: &LineIndex,
     ranges: &[(usize, usize)],
 ) {
     if ranges.is_empty() {
         return;
     }
-    let total_chars = display_code.chars().count();
+    let total_chars = index.total_chars();
     // A window in the background animates nothing: it holds the peak shade,
     // and only a focus change (itself a frame) starts the breathing again.
     let focused = ui.input(|i| i.viewport().focused) != Some(false);
@@ -605,9 +610,9 @@ pub(super) fn show_unused_pulse_overlay(
     let mut painted = false;
 
     for &(start, end) in ranges {
-        for (s, e) in row_spans(display_code, start.min(total_chars), end.min(total_chars)) {
-            let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(s));
-            let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(e));
+        for (s, e) in row_spans(index, start.min(total_chars), end.min(total_chars)) {
+            let loc_s = rows.pos(s);
+            let loc_e = rows.pos(e);
             let y_top = galley_pos.y + loc_s.min.y;
             let y_bot = galley_pos.y + loc_s.max.y;
             if y_bot < clip.top() || y_top > clip.bottom() {
@@ -644,23 +649,23 @@ pub(super) fn show_impl_only_tooltips(
     ui: &egui::Ui,
     galley_pos: egui::Pos2,
     clip: egui::Rect,
-    galley: &egui::text::Galley,
-    display_code: &str,
+    // The rows of the editor's galley, and the index of the text it shows.
+    rows: &GalleyRows,
+    index: &LineIndex,
     ranges: &[(usize, usize)],
 ) {
     if ranges.is_empty() {
         return;
     }
-    let chars: Vec<char> = display_code.chars().collect();
+    let total_chars = index.total_chars();
     for (i, &(start, end)) in ranges.iter().enumerate() {
-        let (start, end) = (start.min(chars.len()), end.min(chars.len()));
+        let (start, end) = (start.min(total_chars), end.min(total_chars));
         if start >= end {
             continue;
         }
-        let name: String = chars[start..end].iter().collect();
-        for (s, e) in row_spans(display_code, start, end) {
-            let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(s));
-            let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(e));
+        for (s, e) in row_spans(index, start, end) {
+            let loc_s = rows.pos(s);
+            let loc_e = rows.pos(e);
             let rect = egui::Rect::from_min_max(
                 egui::pos2(galley_pos.x + loc_s.min.x, galley_pos.y + loc_s.min.y),
                 egui::pos2(galley_pos.x + loc_e.min.x, galley_pos.y + loc_s.max.y),
@@ -681,6 +686,8 @@ pub(super) fn show_impl_only_tooltips(
             )
             .on_hover_ui(|ui| {
                 ui.set_max_width(tip_w);
+                // Sliced only for a tooltip actually shown.
+                let name = &index.text()[index.byte_of_char(start)..index.byte_of_char(end)];
                 ui.label(format!(
                     "`{name}` is not used by this item itself — only by an `impl` of it.\n\
                      Underlined instead of dimmed: it is live code, not a leftover."
@@ -998,7 +1005,7 @@ where DECODER: PayloadDecoder
         // The whole `<…>` list, spanning three rows.
         let start = src.find('<').unwrap() + 1;
         let end = src.find('>').unwrap();
-        let spans = row_spans(src, start, end);
+        let spans = row_spans(&LineIndex::new(src), start, end);
         let got: Vec<String> = spans
             .iter()
             .map(|&(s, e)| src.chars().skip(s).take(e - s).collect())
@@ -1008,7 +1015,75 @@ where DECODER: PayloadDecoder
 
     #[test]
     fn row_spans_leaves_a_single_line_alone() {
-        assert_eq!(row_spans("fn f<T>() {}", 5, 6), [(5, 6)]);
+        assert_eq!(row_spans(&LineIndex::new("fn f<T>() {}"), 5, 6), [(5, 6)]);
+    }
+
+    /// A newline right at `start`, or right after another newline, closes an
+    /// empty row: no `(seg, seg)` span may come out of it.
+    #[test]
+    fn row_spans_emits_no_empty_rows() {
+        assert_eq!(row_spans(&LineIndex::new("\n"), 0, 1), []);
+        assert_eq!(row_spans(&LineIndex::new("a\n\nb"), 0, 4), [(0, 1), (3, 4)]);
+        assert_eq!(row_spans(&LineIndex::new("a\n\nb"), 1, 3), []);
+    }
+
+    /// The walk `row_spans` replaced, verbatim.
+    fn old_row_spans(display_code: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut seg = start;
+        for (i, c) in display_code
+            .chars()
+            .enumerate()
+            .skip(start)
+            .take(end.saturating_sub(start))
+        {
+            if c == '\n' {
+                if i > seg {
+                    out.push((seg, i));
+                }
+                seg = i + 1;
+            }
+        }
+        if end > seg {
+            out.push((seg, end));
+        }
+        out
+    }
+
+    /// Every range of every text, inverted, empty and past-the-end ones too,
+    /// is cut exactly where the walk cut it.
+    #[test]
+    fn row_spans_match_the_walk_from_offset_zero() {
+        use crate::editor::gui::text_pos::word_walk_tests::{indices, word_texts};
+        for text in word_texts() {
+            let index = LineIndex::new(&text);
+            for start in indices(&text) {
+                for end in indices(&text) {
+                    assert_eq!(
+                        row_spans(&index, start, end),
+                        old_row_spans(&text, start, end),
+                        "{text:?} [{start}, {end})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The tooltip's slice through the index is the name the char walk collected.
+    #[test]
+    fn a_name_sliced_through_the_index_is_the_collected_one() {
+        use crate::editor::gui::text_pos::word_walk_tests::word_texts;
+        for text in word_texts() {
+            let index = LineIndex::new(&text);
+            let chars: Vec<char> = text.chars().collect();
+            for start in 0..chars.len() {
+                for end in start + 1..=chars.len() {
+                    let want: String = chars[start..end].iter().collect();
+                    let got = &index.text()[index.byte_of_char(start)..index.byte_of_char(end)];
+                    assert_eq!(got, want, "{text:?} [{start}, {end})");
+                }
+            }
+        }
     }
 
     #[test]

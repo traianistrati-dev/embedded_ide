@@ -18,6 +18,7 @@
 //! the same file's marks agreeing in both views.
 
 use crate::app::{PinHighlight, ProjectFileId, editor_panel, lsp};
+use crate::editor::gui::text_pos::LineIndexCache;
 use eframe::egui;
 use egui_code_editor::{Completer, Syntax};
 
@@ -81,7 +82,9 @@ pub(crate) struct EditorState {
     /// Filtered completion list from the last rendered frame.
     /// Key handlers (Tab / Enter / Arrow) use this so they always operate
     /// on the same slice the user sees, not the full unfiltered LSP list.
-    pub(crate) completion_filtered_items: Vec<lsp::CompletionItem>,
+    /// Re-ordered only when the LSP list or the typed prefix changes: see
+    /// `completion::CompletionRows`.
+    pub(crate) completion_filtered_items: editor_panel::completion::CompletionRows,
 
     /// Cargo.toml dependency-completion popup (crate names + live crates.io
     /// versions). Independent of rust-analyzer.
@@ -235,6 +238,10 @@ pub(crate) struct EditorState {
     /// at frame TOP next `init_frame` (like code actions, to dodge the revert).
     pub(crate) inlay_accept_pending: bool,
 
+    /// The last scan for the caret's untyped `let`, reused while the text and
+    /// caret are unchanged: see `inlay_hint::InlayScan`.
+    pub(crate) inlay_scan: Option<editor_panel::inlay_hint::InlayScan>,
+
     /// Request keyboard focus for the rename input on the frame it opens.
     pub(crate) rename_focus: bool,
 
@@ -251,6 +258,15 @@ pub(crate) struct EditorState {
     /// frame.
     /// Editor gutter diff (live in-memory text vs HEAD) + revert-hunk state.
     pub(crate) diff_gutter: editor_panel::diff_gutter::DiffGutter,
+
+    /// Line starts of the text this view's overlays draw against, reused
+    /// across frames while that text is unchanged. Ask it with the exact text
+    /// being drawn: see `text_pos::LineIndexCache`.
+    pub(crate) line_index: LineIndexCache,
+
+    /// Foldable regions of the text this view shows, lexed once per text
+    /// rather than per frame: see `fold::RegionsCache`.
+    pub(crate) fold_regions: editor_panel::fold::RegionsCache,
 }
 
 impl EditorState {
@@ -274,7 +290,7 @@ impl EditorState {
             completion_sel: 0,
             completion_trigger_idx: 0,
             completion_pending_insert: None,
-            completion_filtered_items: Vec::new(),
+            completion_filtered_items: editor_panel::completion::CompletionRows::default(),
             cargo_complete: editor_panel::cargo_complete::CargoCompleteState::default(),
             last_caret_idx: None,
             pending_scroll_to_line: None,
@@ -310,9 +326,12 @@ impl EditorState {
             inlay_requested: None,
             inlay_asked_at: (0, false),
             inlay_accept_pending: false,
+            inlay_scan: None,
             rename_focus: false,
             find: editor_panel::find_replace::FindReplace::default(),
             full_block_selection: None,
+            line_index: LineIndexCache::default(),
+            fold_regions: editor_panel::fold::RegionsCache::default(),
         }
     }
 }

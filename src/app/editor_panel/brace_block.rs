@@ -435,6 +435,15 @@ impl AppIde {
         ui: &egui::Ui,
         copy_requested: bool,
     ) -> bool {
+        // Neither a triple-click nor a stored selection for this file: nothing
+        // below can paint, copy or change state, so skip collecting the text.
+        let stored_here = self
+            .ed
+            .full_block_selection
+            .is_some_and(|(f, ..)| f == displayed_file);
+        if !stored_here && !editor_resp.response.triple_clicked() {
+            return false;
+        }
         let chars: Vec<char> = display_code.chars().collect();
         // Clamp to the current text: a stale cursor (recorded before an edit that
         // just shrank the file — e.g. a Clippy "Fix" mid-frame) would otherwise

@@ -4,22 +4,26 @@
 //! edits are applied in `AppIde::apply_rename_edits` (see `app.rs`).
 
 use crate::app::AppIde;
+use crate::editor::gui::text_pos::{char_and_byte_at, is_ident_char};
 use eframe::egui;
 
 /// The identifier (variable / function / type / …) surrounding char index
 /// `cursor` in `text`, or "" if the cursor isn't on one.
 pub fn identifier_at(text: &str, cursor: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let is_id = |c: char| c.is_alphanumeric() || c == '_';
-    let mut start = cursor.min(chars.len());
-    while start > 0 && is_id(chars[start - 1]) {
-        start -= 1;
-    }
-    let mut end = cursor.min(chars.len());
-    while end < chars.len() && is_id(chars[end]) {
-        end += 1;
-    }
-    chars[start..end].iter().collect()
+    // Walks out from the cursor instead of collecting the whole file; a cursor
+    // past the end clamps to the end, as before.
+    let (_, at) = char_and_byte_at(text, cursor);
+    let start = text[..at]
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| is_ident_char(c))
+        .last()
+        .map_or(at, |(b, _)| b);
+    let end = text[at..]
+        .char_indices()
+        .find(|&(_, c)| !is_ident_char(c))
+        .map_or(text.len(), |(b, _)| at + b);
+    text[start..end].to_owned()
 }
 
 /// 1-based line numbers where `name` still appears in `content` as a WHOLE
@@ -211,6 +215,36 @@ let d = obj.raw;
     fn empty_when_not_on_identifier() {
         // cursor between the space and `+`, no identifier char on either side
         assert_eq!(identifier_at("a + b", 2), "");
+    }
+
+    /// The walk out from the cursor returns exactly what slicing a collected
+    /// `Vec<char>` returned: multi-byte and astral identifier chars, cursors
+    /// past the end, empty texts.
+    #[test]
+    fn identifier_at_matches_the_collected_walk() {
+        use crate::editor::gui::text_pos::word_walk_tests::{indices, word_texts};
+        fn old(text: &str, cursor: usize) -> String {
+            let chars: Vec<char> = text.chars().collect();
+            let is_id = |c: char| c.is_alphanumeric() || c == '_';
+            let mut start = cursor.min(chars.len());
+            while start > 0 && is_id(chars[start - 1]) {
+                start -= 1;
+            }
+            let mut end = cursor.min(chars.len());
+            while end < chars.len() && is_id(chars[end]) {
+                end += 1;
+            }
+            chars[start..end].iter().collect()
+        }
+        let mut non_empty = 0;
+        for text in word_texts() {
+            for i in indices(&text) {
+                let word = identifier_at(&text, i);
+                assert_eq!(word, old(&text, i), "{text:?} cursor {i}");
+                non_empty += usize::from(!word.is_empty());
+            }
+        }
+        assert!(non_empty > 1000, "only {non_empty} cursors sat on a word");
     }
 }
 

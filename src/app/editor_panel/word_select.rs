@@ -13,10 +13,92 @@
 //!   punctuation and spaces are separate classes — so a jump stops AT the `:`.
 
 use crate::app::AppIde;
+use crate::editor::gui::text_pos::{GalleyRows, LineIndex};
 use eframe::egui;
 
 fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// The rects [`AppIde::highlight_selected_word`] fills for the selection
+/// `lo..hi` of `index`'s text: every whole-word occurrence of it on screen.
+/// Only a single identifier counts; any other selection yields nothing.
+///
+/// Only the chars whose row can meet the clip are scanned, plus one on each
+/// side for the whole-word test. That finds exactly what a scan of the whole
+/// text found there: two whole-word occurrences of an identifier can never
+/// overlap, so where a scan starts cannot change which ones it sees.
+pub(super) fn for_each_selected_word_rect(
+    rows: &GalleyRows,
+    gp: egui::Pos2,
+    clip: egui::Rect,
+    index: &LineIndex,
+    lo: usize,
+    hi: usize,
+    mut paint: impl FnMut(egui::Rect),
+) {
+    let n = index.total_chars();
+    if lo >= hi || hi > n {
+        return;
+    }
+    let text = index.text();
+    let target = &text[index.byte_of_char(lo)..index.byte_of_char(hi)];
+    // Reject anything that isn't one identifier token (whitespace, symbols,
+    // multi-word selections, or a leading digit → not a variable name).
+    if target.chars().any(|c| !is_ident(c)) || target.starts_with(|c: char| c.is_ascii_digit()) {
+        return;
+    }
+    let target: Vec<char> = target.chars().collect();
+    let wl = hi - lo;
+
+    let Some(span) = rows.chars_meeting_band(gp.y, clip.top(), clip.bottom()) else {
+        return;
+    };
+    // Clamped to the text: the galley can be an edit behind it.
+    let first = *span.start();
+    let last = (*span.end()).min(n - wl);
+    if first > last {
+        return;
+    }
+    let from = first.saturating_sub(1);
+    let to = (last + wl + 1).min(n);
+    let chars: Vec<char> = text[index.byte_of_char(from)..index.byte_of_char(to)]
+        .chars()
+        .collect();
+
+    let mut i = first;
+    while i <= last {
+        let k = i - from;
+        if chars[k..k + wl] == target[..]
+            && (i == 0 || !is_ident(chars[k - 1]))
+            && (i + wl == n || !is_ident(chars[k + wl]))
+        {
+            // Map the match's char range to a screen rect via the galley.
+            let loc_s = rows.pos(i);
+            let loc_e = rows.pos(i + wl);
+            let y_top = gp.y + loc_s.min.y;
+            let y_bot = gp.y + loc_s.max.y;
+            // A whole identifier never wraps, but guard anyway: if start/end
+            // land on different rows, extend to the line end.
+            let same_row = (loc_s.min.y - loc_e.min.y).abs() < (y_bot - y_top).max(1.0) * 0.5;
+            let x_l = gp.x + loc_s.min.x;
+            let x_r = if same_row {
+                gp.x + loc_e.min.x
+            } else {
+                gp.x + rows.galley().rect.width()
+            };
+            // Skip occurrences scrolled out of the visible editor region.
+            if y_bot >= clip.top() && y_top <= clip.bottom() && x_r > x_l {
+                paint(egui::Rect::from_min_max(
+                    egui::pos2(x_l, y_top),
+                    egui::pos2(x_r, y_bot),
+                ));
+            }
+            i += wl; // jump past this match
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Char class for word-wise movement. Runs of one class are consumed whole, so
@@ -198,6 +280,7 @@ impl AppIde {
 #[cfg(test)]
 mod tests {
     use super::{ident_run_at, next_word_boundary, prev_word_boundary};
+    use eframe::egui;
 
     fn run(text: &str, idx: usize) -> Option<(usize, usize)> {
         ident_run_at(&text.chars().collect::<Vec<_>>(), idx)
@@ -321,5 +404,136 @@ mod tests {
     fn underscores_and_digits_are_part_of_the_word() {
         let src = "count_2ab = 7";
         assert_eq!(run(src, 5), Some((0, 9)));
+    }
+
+    /// What the selected-word highlight filled before it was limited to the rows
+    /// on screen: a scan of the whole text, every match positioned with the
+    /// galley's own walk, then culled.
+    fn old_rects(
+        galley: &egui::Galley,
+        gp: egui::Pos2,
+        clip: egui::Rect,
+        display_code: &str,
+        lo: usize,
+        hi: usize,
+    ) -> Vec<egui::Rect> {
+        let mut out = Vec::new();
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        let chars: Vec<char> = display_code.chars().collect();
+        if hi > chars.len() {
+            return out;
+        }
+        let target = &chars[lo..hi];
+        if target.iter().any(|&c| !is_ident(c)) || target[0].is_ascii_digit() {
+            return out;
+        }
+        let wl = hi - lo;
+        let n = chars.len();
+        let mut i = 0;
+        while i + wl <= n {
+            if &chars[i..i + wl] == target
+                && (i == 0 || !is_ident(chars[i - 1]))
+                && (i + wl == n || !is_ident(chars[i + wl]))
+            {
+                let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(i));
+                let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(i + wl));
+                let y_top = gp.y + loc_s.min.y;
+                let y_bot = gp.y + loc_s.max.y;
+                let same_row = (loc_s.min.y - loc_e.min.y).abs() < (y_bot - y_top).max(1.0) * 0.5;
+                let x_l = gp.x + loc_s.min.x;
+                let x_r = if same_row {
+                    gp.x + loc_e.min.x
+                } else {
+                    gp.x + galley.rect.width()
+                };
+                if y_bot >= clip.top() && y_top <= clip.bottom() && x_r > x_l {
+                    out.push(egui::Rect::from_min_max(
+                        egui::pos2(x_l, y_top),
+                        egui::pos2(x_r, y_bot),
+                    ));
+                }
+                i += wl;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Same rects in the same order, for texts the galley was laid out from and
+    /// for texts it is an edit behind, with clips that cut through rows so the
+    /// whole-word test runs at the edges of the scanned chars.
+    #[test]
+    fn visible_occurrences_paint_exactly_what_the_whole_file_pass_painted() {
+        use crate::editor::gui::text_pos::{
+            GalleyRows, LineIndex, galley_rows_tests::galleys, test_galleys,
+        };
+        let code = "let x = x + max(x, x_1);\nfoo(x)\n  x\nx\nself.a = self.b;\n\
+                    self\nself_ x\nă x ăx x\n2x x2 x";
+        let long: String = (0..60).map(|i| format!("x{i} x x_ {i}x\n")).collect();
+        let named = test_galleys(&[(code, f32::INFINITY), (code, 40.0), (&long, f32::INFINITY)]);
+        let named_texts = [code, code, long.as_str()].map(str::to_owned);
+        // A third of the generated galleys (still both wrap widths) keeps this
+        // under a second in the dev build.
+        let all = galleys()
+            .into_iter()
+            .step_by(3)
+            .chain(named_texts.into_iter().zip(named));
+        let mut compared = 0usize;
+        for (text, galley) in all {
+            let rows = GalleyRows::new(&galley);
+            let h = galley.rect.height();
+            let variants = [
+                text.clone(),
+                format!("x\n{text}"),
+                text.chars().skip(1).collect(),
+                format!("{text} x a"),
+            ];
+            for shown in &variants {
+                let index = LineIndex::new(shown);
+                let n = shown.chars().count();
+                let mut selections: Vec<(usize, usize)> = (0..n)
+                    .step_by((n / 16).max(3))
+                    .flat_map(|lo| (1..=3).map(move |len| (lo, lo + len)))
+                    .filter(|&(_, hi)| hi <= n + 1)
+                    .collect();
+                selections.extend([(0, n), (n, n + 2)]);
+                for &(lo, hi) in &selections {
+                    if lo >= hi {
+                        continue;
+                    }
+                    for gp in [egui::pos2(0.0, 0.0), egui::pos2(12.5, -20.0)] {
+                        for (top, bottom) in [
+                            (-50.0, h + 50.0),
+                            (7.0, 21.0),
+                            (h * 0.5, h * 0.5 + 10.0),
+                            (h, h),
+                        ] {
+                            let clip = egui::Rect::from_min_max(
+                                egui::pos2(0.0, top),
+                                egui::pos2(400.0, bottom),
+                            );
+                            let mut got = Vec::new();
+                            super::for_each_selected_word_rect(
+                                &rows,
+                                gp,
+                                clip,
+                                &index,
+                                lo,
+                                hi,
+                                |r| got.push(r),
+                            );
+                            let want = old_rects(&galley, gp, clip, shown, lo, hi);
+                            assert_eq!(got, want, "{lo}..{hi} of {shown:?} laid out {text:?}");
+                            compared += want.len();
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            compared > 1000,
+            "the cases must actually paint something: {compared}"
+        );
     }
 }

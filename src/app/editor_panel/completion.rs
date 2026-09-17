@@ -8,13 +8,14 @@
 use super::doc_md;
 use crate::app::{AppIde, ProjectFileId};
 use crate::editor::gui::text_pos::{
-    diags_for_file, lsp_completion_prefix, lsp_cursor_pos, lsp_kind_icon, lsp_line_end_char_idx,
+    LineIndex, diags_for_file, lsp_completion_prefix, lsp_cursor_pos, lsp_kind_icon,
     lsp_word_start, selected_file_rel_path,
 };
 use crate::editor::gui::{show_diagnostics_overlay, show_inlay_hint};
 use crate::lsp;
 use eframe::egui;
 use egui::text_edit::TextEditOutput;
+use std::sync::Arc;
 
 // The **inline** diagnostic overlay — squiggles and inline message text drawn
 // over the code — is gated at the call site by `self.inline_errors_enabled`
@@ -469,7 +470,8 @@ impl AppIde {
         // check the popup would be drawn twice — once anchored to the wrong
         // caret — and both would fight over the selection index.
         if self.ed.completion_open && self.completion_owner == slot {
-            let all_items = self.lsp_state.lock().unwrap().completion_items.clone();
+            // A pointer copy under the lock, not a deep copy of every item.
+            let all_items = Arc::clone(&self.lsp_state.lock().unwrap().completion_items);
 
             if !all_items.is_empty() {
                 // ── Prefix-first ordering ────────────────────────────────
@@ -485,11 +487,13 @@ impl AppIde {
                     })
                     .unwrap_or_default();
 
-                let filtered = order_by_prefix(all_items, &prefix);
-
-                // Persist filtered list so next frame's key handlers see
-                // exactly the same items the user sees right now.
-                self.ed.completion_filtered_items = filtered.clone();
+                // Persisted in the view, so next frame's key handlers see
+                // exactly the same items the user sees right now. Re-ordered
+                // only when the list or the prefix changed.
+                let filtered = self
+                    .ed
+                    .completion_filtered_items
+                    .update(&all_items, &prefix);
 
                 if filtered.is_empty() {
                     // Nothing matches the current prefix — hide the popup.
@@ -550,91 +554,11 @@ impl AppIde {
                     };
 
                     // ── Render popup ─────────────────────────────────────
-                    // `interactable` defaults to true → mouse clicks work.
-                    egui::Area::new(egui::Id::new("lsp_completion_popup"))
-                        .fixed_pos(popup_pos)
-                        .order(egui::Order::Foreground)
-                        .show(ui.ctx(), |ui| {
-                            egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
-                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                                ui.set_min_width(440.0);
-                                ui.set_max_width(440.0);
-
-                                egui::ScrollArea::vertical()
-                                    .max_height(300.0)
-                                    .auto_shrink([false, true])
-                                    .show(ui, |ui| {
-                                        for (i, item) in filtered.iter().enumerate() {
-                                            let selected = i == sel;
-
-                                            let fg = if selected {
-                                                egui::Color32::WHITE
-                                            } else {
-                                                egui::Color32::from_rgb(200, 210, 230)
-                                            };
-                                            let sel_bg = egui::Color32::from_rgb(40, 90, 160);
-                                            let hover_bg = egui::Color32::from_rgb(50, 60, 80);
-
-                                            // Allocate the full row width for hit-testing.
-                                            let row_h = 19.0;
-                                            let avail_w = ui.available_width();
-                                            let (rect, row_resp) = ui.allocate_exact_size(
-                                                egui::vec2(avail_w, row_h),
-                                                egui::Sense::click(),
-                                            );
-
-                                            // Background (selected / hovered).
-                                            if selected {
-                                                ui.painter().rect_filled(rect, 2.0, sel_bg);
-                                            } else if row_resp.hovered() {
-                                                ui.painter().rect_filled(rect, 2.0, hover_bg);
-                                            }
-
-                                            let painter = ui.painter();
-                                            let icon = lsp_kind_icon(item.kind);
-                                            let label = format!("{} {}", icon, item.label);
-
-                                            // Icon + label — left-aligned.
-                                            painter.text(
-                                                rect.left_center() + egui::vec2(4.0, 0.0),
-                                                egui::Align2::LEFT_CENTER,
-                                                &label,
-                                                egui::FontId::monospace(12.0),
-                                                fg,
-                                            );
-
-                                            // The type signature is deliberately NOT
-                                            // repeated per row. It used to be
-                                            // right-aligned in the same 440 px as the
-                                            // label, so a long name (`into_open_drain_
-                                            // output_with_state`) and its signature
-                                            // ran into each other and both became
-                                            // unreadable. The panel beside the popup
-                                            // already shows the focused item's full
-                                            // signature, untruncated.
-
-                                            // Mouse click → deferred insert.
-                                            if row_resp.clicked() {
-                                                self.ed.completion_pending_insert =
-                                                    Some(item.clone());
-                                                self.ed.completion_open = false;
-                                            }
-
-                                            // Scroll selected item into view.
-                                            if selected {
-                                                row_resp.scroll_to_me(None);
-                                            }
-
-                                            // No hover tooltip: the panel to the
-                                            // right already shows the FOCUSED
-                                            // item's signature and docs. Two
-                                            // popups describing two different
-                                            // items at once was the confusing
-                                            // part.
-                                        }
-                                    }); // ScrollArea
-                            }); // Frame
-                        }); // Area
+                    // Mouse click → deferred insert.
+                    if let Some(i) = show_completion_list(ui.ctx(), popup_pos, &filtered, sel) {
+                        self.ed.completion_pending_insert = Some(filtered[i].clone());
+                        self.ed.completion_open = false;
+                    }
 
                     // ── Detail panel, beside the focused item ─────────────────
                     // Was hover-only, which meant you had to leave the keyboard
@@ -669,6 +593,11 @@ impl AppIde {
                                 // than hang off it, so the text stays readable.
                                 (screen.right() - DETAIL_W).max(screen.left())
                             };
+                            // Parsed once per focused item, not once per frame.
+                            let doc = self
+                                .ed
+                                .completion_filtered_items
+                                .doc_lines(&item.documentation);
                             egui::Area::new(egui::Id::new("lsp_completion_detail"))
                                 .fixed_pos(egui::pos2(detail_x, popup_pos.y))
                                 .order(egui::Order::Foreground)
@@ -722,7 +651,7 @@ impl AppIde {
                                                     ui.separator();
                                                 }
                                                 if !item.documentation.is_empty() {
-                                                    render_doc(ui, &item.documentation);
+                                                    render_doc(ui, doc);
                                                 }
                                             });
                                     });
@@ -882,6 +811,12 @@ impl AppIde {
             }
         }
 
+        // Every position lookup below goes through this, instead of walking
+        // `display_code` from offset 0 once per diagnostic per frame. Taken
+        // here because `display_code` is final from this point on (an accepted
+        // completion above rewrites it).
+        let line_index = self.ed.line_index.get(&display_code);
+
         // ── Pin-jump pulse band ───────────────────────────────────────
         // Painted OUTSIDE the diagnostics gate below: it must show up on any
         // file the editor can display, whether or not rust-analyzer tracks it
@@ -896,7 +831,7 @@ impl AppIde {
                 editor_resp.galley_pos,
                 editor_clip,
                 &editor_resp.galley,
-                &display_code,
+                &line_index,
                 line,
                 color,
             );
@@ -945,8 +880,12 @@ impl AppIde {
                         // natively regardless of `source == "rustc"` (see
                         // `LspDiagnostic::is_rustc_error_code`).
                         let flycheck_stale = lsp.flycheck_stale();
+                        // Filtered by reference, and only what survives is
+                        // cloned: the filters are pure, so the list (and each
+                        // survivor's index, which keys its tooltip) is the one
+                        // cloning everything first produced.
                         diags_for_file(&lsp.diagnostics, rel)
-                            .into_iter()
+                            .iter()
                             // One toolbar switch per half.
                             //
                             // This used to read `Error | Info`, which meant the
@@ -973,8 +912,9 @@ impl AppIde {
                             // is exactly why they used to stick to commented
                             // lines until the next Save.
                             .filter(|d| {
-                                d.source == "rust-analyzer" || !line_is_gone(&display_code, d.line)
+                                d.source == "rust-analyzer" || !line_is_gone(&line_index, d.line)
                             })
+                            .cloned()
                             .collect()
                     } else {
                         Vec::new()
@@ -997,7 +937,7 @@ impl AppIde {
                 visible_clip,
                 &editor_resp.galley,
                 &diags,
-                &display_code,
+                &line_index,
                 copy_requested,
                 highlight,
                 def_line,
@@ -1025,7 +965,7 @@ impl AppIde {
                     let (entries, ready, live) = {
                         let lsp = self.lsp_state.lock().unwrap();
                         (
-                            error_list::entries_from_lsp(&diags_for_file(&lsp.diagnostics, rel)),
+                            error_list::entries_from_lsp(diags_for_file(&lsp.diagnostics, rel)),
                             matches!(lsp.status, lsp::LspStatus::Ready),
                             lsp.last_sent_matches(rel, &display_code) && lsp.diagnostics_fresh(rel),
                         )
@@ -1069,7 +1009,7 @@ impl AppIde {
             let target = error_list::show(ui, salt, editor_clip, &rows, fresh).or_else(|| {
                 let forward = err_step?;
                 let caret = cursor_char_idx
-                    .map(|i| lsp_cursor_pos(&display_code, i).0 + 1)
+                    .map(|i| line_index.line_of_char(i) as u32 + 1)
                     .unwrap_or(0);
                 error_list::step(&rows, caret, forward)
             });
@@ -1102,7 +1042,7 @@ impl AppIde {
         if let (Some(line), Some(hint)) = (inlay_line, self.ed.inlay_hint.as_ref()) {
             // Only draw a hint that still belongs to the caret's current line.
             if hint.line == line {
-                let eol_idx = lsp_line_end_char_idx(&display_code, hint.line + 1);
+                let eol_idx = line_index.line_end_char_idx(hint.line + 1);
                 show_inlay_hint(
                     ui,
                     editor_resp.galley_pos,
@@ -1197,19 +1137,18 @@ fn mod_declared_in(parent_text: &str, stem: &str) -> bool {
     })
 }
 
-/// Order completion items so those whose label starts with `prefix` (case-
-/// insensitive) come first, keeping each group in the server's original order,
-/// then the rest — so the popup leads with what the user has already typed.
-/// An empty prefix returns the list unchanged (the server's relevance order).
-/// `true` when 1-based `line` of `text` can no longer hold the code a compiler
-/// diagnostic was computed for: it is blank, a pure `//` line comment, or past
-/// the end of the file.
+/// `true` when 1-based `line` of the indexed text can no longer hold the code a
+/// compiler diagnostic was computed for: it is blank, a pure `//` line comment,
+/// or past the end of the file.
 ///
 /// Used to drop flycheck diagnostics whose position went stale — commenting a
 /// line out is the common case, and rustc never reports `mismatched types` on a
 /// comment.
-fn line_is_gone(text: &str, line: u32) -> bool {
-    match text.lines().nth(line.saturating_sub(1) as usize) {
+///
+/// Through the index, not `text.lines().nth(..)`: that walked the file from the
+/// top once per flycheck diagnostic per frame, under the `LspState` lock.
+fn line_is_gone(line_index: &LineIndex, line: u32) -> bool {
+    match line_index.line_str(line.saturating_sub(1) as usize) {
         Some(l) => {
             let t = l.trim_start();
             t.is_empty() || t.starts_with("//")
@@ -1231,6 +1170,10 @@ fn empty_completion_note_for_error(code: i64, message: &str) -> String {
     }
 }
 
+/// Order completion items so those whose label starts with `prefix` (case-
+/// insensitive) come first, keeping each group in the server's original order,
+/// then the rest — so the popup leads with what the user has already typed.
+/// An empty prefix returns the list unchanged (the server's relevance order).
 fn order_by_prefix(items: Vec<lsp::CompletionItem>, prefix: &str) -> Vec<lsp::CompletionItem> {
     if prefix.is_empty() {
         return items;
@@ -1243,13 +1186,190 @@ fn order_by_prefix(items: Vec<lsp::CompletionItem>, prefix: &str) -> Vec<lsp::Co
     starts
 }
 
+/// The completion popup's rows, kept in the view between frames.
+///
+/// The rows are `order_by_prefix` of rust-analyzer's list, and they were
+/// rebuilt every frame the popup was open: a deep copy of every item under the
+/// LSP lock, a lowercase copy of every label, and a second copy of the result.
+/// Now they are rebuilt only when the list or the prefix changed. The key
+/// handlers in `mod.rs` read these same rows, so what they accept is exactly
+/// what was drawn.
+#[derive(Default)]
+pub(crate) struct CompletionRows {
+    rows: Arc<Vec<lsp::CompletionItem>>,
+    /// The list and prefix `rows` was built from; `None` after `clear`.
+    ///
+    /// Comparing the list by `Arc::ptr_eq` is exact: the `Arc` held here keeps
+    /// the allocation alive, so its address cannot be reused, and `LspState`
+    /// replaces its list rather than editing it.
+    source: Option<(Arc<Vec<lsp::CompletionItem>>, String)>,
+    /// The detail panel's documentation and its parsed lines, keyed on the
+    /// text itself.
+    doc: Option<(String, Vec<doc_md::DocLine>)>,
+}
+
+impl CompletionRows {
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub(crate) fn get(&self, i: usize) -> Option<&lsp::CompletionItem> {
+        self.rows.get(i)
+    }
+
+    /// No rows until the next `update`.
+    pub(crate) fn clear(&mut self) {
+        self.rows = Arc::default();
+        self.source = None;
+    }
+
+    /// The rows for `items` with `prefix` typed: always equal to
+    /// `order_by_prefix(items.to_vec(), prefix)`, and stored for the key
+    /// handlers.
+    fn update(
+        &mut self,
+        items: &Arc<Vec<lsp::CompletionItem>>,
+        prefix: &str,
+    ) -> Arc<Vec<lsp::CompletionItem>> {
+        let current = matches!(
+            &self.source,
+            Some((list, p)) if Arc::ptr_eq(list, items) && p == prefix
+        );
+        if !current {
+            self.rows = if prefix.is_empty() {
+                // `order_by_prefix` returns the list unchanged: share it.
+                Arc::clone(items)
+            } else {
+                Arc::new(order_by_prefix(items.to_vec(), prefix))
+            };
+            self.source = Some((Arc::clone(items), prefix.to_owned()));
+        }
+        Arc::clone(&self.rows)
+    }
+
+    /// `doc_md::parse_doc(md)`, parsed again only when `md` changed.
+    fn doc_lines(&mut self, md: &str) -> &[doc_md::DocLine] {
+        if !matches!(&self.doc, Some((text, _)) if text == md) {
+            self.doc = Some((md.to_owned(), doc_md::parse_doc(md)));
+        }
+        self.doc.as_ref().map_or(&[], |(_, lines)| lines)
+    }
+}
+
+/// Height of one completion row, item spacing excluded.
+const COMPLETION_ROW_H: f32 = 19.0;
+
+/// The completion list at `popup_pos`, with row `sel` highlighted and scrolled
+/// into view. Returns the row clicked this frame, if any.
+fn show_completion_list(
+    ctx: &egui::Context,
+    popup_pos: egui::Pos2,
+    items: &[lsp::CompletionItem],
+    sel: usize,
+) -> Option<usize> {
+    let mut clicked = None;
+    // `interactable` defaults to true → mouse clicks work.
+    egui::Area::new(egui::Id::new("lsp_completion_popup"))
+        .fixed_pos(popup_pos)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                ui.set_min_width(440.0);
+                ui.set_max_width(440.0);
+
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (i, item) in items.iter().enumerate() {
+                            if show_completion_row(ui, item, i == sel) {
+                                clicked = Some(i);
+                            }
+                        }
+                    }); // ScrollArea
+            }); // Frame
+        }); // Area
+    clicked
+}
+
+/// One row of the completion list. Returns whether it was clicked.
+///
+/// Every row is still allocated, so row ids, hit-testing and the selected
+/// row's `scroll_to_me` are exactly what they were. `ScrollArea::show_rows` is
+/// not used on purpose: once off-screen rows stop existing, a list scrolled by
+/// whole rows between two frames gives a row's rect to a new id while the old
+/// id is gone, and debug builds outline that in red
+/// (`warn_if_rect_changes_id`).
+fn show_completion_row(ui: &mut egui::Ui, item: &lsp::CompletionItem, selected: bool) -> bool {
+    let fg = if selected {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_rgb(200, 210, 230)
+    };
+    let sel_bg = egui::Color32::from_rgb(40, 90, 160);
+    let hover_bg = egui::Color32::from_rgb(50, 60, 80);
+
+    // Allocate the full row width for hit-testing.
+    let avail_w = ui.available_width();
+    let (rect, row_resp) =
+        ui.allocate_exact_size(egui::vec2(avail_w, COMPLETION_ROW_H), egui::Sense::click());
+
+    // Only what can show is painted. The label and background stay within a
+    // few px of `rect`, so a row a whole row height clear of the clip rect
+    // cannot reach a visible pixel, and its `format!` and text layout are
+    // skipped.
+    if ui.clip_rect().expand(COMPLETION_ROW_H).intersects(rect) {
+        // Background (selected / hovered).
+        if selected {
+            ui.painter().rect_filled(rect, 2.0, sel_bg);
+        } else if row_resp.hovered() {
+            ui.painter().rect_filled(rect, 2.0, hover_bg);
+        }
+
+        let painter = ui.painter();
+        let icon = lsp_kind_icon(item.kind);
+        let label = format!("{} {}", icon, item.label);
+
+        // Icon + label — left-aligned.
+        painter.text(
+            rect.left_center() + egui::vec2(4.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            &label,
+            egui::FontId::monospace(12.0),
+            fg,
+        );
+    }
+
+    // The type signature is deliberately NOT repeated per row. It used to be
+    // right-aligned in the same 440 px as the label, so a long name
+    // (`into_open_drain_output_with_state`) and its signature ran into each
+    // other and both became unreadable. The panel beside the popup already
+    // shows the focused item's full signature, untruncated.
+
+    // Scroll selected item into view.
+    if selected {
+        row_resp.scroll_to_me(None);
+    }
+
+    // No hover tooltip: the panel to the right already shows the FOCUSED
+    // item's signature and docs. Two popups describing two different items at
+    // once was the confusing part.
+
+    row_resp.clicked()
+}
+
 /// Draw rustdoc markdown in the completion detail panel.
 ///
 /// Code examples get monospace on a tinted band: once the ` ``` ` fences are
 /// stripped they are otherwise indistinguishable from the prose around them,
 /// which is what made multi-paragraph docs hard to read. Parsing (including
 /// which lines are code at all) lives in `doc_md`.
-fn render_doc(ui: &mut egui::Ui, md: &str) {
+fn render_doc(ui: &mut egui::Ui, lines: &[doc_md::DocLine]) {
     // Prose stays the muted grey it always was; code borrows the editor's
     // warmer tone so the two are separable at a glance.
     const BODY: egui::Color32 = egui::Color32::from_rgb(200, 205, 215);
@@ -1258,7 +1378,6 @@ fn render_doc(ui: &mut egui::Ui, md: &str) {
     const COMMENT: egui::Color32 = egui::Color32::from_rgb(126, 137, 150);
     const CODE_BG: egui::Color32 = egui::Color32::from_rgb(38, 41, 48);
 
-    let lines = doc_md::parse_doc(md);
     let mut i = 0;
     while i < lines.len() {
         match lines[i].kind {
@@ -1329,8 +1448,14 @@ fn render_doc(ui: &mut egui::Ui, md: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_is_gone, mod_declared_in, order_by_prefix, wanted_inline};
+    use super::{
+        CompletionRows, doc_md, line_is_gone, mod_declared_in, order_by_prefix,
+        show_completion_list, wanted_inline,
+    };
+    use crate::editor::gui::text_pos::{LineIndex, lsp_kind_icon};
     use crate::lsp::{CompletionItem, DiagSeverity};
+    use eframe::egui;
+    use std::sync::Arc;
 
     /// The bug this guards: a warning is the MOST common non-error diagnostic
     /// rust-analyzer publishes, and the old `Error | Info` rule dropped it. With
@@ -1427,6 +1552,376 @@ mod tests {
         assert_eq!(labels(got), ["b", "a", "c"]);
     }
 
+    /// xorshift64: deterministic, so a failing step replays.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+    }
+
+    /// Every field differs per `serial`, so a row taken from the wrong list
+    /// cannot compare equal by accident.
+    fn full_item(label: &str, serial: usize) -> CompletionItem {
+        CompletionItem {
+            label: label.to_owned(),
+            kind: (serial % 26) as u8,
+            detail: format!("detail {serial}"),
+            insert_text: format!("insert {serial}"),
+            insert_is_snippet: serial.is_multiple_of(2),
+            documentation: format!("doc {serial}"),
+        }
+    }
+
+    /// Rows as the key handlers in `mod.rs` read them, one past the end too.
+    fn read_rows(rows: &CompletionRows) -> Vec<String> {
+        (0..rows.len() + 2)
+            .map(|i| format!("{:?}", rows.get(i)))
+            .collect()
+    }
+
+    fn read_vec(items: &[CompletionItem]) -> Vec<String> {
+        (0..items.len() + 2)
+            .map(|i| format!("{:?}", items.get(i)))
+            .collect()
+    }
+
+    /// The memo answers exactly what re-ordering every frame did, through any
+    /// mix of new answers, equal answers in a new `Arc`, prefix edits, new
+    /// triggers (`clear`) and frames where nothing changed. Labels and prefixes
+    /// include case pairs whose lowercase form is longer (`İ`), `ß`, astral
+    /// chars and the empty string.
+    #[test]
+    fn completion_rows_always_equal_order_by_prefix() {
+        const LABELS: &[&str] = &[
+            "",
+            "a",
+            "A",
+            "ab",
+            "Ab",
+            "aB",
+            "b",
+            "ß",
+            "SS",
+            "ss",
+            "İ",
+            "i",
+            "i\u{307}x",
+            "_x",
+            "x_",
+            "é",
+            "É",
+            "😀",
+            "a😀",
+        ];
+        const PREFIXES: &[&str] = &[
+            "", "a", "A", "ab", "AB", "b", "i", "İ", "i\u{307}", "ss", "ß", "é", "É", "x", "_",
+            "😀", "zz",
+        ];
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut rows = CompletionRows::default();
+        let mut list: Arc<Vec<CompletionItem>> = Arc::default();
+        let mut prefix = String::new();
+        let mut serial = 0;
+        let mut last: Option<Arc<Vec<CompletionItem>>> = None;
+        let mut reused = 0;
+        for step in 0..4000 {
+            match rng.below(6) {
+                0 => {
+                    let n = rng.below(9);
+                    list = Arc::new(
+                        (0..n)
+                            .map(|_| {
+                                serial += 1;
+                                full_item(LABELS[rng.below(LABELS.len())], serial)
+                            })
+                            .collect(),
+                    );
+                }
+                1 => list = Arc::new(list.to_vec()),
+                2 => prefix = PREFIXES[rng.below(PREFIXES.len())].to_owned(),
+                3 => {
+                    rows.clear();
+                    assert!(rows.is_empty() && rows.get(0).is_none());
+                    assert_eq!(rows.len(), 0);
+                }
+                _ => {}
+            }
+            let got = rows.update(&list, &prefix);
+            let want = order_by_prefix(list.to_vec(), &prefix);
+            assert_eq!(read_vec(&got), read_vec(&want), "step {step} {prefix:?}");
+            assert_eq!(read_rows(&rows), read_vec(&want), "step {step} {prefix:?}");
+            assert_eq!(rows.is_empty(), want.is_empty(), "step {step}");
+            if last.as_ref().is_some_and(|l| Arc::ptr_eq(l, &got)) {
+                reused += 1;
+            }
+            last = Some(got);
+        }
+        assert!(reused > 1000, "only {reused} frames reused the rows");
+    }
+
+    /// The point of the memo: an unchanged frame hands back the same rows, and
+    /// each thing that can change them forces a rebuild.
+    #[test]
+    fn completion_rows_are_rebuilt_only_when_the_list_or_prefix_changes() {
+        let list = Arc::new(items(&["len", "new", "next"]));
+        let mut rows = CompletionRows::default();
+        let first = rows.update(&list, "n");
+        assert!(Arc::ptr_eq(&first, &rows.update(&list, "n")));
+        assert!(!Arc::ptr_eq(&first, &rows.update(&list, "ne")));
+        let again = rows.update(&list, "n");
+        let equal_answer = Arc::new(list.to_vec());
+        assert!(!Arc::ptr_eq(&again, &rows.update(&equal_answer, "n")));
+        // No prefix: the list itself, not a copy of it.
+        assert!(Arc::ptr_eq(&equal_answer, &rows.update(&equal_answer, "")));
+        // A new trigger empties the rows, and the next frame rebuilds them
+        // although neither the list nor the prefix changed.
+        rows.clear();
+        assert!(rows.is_empty());
+        let rebuilt = rows.update(&equal_answer, "");
+        assert_eq!(labels(rebuilt.to_vec()), ["len", "new", "next"]);
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn doc_lines_equal_parse_doc_and_are_parsed_once_per_text() {
+        let docs = [
+            "",
+            "Plain sentence.",
+            "# Heading\n\nBody.\n\n```\n# use std::fmt;\nlet x = 1;\n## escaped\n#[attr]\n```\nAfter.",
+            "Plain sentence.",
+            "```rust\n// comment\nfn f() {}\n```",
+        ];
+        let mut rows = CompletionRows::default();
+        for _ in 0..2 {
+            for md in docs {
+                // A fresh allocation each time: the key is the text, not where
+                // it lives.
+                let owned = md.to_owned();
+                assert_eq!(rows.doc_lines(&owned), doc_md::parse_doc(md).as_slice());
+            }
+        }
+        let text = docs[2].to_owned();
+        let first = rows.doc_lines(&text).as_ptr();
+        assert_eq!(first, rows.doc_lines(docs[2]).as_ptr());
+        assert_ne!(first, rows.doc_lines(docs[1]).as_ptr());
+    }
+
+    /// The completion list exactly as it was drawn before off-screen rows were
+    /// skipped: every row formatted and painted.
+    fn show_list_painting_every_row(
+        ctx: &egui::Context,
+        popup_pos: egui::Pos2,
+        items: &[CompletionItem],
+        sel: usize,
+    ) -> Option<usize> {
+        let mut clicked = None;
+        egui::Area::new(egui::Id::new("lsp_completion_popup"))
+            .fixed_pos(popup_pos)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    ui.set_min_width(440.0);
+                    ui.set_max_width(440.0);
+
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for (i, item) in items.iter().enumerate() {
+                                let selected = i == sel;
+                                let fg = if selected {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::from_rgb(200, 210, 230)
+                                };
+                                let sel_bg = egui::Color32::from_rgb(40, 90, 160);
+                                let hover_bg = egui::Color32::from_rgb(50, 60, 80);
+                                let row_h = 19.0;
+                                let avail_w = ui.available_width();
+                                let (rect, row_resp) = ui.allocate_exact_size(
+                                    egui::vec2(avail_w, row_h),
+                                    egui::Sense::click(),
+                                );
+                                if selected {
+                                    ui.painter().rect_filled(rect, 2.0, sel_bg);
+                                } else if row_resp.hovered() {
+                                    ui.painter().rect_filled(rect, 2.0, hover_bg);
+                                }
+                                let painter = ui.painter();
+                                let icon = lsp_kind_icon(item.kind);
+                                let label = format!("{} {}", icon, item.label);
+                                painter.text(
+                                    rect.left_center() + egui::vec2(4.0, 0.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    &label,
+                                    egui::FontId::monospace(12.0),
+                                    fg,
+                                );
+                                if row_resp.clicked() {
+                                    clicked = Some(i);
+                                }
+                                if selected {
+                                    row_resp.scroll_to_me(None);
+                                }
+                            }
+                        });
+                });
+            });
+        clicked
+    }
+
+    type ListFn = fn(&egui::Context, egui::Pos2, &[CompletionItem], usize) -> Option<usize>;
+
+    /// One frame's result: the clicked row, and every tessellated mesh with its
+    /// clip rect.
+    type FrameOut = (Option<usize>, Vec<(egui::Rect, egui::Mesh)>);
+
+    fn run_list(
+        list: ListFn,
+        items: &[CompletionItem],
+        pos: egui::Pos2,
+        zoom: f32,
+        frames: &[(usize, Vec<egui::Event>)],
+    ) -> Vec<FrameOut> {
+        let ctx = egui::Context::default();
+        ctx.set_zoom_factor(zoom);
+        let input = |n: usize, events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 720.0),
+            )),
+            time: Some(n as f64 / 60.0),
+            predicted_dt: 1.0 / 60.0,
+            events,
+            ..Default::default()
+        };
+        // Every label's glyphs enter the font atlas first. Painting every row
+        // would otherwise place them in another order, and the meshes would
+        // differ in texture coordinates alone.
+        let _ = ctx.run_ui(input(0, Vec::new()), |ui| {
+            for item in items {
+                let label = format!("{} {}", lsp_kind_icon(item.kind), item.label);
+                let font = egui::FontId::monospace(12.0);
+                let _ = ui
+                    .painter()
+                    .layout_no_wrap(label, font, egui::Color32::WHITE);
+            }
+        });
+        frames
+            .iter()
+            .enumerate()
+            .map(|(n, (sel, events))| {
+                let mut clicked = None;
+                let out = ctx.run_ui(input(n + 1, events.clone()), |ui| {
+                    clicked = list(ui.ctx(), pos, items, *sel);
+                });
+                let meshes = ctx
+                    .tessellate(out.shapes, out.pixels_per_point)
+                    .into_iter()
+                    .map(|p| match p.primitive {
+                        egui::epaint::Primitive::Mesh(mesh) => (p.clip_rect, mesh),
+                        egui::epaint::Primitive::Callback(_) => unreachable!("no callbacks"),
+                    })
+                    .collect();
+                (clicked, meshes)
+            })
+            .collect()
+    }
+
+    /// Selection walking one row per frame past the bottom, held, jumping to
+    /// the top, re-targeted mid-animation; then the pointer hovers the list,
+    /// wheels it both ways (the list scrolls, then the selection pulls it
+    /// back) and clicks a row.
+    fn list_script(len: usize, pos: egui::Pos2) -> Vec<(usize, Vec<egui::Event>)> {
+        let last = len - 1;
+        let mut frames = Vec::new();
+        let hold = |frames: &mut Vec<_>, sel: usize, n: usize| {
+            for _ in 0..n {
+                frames.push((sel, Vec::new()));
+            }
+        };
+        hold(&mut frames, 0, 3);
+        for sel in 0..=last {
+            frames.push((sel, Vec::new()));
+        }
+        hold(&mut frames, last, 10);
+        hold(&mut frames, 0, 10);
+        for sel in [last / 2, last.min(3), last, last / 3] {
+            hold(&mut frames, sel, 2);
+        }
+        let over = pos + egui::vec2(60.0, 40.0);
+        let sel = last.min(5);
+        frames.push((sel, vec![egui::Event::PointerMoved(over)]));
+        for dy in [-1.0, -1.0, 1.0, -3.0] {
+            let wheel = egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, dy),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frames.push((sel, vec![wheel]));
+            hold(&mut frames, sel, 2);
+        }
+        // Past the scroll animation, so both halves of the click land on the
+        // same row.
+        hold(&mut frames, sel, 30);
+        for pressed in [true, false] {
+            let button = egui::Event::PointerButton {
+                pos: over,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frames.push((sel, vec![button]));
+        }
+        hold(&mut frames, sel, 2);
+        frames
+    }
+
+    /// Skipping the paint of rows far outside the clip rect changes nothing a
+    /// renderer receives: per frame, the same clicked row and the same meshes,
+    /// vertex for vertex. That also pins the scroll offset, since every row's
+    /// position depends on it. Covers a 60-row list (rust-analyzer's cap), one
+    /// pushed back on screen at 1.25 zoom, and a list too short to scroll.
+    #[test]
+    fn skipping_off_screen_rows_paints_the_same_meshes() {
+        let many: Vec<CompletionItem> = (0..60)
+            .map(|i| full_item(&format!("item_{i:02}_{}", "w".repeat(i % 9)), i * 7))
+            .collect();
+        let few: Vec<CompletionItem> = many[..3].to_vec();
+        let mut clicks = 0;
+        for (items, pos, zoom) in [
+            (&many, egui::pos2(100.3, 50.7), 1.0),
+            (&many, egui::pos2(700.6, 640.2), 1.25),
+            (&few, egui::pos2(10.0, 10.0), 1.0),
+        ] {
+            let script = list_script(items.len(), pos);
+            let old = run_list(show_list_painting_every_row, items, pos, zoom, &script);
+            let new = run_list(show_completion_list, items, pos, zoom, &script);
+            assert_eq!(old.len(), new.len());
+            for (n, ((old_click, old_meshes), (new_click, new_meshes))) in
+                old.iter().zip(&new).enumerate()
+            {
+                assert_eq!(old_click, new_click, "{pos:?} frame {n}: click");
+                assert_eq!(old_meshes.len(), new_meshes.len(), "{pos:?} frame {n}");
+                for (m, (a, b)) in old_meshes.iter().zip(new_meshes).enumerate() {
+                    assert!(a == b, "{pos:?} frame {n}: mesh {m} differs");
+                }
+                clicks += usize::from(old_click.is_some());
+            }
+        }
+        assert!(
+            clicks >= 2,
+            "the click landed on a row in only {clicks} lists"
+        );
+    }
+
     /// Regression: a rustc diagnostic keeps the line it was computed for, so
     /// after commenting that line out the squiggle used to sit on the comment
     /// until the next Save re-ran cargo check.
@@ -1437,10 +1932,46 @@ mod tests {
 
 fn b() {}
 ";
+        let text = &LineIndex::new(text);
         assert!(!line_is_gone(text, 1), "real code stays");
         assert!(line_is_gone(text, 2), "commented out");
         assert!(line_is_gone(text, 3), "blank");
         assert!(!line_is_gone(text, 4), "real code stays");
         assert!(line_is_gone(text, 99), "past EOF - the line was deleted");
+    }
+
+    /// The index-based check answers exactly what the old
+    /// `text.lines().nth(line - 1)` form did, on every line of texts with CRLF,
+    /// a lone `'\r'`, indented comments, no trailing newline and line 0.
+    #[test]
+    fn line_is_gone_matches_the_lines_walk() {
+        fn old(text: &str, line: u32) -> bool {
+            match text.lines().nth(line.saturating_sub(1) as usize) {
+                Some(l) => {
+                    let t = l.trim_start();
+                    t.is_empty() || t.starts_with("//")
+                }
+                None => true,
+            }
+        }
+        for text in [
+            "",
+            "\n",
+            "a",
+            "a\n\n",
+            "fn a() {}\r\n  // x\r\n\r\n\tb();\r",
+            "\r\n\r",
+            "  //\n x //\n/\n/ /\n    ",
+            "ă\n  // ș\n😀",
+        ] {
+            let index = LineIndex::new(text);
+            for line in (0..8).chain([u32::MAX]) {
+                assert_eq!(
+                    line_is_gone(&index, line),
+                    old(text, line),
+                    "{text:?} line {line}"
+                );
+            }
+        }
     }
 }

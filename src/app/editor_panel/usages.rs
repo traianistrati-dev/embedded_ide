@@ -19,9 +19,10 @@
 //! never leaves a fade/pill at a stale (now wrong) position.
 
 use crate::app::AppIde;
-use crate::editor::gui::text_pos::{lsp_line_end_char_idx, lsp_pos_to_char_idx};
+use crate::editor::gui::text_pos::{GalleyRows, LineIndex, LineIndexCache};
 use crate::lsp::LspStatus;
 use eframe::egui;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How long the displayed file's text must sit unchanged before a fresh
@@ -50,15 +51,20 @@ struct UsageItem {
     /// LSP `SymbolKind` — part of the identity key for carrying a previous
     /// run's references over to the new run (instant fade/pill continuity).
     kind: u8,
-    // Whole-item span (0-based LSP) — the "fade" range when unused.
-    start_line: u32,
-    start_char: u32,
-    end_line: u32,
-    end_char: u32,
-    // Name position — anchors the "N refs" indicator and is the reference
-    // query point.
+    // Name position (0-based LSP) — the reference query point.
     sel_line: u32,
     sel_char: u32,
+    // Char indices into `computed_for_text`, converted once by [`usage_item`]
+    // when the documentSymbol reply lands, so the per-frame overlays do not
+    // walk the file for them.
+    /// The name: the row the "N refs" indicator sits on.
+    sel_ci: usize,
+    /// The end of the name's line: where the indicator starts.
+    eol_ci: usize,
+    /// Whole-item span start — the "fade" range when unused.
+    start_ci: usize,
+    /// Whole-item span end, as converted (not yet raised to `start_ci`).
+    end_ci: usize,
     /// Inside an `impl Trait for Type` block. `references` misses calls
     /// dispatched through a generic trait bound (they bind to the TRAIT's
     /// declaration), so an empty result must NOT fade these — the impl may
@@ -79,6 +85,8 @@ pub struct UsagesState {
     /// draws nothing until a fresh pass lands (positions would otherwise point
     /// at the wrong code after an edit).
     computed_for_text: String,
+    /// `computed_for_text.chars().count()`, counted alongside the item positions.
+    computed_total_chars: usize,
     /// The text a documentSymbol request is currently in flight for, so a
     /// still-unchanged buffer isn't re-requested every frame while waiting.
     pending_text: Option<String>,
@@ -109,6 +117,11 @@ pub struct UsagesState {
     /// `generics_for_text`, and only ever used for that exact text.
     generic_marks: super::generics::GenericMarks,
     generics_for_text: String,
+    /// What [`AppIde::unused_import_spans`] last derived from the build results.
+    unused_imports: LintSpans,
+    /// What the `unused_variables` half of [`AppIde::usages_dead_ranges`] last
+    /// derived from the build results.
+    unused_variables: LintSpans,
 }
 
 /// Send the next queued reference lookup, if none is in flight — one at a time
@@ -144,21 +157,29 @@ const EXTERNALLY_INVOKED_MARKERS: [&str; 8] = [
     "#[global_allocator]",
 ];
 
-/// `true` when the item named `name`, starting at 0-based line `start_line` in
-/// `text`, is externally invoked (see [`EXTERNALLY_INVOKED_MARKERS`]) — either
-/// `fn main` itself (the `#[entry]`-annotated binary entry point in this
-/// `no_std` project; excluded by name too since a plain `fn main` is never
-/// called from source even without the attribute) or preceded by one of the
-/// marker attributes. Scans upward from the item's own line (inclusive, since
-/// rust-analyzer's `documentSymbol` range sometimes starts at a leading
-/// attribute and sometimes at the `fn`/`pub` keyword — checking both is cheap),
-/// skipping blank lines, `//` doc comments, and other attributes, stopping at
-/// the first real code line above the item's own.
+/// [`is_externally_invoked_in`] over a whole text, for the tests.
+#[cfg(test)]
 fn is_externally_invoked(name: &str, start_line: u32, text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    is_externally_invoked_in(name, start_line, &lines)
+}
+
+/// `true` when the item named `name`, starting at 0-based line `start_line` in
+/// `lines` (`text.lines()`, collected once per documentSymbol reply by the
+/// caller rather than once per symbol), is externally invoked (see
+/// [`EXTERNALLY_INVOKED_MARKERS`]) — either `fn main` itself (the
+/// `#[entry]`-annotated binary entry point in this `no_std` project; excluded
+/// by name too since a plain `fn main` is never called from source even without
+/// the attribute) or preceded by one of the marker attributes. Scans upward
+/// from the item's own line (inclusive, since rust-analyzer's `documentSymbol`
+/// range sometimes starts at a leading attribute and sometimes at the `fn`/`pub`
+/// keyword — checking both is cheap), skipping blank lines, `//` doc comments,
+/// and other attributes, stopping at the first real code line above the item's
+/// own.
+fn is_externally_invoked_in(name: &str, start_line: u32, lines: &[&str]) -> bool {
     if name == "main" {
         return true;
     }
-    let lines: Vec<&str> = text.lines().collect();
     let mut i = (start_line as usize + 1).min(lines.len());
     while i > 0 {
         i -= 1;
@@ -182,27 +203,134 @@ fn is_externally_invoked(name: &str, start_line: u32, text: &str) -> bool {
     false
 }
 
+/// The tracked item for one documentSymbol entry, with its positions converted
+/// to char indices in `index`, the text that reply was computed for.
+///
+/// Converted once here rather than in the overlays, which run every frame and
+/// walked the file from offset 0 for each item. This cannot go stale: a
+/// `references` reply never moves an item, and both readers draw nothing unless
+/// the live text equals `computed_for_text`.
+fn usage_item(
+    s: crate::lsp::SymbolInfo,
+    index: &LineIndex,
+    references: Option<Vec<UsageRef>>,
+) -> UsageItem {
+    UsageItem {
+        sel_ci: index.pos_to_char_idx(s.sel_line + 1, s.sel_char + 1),
+        eol_ci: index.line_end_char_idx(s.sel_line + 1),
+        start_ci: index.pos_to_char_idx(s.start_line + 1, s.start_char + 1),
+        end_ci: index.pos_to_char_idx(s.end_line + 1, s.end_char + 1),
+        name: s.name,
+        kind: s.kind,
+        sel_line: s.sel_line,
+        sel_char: s.sel_char,
+        in_trait_impl: s.in_trait_impl,
+        references,
+    }
+}
+
+/// One `unused_variables` / `unused_imports` diagnostic of the displayed file,
+/// copied out of a build result while its lock is held. Only the fields the
+/// spans are derived from, so the per-frame copy is a few short strings rather
+/// than a clone of both results.
+#[derive(Clone, Debug, PartialEq)]
+struct LintSite {
+    message: String,
+    line: Option<u32>,
+    col: Option<u32>,
+}
+
+/// Appends the `code` diagnostics `result` reports for `rel_path`, in order.
+fn push_lint_sites(
+    out: &mut Vec<LintSite>,
+    result: &crate::build::BuildResult,
+    rel_path: &str,
+    code: &str,
+) {
+    out.extend(
+        result
+            .diagnostics
+            .iter()
+            .filter(|d| d.file.as_deref() == Some(rel_path) && d.code.as_deref() == Some(code))
+            .map(|d| LintSite {
+                message: d.message.clone(),
+                line: d.line,
+                col: d.col,
+            }),
+    );
+}
+
+/// Derives a file's spans from its lint sites, given an index of its text.
+type DeriveSpans = fn(&[LintSite], &LineIndex) -> Vec<(usize, usize)>;
+
+/// Spans derived from one lint's sites, kept while the file, the sites and the
+/// text are all unchanged. They change only when a build lands or the text is
+/// edited, while deriving them walks the whole file.
+#[derive(Default)]
+struct LintSpans {
+    rel_path: String,
+    sites: Vec<LintSite>,
+    /// The index the spans were derived through; its text is the key text.
+    /// `None` until the first derivation.
+    index: Option<Arc<LineIndex>>,
+    spans: Vec<(usize, usize)>,
+}
+
+impl LintSpans {
+    /// `derive(&sites, index of text)`, recomputed only when `rel_path`,
+    /// `sites` or `text` differs from the last call. `line_index` is the view's
+    /// cache, asked only on a recompute.
+    fn get(
+        &mut self,
+        rel_path: &str,
+        sites: Vec<LintSite>,
+        text: &str,
+        line_index: &mut LineIndexCache,
+        derive: DeriveSpans,
+    ) -> Vec<(usize, usize)> {
+        // No site derives no span, whatever the text: skip the index.
+        if sites.is_empty() {
+            return Vec::new();
+        }
+        let hit = self.rel_path == rel_path
+            && self.sites == sites
+            && self.index.as_ref().is_some_and(|ix| ix.text() == text);
+        if !hit {
+            let index = line_index.get(text);
+            self.spans = derive(&sites, &index);
+            self.index = Some(index);
+            self.sites = sites;
+            rel_path.clone_into(&mut self.rel_path);
+        }
+        self.spans.clone()
+    }
+}
+
 /// The fade span for an `unused_variables` diagnostic, self-verified against
 /// the CURRENT text: `None` unless the identifier named in the diagnostic's
 /// message (rustc's `"unused variable: \`x\`"` format) still appears at its
 /// reported position. Guards against a Build/Clippy result gone stale after a
 /// later edit shifted the code — the diagnostic just silently stops applying
 /// rather than fading the wrong span.
-fn unused_variable_range(
-    d: &crate::build::Diagnostic,
-    display_code: &str,
-) -> Option<(usize, usize)> {
+fn unused_variable_range(d: &LintSite, index: &LineIndex) -> Option<(usize, usize)> {
     let name = d.message.split('`').nth(1)?;
     if name.is_empty() {
         return None;
     }
-    let start = lsp_pos_to_char_idx(display_code, d.line?, d.col?);
-    let chars: Vec<char> = display_code.chars().collect();
-    let end = (start + name.chars().count()).min(chars.len());
-    if end <= start || chars[start..end].iter().collect::<String>() != name {
+    let start = index.pos_to_char_idx(d.line?, d.col?);
+    let end = (start + name.chars().count()).min(index.total_chars());
+    if end <= start || index.text()[index.byte_of_char(start)..index.byte_of_char(end)] != *name {
         return None; // stale — the code at that position no longer matches
     }
     Some((start, end))
+}
+
+/// Every `unused_variables` site's fade span, in site order.
+fn unused_variable_ranges(sites: &[LintSite], index: &LineIndex) -> Vec<(usize, usize)> {
+    sites
+        .iter()
+        .filter_map(|d| unused_variable_range(d, index))
+        .collect()
 }
 
 /// Is `c` part of a Rust identifier? Used for the whole-word test below, so
@@ -246,13 +374,13 @@ fn word_positions(chars: &[char], needle: &[char], from: usize, to: usize) -> Ve
 ///    introduced it. Two occurrences (a mention in a comment, say) and this
 ///    gives up rather than guess.
 fn locate_import_name(
-    display_code: &str,
+    index: &LineIndex,
     chars: &[char],
     needle: &[char],
     line_1: u32,
 ) -> Option<usize> {
-    let line_start = lsp_pos_to_char_idx(display_code, line_1, 1);
-    let line_end = lsp_line_end_char_idx(display_code, line_1);
+    let line_start = index.pos_to_char_idx(line_1, 1);
+    let line_end = index.line_end_char_idx(line_1);
     if let Some(&i) = word_positions(chars, needle, line_start, line_end).first() {
         return Some(i);
     }
@@ -278,11 +406,12 @@ fn locate_import_name(
 /// Empty when nothing verifies, which is the same silent-stop behaviour the
 /// variable fade has: a stale Build/Clippy result stops applying rather than
 /// marking the wrong span.
-fn unused_import_ranges(d: &crate::build::Diagnostic, display_code: &str) -> Vec<(usize, usize)> {
+///
+/// `chars` is `index.text()` collected, once for all sites.
+fn unused_import_ranges(d: &LintSite, index: &LineIndex, chars: &[char]) -> Vec<(usize, usize)> {
     let Some(line) = d.line else {
         return Vec::new();
     };
-    let chars: Vec<char> = display_code.chars().collect();
     d.message
         .split('`')
         .enumerate()
@@ -290,10 +419,22 @@ fn unused_import_ranges(d: &crate::build::Diagnostic, display_code: &str) -> Vec
         .filter(|(i, part)| i % 2 == 1 && !part.is_empty())
         .filter_map(|(_, name)| {
             let needle: Vec<char> = name.chars().collect();
-            locate_import_name(display_code, &chars, &needle, line)
+            locate_import_name(index, chars, &needle, line)
                 .map(|start| (start, start + needle.len()))
         })
         .collect()
+}
+
+/// Every `unused_imports` site's spans, sorted and deduplicated.
+fn unused_import_spans_in(sites: &[LintSite], index: &LineIndex) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = index.text().chars().collect();
+    let mut out: Vec<(usize, usize)> = sites
+        .iter()
+        .flat_map(|d| unused_import_ranges(d, index, &chars))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 impl AppIde {
@@ -328,29 +469,33 @@ impl AppIde {
     /// Computed once per frame by the caller and handed to BOTH the fade and the
     /// pulse, so the two can never disagree about what is unused.
     pub(super) fn unused_import_spans(
-        &self,
+        &mut self,
         rel_path: &str,
         display_code: &str,
     ) -> Vec<(usize, usize)> {
         if self.build_text_snapshot.get(rel_path).map(String::as_str) != Some(display_code) {
             return Vec::new();
         }
-        let mut out = Vec::new();
+        let sites = self.lint_sites(rel_path, "unused_imports");
+        self.ed.usages.unused_imports.get(
+            rel_path,
+            sites,
+            display_code,
+            &mut self.ed.line_index,
+            unused_import_spans_in,
+        )
+    }
+
+    /// The `code` diagnostics the last Cargo Check and then the last Clippy run
+    /// reported for `rel_path`, copied out under each lock in turn.
+    fn lint_sites(&self, rel_path: &str, code: &str) -> Vec<LintSite> {
+        let mut sites = Vec::new();
         for state in [&self.build_state, &self.clippy_state] {
-            let crate::build::BuildState::Done(result) = &*state.lock().unwrap() else {
-                continue;
-            };
-            for d in &result.diagnostics {
-                if d.file.as_deref() == Some(rel_path)
-                    && d.code.as_deref() == Some("unused_imports")
-                {
-                    out.extend(unused_import_ranges(d, display_code));
-                }
+            if let crate::build::BuildState::Done(result) = &*state.lock().unwrap() {
+                push_lint_sites(&mut sites, result, rel_path, code);
             }
         }
-        out.sort_unstable();
-        out.dedup();
-        out
+        sites
     }
 
     /// Advance the usages pipeline for the displayed `.rs` file: reset on a
@@ -423,6 +568,10 @@ impl AppIde {
                         .into_iter()
                         .filter_map(|it| Some(((it.name, it.kind), it.references?)))
                         .collect();
+                // Both built once for the whole reply, from the exact text its
+                // positions describe.
+                let index = LineIndex::new(&text);
+                let lines: Vec<&str> = text.lines().collect();
                 self.ed.usages.items = syms
                     .into_iter()
                     // Entry points / externally-invoked items (`fn main`, an
@@ -430,20 +579,13 @@ impl AppIde {
                     // crate's own source — `references` legitimately comes back
                     // empty for them, so they must be excluded here rather than
                     // shown as "dead code".
-                    .filter(|s| !is_externally_invoked(&s.name, s.start_line, &text))
-                    .map(|s| UsageItem {
-                        references: cache.get(&(s.name.clone(), s.kind)).cloned(),
-                        name: s.name,
-                        kind: s.kind,
-                        start_line: s.start_line,
-                        start_char: s.start_char,
-                        end_line: s.end_line,
-                        end_char: s.end_char,
-                        sel_line: s.sel_line,
-                        sel_char: s.sel_char,
-                        in_trait_impl: s.in_trait_impl,
+                    .filter(|s| !is_externally_invoked_in(&s.name, s.start_line, &lines))
+                    .map(|s| {
+                        let references = cache.get(&(s.name.clone(), s.kind)).cloned();
+                        usage_item(s, &index, references)
                     })
                     .collect();
+                self.ed.usages.computed_total_chars = index.total_chars();
                 self.ed.usages.computed_for_text = text;
                 self.ed.usages.open_popup = None;
                 // Refresh every item's references — SERIALIZED (one in-flight
@@ -508,7 +650,7 @@ impl AppIde {
     /// verdict all the same). The per-diagnostic identifier re-check below is
     /// extra insurance on top of that, not a substitute for it.
     pub(super) fn usages_dead_ranges(
-        &self,
+        &mut self,
         rel_path: &str,
         display_code: &str,
     ) -> Vec<(usize, usize)> {
@@ -535,32 +677,21 @@ impl AppIde {
                 if item.in_trait_impl {
                     return None;
                 }
-                let start =
-                    lsp_pos_to_char_idx(display_code, item.start_line + 1, item.start_char + 1);
-                let end = lsp_pos_to_char_idx(display_code, item.end_line + 1, item.end_char + 1);
-                Some((start, end.max(start)))
+                // Converted against `computed_for_text`, which equals
+                // `display_code` here.
+                Some((item.start_ci, item.end_ci.max(item.start_ci)))
             }));
         }
 
         if self.build_text_snapshot.get(rel_path).map(String::as_str) == Some(display_code) {
-            let results = [&self.build_state, &self.clippy_state]
-                .into_iter()
-                .filter_map(|s| match &*s.lock().unwrap() {
-                    crate::build::BuildState::Done(r) => Some(r.clone()),
-                    _ => None,
-                });
-            for result in results {
-                ranges.extend(
-                    result
-                        .diagnostics
-                        .iter()
-                        .filter(|d| {
-                            d.file.as_deref() == Some(rel_path)
-                                && d.code.as_deref() == Some("unused_variables")
-                        })
-                        .filter_map(|d| unused_variable_range(d, display_code)),
-                );
-            }
+            let sites = self.lint_sites(rel_path, "unused_variables");
+            ranges.extend(self.ed.usages.unused_variables.get(
+                rel_path,
+                sites,
+                display_code,
+                &mut self.ed.line_index,
+                unused_variable_ranges,
+            ));
         }
 
         ranges
@@ -625,7 +756,11 @@ impl AppIde {
         // that nothing enforces.
         let mut pill_edges: Vec<(u32, f32)> = Vec::new();
         {
-            let total_chars = display_code.chars().count();
+            // Equal to `display_code.chars().count()`: the gate above holds.
+            let total_chars = self.ed.usages.computed_total_chars;
+            // `galley.pos_from_cursor` by binary search: one row table for all
+            // the pills instead of a row walk per lookup.
+            let rows = GalleyRows::new(galley);
             let painter = ui.painter().with_clip_rect(clip);
             let gp = galley_pos;
             for (i, item) in self.ed.usages.items.iter().enumerate() {
@@ -636,18 +771,16 @@ impl AppIde {
                     continue; // unused → faded by the highlighter, no pill
                 }
 
-                let sel_ci =
-                    lsp_pos_to_char_idx(display_code, item.sel_line + 1, item.sel_char + 1)
-                        .min(total_chars);
-                let eol_ci =
-                    lsp_line_end_char_idx(display_code, item.sel_line + 1).min(total_chars);
-                let loc_sel = galley.pos_from_cursor(egui::text::CCursor::new(sel_ci));
-                let loc_eol = galley.pos_from_cursor(egui::text::CCursor::new(eol_ci));
+                let sel_ci = item.sel_ci.min(total_chars);
+                let loc_sel = rows.pos(sel_ci);
                 let y_top = gp.y + loc_sel.min.y;
                 let y_bot = gp.y + loc_sel.max.y;
                 if y_bot < clip.top() || y_top > clip.bottom() {
                     continue; // scrolled out of view
                 }
+                // Only a pill that is drawn needs its line end.
+                let eol_ci = item.eol_ci.min(total_chars);
+                let loc_eol = rows.pos(eol_ci);
 
                 let label = format!(
                     "{} {}",
@@ -672,11 +805,11 @@ impl AppIde {
                     PILL_FG,
                 );
                 pill_rects.insert(i, rect);
-                // The key is the same 1-based line that produced `eol_ci` above.
-                // Deriving it again from `sel_line` would invite the off-by-one
-                // that the three overlays' three different line bases make so
-                // easy — and one that fails silently, as a message that simply
-                // does not move.
+                // The key is the same 1-based line, `sel_line + 1`, that
+                // `usage_item` converted into `eol_ci`. Deriving it any other way
+                // would invite the off-by-one that the three overlays' three
+                // different line bases make so easy — and one that fails
+                // silently, as a message that simply does not move.
                 pill_edges.push((item.sel_line + 1, rect.right()));
 
                 let resp = ui.interact(
@@ -800,7 +933,15 @@ impl AppIde {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_externally_invoked, unused_import_ranges, unused_variable_range};
+    use super::{
+        LineIndex, LintSite, LintSpans, is_externally_invoked, is_externally_invoked_in,
+        push_lint_sites, unused_import_ranges, unused_import_spans_in, unused_variable_range,
+        unused_variable_ranges, usage_item, word_positions,
+    };
+    use crate::build::{BuildResult, Diagnostic};
+    use crate::editor::gui::text_pos::{
+        LineIndexCache, lsp_cursor_pos, lsp_line_end_char_idx, lsp_pos_to_char_idx,
+    };
 
     fn diag(line: u32, col: u32, message: &str) -> crate::build::Diagnostic {
         crate::build::Diagnostic {
@@ -814,6 +955,26 @@ mod tests {
             fixes: Vec::new(),
             rename: None,
         }
+    }
+
+    /// The fields `push_lint_sites` copies out of `d`.
+    fn site(d: &Diagnostic) -> LintSite {
+        LintSite {
+            message: d.message.clone(),
+            line: d.line,
+            col: d.col,
+        }
+    }
+
+    /// One diagnostic's import spans, through the per-site helper.
+    fn import_ranges(d: &Diagnostic, text: &str) -> Vec<(usize, usize)> {
+        let chars: Vec<char> = text.chars().collect();
+        unused_import_ranges(&site(d), &LineIndex::new(text), &chars)
+    }
+
+    /// One diagnostic's variable fade span, through the per-site helper.
+    fn variable_range(d: &Diagnostic, text: &str) -> Option<(usize, usize)> {
+        unused_variable_range(&site(d), &LineIndex::new(text))
     }
 
     // ── unused imports ───────────────────────────────────────────────────────
@@ -833,7 +994,7 @@ mod tests {
     }
 
     fn spans(text: &str, d: &crate::build::Diagnostic) -> Vec<String> {
-        unused_import_ranges(d, text)
+        import_ranges(d, text)
             .into_iter()
             .map(|(s, e)| text.chars().skip(s).take(e - s).collect())
             .collect()
@@ -853,7 +1014,7 @@ mod tests {
     fn a_name_that_prefixes_its_neighbour_lands_on_itself() {
         let text = "use embedded_io_async::{Read, ReadExactError, Write};\n";
         let d = imp(1, 25, "unused import: `Read`");
-        let got = unused_import_ranges(&d, text);
+        let got = import_ranges(&d, text);
         assert_eq!(got.len(), 1, "{got:?}");
         let (s, e) = got[0];
         assert_eq!(text.chars().skip(s).take(e - s).collect::<String>(), "Read");
@@ -895,7 +1056,7 @@ mod tests {
     fn the_fallback_gives_up_when_the_name_is_not_unique() {
         let text = "use a::{\n    Write,\n};\n// Write is mentioned here too\n";
         let d = imp(1, 1, "unused import: `Write`");
-        assert!(unused_import_ranges(&d, text).is_empty());
+        assert!(import_ranges(&d, text).is_empty());
     }
 
     /// A Build/Clippy result gone stale after an edit must stop applying, not
@@ -904,20 +1065,20 @@ mod tests {
     fn a_name_no_longer_in_the_file_marks_nothing() {
         let text = "use a::{Read, Write};\n";
         let d = imp(1, 15, "unused import: `Seek`");
-        assert!(unused_import_ranges(&d, text).is_empty());
+        assert!(import_ranges(&d, text).is_empty());
     }
 
     #[test]
     fn a_message_without_backticks_marks_nothing() {
         let text = "use a::Read;\n";
-        assert!(unused_import_ranges(&imp(1, 1, "unused import"), text).is_empty());
+        assert!(import_ranges(&imp(1, 1, "unused import"), text).is_empty());
     }
 
     #[test]
     fn a_diagnostic_without_a_line_marks_nothing() {
         let mut d = imp(1, 1, "unused import: `Read`");
         d.line = None;
-        assert!(unused_import_ranges(&d, "use a::Read;\n").is_empty());
+        assert!(import_ranges(&d, "use a::Read;\n").is_empty());
     }
 
     #[test]
@@ -925,7 +1086,7 @@ mod tests {
         let text = "fn main() {\n    let x = 100;\n}\n";
         // rustc reports 1-based line 2, col 9 (the `x`).
         let d = diag(2, 9, "unused variable: `x`");
-        let (start, end) = unused_variable_range(&d, text).expect("position still matches");
+        let (start, end) = variable_range(&d, text).expect("position still matches");
         let got: String = text.chars().skip(start).take(end - start).collect();
         assert_eq!(got, "x");
     }
@@ -936,13 +1097,13 @@ mod tests {
         // position now reads something else — must not fade the wrong span.
         let text = "fn main() {\n    let y = 100;\n}\n";
         let d = diag(2, 9, "unused variable: `x`");
-        assert!(unused_variable_range(&d, text).is_none());
+        assert!(variable_range(&d, text).is_none());
     }
 
     #[test]
     fn unused_variable_range_needs_a_quoted_name() {
         let d = diag(1, 1, "no backticks here");
-        assert!(unused_variable_range(&d, "let x = 1;").is_none());
+        assert!(variable_range(&d, "let x = 1;").is_none());
     }
 
     #[test]
@@ -989,5 +1150,515 @@ mod tests {
     fn doc_comment_between_attribute_and_fn_is_skipped() {
         let text = "#[no_mangle]\n/// Doc comment.\npub extern \"C\" fn ffi_thing() {}\n";
         assert!(is_externally_invoked("ffi_thing", 2, text));
+    }
+
+    /// `poll_usages` splits the file once and asks about every symbol with the
+    /// same lines, including a symbol whose start line is past the end.
+    #[test]
+    fn one_collected_line_list_serves_every_symbol() {
+        let text = "#[interrupt]\nfn TIM2() {}\n\npub fn helper() {}\n#[test]\nfn t() {}\n";
+        let lines: Vec<&str> = text.lines().collect();
+        let asked = [
+            ("TIM2", 1, true),
+            ("helper", 3, false),
+            ("t", 5, true),
+            ("main", 3, true),
+            // Past the end the scan starts at the last line, which is code.
+            ("gone", 40, false),
+        ];
+        for (name, start_line, want) in asked {
+            assert_eq!(
+                is_externally_invoked_in(name, start_line, &lines),
+                want,
+                "{name}"
+            );
+            assert_eq!(
+                is_externally_invoked(name, start_line, text),
+                want,
+                "{name}"
+            );
+        }
+    }
+
+    // ── item positions ───────────────────────────────────────────────────────
+
+    /// Texts whose shape decides a clamp: empty, trailing newline or not, CRLF,
+    /// multi-byte BMP chars and astral chars (two UTF-16 units each), plus
+    /// deterministic pseudo-random mixes of them.
+    fn position_texts() -> Vec<String> {
+        const NAMED: &[&str] = &[
+            "",
+            "\n",
+            "a",
+            "a\n",
+            "ab\ncd",
+            "a\r\nb\r\n",
+            "ăîș\nțâ",
+            "x😀y\n😀",
+            "fn main() {\n    let x = 1;\n}\n",
+            "impl Foo {\n    fn ƒ(&self) -> 𝄞 {}\n}",
+        ];
+        const ALPHABET: &[char] = &['a', ' ', '\n', '\n', '\r', 'ă', '😀'];
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let generated = (0..60).map(|_| {
+            let len = (next() % 24) as usize;
+            (0..len)
+                .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+                .collect::<String>()
+        });
+        NAMED
+            .iter()
+            .map(|s| (*s).to_owned())
+            .chain(generated)
+            .collect()
+    }
+
+    /// The positions stored once per reply are exactly what the overlays used to
+    /// convert every frame, on the same text: past-EOF lines, columns past the
+    /// line end and UTF-16 columns included. Each field gets different inputs,
+    /// so a crossed wire between them fails too.
+    #[test]
+    fn stored_positions_match_the_per_frame_conversions() {
+        for text in position_texts() {
+            let index = LineIndex::new(&text);
+            assert_eq!(index.total_chars(), text.chars().count(), "{text:?}");
+            let lines = text.split('\n').count() as u32 + 2;
+            let widest = text
+                .split('\n')
+                .map(|l| l.encode_utf16().count())
+                .max()
+                .unwrap_or(0) as u32
+                + 3;
+            for line in 0..=lines {
+                for col in 0..=widest {
+                    let s = crate::lsp::SymbolInfo {
+                        name: "item".into(),
+                        kind: 12,
+                        start_line: lines - line,
+                        start_char: widest - col,
+                        end_line: line / 2,
+                        end_char: col * 2,
+                        sel_line: line,
+                        sel_char: col,
+                        in_trait_impl: false,
+                    };
+                    let item = usage_item(s.clone(), &index, None);
+                    let at = |l: u32, c: u32| lsp_pos_to_char_idx(&text, l + 1, c + 1);
+                    let ctx = format!("{text:?} line {line} col {col}");
+                    assert_eq!(item.sel_ci, at(s.sel_line, s.sel_char), "sel {ctx}");
+                    assert_eq!(
+                        item.eol_ci,
+                        lsp_line_end_char_idx(&text, s.sel_line + 1),
+                        "eol {ctx}"
+                    );
+                    let (start, end) = (at(s.start_line, s.start_char), at(s.end_line, s.end_char));
+                    assert_eq!(
+                        (item.start_ci, item.end_ci.max(item.start_ci)),
+                        (start, end.max(start)),
+                        "fade range {ctx}"
+                    );
+                    assert_eq!(item.end_ci, end, "end {ctx}");
+                }
+            }
+        }
+    }
+
+    /// Everything else is carried over from the symbol unchanged.
+    #[test]
+    fn usage_item_keeps_the_symbol_fields_and_references() {
+        let s = crate::lsp::SymbolInfo {
+            name: "run".into(),
+            kind: 6,
+            start_line: 1,
+            start_char: 4,
+            end_line: 3,
+            end_char: 5,
+            sel_line: 2,
+            sel_char: 11,
+            in_trait_impl: true,
+        };
+        let refs = vec![super::UsageRef {
+            path: "/p/src/main.rs".into(),
+            line: 7,
+        }];
+        let item = usage_item(s, &LineIndex::new(""), Some(refs));
+        assert_eq!((item.name.as_str(), item.kind), ("run", 6));
+        assert_eq!((item.sel_line, item.sel_char), (2, 11));
+        assert!(item.in_trait_impl);
+        let got = item.references.expect("references kept");
+        assert_eq!((got[0].path.as_str(), got[0].line), ("/p/src/main.rs", 7));
+        // An empty text puts every position at 0.
+        assert_eq!(
+            (item.sel_ci, item.eol_ci, item.start_ci, item.end_ci),
+            (0, 0, 0, 0)
+        );
+    }
+
+    // ── flycheck lint spans ──────────────────────────────────────────────────
+
+    /// `unused_variable_range` as it was, verbatim: the whole text walked and
+    /// collected per diagnostic.
+    fn old_unused_variable_range(d: &Diagnostic, display_code: &str) -> Option<(usize, usize)> {
+        let name = d.message.split('`').nth(1)?;
+        if name.is_empty() {
+            return None;
+        }
+        let start = lsp_pos_to_char_idx(display_code, d.line?, d.col?);
+        let chars: Vec<char> = display_code.chars().collect();
+        let end = (start + name.chars().count()).min(chars.len());
+        if end <= start || chars[start..end].iter().collect::<String>() != name {
+            return None;
+        }
+        Some((start, end))
+    }
+
+    /// `locate_import_name` as it was, verbatim.
+    fn old_locate_import_name(
+        display_code: &str,
+        chars: &[char],
+        needle: &[char],
+        line_1: u32,
+    ) -> Option<usize> {
+        let line_start = lsp_pos_to_char_idx(display_code, line_1, 1);
+        let line_end = lsp_line_end_char_idx(display_code, line_1);
+        if let Some(&i) = word_positions(chars, needle, line_start, line_end).first() {
+            return Some(i);
+        }
+        let all = word_positions(chars, needle, 0, chars.len());
+        (all.len() == 1).then(|| all[0])
+    }
+
+    /// `unused_import_ranges` as it was, verbatim.
+    fn old_unused_import_ranges(d: &Diagnostic, display_code: &str) -> Vec<(usize, usize)> {
+        let Some(line) = d.line else {
+            return Vec::new();
+        };
+        let chars: Vec<char> = display_code.chars().collect();
+        d.message
+            .split('`')
+            .enumerate()
+            .filter(|(i, part)| i % 2 == 1 && !part.is_empty())
+            .filter_map(|(_, name)| {
+                let needle: Vec<char> = name.chars().collect();
+                old_locate_import_name(display_code, &chars, &needle, line)
+                    .map(|start| (start, start + needle.len()))
+            })
+            .collect()
+    }
+
+    /// The old `unused_import_spans` loop, over the results that were `Done`.
+    fn old_import_spans(
+        results: &[&BuildResult],
+        rel_path: &str,
+        text: &str,
+    ) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for result in results {
+            for d in &result.diagnostics {
+                if d.file.as_deref() == Some(rel_path)
+                    && d.code.as_deref() == Some("unused_imports")
+                {
+                    out.extend(old_unused_import_ranges(d, text));
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The old `unused_variables` half of `usages_dead_ranges`, over the
+    /// results that were `Done`.
+    fn old_variable_ranges(
+        results: &[&BuildResult],
+        rel_path: &str,
+        text: &str,
+    ) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        for result in results {
+            ranges.extend(
+                result
+                    .diagnostics
+                    .iter()
+                    .filter(|d| {
+                        d.file.as_deref() == Some(rel_path)
+                            && d.code.as_deref() == Some("unused_variables")
+                    })
+                    .filter_map(|d| old_unused_variable_range(d, text)),
+            );
+        }
+        ranges
+    }
+
+    /// The `app::AppIde::lint_sites` copy-out, over the same results.
+    fn sites_of(results: &[&BuildResult], rel_path: &str, code: &str) -> Vec<LintSite> {
+        let mut sites = Vec::new();
+        for result in results {
+            push_lint_sites(&mut sites, result, rel_path, code);
+        }
+        sites
+    }
+
+    /// The import shapes rustc reports, then the word-walk texts: identifier
+    /// and separator chars, CRLF, multi-byte and astral chars, empty texts.
+    fn lint_texts() -> Vec<String> {
+        const SHAPES: &[&str] = &[
+            "use embedded_io_async::{Read, ReadExactError, Write};\n",
+            "use core::fmt::Write;\nfn main() {}\n",
+            "use a::{\n    Read,\n    Write,\n};\nfn main() { let _ = Read; }\n",
+            "use a::{\r\n    Write,\r\n};\r\n// Write is mentioned here too\r\n",
+            "fn main() {\n    let x = 100;\n    let 𝔸ă = 1;\n}\n",
+        ];
+        SHAPES
+            .iter()
+            .map(|s| (*s).to_owned())
+            .chain(crate::editor::gui::text_pos::word_walk_tests::word_texts())
+            .collect()
+    }
+
+    fn xorshift(mut state: u64) -> impl FnMut() -> u64 {
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
+
+    /// Diagnostics for `text`. Most names are cut from the text at the position
+    /// reported, so a good share verify; the rest cover a stale position, a
+    /// missing line or column, positions past the end, empty and plural names,
+    /// other files and other lint codes.
+    fn lint_diagnostics(text: &str, next: &mut impl FnMut() -> u64) -> Vec<Diagnostic> {
+        const WORDS: &[&str] = &["a", "Z", "_7", "𝔸", "ă٣", "Read", ""];
+        let chars: Vec<char> = text.chars().collect();
+        let lines = text.split('\n').count() as u64;
+        let widest = text
+            .split('\n')
+            .map(|l| l.encode_utf16().count())
+            .max()
+            .unwrap_or(0) as u64;
+        (0..12)
+            .map(|_| {
+                let from = (next() % (chars.len() as u64 + 1)) as usize;
+                let cut: String = chars
+                    .iter()
+                    .skip(from)
+                    .take((next() % 5) as usize)
+                    .collect();
+                let word = WORDS[(next() % WORDS.len() as u64) as usize];
+                let message = match next() % 6 {
+                    0 | 1 => format!("unused variable: `{cut}`"),
+                    2 => format!("unused import: `{cut}`"),
+                    3 => format!("unused imports: `{cut}`, `{word}`"),
+                    4 => format!("unused import: `{word}`"),
+                    _ => "no backticks here".to_owned(),
+                };
+                let (line0, col0) = lsp_cursor_pos(text, from);
+                let (line, col) = match next() % 6 {
+                    0 => (None, Some(col0 + 1)),
+                    1 => (Some(line0 + 1), None),
+                    2 => (
+                        Some((next() % (lines + 3)) as u32),
+                        Some((next() % (widest + 4)) as u32),
+                    ),
+                    3 => (Some(u32::MAX), Some(u32::MAX)),
+                    _ => (Some(line0 + 1), Some(col0 + 1)),
+                };
+                let file = match next() % 5 {
+                    0 => None,
+                    1 => Some("src/other.rs"),
+                    _ => Some("src/main.rs"),
+                };
+                let code = match next() % 6 {
+                    0 => None,
+                    1 => Some("dead_code"),
+                    2 | 3 => Some("unused_imports"),
+                    _ => Some("unused_variables"),
+                };
+                Diagnostic {
+                    level: "warning".into(),
+                    message,
+                    rendered: String::new(),
+                    file: file.map(str::to_owned),
+                    line,
+                    col,
+                    code: code.map(str::to_owned),
+                    fixes: Vec::new(),
+                    rename: None,
+                }
+            })
+            .collect()
+    }
+
+    /// Per diagnostic, the line-index versions give exactly what the whole-text
+    /// walks gave, for either lint shape on every text.
+    #[test]
+    fn per_site_spans_match_the_old_whole_text_walks() {
+        let mut next = xorshift(0x2545_F491_4F6C_DD1D);
+        let (mut variables, mut imports) = (0, 0);
+        for text in lint_texts() {
+            let index = LineIndex::new(&text);
+            let chars: Vec<char> = text.chars().collect();
+            for d in lint_diagnostics(&text, &mut next) {
+                let ctx = format!("{text:?} {d:?}");
+                let old = old_unused_variable_range(&d, &text);
+                assert_eq!(unused_variable_range(&site(&d), &index), old, "{ctx}");
+                variables += usize::from(old.is_some());
+                let old = old_unused_import_ranges(&d, &text);
+                assert_eq!(
+                    unused_import_ranges(&site(&d), &index, &chars),
+                    old,
+                    "{ctx}"
+                );
+                imports += usize::from(!old.is_empty());
+            }
+        }
+        // Enough of them verify for the comparison to mean something.
+        assert!(variables > 1000, "{variables}");
+        assert!(imports > 1000, "{imports}");
+    }
+
+    /// Per file, the memoized spans equal the old per-frame loops over both
+    /// results, on a first call and on a repeat, with one memo and one line
+    /// index cache shared across every text, file and result combination.
+    /// Each text is also asked with the previous text's results, the way a
+    /// result outlives an edit: same file and sites, different text.
+    #[test]
+    fn memoized_file_spans_match_the_old_per_frame_loops() {
+        let mut next = xorshift(0x9E37_79B9_7F4A_7C15);
+        let texts = lint_texts();
+        // (Cargo Check result, Clippy result, which of them are `Done`) per text.
+        let runs: Vec<(BuildResult, BuildResult, u64)> = texts
+            .iter()
+            .map(|text| {
+                let mut diagnostics = lint_diagnostics(text, &mut next);
+                let clippy = BuildResult {
+                    success: true,
+                    diagnostics: diagnostics.split_off(6),
+                };
+                let build = BuildResult {
+                    success: true,
+                    diagnostics,
+                };
+                (build, clippy, next() % 4)
+            })
+            .collect();
+        let (mut vars_memo, mut imports_memo) = (LintSpans::default(), LintSpans::default());
+        let mut cache = LineIndexCache::default();
+        let (mut variables, mut imports) = (0, 0);
+        for (i, text) in texts.iter().enumerate() {
+            for (build, clippy, which) in [&runs[i.saturating_sub(1)], &runs[i]] {
+                let done: Vec<&BuildResult> = match which {
+                    0 => vec![build],
+                    1 => vec![clippy],
+                    2 => Vec::new(),
+                    _ => vec![build, clippy],
+                };
+                for rel in ["src/main.rs", "src/other.rs"] {
+                    let ctx = format!("{text:?} {rel} {} results", done.len());
+                    let old = old_variable_ranges(&done, rel, text);
+                    for _ in 0..2 {
+                        let sites = sites_of(&done, rel, "unused_variables");
+                        let got =
+                            vars_memo.get(rel, sites, text, &mut cache, unused_variable_ranges);
+                        assert_eq!(got, old, "variables {ctx}");
+                    }
+                    variables += usize::from(!old.is_empty());
+                    let old = old_import_spans(&done, rel, text);
+                    for _ in 0..2 {
+                        let sites = sites_of(&done, rel, "unused_imports");
+                        let got =
+                            imports_memo.get(rel, sites, text, &mut cache, unused_import_spans_in);
+                        assert_eq!(got, old, "imports {ctx}");
+                    }
+                    imports += usize::from(!old.is_empty());
+                }
+            }
+        }
+        assert!(variables > 100, "{variables}");
+        assert!(imports > 200, "{imports}");
+    }
+
+    /// The memo derives again when the file, the sites or the text changes,
+    /// and at no other time. No site derives nothing and leaves the memo alone.
+    #[test]
+    fn lint_spans_rederive_only_when_a_key_part_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DERIVED: AtomicUsize = AtomicUsize::new(0);
+        fn counting(sites: &[LintSite], index: &LineIndex) -> Vec<(usize, usize)> {
+            DERIVED.fetch_add(1, Ordering::SeqCst);
+            unused_variable_ranges(sites, index)
+        }
+        let derived = || DERIVED.load(Ordering::SeqCst);
+        let sites = |col: u32| {
+            vec![LintSite {
+                message: "unused variable: `x`".into(),
+                line: Some(2),
+                col: Some(col),
+            }]
+        };
+        let (text, edited) = (
+            "fn main() {\n    let x = 1;\n}\n",
+            "fn main() {\n    let x = 2;\n}\n",
+        );
+        let mut memo = LintSpans::default();
+        let mut cache = LineIndexCache::default();
+
+        let (x, none) = (vec![(20, 21)], Vec::<(usize, usize)>::new());
+        assert_eq!(
+            memo.get("src/main.rs", sites(9), text, &mut cache, counting),
+            x
+        );
+        assert_eq!(derived(), 1);
+        assert_eq!(
+            memo.get("src/main.rs", sites(9), text, &mut cache, counting),
+            x
+        );
+        assert_eq!(derived(), 1);
+        // The view's cache moving on to another text does not matter.
+        cache.get("something else");
+        assert_eq!(
+            memo.get("src/main.rs", sites(9), text, &mut cache, counting),
+            x
+        );
+        assert_eq!(derived(), 1);
+
+        assert_eq!(
+            memo.get("src/main.rs", sites(9), edited, &mut cache, counting),
+            x
+        );
+        assert_eq!(derived(), 2);
+        assert_eq!(
+            memo.get("src/main.rs", sites(10), edited, &mut cache, counting),
+            none
+        );
+        assert_eq!(derived(), 3);
+        assert_eq!(
+            memo.get("src/lib.rs", sites(10), edited, &mut cache, counting),
+            none
+        );
+        assert_eq!(derived(), 4);
+
+        assert_eq!(
+            memo.get("src/lib.rs", Vec::new(), edited, &mut cache, counting),
+            none
+        );
+        assert_eq!(derived(), 4);
+        assert_eq!(
+            memo.get("src/lib.rs", sites(10), edited, &mut cache, counting),
+            none
+        );
+        assert_eq!(derived(), 4);
+        // Both derivations give nothing for no site, so skipping them is exact.
+        let index = LineIndex::new(text);
+        assert!(unused_variable_ranges(&[], &index).is_empty());
+        assert!(unused_import_spans_in(&[], &index).is_empty());
     }
 }

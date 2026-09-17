@@ -350,7 +350,11 @@ pub struct LspState {
     /// recorder can wrap (it runs inside rust-analyzer).
     pub finished_checks: Vec<(std::time::Duration, std::time::Duration)>,
     /// Most recent completion items from rust-analyzer.
-    pub completion_items: Vec<CompletionItem>,
+    ///
+    /// Never edited in place: every change assigns a new `Arc`. The popup
+    /// takes a cheap clone of it each frame, and a reader still holding one
+    /// can tell the list is unchanged by `Arc::ptr_eq` alone.
+    pub completion_items: Arc<Vec<CompletionItem>>,
     /// Set to `true` when a completion response (success OR error) arrives.
     pub completion_response_received: bool,
     /// The request id of the pending completion request, if any.
@@ -489,7 +493,7 @@ impl Default for LspState {
             check_started_at: None,
             check_queued: std::time::Duration::ZERO,
             finished_checks: Vec::new(),
-            completion_items: Vec::new(),
+            completion_items: Arc::default(),
             completion_response_received: false,
             completion_req_id: None,
             next_req_id: 1,
@@ -747,7 +751,7 @@ impl LspState {
         self.completion_params = Some((rel_path.to_owned(), line, character, trigger_char));
         self.completion_retries = 0;
         self.completion_failure = None;
-        self.completion_items.clear();
+        self.completion_items = Arc::default();
         self.completion_response_received = false;
         self.completion_request_sent_at = Some(std::time::Instant::now());
         self.send_completion();
@@ -1288,6 +1292,8 @@ impl LspState {
             .unwrap_or(0)
     }
 
+    // Test-only: the project tree's `DiagBadges` is pinned against it.
+    #[cfg(test)]
     pub fn warning_count_for(&self, path: &str) -> usize {
         self.diagnostics
             .get(path)
@@ -1359,7 +1365,7 @@ impl LspState {
         self.check_started_at = None;
         self.check_queued = std::time::Duration::ZERO;
         self.finished_checks.clear();
-        self.completion_items.clear();
+        self.completion_items = Arc::default();
         self.completion_req_id = None;
         self.completion_failure = None;
         self.completion_params = None;
@@ -2207,14 +2213,16 @@ fn handle_incoming(
                         s.completion_failure = Some(CompletionFailure::Null);
                     }
                     let items_arr = result["items"].as_array().or_else(|| result.as_array());
-                    s.completion_items = items_arr
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(parse_completion_item)
-                                .take(60)
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    s.completion_items = Arc::new(
+                        items_arr
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(parse_completion_item)
+                                    .take(60)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    );
                     lsp_log(&format!(
                         "COMPLETION_RESP id={req_id} items={} null={}",
                         s.completion_items.len(),
@@ -3354,6 +3362,36 @@ mod completion_retry_tests {
             serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": [] }),
         );
         assert!(state.lock().unwrap().completion_failure.is_none());
+    }
+
+    /// The popup re-orders its rows only when `completion_items` is a
+    /// different `Arc`, so every change to the list must replace it: an answer,
+    /// a new request and a reset.
+    #[test]
+    fn every_change_to_the_items_is_a_new_arc() {
+        let (state, _rx, tx, id) = in_flight();
+        let before = Arc::clone(&state.lock().unwrap().completion_items);
+        reply(
+            &state,
+            &tx,
+            serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": [
+                { "label": "len" }, { "label": "new" }
+            ] }),
+        );
+        let answered = Arc::clone(&state.lock().unwrap().completion_items);
+        assert!(!Arc::ptr_eq(&before, &answered));
+        let labels: Vec<&str> = answered.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["len", "new"]);
+
+        let mut s = state.lock().unwrap();
+        s.request_completion("src/main.rs", 4, 8, None);
+        assert!(!Arc::ptr_eq(&answered, &s.completion_items));
+        assert!(s.completion_items.is_empty());
+
+        let requested = Arc::clone(&s.completion_items);
+        s.reset();
+        assert!(!Arc::ptr_eq(&requested, &s.completion_items));
+        assert!(s.completion_items.is_empty());
     }
 }
 

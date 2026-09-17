@@ -21,6 +21,7 @@
 
 use eframe::egui;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// What kind of thing a foldable region delimits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,6 +184,28 @@ pub fn regions(text: &str) -> Vec<Region> {
 
     out.sort_by_key(|r| (r.head, r.end));
     out
+}
+
+/// [`regions`] of the last text asked about, per view.
+///
+/// The fold gutter needs them every frame and a folded frame builds its
+/// [`FoldMap`] from them as well, while the text only changes on an edit. Keyed
+/// on text EQUALITY, like `text_pos::LineIndexCache`, so whoever asks gets the
+/// regions of exactly the text they pass, and a hit costs one `memcmp`.
+#[derive(Default)]
+pub struct RegionsCache(Option<(String, Arc<[Region]>)>);
+
+impl RegionsCache {
+    pub fn get(&mut self, text: &str) -> Arc<[Region]> {
+        if let Some((cached, found)) = &self.0
+            && cached == text
+        {
+            return Arc::clone(found);
+        }
+        let found: Arc<[Region]> = regions(text).into();
+        self.0 = Some((text.to_owned(), Arc::clone(&found)));
+        found
+    }
 }
 
 /// The header lines of every foldable FUNCTION body — what "collapse all"
@@ -398,6 +421,11 @@ pub struct FoldMap {
     vis: Vec<VisLine>,
     /// 1-based buffer line number of each visible line — what the gutter shows.
     numbers: Vec<usize>,
+    /// Char index where each line of `display` starts: `0`, then one past
+    /// every `'\n'`. Empty on the identity map.
+    line_starts: Vec<usize>,
+    /// `display.chars().count()`; `0` on the identity map.
+    display_chars: usize,
     identity: bool,
 }
 
@@ -406,28 +434,44 @@ impl FoldMap {
     /// in `folded`. A header with no matching region (the code changed under an
     /// old fold) is ignored, so a stale fold degrades to "not folded".
     pub fn new(text: &str, folded: &BTreeSet<usize>) -> Self {
-        let hidden = hidden_lines(text, folded);
+        if folded.is_empty() {
+            return Self::identity(text);
+        }
+        Self::with_regions(text, folded, &regions(text))
+    }
+
+    /// [`new`](Self::new) with `regions(text)` already in hand, so a view that
+    /// keeps them ([`RegionsCache`]) does not lex the file again per build.
+    pub fn with_regions(text: &str, folded: &BTreeSet<usize>, regions: &[Region]) -> Self {
+        let hidden = hidden_lines(regions, folded);
         if hidden.is_empty() {
             return Self::identity(text);
         }
         let mut vis = Vec::new();
         let mut display = String::new();
         let mut numbers = Vec::new();
+        let mut line_starts = vec![0];
+        // `display.chars().count()`, kept up to date as the projection grows:
+        // recounting it for every visible line made a build O(lines x chars).
+        let mut display_chars = 0usize;
         let mut buf_start = 0usize;
         for (buf_line, line) in text.split('\n').enumerate() {
             let len = line.chars().count();
-            if !hidden.contains(&buf_line) {
+            if !hidden.get(buf_line).copied().unwrap_or(false) {
                 if !display.is_empty() {
                     display.push('\n');
+                    display_chars += 1;
+                    line_starts.push(display_chars);
                 }
                 vis.push(VisLine {
                     buf_start,
-                    disp_start: display.chars().count(),
+                    disp_start: display_chars,
                     len,
                     buf_line,
                 });
                 numbers.push(buf_line + 1);
                 display.push_str(line);
+                display_chars += len;
             }
             buf_start += len + 1; // + the '\n'
         }
@@ -435,6 +479,8 @@ impl FoldMap {
             display,
             vis,
             numbers,
+            line_starts,
+            display_chars,
             identity: false,
         }
     }
@@ -445,6 +491,8 @@ impl FoldMap {
             display: text.to_owned(),
             vis: Vec::new(),
             numbers: Vec::new(),
+            line_starts: Vec::new(),
+            display_chars: 0,
             identity: true,
         }
     }
@@ -463,6 +511,21 @@ impl FoldMap {
     /// on the identity map (the gutter counts by itself).
     pub fn line_numbers(&self) -> &[usize] {
         &self.numbers
+    }
+
+    /// Char index where line `line` of [`display`](Self::display) starts,
+    /// `None` past the last line. Folded maps only: the identity map's display
+    /// is the buffer, and it keeps no table of its own.
+    pub fn display_line_start(&self, line: usize) -> Option<usize> {
+        debug_assert!(!self.identity, "the identity map keeps no line table");
+        self.line_starts.get(line).copied()
+    }
+
+    /// `display().chars().count()`. Folded maps only, like
+    /// [`display_line_start`](Self::display_line_start).
+    pub fn display_chars(&self) -> usize {
+        debug_assert!(!self.identity, "the identity map keeps no char count");
+        self.display_chars
     }
 
     /// Display char index for a buffer char index, or `None` when it is inside a
@@ -523,7 +586,10 @@ impl FoldMap {
         if self.identity {
             return Some(buf_line);
         }
-        self.vis.iter().position(|v| v.buf_line == buf_line)
+        // `vis` is in buffer-line order, so the first entry at or past
+        // `buf_line` is the only one that can be it.
+        let pos = self.vis.partition_point(|v| v.buf_line < buf_line);
+        (self.vis.get(pos)?.buf_line == buf_line).then_some(pos)
     }
 
     /// Like [`display_line_of`](Self::display_line_of), but total: a hidden
@@ -571,23 +637,29 @@ impl FoldMap {
     }
 }
 
-/// Every buffer line hidden by the folds in `folded`. Nested folds simply
-/// overlap — the union is what matters.
-fn hidden_lines(text: &str, folded: &BTreeSet<usize>) -> BTreeSet<usize> {
+/// Every buffer line hidden by the folds in `folded`, as a flag per line
+/// (`true` = hidden; a line past the end is not). Empty when nothing is
+/// hidden. Nested folds simply overlap — the union is what matters.
+fn hidden_lines(regions: &[Region], folded: &BTreeSet<usize>) -> Vec<bool> {
+    let mut hidden = Vec::new();
     if folded.is_empty() {
-        return BTreeSet::new();
+        return hidden;
     }
-    let mut hidden = BTreeSet::new();
-    for r in regions(text) {
-        if folded.contains(&r.head) {
-            hidden.extend(r.hidden());
+    for r in regions {
+        if folded.contains(&r.head) && r.hidden_count() > 0 {
+            if hidden.len() < r.end {
+                hidden.resize(r.end, false);
+            }
+            for line in r.hidden() {
+                hidden[line] = true;
+            }
         }
     }
     hidden
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn heads(src: &str) -> Vec<(usize, usize)> {
@@ -1061,5 +1133,254 @@ Xafter
         let r = regions(FN_SRC)[0];
         assert_eq!(r.hidden_count(), 2);
         assert_eq!(r.hidden().collect::<Vec<_>>(), [1, 2]);
+    }
+
+    // ── Build cost: equivalence with the straightforward build ───────────────
+
+    /// Deterministic xorshift64 stream.
+    pub(crate) fn rng(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
+
+    /// Code-shaped fragments: nested blocks, comments, braces in literals,
+    /// blank and CRLF lines, multi-byte and astral chars.
+    const PIECES: &[&str] = &[
+        "fn f() {",
+        "impl S {",
+        "match x {",
+        "{",
+        "}",
+        "}",
+        "\n}",
+        "\n}\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "\r\n",
+        "    x;",
+        "/* a",
+        "*/",
+        "// }",
+        "\"{\"",
+        "'{'",
+        "r#\"}\"#",
+        "let s = \"a\nb\";",
+        "fn g() {}",
+        "ă€",
+        "😀",
+        "",
+    ];
+
+    /// Texts to fold: a few named shapes (empty, blank leading lines, no
+    /// trailing newline) and generated ones.
+    pub(crate) fn fold_texts() -> Vec<String> {
+        let named = [
+            "",
+            "\n",
+            "\nfn a() {\n    x;\n}\n",
+            "\n\nfn a() {\n    x;\n    y;\n}",
+            "fn a() {\n\n\n}\n\n",
+            "fn a() {\r\n    x;\r\n}\r\n",
+            "impl S {\n    fn f() {\n        x;\n    }\n}\nfn g() {\n    😀;\n}\n",
+            FN_SRC,
+        ];
+        let mut next = rng(0x2545_F491_4F6C_DD1D);
+        named
+            .iter()
+            .map(|s| (*s).to_owned())
+            .chain((0..300).map(|_| {
+                let len = (next() % 40) as usize;
+                (0..len)
+                    .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+                    .collect()
+            }))
+            .collect()
+    }
+
+    /// Fold sets for `text`: none, every header, random subsets of the
+    /// headers, and a subset mixed with lines that head no region (stale).
+    pub(crate) fn fold_sets(text: &str, next: &mut impl FnMut() -> u64) -> Vec<BTreeSet<usize>> {
+        let heads: Vec<usize> = regions(text).iter().map(|r| r.head).collect();
+        let lines = text.split('\n').count();
+        let mut sets = vec![BTreeSet::new(), heads.iter().copied().collect()];
+        for _ in 0..3 {
+            sets.push(
+                heads
+                    .iter()
+                    .copied()
+                    .filter(|_| next().is_multiple_of(2))
+                    .collect(),
+            );
+        }
+        let mut stale: BTreeSet<usize> = heads
+            .iter()
+            .copied()
+            .filter(|_| next().is_multiple_of(3))
+            .collect();
+        stale.extend((0..3).map(|_| (next() % (lines as u64 + 3)) as usize));
+        sets.push(stale);
+        sets
+    }
+
+    type Built = (String, Vec<(usize, usize, usize, usize)>, Vec<usize>, bool);
+
+    /// The build as it was before it kept a running char count: a full
+    /// `regions` pass into a set of hidden lines, and the projection recounted
+    /// for every visible line.
+    fn reference_build(text: &str, folded: &BTreeSet<usize>) -> Built {
+        let mut hidden = BTreeSet::new();
+        if !folded.is_empty() {
+            for r in regions(text) {
+                if folded.contains(&r.head) {
+                    hidden.extend(r.hidden());
+                }
+            }
+        }
+        if hidden.is_empty() {
+            return (text.to_owned(), Vec::new(), Vec::new(), true);
+        }
+        let (mut vis, mut display, mut numbers) = (Vec::new(), String::new(), Vec::new());
+        let mut buf_start = 0usize;
+        for (buf_line, line) in text.split('\n').enumerate() {
+            let len = line.chars().count();
+            if !hidden.contains(&buf_line) {
+                if !display.is_empty() {
+                    display.push('\n');
+                }
+                vis.push((buf_start, display.chars().count(), len, buf_line));
+                numbers.push(buf_line + 1);
+                display.push_str(line);
+            }
+            buf_start += len + 1;
+        }
+        (display, vis, numbers, false)
+    }
+
+    fn built(m: &FoldMap) -> Built {
+        (
+            m.display.clone(),
+            m.vis
+                .iter()
+                .map(|v| (v.buf_start, v.disp_start, v.len, v.buf_line))
+                .collect(),
+            m.numbers.clone(),
+            m.identity,
+        )
+    }
+
+    #[test]
+    fn the_fold_texts_reach_the_hard_cases() {
+        let texts = fold_texts();
+        let mut next = rng(7);
+        let folded = |t: &String| {
+            let set: BTreeSet<usize> = regions(t).iter().map(|r| r.head).collect();
+            !FoldMap::new(t, &set).is_identity()
+        };
+        let count = texts.iter().filter(|t| folded(t)).count();
+        assert!(count > 100, "{count} of {} texts fold", texts.len());
+        assert!(texts.iter().any(|t| t.starts_with('\n') && folded(t)));
+        assert!(texts.iter().any(|t| t.contains('😀') && folded(t)));
+        assert!(texts.iter().any(|t| t.contains("\r\n") && folded(t)));
+        // Some stale set holds a line that heads no region.
+        assert!(texts.iter().any(|t| {
+            let heads: Vec<usize> = regions(t).iter().map(|r| r.head).collect();
+            fold_sets(t, &mut next)[5]
+                .iter()
+                .any(|h| !heads.contains(h))
+        }));
+    }
+
+    #[test]
+    fn new_matches_the_straightforward_build() {
+        let mut next = rng(0x9E37_79B9_7F4A_7C15);
+        for text in fold_texts() {
+            let found = regions(&text);
+            for set in fold_sets(&text, &mut next) {
+                let want = reference_build(&text, &set);
+                assert_eq!(built(&FoldMap::new(&text, &set)), want, "{text:?} {set:?}");
+                assert_eq!(
+                    built(&FoldMap::with_regions(&text, &set, &found)),
+                    want,
+                    "{text:?} {set:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn display_line_of_matches_a_linear_search() {
+        let mut next = rng(0xD1B5_4A32_D192_ED03);
+        for text in fold_texts() {
+            let lines = text.split('\n').count();
+            for set in fold_sets(&text, &mut next) {
+                let m = FoldMap::new(&text, &set);
+                for buf_line in (0..lines + 3).chain([usize::MAX]) {
+                    let want = if m.identity {
+                        Some(buf_line)
+                    } else {
+                        m.vis.iter().position(|v| v.buf_line == buf_line)
+                    };
+                    assert_eq!(
+                        m.display_line_of(buf_line),
+                        want,
+                        "{text:?} {set:?} {buf_line}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn display_line_starts_match_a_scan_of_the_projection() {
+        let mut next = rng(0x94D0_49BB_1331_11EB);
+        for text in fold_texts() {
+            for set in fold_sets(&text, &mut next) {
+                let m = FoldMap::new(&text, &set);
+                if m.is_identity() {
+                    continue;
+                }
+                let mut starts = vec![0];
+                for (i, c) in m.display().chars().enumerate() {
+                    if c == '\n' {
+                        starts.push(i + 1);
+                    }
+                }
+                for line in 0..starts.len() + 3 {
+                    assert_eq!(
+                        m.display_line_start(line),
+                        starts.get(line).copied(),
+                        "{text:?} {set:?} line {line}"
+                    );
+                }
+                assert_eq!(m.display_chars(), m.display().chars().count());
+            }
+        }
+    }
+
+    #[test]
+    fn the_regions_cache_answers_for_the_text_it_is_asked_about() {
+        let mut cache = RegionsCache::default();
+        let first = cache.get(FN_SRC);
+        assert_eq!(*first, *regions(FN_SRC));
+        let again = cache.get(&String::from(FN_SRC));
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "an equal text reuses the regions"
+        );
+        let other = "impl S {\n    x;\n}\n";
+        let changed = cache.get(other);
+        assert!(
+            !Arc::ptr_eq(&first, &changed),
+            "a different text lexes again"
+        );
+        assert_eq!(*changed, *regions(other));
+        assert_eq!(*cache.get(""), *regions(""));
     }
 }

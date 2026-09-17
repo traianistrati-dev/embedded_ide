@@ -460,12 +460,16 @@ impl BuildResult {
             .collect()
     }
 
+    // Test-only: the project tree's `DiagBadges` answers both in one pass over
+    // the diagnostics, and its tests pin it against these.
+    #[cfg(test)]
     pub fn has_errors_in(&self, file: &str) -> bool {
         self.diagnostics
             .iter()
             .any(|d| d.is_error() && d.file.as_deref() == Some(file))
     }
 
+    #[cfg(test)]
     pub fn has_warnings_in(&self, file: &str) -> bool {
         self.diagnostics
             .iter()
@@ -480,7 +484,10 @@ pub enum BuildState {
     #[default]
     Idle,
     Building,
-    Done(BuildResult),
+    /// Behind an `Arc` because the Cargo and Clippy tabs clone the state every
+    /// frame (they release the lock before writing `Idle` back): a refcount
+    /// bump rather than a copy of every diagnostic's rendered text and fixes.
+    Done(Arc<BuildResult>),
     /// Fatal failure — `cargo` not found, I/O error, etc.
     Failed(String),
 }
@@ -492,7 +499,7 @@ impl BuildState {
 
     pub fn result(&self) -> Option<&BuildResult> {
         if let BuildState::Done(r) = self {
-            Some(r)
+            Some(r.as_ref())
         } else {
             None
         }
@@ -836,7 +843,7 @@ Install it with `espup install` - the Tools tab lists espup.",
         result.success = result.error_count() == 0;
     }
 
-    BuildState::Done(result)
+    BuildState::Done(Arc::new(result))
 }
 
 /// Run `rustup target add <target>`, returning an error only if rustup itself

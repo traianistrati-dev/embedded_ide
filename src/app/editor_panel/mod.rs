@@ -33,7 +33,7 @@ mod breakpoint_gutter;
 pub(crate) mod cargo_complete;
 mod code_action;
 mod comment;
-mod completion;
+pub(super) mod completion;
 mod context_menu;
 mod crate_search;
 mod debug_hover;
@@ -52,7 +52,7 @@ mod format;
 mod generics;
 mod idle_sync;
 pub(crate) mod impl_picker;
-mod inlay_hint;
+pub(super) mod inlay_hint;
 mod kbd_scope;
 mod let_annotation;
 mod move_lines;
@@ -1014,11 +1014,22 @@ impl AppIde {
         // Replace opens PRE-FILLED with the identifier under the cursor
         // (query searches for it, replace field starts from it + gets
         // focus) — quick rename of the symbol you're on.
-        let word_under_cursor = self
+        //
+        // The word is read from last frame's caret and the text as it stands
+        // HERE, before the editor renders, but only by the actions that use it.
+        // The view's line index keeps that text for the context-menu arms
+        // further down, after the editor may have changed `display_code`, and
+        // an unchanged text costs one comparison instead of a whole-file scan.
+        let word_src = self
             .ed
             .last_caret_idx
-            .map(|idx| rename::identifier_at(&display_code, idx))
-            .unwrap_or_default();
+            .map(|idx| (self.ed.line_index.get(&display_code), idx));
+        let word_under_cursor = || {
+            word_src
+                .as_ref()
+                .map(|(text, idx)| rename::identifier_at(text.text(), *idx))
+                .unwrap_or_default()
+        };
         if editor_kbd_active {
             ui.input_mut(|i| {
                 use find_replace::FindMode as M;
@@ -1029,13 +1040,13 @@ impl AppIde {
                 } else if i.consume_key(ctrl_shift, egui::Key::H) {
                     self.ed
                         .find
-                        .open_replace_with_word(M::ReplaceProject, &word_under_cursor);
+                        .open_replace_with_word(M::ReplaceProject, &word_under_cursor());
                 } else if i.consume_key(ctrl, egui::Key::F) {
                     self.ed.find.open_with(M::FindFile);
                 } else if i.consume_key(ctrl, egui::Key::H) {
                     self.ed
                         .find
-                        .open_replace_with_word(M::ReplaceFile, &word_under_cursor);
+                        .open_replace_with_word(M::ReplaceFile, &word_under_cursor());
                 }
             });
         }
@@ -1296,7 +1307,11 @@ impl AppIde {
         }
         let mut fold_map = match &fold_key {
             Some(rel) => match self.folds.get(rel) {
-                Some(set) if !set.is_empty() => fold::FoldMap::new(&display_code, set),
+                Some(set) if !set.is_empty() => fold::FoldMap::with_regions(
+                    &display_code,
+                    set,
+                    &self.ed.fold_regions.get(&display_code),
+                ),
                 _ => fold::FoldMap::identity(&display_code),
             },
             None => fold::FoldMap::identity(&display_code),
@@ -1421,6 +1436,9 @@ impl AppIde {
         // `editor_text` over it there wrote back the pre-edit clone and
         // erased every keystroke as it was typed.
         let mut folded_own_edit = false;
+        // A delta was adopted or refused below: either way `display_code` or
+        // this file's fold set changed, the two things `fold_map` is built from.
+        let mut fold_inputs_changed = false;
         if is_rust_file && !folded {
             display_code = editor_text;
         } else if is_rust_file {
@@ -1430,6 +1448,7 @@ impl AppIde {
             // hidden lines are untouched. An undo arrives here as just
             // another delta, so it is correct for free.
             if let Some((ds, de, ins)) = fold::text_delta(fold_map.display(), &editor_text) {
+                fold_inputs_changed = true;
                 let (bs, be) = (fold_map.to_buffer(ds), fold_map.to_buffer(de));
                 let chars: Vec<char> = display_code.chars().collect();
                 let (bs, be) = (bs.min(chars.len()), be.min(chars.len()));
@@ -1489,12 +1508,17 @@ impl AppIde {
             }
         }
         // The fold set may have shifted with the edit above, and
-        // `display_code` certainly changed — rebuild the projection so every
+        // `display_code` may have changed — rebuild the projection so every
         // reader below (the gutter, the anchor, the write-back) sees one
-        // consistent pair.
-        if folded {
+        // consistent pair. Without a delta neither input moved, and the map
+        // built before the render already is that pair.
+        if folded && fold_inputs_changed {
             fold_map = match fold_key.as_ref().and_then(|rel| self.folds.get(rel)) {
-                Some(set) if !set.is_empty() => fold::FoldMap::new(&display_code, set),
+                Some(set) if !set.is_empty() => fold::FoldMap::with_regions(
+                    &display_code,
+                    set,
+                    &self.ed.fold_regions.get(&display_code),
+                ),
                 _ => fold::FoldMap::identity(&display_code),
             };
         }
@@ -1553,6 +1577,10 @@ impl AppIde {
         // they are skipped for that frame rather than lied to. The fade and
         // underline marks are unaffected: they went into the layout already
         // translated (`fold_map.map_ranges`).
+        //
+        // The overlays and gutters below position what they draw through one
+        // row table of this galley, built on the first lookup any of them makes.
+        let galley_rows = crate::editor::gui::text_pos::GalleyRows::new(&editor_resp.galley);
         // Where each "N refs" pill ended, for the inline diagnostic message that
         // is drawn much later (via `handle_editor_completion`) and used to paint
         // straight through them.
@@ -1578,10 +1606,16 @@ impl AppIde {
             if let Some((right, extend)) = word_move {
                 self.apply_word_move(ui, &editor_resp, &display_code, right, extend);
             }
-            Self::highlight_selected_word(&editor_resp, &display_code, editor_clip, ui);
+            self.highlight_selected_word(
+                &editor_resp,
+                &galley_rows,
+                &display_code,
+                editor_clip,
+                ui,
+            );
             // Highlight all occurrences of the active find query (current one
             // in amber), so matches show even when the find field has focus.
-            self.paint_find_matches(&editor_resp, &display_code, editor_clip, ui);
+            self.paint_find_matches(&editor_resp, &galley_rows, &display_code, editor_clip, ui);
             // Triple-clicking a `{`/`}` or a definition's header line
             // highlights the WHOLE definition in white and copies it on
             // Ctrl+C. (The single-block highlight moved off "selecting a
@@ -1603,23 +1637,28 @@ impl AppIde {
             // themselves and the phases would only agree by luck.
             let mut pulse: Vec<(usize, usize)> = self.generic_pulse_ranges(&display_code).to_vec();
             pulse.extend(unused_imports.iter().copied());
-            generics::show_unused_pulse_overlay(
-                ui,
-                editor_resp.galley_pos,
-                editor_clip,
-                &editor_resp.galley,
-                &display_code,
-                &pulse,
-            );
-            // …and the underlined ones explain themselves on hover.
-            generics::show_impl_only_tooltips(
-                ui,
-                editor_resp.galley_pos,
-                editor_clip,
-                &editor_resp.galley,
-                &display_code,
-                &underline_ranges,
-            );
+            // Both read the text through the view's line index, asked for only
+            // when one of them has something to draw.
+            if !pulse.is_empty() || !underline_ranges.is_empty() {
+                let index = self.ed.line_index.get(&display_code);
+                generics::show_unused_pulse_overlay(
+                    ui,
+                    editor_resp.galley_pos,
+                    editor_clip,
+                    &galley_rows,
+                    &index,
+                    &pulse,
+                );
+                // …and the underlined ones explain themselves on hover.
+                generics::show_impl_only_tooltips(
+                    ui,
+                    editor_resp.galley_pos,
+                    editor_clip,
+                    &galley_rows,
+                    &index,
+                    &underline_ranges,
+                );
+            }
             // "N refs" indicator + popup on every used item (unused ones were
             // already faded by the highlighter, above, via `dead_ranges`).
             if let Some(rel) = &usages_rel_path {
@@ -1718,11 +1757,19 @@ impl AppIde {
             // click-to-revert. A revert mutates `display_code`; the write-back
             // below persists it (same as the context-menu Cut).
             self.tick_diff_gutter(&display_code, displayed_file);
-            self.paint_diff_gutter(ui, &editor_resp, editor_clip, &display_code, displayed_file);
+            self.paint_diff_gutter(
+                ui,
+                &editor_resp,
+                &galley_rows,
+                editor_clip,
+                &display_code,
+                displayed_file,
+            );
             // Breakpoint dots + click-to-toggle in the line-number column.
             self.paint_breakpoint_gutter(
                 ui,
                 &editor_resp,
+                &galley_rows,
                 editor_clip,
                 &display_code,
                 displayed_file,
@@ -1747,6 +1794,7 @@ impl AppIde {
             self.paint_fold_gutter(
                 ui,
                 &editor_resp,
+                &galley_rows,
                 editor_clip,
                 &display_code,
                 &fold_map,
@@ -1756,11 +1804,15 @@ impl AppIde {
             // Ctrl+Shift+Q / the menu item, applied here where this frame's
             // galley can be measured for an anchor. Lands next frame, like a
             // gutter click.
-            let text_changed = self
-                .fold_guard
-                .get(&rel)
-                .is_some_and(|(_, prev)| *prev != fold_ui::text_sig(&display_code));
-            match fold_ui::fold_all_request(self.ed.fold_all_requested.take(), &rel, text_changed) {
+            // Hashed only while a request is pending: without one the answer
+            // is None whatever the text did.
+            let requested = self.ed.fold_all_requested.take();
+            let text_changed = requested.is_some()
+                && self
+                    .fold_guard
+                    .get(&rel)
+                    .is_some_and(|(_, prev)| *prev != fold_ui::text_sig(&display_code));
+            match fold_ui::fold_all_request(requested, &rel, text_changed) {
                 Some(fold_ui::Request::Fire) => {
                     self.toggle_fold_all(&editor_resp, editor_clip, &display_code, &fold_map, &rel);
                 }
@@ -1879,7 +1931,7 @@ impl AppIde {
                                 chars[lo..hi.min(chars.len())].iter().collect::<String>()
                             })
                         })
-                        .unwrap_or_else(|| word_under_cursor.clone());
+                        .unwrap_or_else(word_under_cursor);
                     if !expr.trim().is_empty() {
                         self.debugger.add_watch(expr);
                         self.build_tab = crate::app::BuildPanelTab::Debug;
@@ -1890,14 +1942,14 @@ impl AppIde {
                 Some(A::Find) => self.ed.find.open_with(find_replace::FindMode::FindFile),
                 Some(A::Replace) => self.ed.find.open_replace_with_word(
                     find_replace::FindMode::ReplaceFile,
-                    &word_under_cursor,
+                    &word_under_cursor(),
                 ),
                 Some(A::FindInProject) => {
                     self.ed.find.open_with(find_replace::FindMode::FindProject)
                 }
                 Some(A::ReplaceInProject) => self.ed.find.open_replace_with_word(
                     find_replace::FindMode::ReplaceProject,
-                    &word_under_cursor,
+                    &word_under_cursor(),
                 ),
                 Some(A::Cut) => {
                     // Cut the selection (mirrors the native Ctrl+X): copy
@@ -2378,8 +2430,14 @@ impl AppIde {
     /// Only a single whole identifier counts as a "variable": an empty / multi-
     /// token / non-identifier selection paints nothing. Matches are whole-word
     /// (so selecting `x` doesn't light up the `x` inside `max`).
+    ///
+    /// Only the rows on screen are scanned and positioned (see
+    /// [`word_select::for_each_selected_word_rect`]); `rows` must describe
+    /// `editor_resp.galley`.
     fn highlight_selected_word(
+        &mut self,
         editor_resp: &egui::text_edit::TextEditOutput,
+        rows: &crate::editor::gui::text_pos::GalleyRows,
         display_code: &str,
         clip: egui::Rect,
         ui: &egui::Ui,
@@ -2393,60 +2451,22 @@ impl AppIde {
             return; // no selection — nothing to highlight
         }
 
-        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
-        let chars: Vec<char> = display_code.chars().collect();
-        if hi > chars.len() {
-            return;
-        }
-        let target = &chars[lo..hi];
-        // Reject anything that isn't one identifier token (whitespace, symbols,
-        // multi-word selections, or a leading digit → not a variable name).
-        if target.iter().any(|&c| !is_ident(c)) || target[0].is_ascii_digit() {
-            return;
-        }
-
         // RGB (52, 232, 235) at 20% opacity → alpha ≈ 0.20 × 255 = 51, so the
         // code stays readable through the band (like the diagnostic tints).
         let color = egui::Color32::from_rgba_unmultiplied(52, 232, 235, 51);
-        let gp = editor_resp.galley_pos;
-        let galley = &editor_resp.galley;
         let painter = ui.painter().with_clip_rect(clip);
-
-        let wl = hi - lo;
-        let n = chars.len();
-        let mut i = 0;
-        while i + wl <= n {
-            if &chars[i..i + wl] == target
-                && (i == 0 || !is_ident(chars[i - 1]))
-                && (i + wl == n || !is_ident(chars[i + wl]))
-            {
-                // Map the match's char range to a screen rect via the galley.
-                let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(i));
-                let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(i + wl));
-                let y_top = gp.y + loc_s.min.y;
-                let y_bot = gp.y + loc_s.max.y;
-                // A whole identifier never wraps, but guard anyway: if start/end
-                // land on different rows, extend to the line end.
-                let same_row = (loc_s.min.y - loc_e.min.y).abs() < (y_bot - y_top).max(1.0) * 0.5;
-                let x_l = gp.x + loc_s.min.x;
-                let x_r = if same_row {
-                    gp.x + loc_e.min.x
-                } else {
-                    gp.x + galley.rect.width()
-                };
-                // Skip occurrences scrolled out of the visible editor region.
-                if y_bot >= clip.top() && y_top <= clip.bottom() && x_r > x_l {
-                    painter.rect_filled(
-                        egui::Rect::from_min_max(egui::pos2(x_l, y_top), egui::pos2(x_r, y_bot)),
-                        2.0,
-                        color,
-                    );
-                }
-                i += wl; // jump past this match
-            } else {
-                i += 1;
-            }
-        }
+        let index = self.ed.line_index.get(display_code);
+        word_select::for_each_selected_word_rect(
+            rows,
+            editor_resp.galley_pos,
+            clip,
+            &index,
+            lo,
+            hi,
+            |rect| {
+                painter.rect_filled(rect, 2.0, color);
+            },
+        );
     }
 }
 

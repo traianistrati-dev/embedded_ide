@@ -394,10 +394,14 @@ impl AppIde {
                     let build_cfg = self.selected_build_cfg();
                     match (project_files, build_cfg) {
                         (Some(_), Some((project, toolchain))) => {
-                            let build_guard = self.build_state.lock().unwrap();
-                            let build_result = build_guard.result().cloned();
-                            drop(build_guard);
-                            let lsp_guard = self.lsp_state.lock().unwrap();
+                            // Only the badge flags leave the locks, taken one at a
+                            // time: neither result is cloned, and the tree renders
+                            // holding neither lock.
+                            let mut badges = crate::project_tree::gui::DiagBadges::default();
+                            if let Some(result) = self.build_state.lock().unwrap().result() {
+                                badges.add_build(result);
+                            }
+                            badges.add_lsp(&self.lsp_state.lock().unwrap());
                             // Use actual project directory if available, otherwise use temp workspace
                             let workspace_dir = if let Some(project_dir) = &self.project_dir {
                                 project_dir.clone()
@@ -409,8 +413,7 @@ impl AppIde {
                                 &project.pkg_name,
                                 &toolchain,
                                 &mut self.selected_file,
-                                build_result.as_ref(),
-                                Some(&*lsp_guard),
+                                &badges,
                                 &mut self.project_tree.user_src_files,
                                 &mut self.project_tree.user_src_folders,
                                 &mut self.new_src_name,

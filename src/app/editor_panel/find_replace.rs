@@ -12,8 +12,10 @@
 //! project find lists every hit and clicking one opens that file at the line.
 
 use crate::app::{AppIde, ProjectFileId};
+use crate::editor::gui::text_pos::GalleyRows;
 use eframe::egui;
 use egui_phosphor::regular as ph;
+use std::sync::Arc;
 
 /// Which of the four search/replace modes the bar is in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -80,6 +82,17 @@ pub struct FindReplace {
     /// of the MAIN editor's editing scope, so Ctrl+F / Ctrl+Shift+F must keep
     /// working while typing a query.
     pub had_focus: bool,
+    /// The in-file matches, shared by the bar and the painter (see
+    /// [`FindReplace::match_starts_in`]).
+    matches: MatchCache,
+}
+
+/// [`match_starts`] of `query` in `text`, kept until either differs.
+#[derive(Default)]
+struct MatchCache {
+    query: String,
+    text: String,
+    starts: Arc<[usize]>,
 }
 
 impl FindReplace {
@@ -155,6 +168,26 @@ impl FindReplace {
             self.focus_replace = true;
         }
     }
+
+    /// [`match_starts`] of the query in `text`, over the whole text.
+    ///
+    /// The bar (for the `i/N` status and F3) and the painter both need it every
+    /// frame. Kept against a copy of the query and the text, so the scan reruns
+    /// only when one of them changed: a hit costs one compare of each.
+    fn match_starts_in(&mut self, text: &str) -> Arc<[usize]> {
+        if self.query.is_empty() {
+            // No scan and no copy of the text: an empty query matches nothing.
+            return Arc::default();
+        }
+        let cache = &mut self.matches;
+        if cache.query != self.query || cache.text != text {
+            cache.starts = match_starts(text, &self.query).into();
+            cache.query.clone_from(&self.query);
+            cache.text.clear();
+            cache.text.push_str(text);
+        }
+        Arc::clone(&cache.starts)
+    }
 }
 
 /// Non-overlapping char-index start positions of `query` in `text`
@@ -183,6 +216,45 @@ fn match_starts(text: &str, query: &str) -> Vec<usize> {
 /// 1-based line number of char index `idx` in `text`.
 fn line_of(text: &str, idx: usize) -> usize {
     text.chars().take(idx).filter(|&c| c == '\n').count() + 1
+}
+
+/// The rects [`AppIde::paint_find_matches`] fills: `(index into starts, rect)`
+/// for each match of length `wl` that is on screen.
+///
+/// `starts` is sorted, so the matches whose row can meet the clip are one run,
+/// found by binary search; only those are positioned and tested.
+fn for_each_visible_match(
+    rows: &GalleyRows,
+    gp: egui::Pos2,
+    clip: egui::Rect,
+    starts: &[usize],
+    wl: usize,
+    mut paint: impl FnMut(usize, egui::Rect),
+) {
+    let Some(span) = rows.chars_meeting_band(gp.y, clip.top(), clip.bottom()) else {
+        return;
+    };
+    let from = starts.partition_point(|&s| s < *span.start());
+    let to = starts.partition_point(|&s| s <= *span.end());
+    for (idx, &start) in starts.iter().enumerate().take(to).skip(from) {
+        let loc_s = rows.pos(start);
+        let loc_e = rows.pos(start + wl);
+        let y_top = gp.y + loc_s.min.y;
+        let y_bot = gp.y + loc_s.max.y;
+        let same_row = (loc_s.min.y - loc_e.min.y).abs() < (y_bot - y_top).max(1.0) * 0.5;
+        let x_l = gp.x + loc_s.min.x;
+        let x_r = if same_row {
+            gp.x + loc_e.min.x
+        } else {
+            gp.x + rows.galley().rect.width()
+        };
+        if y_bot >= clip.top() && y_top <= clip.bottom() && x_r > x_l {
+            paint(
+                idx,
+                egui::Rect::from_min_max(egui::pos2(x_l, y_top), egui::pos2(x_r, y_bot)),
+            );
+        }
+    }
 }
 
 impl AppIde {
@@ -424,7 +496,7 @@ impl AppIde {
                 }
             }
             FindMode::FindFile => {
-                let starts = match_starts(display_code, &self.ed.find.query);
+                let starts = self.ed.find.match_starts_in(display_code);
                 if starts.is_empty() {
                     self.ed.find.status = if self.ed.find.query.is_empty() {
                         String::new()
@@ -459,9 +531,14 @@ impl AppIde {
     /// (not the editor) holds focus. The current in-file match is emphasised in
     /// amber; the rest are translucent cyan. Painted after the editor, like
     /// [`AppIde::highlight_selected_word`].
+    ///
+    /// `rows` must describe `editor_resp.galley`. The matches (and so the `i/N`
+    /// colouring) are still found over the whole text; only the positioning
+    /// is limited to the rows on screen.
     pub(super) fn paint_find_matches(
-        &self,
+        &mut self,
         editor_resp: &egui::text_edit::TextEditOutput,
+        rows: &GalleyRows,
         display_code: &str,
         clip: egui::Rect,
         ui: &egui::Ui,
@@ -469,7 +546,7 @@ impl AppIde {
         if !self.ed.find.open || self.ed.find.query.is_empty() {
             return;
         }
-        let starts = match_starts(display_code, &self.ed.find.query);
+        let starts = self.ed.find.match_starts_in(display_code);
         if starts.is_empty() {
             return;
         }
@@ -482,34 +559,16 @@ impl AppIde {
         let base = egui::Color32::from_rgba_unmultiplied(52, 232, 235, 45);
         let current = egui::Color32::from_rgba_unmultiplied(255, 200, 60, 96);
 
-        let gp = editor_resp.galley_pos;
-        let galley = &editor_resp.galley;
         let painter = ui.painter().with_clip_rect(clip);
-        for (idx, &start) in starts.iter().enumerate() {
-            let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(start));
-            let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(start + wl));
-            let y_top = gp.y + loc_s.min.y;
-            let y_bot = gp.y + loc_s.max.y;
-            let same_row = (loc_s.min.y - loc_e.min.y).abs() < (y_bot - y_top).max(1.0) * 0.5;
-            let x_l = gp.x + loc_s.min.x;
-            let x_r = if same_row {
-                gp.x + loc_e.min.x
+        let gp = editor_resp.galley_pos;
+        for_each_visible_match(rows, gp, clip, &starts, wl, |idx, rect| {
+            let color = if file_find && idx == cur_idx {
+                current
             } else {
-                gp.x + galley.rect.width()
+                base
             };
-            if y_bot >= clip.top() && y_top <= clip.bottom() && x_r > x_l {
-                let color = if file_find && idx == cur_idx {
-                    current
-                } else {
-                    base
-                };
-                painter.rect_filled(
-                    egui::Rect::from_min_max(egui::pos2(x_l, y_top), egui::pos2(x_r, y_bot)),
-                    2.0,
-                    color,
-                );
-            }
-        }
+            painter.rect_filled(rect, 2.0, color);
+        });
     }
 
     /// Every file the project search/replace spans: `(id, display_path, content)`.
@@ -791,5 +850,128 @@ mod tests {
         assert_eq!(line_of(text, 0), 1);
         assert_eq!(line_of(text, 2), 2); // first char of line 2
         assert_eq!(line_of(text, 5), 3);
+    }
+
+    /// The cached list is always what a fresh scan returns, and a repeated
+    /// question with the same query and text reuses it.
+    #[test]
+    fn cached_match_starts_follow_the_query_and_the_text() {
+        let mut find = FindReplace::default();
+        let steps = [
+            ("foo", "foo bar foo"),
+            ("foo", "foo bar foo"),
+            ("foo", "foo bar fo"),
+            ("bar", "foo bar fo"),
+            ("", "foo bar fo"),
+            ("o", "é foo"),
+            ("o", "é foo"),
+            ("aa", "aaaa"),
+        ];
+        let mut prev: Option<std::sync::Arc<[usize]>> = None;
+        let mut prev_key = ("", "");
+        for (query, text) in steps {
+            find.query = query.to_owned();
+            let got = find.match_starts_in(text);
+            assert_eq!(
+                &got[..],
+                &match_starts(text, query)[..],
+                "{query:?} in {text:?}"
+            );
+            if let Some(p) = &prev
+                && prev_key == (query, text)
+                && !query.is_empty()
+            {
+                assert!(
+                    std::sync::Arc::ptr_eq(p, &got),
+                    "{query:?} in {text:?} rescanned"
+                );
+            }
+            prev = Some(got);
+            prev_key = (query, text);
+        }
+    }
+
+    /// An empty query neither scans nor keeps a copy of the text.
+    #[test]
+    fn an_empty_query_keeps_no_text() {
+        let mut find = FindReplace::default();
+        assert!(find.match_starts_in("some text").is_empty());
+        assert!(find.matches.text.is_empty());
+    }
+
+    /// What the painter filled before it was limited to the rows on screen:
+    /// every match positioned with the galley's own walk, then culled.
+    fn old_rects(
+        galley: &egui::Galley,
+        gp: egui::Pos2,
+        clip: egui::Rect,
+        starts: &[usize],
+        wl: usize,
+    ) -> Vec<(usize, egui::Rect)> {
+        let mut out = Vec::new();
+        for (idx, &start) in starts.iter().enumerate() {
+            let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(start));
+            let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(start + wl));
+            let y_top = gp.y + loc_s.min.y;
+            let y_bot = gp.y + loc_s.max.y;
+            let same_row = (loc_s.min.y - loc_e.min.y).abs() < (y_bot - y_top).max(1.0) * 0.5;
+            let x_l = gp.x + loc_s.min.x;
+            let x_r = if same_row {
+                gp.x + loc_e.min.x
+            } else {
+                gp.x + galley.rect.width()
+            };
+            if y_bot >= clip.top() && y_top <= clip.bottom() && x_r > x_l {
+                out.push((
+                    idx,
+                    egui::Rect::from_min_max(egui::pos2(x_l, y_top), egui::pos2(x_r, y_bot)),
+                ));
+            }
+        }
+        out
+    }
+
+    /// Same rects, same indices (so the same one is amber), for texts the galley
+    /// was laid out from and for texts it is an edit behind.
+    #[test]
+    fn visible_matches_paint_exactly_what_the_whole_file_pass_painted() {
+        use crate::editor::gui::text_pos::{GalleyRows, galley_rows_tests::galleys};
+        let mut compared = 0usize;
+        for (text, galley) in galleys() {
+            let rows = GalleyRows::new(&galley);
+            let h = galley.rect.height();
+            let bands = [(-50.0, h + 50.0), (0.0, 14.0), (h * 0.5, h), (h, h)];
+            let variants = [
+                text.clone(),
+                format!("a\n{text}"),
+                text.chars().skip(1).collect(),
+                format!("{text}aa a"),
+            ];
+            for shown in &variants {
+                for query in ["a", "aa", "a\n", "😀", "Z a", "ă€"] {
+                    let starts = match_starts(shown, query);
+                    let wl = query.chars().count();
+                    for gp in [egui::pos2(0.0, 0.0), egui::pos2(12.5, -20.0)] {
+                        for (top, bottom) in bands {
+                            let clip = egui::Rect::from_min_max(
+                                egui::pos2(0.0, top),
+                                egui::pos2(400.0, bottom),
+                            );
+                            let mut got = Vec::new();
+                            super::for_each_visible_match(&rows, gp, clip, &starts, wl, |i, r| {
+                                got.push((i, r))
+                            });
+                            let want = old_rects(&galley, gp, clip, &starts, wl);
+                            assert_eq!(got, want, "{query:?} in {shown:?} laid out {text:?}");
+                            compared += want.len();
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            compared > 1000,
+            "the cases must actually paint something: {compared}"
+        );
     }
 }

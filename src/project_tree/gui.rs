@@ -950,14 +950,67 @@ fn insert_file_path_recursive(
     }
 }
 
+/// Which files carry a diagnostic badge: `(has errors, has warnings)` per
+/// project-root-relative path, merged from the last Cargo Check result and
+/// rust-analyzer's live map. A file with neither has no entry.
+///
+/// The caller fills it under two short locks, one at a time, so the tree
+/// renders holding neither: the LSP reader thread and the flush worker lock
+/// `LspState` too, and used to wait out a whole tree render.
+#[derive(Default)]
+pub struct DiagBadges(std::collections::HashMap<String, (bool, bool)>);
+
+impl DiagBadges {
+    /// Adds a Cargo Check result, as `has_errors_in` / `has_warnings_in` see it.
+    pub fn add_build(&mut self, result: &build::BuildResult) {
+        for d in &result.diagnostics {
+            if let Some(file) = &d.file {
+                self.mark(file, d.is_error(), d.is_warning());
+            }
+        }
+    }
+
+    /// Adds rust-analyzer's diagnostics, as `error_count_for(f) > 0` /
+    /// `warning_count_for(f) > 0` see them: no `flycheck_stale` filter, since
+    /// those counts apply none.
+    pub fn add_lsp(&mut self, lsp: &lsp::LspState) {
+        for (file, ds) in &lsp.diagnostics {
+            let err = ds.iter().any(|d| d.severity.is_error());
+            let warn = ds.iter().any(|d| d.severity.is_warning());
+            self.mark(file, err, warn);
+        }
+    }
+
+    fn mark(&mut self, file: &str, err: bool, warn: bool) {
+        if !(err || warn) {
+            return;
+        }
+        // Looked up first so a file already marked costs no key allocation.
+        if let Some(flags) = self.0.get_mut(file) {
+            flags.0 |= err;
+            flags.1 |= warn;
+        } else {
+            self.0.insert(file.to_owned(), (err, warn));
+        }
+    }
+
+    pub fn errors_in(&self, file: &str) -> bool {
+        self.0.get(file).is_some_and(|&(err, _)| err)
+    }
+
+    pub fn warnings_in(&self, file: &str) -> bool {
+        self.0.get(file).is_some_and(|&(_, warn)| warn)
+    }
+}
+
 /// Display the project tree panel (left side of the IDE).
 pub fn show_project_tree(
     ui: &mut egui::Ui,
     pkg_name: &str,
     toolchain: &ToolchainKind,
     selected: &mut ProjectFileId,
-    build_result: Option<&build::BuildResult>,
-    lsp_state: Option<&lsp::LspState>,
+    // Error / warning badges of every file (cargo + rust-analyzer).
+    badges: &DiagBadges,
     user_src_files: &mut Vec<(String, String)>,
     user_src_folders: &mut Vec<String>,
     new_src_name: &mut Option<String>,
@@ -1024,14 +1077,10 @@ pub fn show_project_tree(
     let file_diags: std::collections::HashMap<String, bool> = user_src_files
         .iter()
         .filter_map(|(rel, _)| {
-            let err = build_result.is_some_and(|r| r.has_errors_in(rel))
-                || lsp_state.is_some_and(|l| l.error_count_for(rel) > 0);
-            if err {
+            if badges.errors_in(rel) {
                 return Some((rel.clone(), true));
             }
-            let warn = build_result.is_some_and(|r| r.has_warnings_in(rel))
-                || lsp_state.is_some_and(|l| l.warning_count_for(rel) > 0);
-            warn.then(|| (rel.clone(), false))
+            badges.warnings_in(rel).then(|| (rel.clone(), false))
         })
         .collect();
 
@@ -1146,8 +1195,7 @@ pub fn show_project_tree(
                     open_reference,
                     goto_error,
                     project_dir,
-                    build_result,
-                    lsp_state,
+                    badges,
                 );
             });
 
@@ -1170,8 +1218,7 @@ pub fn show_project_tree(
                     open_reference,
                     goto_error,
                     project_dir,
-                    build_result,
-                    lsp_state,
+                    badges,
                 );
 
                 // Inline "new file / new folder" input at the src/ root, rendered right
@@ -1318,8 +1365,7 @@ pub fn show_project_tree(
                 open_reference,
                 goto_error,
                 project_dir,
-                build_result,
-                lsp_state,
+                badges,
             );
             if *toolchain == ToolchainKind::RustEmbedded {
                 file_row(
@@ -1331,8 +1377,7 @@ pub fn show_project_tree(
                     open_reference,
                     goto_error,
                     project_dir,
-                    build_result,
-                    lsp_state,
+                    badges,
                 );
             }
             file_row(
@@ -1344,8 +1389,7 @@ pub fn show_project_tree(
                 open_reference,
                 goto_error,
                 project_dir,
-                build_result,
-                lsp_state,
+                badges,
             );
             if *toolchain == ToolchainKind::RustEmbedded {
                 file_row(
@@ -1357,8 +1401,7 @@ pub fn show_project_tree(
                     open_reference,
                     goto_error,
                     project_dir,
-                    build_result,
-                    lsp_state,
+                    badges,
                 );
             }
         });
@@ -2446,8 +2489,7 @@ fn file_row(
     goto_error: &mut Option<ProjectFileId>,
     // The saved project folder, for the Show-in-Explorer / Copy-path entries.
     project_dir: Option<&std::path::Path>,
-    build_result: Option<&build::BuildResult>,
-    lsp_state: Option<&lsp::LspState>,
+    badges: &DiagBadges,
 ) {
     let hi = egui::Color32::from_rgb(100, 180, 255);
     // Fixed project files have no Rename/Delete menu — mark them dark-red + bold.
@@ -2476,10 +2518,7 @@ fn file_row(
         // clicking a row that is MARKED with the error badge means "take me to
         // that error", so the click needs to know whether the badge is there.
         let cargo_path = id.cargo_path();
-        let err = cargo_path.is_some_and(|p| {
-            build_result.is_some_and(|r| r.has_errors_in(p))
-                || lsp_state.is_some_and(|l| l.error_count_for(p) > 0)
-        });
+        let err = cargo_path.is_some_and(|p| badges.errors_in(p));
         if resp.clicked() {
             *selected = id;
             if err {
@@ -2518,9 +2557,7 @@ fn file_row(
                 .on_hover_text("This file has errors");
             } else {
                 // Amber warning badge — only when there are warnings but NO errors.
-                let warn = build_result.is_some_and(|r| r.has_warnings_in(cargo_path))
-                    || lsp_state.is_some_and(|l| l.warning_count_for(cargo_path) > 0);
-                if warn {
+                if badges.warnings_in(cargo_path) {
                     ui.label(
                         egui::RichText::new(ph::WARNING)
                             .size(10.0)
@@ -2842,5 +2879,90 @@ mod tests {
         assert_eq!(libs_section_h(600.0, FLOOR, 0.99, true), FLOOR);
         // Same in a very short panel, where even the floor exceeds the share.
         assert_eq!(libs_section_h(40.0, FLOOR, 0.5, true), FLOOR);
+    }
+
+    /// The badges answer what each row used to compute with both locks held:
+    /// `has_errors_in || error_count_for > 0`, and the same for warnings. With
+    /// and without a Cargo result, for files in one source, both or neither,
+    /// and for levels and severities that badge nothing.
+    #[test]
+    fn diag_badges_match_the_per_row_scans() {
+        const FILES: &[&str] = &["src/main.rs", "src/a.rs", "lib/src/lib.rs", "Cargo.toml"];
+        const LEVELS: &[&str] = &["error", "warning", "note", "help", "failure-note"];
+        const SEVERITIES: &[lsp::DiagSeverity] = &[
+            lsp::DiagSeverity::Error,
+            lsp::DiagSeverity::Warning,
+            lsp::DiagSeverity::Info,
+            lsp::DiagSeverity::Hint,
+        ];
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as usize
+        };
+        let (mut errors, mut warnings_only) = (0, 0);
+        for round in 0..500 {
+            let result = build::BuildResult {
+                success: false,
+                diagnostics: (0..next() % 6)
+                    .map(|_| build::Diagnostic {
+                        level: LEVELS[next() % LEVELS.len()].into(),
+                        message: String::new(),
+                        rendered: String::new(),
+                        file: (next() % 6 != 0).then(|| FILES[next() % FILES.len()].into()),
+                        line: None,
+                        col: None,
+                        code: None,
+                        fixes: Vec::new(),
+                        rename: None,
+                    })
+                    .collect(),
+            };
+            let mut lsp_state = lsp::LspState::default();
+            for file in FILES {
+                if next() % 3 == 0 {
+                    let ds = (0..next() % 4)
+                        .map(|_| lsp::LspDiagnostic {
+                            severity: SEVERITIES[next() % SEVERITIES.len()],
+                            message: String::new(),
+                            line: 1,
+                            col: 1,
+                            end_line: 1,
+                            end_col: 1,
+                            code: None,
+                            source: "rustc".into(),
+                        })
+                        .collect();
+                    lsp_state.diagnostics.insert((*file).to_owned(), ds);
+                }
+            }
+            let build_result = (next() % 3 != 0).then_some(&result);
+
+            let mut badges = DiagBadges::default();
+            if let Some(result) = build_result {
+                badges.add_build(result);
+            }
+            badges.add_lsp(&lsp_state);
+
+            for file in FILES.iter().chain(&["src/absent.rs", ""]) {
+                let err = build_result.is_some_and(|r| r.has_errors_in(file))
+                    || lsp_state.error_count_for(file) > 0;
+                let warn = build_result.is_some_and(|r| r.has_warnings_in(file))
+                    || lsp_state.warning_count_for(file) > 0;
+                assert_eq!(
+                    (badges.errors_in(file), badges.warnings_in(file)),
+                    (err, warn),
+                    "round {round} {file}"
+                );
+                errors += usize::from(err);
+                warnings_only += usize::from(warn && !err);
+            }
+        }
+        assert!(
+            errors > 200 && warnings_only > 150,
+            "{errors} {warnings_only}"
+        );
     }
 }

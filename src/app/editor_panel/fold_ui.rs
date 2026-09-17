@@ -4,10 +4,12 @@
 //! folded header saying how many lines are hidden. The model (which blocks
 //! exist, and the buffer ↔ display projection) lives in [`fold`](super::fold).
 
-use super::fold::{FoldMap, Region, regions};
+use super::fold::{FoldMap, Region};
 use crate::app::AppIde;
+use crate::editor::gui::text_pos::{GalleyRows, LineIndex};
 use eframe::egui;
 use egui_phosphor::regular as ph;
+use std::collections::BTreeSet;
 
 /// Caret colours — dim by default so a column of them doesn't compete with the
 /// code, brighter when folded (that block is hiding something) and brightest
@@ -28,13 +30,14 @@ impl AppIde {
         &mut self,
         ui: &egui::Ui,
         editor_resp: &egui::text_edit::TextEditOutput,
+        // The rows of `editor_resp.galley`, shared with the other overlays.
+        rows: &GalleyRows,
         clip: egui::Rect,
         display_code: &str,
         map: &FoldMap,
         rel: &str,
         font_size: f32,
     ) {
-        let galley = &editor_resp.galley;
         let gp = editor_resp.galley_pos;
         // Same guard the breakpoint gutter uses: a degenerate layout has no
         // number column to draw into.
@@ -42,27 +45,16 @@ impl AppIde {
             return;
         }
 
+        let regions = self.ed.fold_regions.get(display_code);
         // Display-line starts, so a region's header can be located on screen.
-        let shown = map.display();
-        let starts: Vec<usize> = {
-            let mut v = vec![0usize];
-            for (i, c) in shown.chars().enumerate() {
-                if c == '\n' {
-                    v.push(i + 1);
-                }
-            }
-            v
-        };
-        // The galley was laid out BEFORE this frame's edit was adopted, so an
-        // index taken from the current projection can sit one character past
-        // its end — and `pos_from_cursor` has a `debug_assert!` on exactly
-        // that. One frame of a slightly stale arrow position beats a panic on
-        // the keystroke that adds a line.
-        let galley_len = galley.text().chars().count();
-        let y_of = |disp_line: usize| -> Option<(f32, f32)> {
-            let ci = (*starts.get(disp_line)?).min(galley_len);
-            let loc = galley.pos_from_cursor(egui::text::CCursor::new(ci));
-            Some((gp.y + loc.min.y, gp.y + loc.max.y))
+        // A folded map built its table with the projection; unfolded, the
+        // display is the text itself, which this view already indexes.
+        let index;
+        let lines = if map.is_identity() {
+            index = self.ed.line_index.get(map.display());
+            DisplayLines::Text(&index)
+        } else {
+            DisplayLines::Folded(map)
         };
 
         // The caret goes in the blank cells `numlines_show` reserves at the end
@@ -82,21 +74,15 @@ impl AppIde {
         // the scroll offset on.
         let mut toggle: Option<(usize, f32)> = None;
 
-        for region in regions(display_code) {
-            // Every block gets a caret — `is_fn` only narrows "collapse all".
-            let Region { head, end, .. } = region;
-            if end <= head + 1 {
-                continue; // nothing to hide
-            }
-            let Some(disp_line) = map.display_line_of(head) else {
-                continue; // the header itself is inside another fold
-            };
-            let Some((top, bot)) = y_of(disp_line) else {
-                continue;
-            };
-            if bot < clip.top() || top > clip.bottom() {
-                continue; // off-screen
-            }
+        let carets = visible_carets(rows, gp, clip, &regions, map, &lines, &folded_now);
+        for Caret {
+            region,
+            top,
+            bot,
+            eol_x,
+        } in carets
+        {
+            let head = region.head;
             let is_folded = folded_now.contains(&head);
             let cy = (top + bot) * 0.5;
             let hit = egui::Rect::from_center_size(
@@ -141,18 +127,12 @@ impl AppIde {
             }
 
             // Folded: say how much is hidden, at the end of the header line.
-            if is_folded {
-                let eol = starts
-                    .get(disp_line + 1)
-                    .map(|&s| s - 1)
-                    .unwrap_or(shown.chars().count())
-                    .min(galley_len);
-                let loc = galley.pos_from_cursor(egui::text::CCursor::new(eol));
+            if let Some(eol_x) = eol_x {
                 let label = format!("... {} lines", region.hidden_count());
                 let font = egui::FontId::proportional(10.0);
                 let g = painter.layout_no_wrap(label.clone(), font.clone(), BADGE_FG);
                 let rect = egui::Rect::from_min_size(
-                    egui::pos2(gp.x + loc.min.x + 10.0, top),
+                    egui::pos2(gp.x + eol_x + 10.0, top),
                     egui::vec2(g.size().x + 8.0, bot - top),
                 );
                 painter.rect_filled(rect, 3.0, BADGE_BG);
@@ -257,6 +237,109 @@ impl AppIde {
         }
         self.ed.fold_anchor = Some((rel.to_owned(), line, y));
     }
+}
+
+/// Line starts of `map.display()`, read from a table that already exists.
+enum DisplayLines<'a> {
+    /// Not folded: the display is the buffer text, indexed by the view.
+    Text(&'a LineIndex),
+    /// Folded: the projection's own table, built with it.
+    Folded(&'a FoldMap),
+}
+
+impl DisplayLines<'_> {
+    /// Where display line `line` starts, `None` past the last one.
+    fn start(&self, line: usize) -> Option<usize> {
+        match self {
+            Self::Text(index) => index.line_start_char(line),
+            Self::Folded(map) => map.display_line_start(line),
+        }
+    }
+
+    /// The display's length in chars.
+    fn total_chars(&self) -> usize {
+        match self {
+            Self::Text(index) => index.total_chars(),
+            Self::Folded(map) => map.display_chars(),
+        }
+    }
+}
+
+/// A fold caret to draw: its region, the header row's screen `top`/`bot`, and
+/// for a folded header the galley x where that display line ends (the badge).
+#[derive(Debug, PartialEq)]
+struct Caret {
+    region: Region,
+    top: f32,
+    bot: f32,
+    eol_x: Option<f32>,
+}
+
+/// The carets the fold gutter draws, in `regions` order: every block with
+/// something to hide whose header is shown on a row that meets `clip`.
+///
+/// Every block used to be positioned with `pos_from_cursor`, a walk over the
+/// galley's rows, before the off-screen test. The rows that can meet `clip` are
+/// found once instead, and a header outside them is dropped before it is
+/// positioned. The test itself is unchanged, and so is the position: the
+/// header's char index in the projection, clamped to the galley. The galley
+/// is laid out BEFORE this frame's edit is adopted, so it can be one edit
+/// behind that index; one frame of a slightly stale caret is accepted.
+fn visible_carets(
+    rows: &GalleyRows,
+    gp: egui::Pos2,
+    clip: egui::Rect,
+    regions: &[Region],
+    map: &FoldMap,
+    lines: &DisplayLines,
+    folded: &BTreeSet<usize>,
+) -> Vec<Caret> {
+    let galley = rows.galley();
+    let band = rows.chars_meeting_band(gp.y, clip.top(), clip.bottom());
+    // No row meets the clip, so no header can. (A galley without rows puts
+    // every cursor at its origin, so that one is left to the test below.)
+    if band.is_none() && !galley.rows.is_empty() {
+        return Vec::new();
+    }
+    let galley_len = galley.text().chars().count();
+    let mut carets = Vec::new();
+    for &region in regions {
+        // Every block gets a caret — `is_fn` only narrows "collapse all".
+        let Region { head, end, .. } = region;
+        if end <= head + 1 {
+            continue; // nothing to hide
+        }
+        let Some(disp_line) = map.display_line_of(head) else {
+            continue; // the header itself is inside another fold
+        };
+        let Some(start) = lines.start(disp_line) else {
+            continue;
+        };
+        let ci = start.min(galley_len);
+        if band.as_ref().is_some_and(|band| !band.contains(&ci)) {
+            continue; // on a row outside the clip
+        }
+        let loc = rows.pos(ci);
+        let (top, bot) = (gp.y + loc.min.y, gp.y + loc.max.y);
+        if bot < clip.top() || top > clip.bottom() {
+            continue; // off-screen
+        }
+        let eol_x = folded.contains(&head).then(|| {
+            let eol = lines
+                .start(disp_line + 1)
+                .map(|s| s - 1)
+                .unwrap_or_else(|| lines.total_chars())
+                .min(galley_len);
+            rows.pos(eol).min.x
+        });
+        carets.push(Caret {
+            region,
+            top,
+            bot,
+            eol_x,
+        });
+    }
+    carets
 }
 
 /// The display row a "toggle collapse all" pins: the caret's when it is
@@ -453,7 +536,144 @@ impl AppIde {
 
 #[cfg(test)]
 mod tests {
-    use super::{Request, anchor_row, fold_all_request};
+    use super::{Caret, DisplayLines, Request, anchor_row, fold_all_request, visible_carets};
+    use crate::app::editor_panel::fold::tests::{fold_sets, fold_texts, rng};
+    use crate::app::editor_panel::fold::{FoldMap, Region, regions};
+    use crate::editor::gui::text_pos::{GalleyRows, LineIndex, test_galleys};
+    use eframe::egui;
+    use egui::text::CCursor;
+    use std::collections::BTreeSet;
+
+    /// The gutter's positioning as it was: a line-start table scanned from the
+    /// projection, and `pos_from_cursor` for every region before the clip test.
+    fn reference_carets(
+        galley: &egui::Galley,
+        gp: egui::Pos2,
+        clip: egui::Rect,
+        regions: &[Region],
+        map: &FoldMap,
+        folded: &BTreeSet<usize>,
+    ) -> Vec<Caret> {
+        let shown = map.display();
+        let mut starts = vec![0usize];
+        for (i, c) in shown.chars().enumerate() {
+            if c == '\n' {
+                starts.push(i + 1);
+            }
+        }
+        let galley_len = galley.text().chars().count();
+        let y_of = |disp_line: usize| -> Option<(f32, f32)> {
+            let ci = (*starts.get(disp_line)?).min(galley_len);
+            let loc = galley.pos_from_cursor(CCursor::new(ci));
+            Some((gp.y + loc.min.y, gp.y + loc.max.y))
+        };
+        let mut out = Vec::new();
+        for &region in regions {
+            let Region { head, end, .. } = region;
+            if end <= head + 1 {
+                continue;
+            }
+            let Some(disp_line) = map.display_line_of(head) else {
+                continue;
+            };
+            let Some((top, bot)) = y_of(disp_line) else {
+                continue;
+            };
+            if bot < clip.top() || top > clip.bottom() {
+                continue;
+            }
+            let eol_x = folded.contains(&head).then(|| {
+                let eol = starts
+                    .get(disp_line + 1)
+                    .map(|&s| s - 1)
+                    .unwrap_or(shown.chars().count())
+                    .min(galley_len);
+                galley.pos_from_cursor(CCursor::new(eol)).min.x
+            });
+            out.push(Caret {
+                region,
+                top,
+                bot,
+                eol_x,
+            });
+        }
+        out
+    }
+
+    /// `text` with one edit applied at a pseudo-random char: a newline
+    /// inserted, or a char removed. What a galley one edit behind looks like.
+    fn one_edit_off(text: &str, next: &mut impl FnMut() -> u64) -> String {
+        let mut out: Vec<char> = text.chars().collect();
+        let at = (next() % (out.len() as u64 + 1)) as usize;
+        if next().is_multiple_of(2) || at == out.len() {
+            out.insert(at, '\n');
+        } else {
+            out.remove(at);
+        }
+        out.into_iter().collect()
+    }
+
+    /// Every fold set over a sample of the fold texts, each projection paired
+    /// with its own galley and with one an edit behind, unwrapped and wrapped,
+    /// under clips above, across and below the galley.
+    #[test]
+    fn visible_carets_match_positioning_every_region() {
+        let mut next = rng(0xA076_1D64_78BD_642F);
+        let mut cases = Vec::new(); // (text, fold set, galley text)
+        for text in fold_texts().into_iter().step_by(3) {
+            // No folds, every block folded, and a mix with stale heads.
+            let sets = fold_sets(&text, &mut next);
+            for set in [&sets[0], &sets[1], &sets[5]].map(Clone::clone) {
+                let shown = FoldMap::new(&text, &set).display().to_owned();
+                let stale = one_edit_off(&shown, &mut next);
+                cases.push((text.clone(), set.clone(), shown));
+                cases.push((text.clone(), set, stale));
+            }
+        }
+        let specs: Vec<(&str, f32)> = cases
+            .iter()
+            .flat_map(|(_, _, g)| [(g.as_str(), f32::INFINITY), (g.as_str(), 30.0)])
+            .collect();
+        let galleys = test_galleys(&specs);
+        let (mut drawn_folded, mut drawn_open, mut badges) = (0usize, 0usize, 0usize);
+        for (k, galley) in galleys.iter().enumerate() {
+            let (text, set, _) = &cases[k / 2];
+            let map = FoldMap::new(text, set);
+            let found = regions(text);
+            let index = LineIndex::new(map.display());
+            let lines = if map.is_identity() {
+                DisplayLines::Text(&index)
+            } else {
+                DisplayLines::Folded(&map)
+            };
+            let rows = GalleyRows::new(galley);
+            let h = galley.rect.height();
+            for gy in [0.0, -13.5, 20.25] {
+                for top in [-40.0, -1.0, 0.0, 7.0, h * 0.5, h - 1.0, h, h + 30.0] {
+                    for height in [0.0, 5.0, 14.0, 60.0, 1.0e6] {
+                        let gp = egui::pos2(50.0, gy);
+                        let clip = egui::Rect::from_min_max(
+                            egui::pos2(0.0, top),
+                            egui::pos2(400.0, top + height),
+                        );
+                        let want = reference_carets(galley, gp, clip, &found, &map, set);
+                        let got = visible_carets(&rows, gp, clip, &found, &map, &lines, set);
+                        if map.is_identity() {
+                            drawn_open += want.len();
+                        } else {
+                            drawn_folded += want.len();
+                        }
+                        badges += want.iter().filter(|c| c.eol_x.is_some()).count();
+                        assert_eq!(got, want, "{text:?} {set:?} galley {k} clip {clip:?}");
+                    }
+                }
+            }
+        }
+        // The comparison has to have seen real work, folded and not.
+        assert!(drawn_open > 500, "{drawn_open} carets on open maps");
+        assert!(drawn_folded > 500, "{drawn_folded} carets on folded maps");
+        assert!(badges > 500, "{badges} badges");
+    }
 
     /// A request raised on one file must never fold another: via the menu on
     /// a library's `Cargo.toml` it used to sit armed until the next Rust file

@@ -1,8 +1,6 @@
 //! Inline diagnostic visualization — wavy underlines, error messages, tooltips.
 
-use crate::editor::gui::text_pos::{
-    draw_wavy_underline, lsp_line_end_char_idx, lsp_pos_to_char_idx,
-};
+use crate::editor::gui::text_pos::{GalleyRows, LineIndex, draw_wavy_underline};
 use crate::lsp::LspDiagnostic;
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -36,12 +34,13 @@ pub fn show_line_band(
     galley_pos: egui::Pos2,
     text_clip_rect: egui::Rect,
     galley: &egui::text::Galley,
-    display_code: &str,
+    // Of the text the galley shows (`display_code`).
+    line_index: &LineIndex,
     line: u32,
     color: egui::Color32,
 ) {
-    let total_chars = display_code.chars().count();
-    let ci = lsp_pos_to_char_idx(display_code, line, 1).min(total_chars);
+    let total_chars = line_index.total_chars();
+    let ci = line_index.pos_to_char_idx(line, 1).min(total_chars);
     let loc = galley.pos_from_cursor(egui::text::CCursor::new(ci));
     let y_top = galley_pos.y + loc.min.y;
     let y_bot = galley_pos.y + loc.max.y;
@@ -286,7 +285,8 @@ pub fn show_diagnostics_overlay(
     text_clip_rect: egui::Rect,
     galley: &egui::text::Galley,
     diags: &[LspDiagnostic],
-    display_code: &str,
+    // Of `display_code`, the text every diagnostic position refers to.
+    line_index: &LineIndex,
     // `copy_requested`: true when Ctrl+C was pressed this frame — the hovered
     // diagnostic copies its message to the clipboard.
     copy_requested: bool,
@@ -303,7 +303,10 @@ pub fn show_diagnostics_overlay(
     // message steps around them; see [`inline_message_x`].
     pill_edges: &[(u32, f32)],
 ) {
-    let total_chars = display_code.chars().count();
+    let total_chars = line_index.total_chars();
+    // Every position below is `galley.pos_from_cursor`, looked up by binary
+    // search: one row table for the pass instead of a row walk per lookup.
+    let rows = GalleyRows::new(galley);
 
     // Painter clipped to editor bounds.
     let gp = galley_pos;
@@ -314,8 +317,8 @@ pub fn show_diagnostics_overlay(
     // Drawn before the diagnostics (so squiggles/messages render on top) AND
     // before the empty-diags return below (the def target may be a clean file).
     let band = |line: u32, color: egui::Color32| {
-        let ci = lsp_pos_to_char_idx(display_code, line, 1).min(total_chars);
-        let loc = galley.pos_from_cursor(egui::text::CCursor::new(ci));
+        let ci = line_index.pos_to_char_idx(line, 1).min(total_chars);
+        let loc = rows.pos(ci);
         let y_top = gp.y + loc.min.y;
         let y_bot = gp.y + loc.max.y;
         if y_bot >= clip.top() && y_top <= clip.bottom() {
@@ -362,18 +365,12 @@ pub fn show_diagnostics_overlay(
 
     // ── Per-diagnostic: underline + inline message + tooltip ──────────────
     for (di, diag) in diags.iter().enumerate() {
-        let start_ci = lsp_pos_to_char_idx(&display_code, diag.line, diag.col).min(total_chars);
-        let end_ci_raw =
-            lsp_pos_to_char_idx(&display_code, diag.end_line, diag.end_col).min(total_chars);
-        let end_ci = if end_ci_raw <= start_ci {
-            (start_ci + 1).min(total_chars)
-        } else {
-            end_ci_raw
-        };
+        let start_ci = line_index
+            .pos_to_char_idx(diag.line, diag.col)
+            .min(total_chars);
 
-        // Galley-local positions
-        let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(start_ci));
-        let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(end_ci));
+        // Galley-local position of the start
+        let loc_s = rows.pos(start_ci);
 
         // Screen coordinates
         let sx = gp.x + loc_s.min.x;
@@ -386,9 +383,22 @@ pub fn show_diagnostics_overlay(
         // inline message, and hover region would land below the editor in the
         // bottom diagnostics panel (the painter clip hides the drawing, but the
         // hover interaction must be skipped too).
+        //
+        // Decided from the START alone, so it runs before the end and
+        // end-of-line lookups: most of a file's diagnostics are off screen.
         if sy_bot < clip.top() || sy_top > clip.bottom() {
             continue;
         }
+
+        let end_ci_raw = line_index
+            .pos_to_char_idx(diag.end_line, diag.end_col)
+            .min(total_chars);
+        let end_ci = if end_ci_raw <= start_ci {
+            (start_ci + 1).min(total_chars)
+        } else {
+            end_ci_raw
+        };
+        let loc_e = rows.pos(end_ci);
 
         // Same-line check
         let same_line = (loc_s.min.y - loc_e.min.y).abs() < line_h * 0.5;
@@ -438,8 +448,8 @@ pub fn show_diagnostics_overlay(
         draw_wavy_underline(&painter, sx, ex, sy_bot, ul_color);
 
         // ── Inline message at end of line ─────────────────────────────────
-        let eol_ci = lsp_line_end_char_idx(&display_code, diag.line).min(total_chars);
-        let loc_eol = galley.pos_from_cursor(egui::text::CCursor::new(eol_ci));
+        let eol_ci = line_index.line_end_char_idx(diag.line).min(total_chars);
+        let loc_eol = rows.pos(eol_ci);
         let same_row_eol = (loc_s.min.y - loc_eol.min.y).abs() < line_h * 0.5;
         // Only one inline message per line (a second would overlap the first).
         if same_row_eol && !msg_lines.contains(&diag.line) {

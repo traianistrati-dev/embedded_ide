@@ -10,6 +10,7 @@
 //! reverted the hunk; revert now lives in the Git tab's diff view (+ Ctrl+Z).
 
 use crate::app::{AppIde, ProjectFileId};
+use crate::editor::gui::text_pos::GalleyRows;
 use crate::git::{BaselineFetch, DiffHunk, compute_hunks, fetch_baseline};
 use eframe::egui;
 use std::sync::{Arc, Mutex};
@@ -162,6 +163,8 @@ impl AppIde {
         &mut self,
         ui: &egui::Ui,
         editor_resp: &egui::text_edit::TextEditOutput,
+        // The rows of `editor_resp.galley`, shared with the other overlays.
+        rows: &GalleyRows,
         clip: egui::Rect,
         display_code: &str,
         displayed_file: ProjectFileId,
@@ -169,7 +172,6 @@ impl AppIde {
         if self.ed.diff_gutter.hunks.is_empty() || self.ed.diff_gutter.computed_hash == 0 {
             return;
         }
-        let galley = &editor_resp.galley;
         let gp = editor_resp.galley_pos;
         let total_chars = display_code.chars().count();
         let painter = ui.painter().with_clip_rect(clip);
@@ -183,9 +185,11 @@ impl AppIde {
                 .min(total_chars)
         };
         let y_of = |ci: usize| {
-            let loc = galley.pos_from_cursor(egui::text::CCursor::new(ci));
+            let loc = rows.pos(ci);
             (gp.y + loc.min.y, gp.y + loc.max.y)
         };
+        // The same for every hunk, so hashed once, when the first one is drawn.
+        let mut file_key = None;
 
         for (i, hk) in self.ed.diff_gutter.hunks.iter().enumerate() {
             let (y_top, y_bot, color) = if hk.new_len == 0 {
@@ -246,7 +250,7 @@ impl AppIde {
             let resp = ui.interact(
                 hit,
                 egui::Id::new("diff_gutter")
-                    .with(self.file_key(displayed_file))
+                    .with(*file_key.get_or_insert_with(|| self.file_key(displayed_file)))
                     .with(i),
                 egui::Sense::hover(),
             );
