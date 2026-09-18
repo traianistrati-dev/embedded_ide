@@ -6,6 +6,7 @@
 
 use super::AppIde;
 use super::ProjectFileId;
+use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use crate::project_tree::ProjectTreeState;
 
 impl AppIde {
@@ -157,10 +158,11 @@ impl AppIde {
             self.flow_cache = None;
         }
 
-        // ── Restore pin state from src/main.rs ───────────────────────────────
-        // Parse the GEN_BEGIN…GEN_END block and apply every recognised pin
-        // assignment back to the MCU diagram.  If no markers are found (e.g.
-        // an ESP32-C3 project or a hand-written main.rs) this is a silent no-op.
+        // ── Restore pin state from mcu.config and src/main.rs ────────────────
+        // Restore the MCU diagram: pin assignments from the `@pins` section of
+        // `mcu.config` when it has one, otherwise from the recognized bindings
+        // in the GEN_BEGIN…GEN_END block.  If neither yields any pins (e.g. a
+        // hand-written main.rs) the diagram is reset.
         if let Some(source) = main_rs_source {
             use crate::panels::mcu_module::codegen;
             use crate::panels::mcu_module::mcu_config;
@@ -170,8 +172,9 @@ impl AppIde {
             // restored clock drives the regenerated chain). Older projects
             // without that file fall back to the legacy `@modules` / `@clock`
             // comment markers that used to live in main.rs.
-            // Kept, not just consumed: `@labels` has to be applied further down,
-            // after `apply_saved_pins` has done its `reset_all_pins`.
+            // Kept, not just consumed: `@pins` is read further down, and
+            // `@labels` has to be applied after the pin apply has done its
+            // `reset_all_pins`.
             let cfg_text = std::fs::read_to_string(root.join(mcu_config::FILE_NAME)).ok();
             match &cfg_text {
                 Some(cfg) => {
@@ -196,10 +199,17 @@ impl AppIde {
                 }
             }
 
-            let saved = codegen::parse_main_rs(&source);
-            if !saved.is_empty() {
+            // The pins. `@pins` first, when the config has it: that is the nRF
+            // store, whose generated block carries no label `parse_main_rs`
+            // could read. Every STM32 and ESP project is recovered from
+            // main.rs as it always was; an nRF project saved before the
+            // section existed has nothing to recover, and resets below.
+            if let Some(saved) = saved_pins(cfg_text.as_deref(), &source) {
                 if let Some(mcu) = &mut self.mcu {
-                    mcu.apply_saved_pins(&saved);
+                    match &saved {
+                        SavedPins::ByNumber(pins) => mcu.apply_saved_pins_by_number(pins),
+                        SavedPins::ByName(pins) => mcu.apply_saved_pins(pins),
+                    }
                     // Restore the per-pin user labels (the `_<label>` suffix on a
                     // binding) — after apply_saved_pins, which would clear them.
                     mcu.apply_saved_pin_labels(&codegen::parse_pin_labels(&source));
@@ -216,10 +226,12 @@ impl AppIde {
                     self.generated_code = mcu.update_main_rs(&source);
                 }
             } else {
-                // No parseable pins (blank STM32 project, ESP32-C3, or
-                // hand-written main.rs).  Always reset the MCU diagram so
-                // pins configured in the previously-open project do not
-                // bleed into this one.
+                // No saved pins: a blank project, a hand-written main.rs, an
+                // nRF project saved before `@pins` existed, or an RP project
+                // (its shape is one `parse_main_rs` cannot read either, and it
+                // has no section yet).  Always reset the MCU diagram so pins
+                // configured in the previously-open project do not bleed into
+                // this one.
                 if let Some(mcu) = &mut self.mcu {
                     mcu.reset_all_pins();
                 }
@@ -1222,7 +1234,6 @@ impl AppIde {
                 &generated_files_that_must_be_absent(&self.current_project_files()),
             ),
             None => {
-                use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
                 let has_content = !self.project_tree.user_src_files.is_empty()
                     || self.mcu.as_ref().is_some_and(|m| {
                         !m.modules.is_empty()
@@ -1651,6 +1662,93 @@ pub(super) fn apply_fs_create(
     }
     if let Some(content) = read() {
         user_src_files.push((rel.to_owned(), content));
+    }
+}
+
+/// Where a project's pin functions come from on open.
+#[derive(Debug)]
+enum SavedPins {
+    /// The `@pins` section of `mcu.config`: the store for a family whose
+    /// generated block carries no label to read back (nRF).
+    ByNumber(Vec<(usize, PinFunction)>),
+    /// The `// label` on each binding in `src/main.rs`, the STM32 and ESP
+    /// shape `codegen::parse_main_rs` has always read.
+    ByName(Vec<(String, PinFunction)>),
+}
+
+/// The pins to restore, or `None` when neither store has any: a blank
+/// project, a hand-written main.rs, or a family the parser cannot read that
+/// was saved before `@pins` existed. The section wins when both are present -
+/// it is written from the diagram itself, where the parse is a recovery.
+fn saved_pins(cfg_text: Option<&str>, source: &str) -> Option<SavedPins> {
+    use crate::panels::mcu_module::{codegen, mcu_config};
+    let by_number = cfg_text.map(mcu_config::parse_pins).unwrap_or_default();
+    if !by_number.is_empty() {
+        return Some(SavedPins::ByNumber(by_number));
+    }
+    let by_name = codegen::parse_main_rs(source);
+    (!by_name.is_empty()).then_some(SavedPins::ByName(by_name))
+}
+
+#[cfg(test)]
+mod saved_pins_tests {
+    use super::{SavedPins, saved_pins};
+    use crate::panels::mcu_module::codegen::common::{GEN_BEGIN, GEN_END};
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+    /// An STM32 file, in the shape `parse_main_rs` has always read.
+    fn stm32_main_rs() -> String {
+        format!(
+            "{GEN_BEGIN}\nlet pc13 = &mut gpioc.pc13.into_push_pull_output(&mut gpioc.crh); // GPIO Output\n{GEN_END}\n"
+        )
+    }
+
+    /// An nRF file: the pad name in a comment, no function label anywhere.
+    fn nrf_main_rs() -> String {
+        format!(
+            "{GEN_BEGIN}\n// P0.21\nlet mut p0_21_out = Output::new(p.P0_21, Level::Low, OutputDrive::Standard);\n{GEN_END}\n"
+        )
+    }
+
+    const WITH_PINS: &str = "@runtime\nAsync\n\n@pins\n7=GPIO Output\n";
+    const WITHOUT_PINS: &str = "@runtime\nAsync\n";
+
+    /// A project with no `@pins` - no config at all, or one written before
+    /// the section existed - still restores from main.rs, so STM32 and ESP
+    /// projects open exactly as before.
+    #[test]
+    fn a_project_without_the_section_still_restores_from_main_rs() {
+        for cfg in [None, Some(WITHOUT_PINS)] {
+            match saved_pins(cfg, &stm32_main_rs()) {
+                Some(SavedPins::ByName(pins)) => {
+                    assert_eq!(pins, vec![("PC13".to_owned(), PinFunction::GpioOutput)])
+                }
+                other => panic!("{cfg:?}: {other:?}"),
+            }
+        }
+    }
+
+    /// The section is the diagram's own record, so it wins over the parse -
+    /// and against an nRF file it is the only record there is.
+    #[test]
+    fn the_section_wins_when_present() {
+        for source in [stm32_main_rs(), nrf_main_rs()] {
+            match saved_pins(Some(WITH_PINS), &source) {
+                Some(SavedPins::ByNumber(pins)) => {
+                    assert_eq!(pins, vec![(7, PinFunction::GpioOutput)])
+                }
+                other => panic!("{source}: {other:?}"),
+            }
+        }
+    }
+
+    /// The bug this exists for: an nRF file without the section has nothing
+    /// to restore, and the open path resets the diagram rather than guessing.
+    /// An nRF project saved before `@pins` opens this way once.
+    #[test]
+    fn an_nrf_file_without_the_section_has_nothing_to_restore() {
+        assert!(saved_pins(None, &nrf_main_rs()).is_none());
+        assert!(saved_pins(Some(WITHOUT_PINS), &nrf_main_rs()).is_none());
     }
 }
 
