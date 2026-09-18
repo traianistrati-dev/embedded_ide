@@ -392,8 +392,11 @@ pub struct LspState {
     pub rename_response_received: bool,
     /// The edits returned by the last rename (empty on error / no-op).
     pub rename_edits: Vec<RenameEdit>,
-    /// The request id of the pending `textDocument/codeAction`, if any.
-    code_action_req_id: Option<u64>,
+    /// The `textDocument/codeAction` requests of one Ctrl+Enter, in the order
+    /// they were asked, each with its answer once it lands. Several, because
+    /// rust-analyzer's assists depend on WHERE they are asked (see
+    /// `request_code_actions`); the list is published when all have answered.
+    code_action_pending: Vec<(u64, Option<Vec<CodeAction>>)>,
     /// Set when a codeAction list response arrives; consumed by the app.
     pub code_action_response_received: bool,
     /// The code actions returned by the last request.
@@ -525,7 +528,7 @@ impl Default for LspState {
             will_rename_edits: Vec::new(),
             rename_response_received: false,
             rename_edits: Vec::new(),
-            code_action_req_id: None,
+            code_action_pending: Vec::new(),
             code_action_response_received: false,
             code_actions: Vec::new(),
             code_action_resolve_req_id: None,
@@ -988,53 +991,82 @@ impl LspState {
         }
     }
 
-    /// Request the assists / quick-fixes available at `(line, character)` in
-    /// `rel_path` (`textDocument/codeAction`, Ctrl+Enter). A zero-width range at
-    /// the cursor is enough for import/qualify assists. Poll
+    /// Request the assists / quick-fixes available in `rel_path`
+    /// (`textDocument/codeAction`, Ctrl+Enter), one request per range, and
+    /// publish them as ONE list once every request has answered — in the order
+    /// the ranges were given, duplicates (same title) kept once. Poll
     /// [`take_code_actions_result`].
-    /// `(line, character)` .. `(end_line, end_character)` is the SELECTION, or
-    /// the same position twice when there is none.
+    ///
+    /// Each range is `(line, character, end_line, end_character)`: the
+    /// SELECTION, or the same position twice when there is none. The first one
+    /// is what `code_action_for` reports.
     ///
     /// The range is not decoration: rust-analyzer offers a different set of
     /// assists for a span than for a point, and the useful ones — "Extract into
     /// function", "Extract into variable", "Convert to guarded return" — are
     /// span-only. Sending a zero-width range made every one of them
     /// unreachable, which is why Ctrl+Enter never offered an extraction.
-    pub fn request_code_actions(
-        &mut self,
-        rel_path: &str,
-        line: u32,
-        character: u32,
-        end_line: u32,
-        end_character: u32,
-    ) {
-        if self.sender.is_none() {
+    ///
+    /// Several points, because assists are just as position-sensitive: "Add
+    /// explicit type" lives on a `let` pattern, a closure's own assists inside
+    /// the closure. Asking at only one of them silently lost the other set.
+    pub fn request_code_actions(&mut self, rel_path: &str, ranges: &[(u32, u32, u32, u32)]) {
+        if self.sender.is_none() || ranges.is_empty() {
             return;
         }
-        self.code_action_for = Some((rel_path.to_owned(), line + 1));
-        self.next_req_id += 1;
-        let id = self.next_req_id;
-        self.code_action_req_id = Some(id);
+        self.code_action_for = Some((rel_path.to_owned(), ranges[0].0 + 1));
+        self.code_action_pending.clear();
         self.code_action_response_received = false;
         self.code_actions.clear();
         let uri = format!("{}/{}", self.root_uri, rel_path);
-        let pos = serde_json::json!({ "line": line, "character": character });
-        let end = serde_json::json!({ "line": end_line, "character": end_character });
-        self.send_raw(
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id":      id,
-                "method":  "textDocument/codeAction",
-                "params": {
-                    "textDocument": { "uri": uri },
-                    "range":        { "start": pos, "end": end },
-                    // No diagnostics in context (v1 = assists at the cursor, not
-                    // diagnostic quick-fixes); `only` unset → RA returns all.
-                    "context":      { "diagnostics": [] },
-                }
-            })
-            .to_string(),
-        );
+        for &(line, character, end_line, end_character) in ranges {
+            self.next_req_id += 1;
+            let id = self.next_req_id;
+            self.code_action_pending.push((id, None));
+            let pos = serde_json::json!({ "line": line, "character": character });
+            let end = serde_json::json!({ "line": end_line, "character": end_character });
+            self.send_raw(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id":      id,
+                    "method":  "textDocument/codeAction",
+                    "params": {
+                        "textDocument": { "uri": uri },
+                        "range":        { "start": pos, "end": end },
+                        // No diagnostics in context (v1 = assists at the cursor,
+                        // not diagnostic quick-fixes); `only` unset → RA
+                        // returns all.
+                        "context":      { "diagnostics": [] },
+                    }
+                })
+                .to_string(),
+            );
+        }
+    }
+
+    /// Is `req_id` one of the code-action requests still waiting for an answer?
+    fn is_code_action_req(&self, req_id: u64) -> bool {
+        self.code_action_pending.iter().any(|(id, _)| *id == req_id)
+    }
+
+    /// Record the answer to one of the pending code-action requests (an error
+    /// or `null` answers with an empty list). Returns `false` when `req_id` is
+    /// not one of them. When the last one lands, the merged list is published.
+    fn record_code_actions(&mut self, req_id: u64, actions: Vec<CodeAction>) -> bool {
+        let Some(slot) = self
+            .code_action_pending
+            .iter_mut()
+            .find(|(id, _)| *id == req_id)
+        else {
+            return false;
+        };
+        slot.1 = Some(actions);
+        if self.code_action_pending.iter().all(|(_, a)| a.is_some()) {
+            let parts = std::mem::take(&mut self.code_action_pending);
+            self.code_actions = merge_code_actions(parts.into_iter().filter_map(|(_, a)| a));
+            self.code_action_response_received = true;
+        }
+        true
     }
 
     /// Take the code-action list once RA responded (`Some(vec)`; empty = none).
@@ -1393,7 +1425,7 @@ impl LspState {
         self.completion_req_id.is_some()
             || self.rename_req_id.is_some()
             || self.will_rename_req_id.is_some()
-            || self.code_action_req_id.is_some()
+            || !self.code_action_pending.is_empty()
             || self.code_action_resolve_req_id.is_some()
             || self.definition_req_id.is_some()
             || self.implementation_req_id.is_some()
@@ -1514,7 +1546,7 @@ impl LspState {
         self.inlay_for_line = 0;
         self.inlay_response_received = false;
         self.inlay_result.clear();
-        self.code_action_req_id = None;
+        self.code_action_pending.clear();
         self.code_action_response_received = false;
         self.code_actions.clear();
         self.code_action_resolve_req_id = None;
@@ -2352,10 +2384,11 @@ fn handle_incoming(
                     s.inlay_result = parse_inlay_hints(&msg["result"], &rel);
                     s.inlay_response_received = true;
                     ctx.request_repaint();
-                } else if s.code_action_req_id == Some(req_id) {
-                    s.code_action_req_id = None;
-                    s.code_actions = parse_code_actions(&msg["result"], root_uri);
-                    s.code_action_response_received = true;
+                } else if s.is_code_action_req(req_id) {
+                    // Parsed only once the id is known to be ours: every reply
+                    // this far down the chain would otherwise be parsed too.
+                    let actions = parse_code_actions(&msg["result"], root_uri);
+                    s.record_code_actions(req_id, actions);
                     ctx.request_repaint();
                 } else if s.code_action_resolve_req_id == Some(req_id) {
                     s.code_action_resolve_req_id = None;
@@ -2445,9 +2478,9 @@ fn handle_incoming(
                     s.inlay_req_id = None;
                     s.inlay_response_received = true; // no hints, stop waiting
                     ctx.request_repaint();
-                } else if s.code_action_req_id == Some(req_id) {
-                    s.code_action_req_id = None;
-                    s.code_action_response_received = true; // empty list, stop waiting
+                } else if s.record_code_actions(req_id, Vec::new()) {
+                    // An error answers its part with an empty list, so the
+                    // others still publish and nothing waits for ever.
                     ctx.request_repaint();
                 } else if s.code_action_resolve_req_id == Some(req_id) {
                     s.code_action_resolve_req_id = None;
@@ -2647,6 +2680,18 @@ fn parse_workspace_edit(result: &serde_json::Value, root_uri: &str) -> Vec<Renam
 /// `Command`s (no `edit`, no `data`, but a `command` field) are dropped —
 /// `is_applicable` filters them anyway. Each `CodeAction`'s inline `edit` is
 /// parsed now; lazy ones keep `edits: None` and resolve later.
+/// One list from the answers of several code-action requests: in request
+/// order, and an action offered at two positions (the same title) only once.
+fn merge_code_actions(parts: impl IntoIterator<Item = Vec<CodeAction>>) -> Vec<CodeAction> {
+    let mut out: Vec<CodeAction> = Vec::new();
+    for action in parts.into_iter().flatten() {
+        if !out.iter().any(|a| a.title == action.title) {
+            out.push(action);
+        }
+    }
+    out
+}
+
 fn parse_code_actions(result: &serde_json::Value, root_uri: &str) -> Vec<CodeAction> {
     let Some(arr) = result.as_array() else {
         return Vec::new();
@@ -3433,6 +3478,109 @@ mod document_symbol_tests {
         flag("new_parser", true, 1); // impl-for member
         flag("decode", true, 0); // impl-for member
         flag("helper", false, 0); // inherent impl member
+    }
+}
+
+#[cfg(test)]
+mod code_action_merge_tests {
+    use super::*;
+
+    fn action(title: &str) -> serde_json::Value {
+        serde_json::json!({ "title": title, "data": { "id": title } })
+    }
+
+    fn reply(state: &Arc<Mutex<LspState>>, tx: &mpsc::Sender<String>, msg: serde_json::Value) {
+        let generation = state.lock().unwrap().generation;
+        handle_incoming(
+            msg,
+            state,
+            &eframe::egui::Context::default(),
+            tx,
+            "file:///w",
+            generation,
+        );
+    }
+
+    fn titles(actions: &[CodeAction]) -> Vec<&str> {
+        actions.iter().map(|a| a.title.as_str()).collect()
+    }
+
+    /// Two positions asked, answers arriving in reverse order: nothing is
+    /// published until both are in, then in REQUEST order, duplicates once.
+    #[test]
+    fn answers_merge_in_request_order_once_all_are_in() {
+        let (tx, _rx) = mpsc::channel();
+        let mut s = LspState {
+            sender: Some(tx.clone()),
+            ..Default::default()
+        };
+        s.request_code_actions("src/main.rs", &[(3, 20, 3, 20), (3, 8, 3, 8)]);
+        let ids: Vec<u64> = s.code_action_pending.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(
+            s.code_action_for,
+            Some(("src/main.rs".to_owned(), 4)),
+            "the caret line"
+        );
+        let state = Arc::new(Mutex::new(s));
+
+        let second = serde_json::json!({ "jsonrpc": "2.0", "id": ids[1],
+            "result": [action("Add explicit type"), action("Inline variable"), action("Shared")] });
+        reply(&state, &tx, second);
+        assert!(
+            state.lock().unwrap().take_code_actions_result().is_none(),
+            "half an answer is not published"
+        );
+
+        let first = serde_json::json!({ "jsonrpc": "2.0", "id": ids[0],
+            "result": [action("Add closure return type"), action("Shared")] });
+        reply(&state, &tx, first);
+        let got = state
+            .lock()
+            .unwrap()
+            .take_code_actions_result()
+            .expect("published");
+        assert_eq!(
+            titles(&got),
+            [
+                "Add closure return type",
+                "Shared",
+                "Add explicit type",
+                "Inline variable"
+            ]
+        );
+        assert!(!state.lock().unwrap().any_request_in_flight());
+    }
+
+    /// An error answers its part with nothing; the other part still shows.
+    #[test]
+    fn an_error_on_one_position_does_not_hold_the_other() {
+        let (tx, _rx) = mpsc::channel();
+        let mut s = LspState {
+            sender: Some(tx.clone()),
+            ..Default::default()
+        };
+        s.request_code_actions("src/main.rs", &[(1, 1, 1, 1), (1, 5, 1, 5)]);
+        let ids: Vec<u64> = s.code_action_pending.iter().map(|(id, _)| *id).collect();
+        let state = Arc::new(Mutex::new(s));
+        reply(
+            &state,
+            &tx,
+            serde_json::json!({ "jsonrpc": "2.0", "id": ids[0],
+            "error": { "code": -32603, "message": "boom" } }),
+        );
+        reply(
+            &state,
+            &tx,
+            serde_json::json!({ "jsonrpc": "2.0", "id": ids[1],
+            "result": [action("Add explicit type")] }),
+        );
+        let got = state
+            .lock()
+            .unwrap()
+            .take_code_actions_result()
+            .expect("published");
+        assert_eq!(titles(&got), ["Add explicit type"]);
     }
 }
 

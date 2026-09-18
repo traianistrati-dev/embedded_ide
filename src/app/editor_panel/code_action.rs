@@ -4,7 +4,10 @@
 //! apply the returned `WorkspaceEdit` via [`AppIde::apply_rename_edits`].
 //!
 //! Flow: Ctrl+Enter → `request_code_actions`. When the list lands (polled in
-//! `init_frame`): 0 → nothing; 1 → apply directly; >1 → a chooser popup. A
+//! `init_frame`): 0 → a status message; 1 or more → the chooser popup. Nothing
+//! is ever applied without a choice: an action is an edit the user has not
+//! seen, and the one rust-analyzer offers alone can be "Inline variable" —
+//! which, auto-applied on an `async` closure's `let`, deleted the closure. A
 //! chosen action with an inline edit applies immediately; a lazy one is
 //! `codeAction/resolve`d first. All applies run at frame TOP so the editor's
 //! end-of-frame write-back can't revert them (the Clippy-fix gotcha).
@@ -12,6 +15,36 @@
 use crate::app::{AppIde, ProjectFileId};
 use crate::editor::gui::text_pos::{lsp_cursor_pos, selected_file_rel_path};
 use eframe::egui;
+
+/// The spans to ask rust-analyzer about for one Ctrl+Enter, as char ranges in
+/// the order their actions are listed.
+///
+/// A selection is asked about as-is — it is the one thing the user pointed at,
+/// and the span-only assists (Extract into function, …) need it whole.
+///
+/// Without one: the caret FIRST, then the binding of the `let` statement the
+/// caret sits in, when that is somewhere else. rust-analyzer offers "Add
+/// explicit type" only on the `let` pattern, so the caret alone missed it from
+/// the initializer. But asking only at the pattern — the old re-target — lost
+/// every assist of the code under the caret: on `let f = async |…| { … }` the
+/// closure's own assists were gone, and what remained was the pattern's
+/// "Inline variable".
+fn code_action_positions(
+    chars: &[char],
+    caret: usize,
+    sel_end: Option<usize>,
+) -> Vec<(usize, usize)> {
+    if let Some(e) = sel_end.filter(|&e| e != caret) {
+        return vec![(caret.min(e), caret.max(e))];
+    }
+    let mut out = vec![(caret, caret)];
+    if let Some(t) = super::let_annotation::let_binding_pos(chars, caret)
+        && t != caret
+    {
+        out.push((t, t));
+    }
+    out
+}
 
 impl AppIde {
     /// Fire a codeAction request for the cursor position (Ctrl+Enter). Syncs
@@ -55,23 +88,16 @@ impl AppIde {
             return;
         };
         let Some(idx) = cursor_char_idx else { return };
-        // When the line is a `let x = …` without a type, re-target the request
-        // to the binding name — rust-analyzer only offers "Add explicit type"
-        // on the `let` pattern, not on the initializer where the cursor usually
-        // sits. This makes Ctrl+Enter add the type from anywhere on the line.
         let chars: Vec<char> = display_code.chars().collect();
-        // A selection is asked about as-is: re-targeting it to a `let` pattern
-        // would throw the span away, which is the whole point of sending one.
-        let sel = sel_end_char_idx.filter(|&e| e != idx);
-        let (start, end) = match sel {
-            Some(e) => (idx.min(e), idx.max(e)),
-            None => {
-                let t = super::let_annotation::let_binding_pos(&chars, idx).unwrap_or(idx);
-                (t, t)
-            }
-        };
-        let (line, col) = lsp_cursor_pos(display_code, start);
-        let (end_line, end_col) = lsp_cursor_pos(display_code, end);
+        let ranges: Vec<(u32, u32, u32, u32)> =
+            code_action_positions(&chars, idx, sel_end_char_idx)
+                .into_iter()
+                .map(|(start, end)| {
+                    let (line, col) = lsp_cursor_pos(display_code, start);
+                    let (end_line, end_col) = lsp_cursor_pos(display_code, end);
+                    (line, col, end_line, end_col)
+                })
+                .collect();
         // Our own row — rust-analyzer never offers this one, it does not know
         // Cargo.toml exists. Computed BEFORE the LSP is consulted, and offered
         // even when it is down: a missing dependency is a fact about Cargo.toml,
@@ -88,7 +114,7 @@ impl AppIde {
                 return;
             }
             lsp.did_change(&rel, display_code, false);
-            lsp.request_code_actions(&rel, line, col, end_line, end_col);
+            lsp.request_code_actions(&rel, &ranges);
         }
         // The answer lands at frame top, before any view has drawn — record
         // who asked so it is written into the right one.
@@ -107,9 +133,7 @@ impl AppIde {
             let actions = self.lsp_state.lock().unwrap().take_code_actions_result();
             if let Some(actions) = actions {
                 self.ed.code_action_in_flight = false;
-                // With our row present, neither shortcut holds: 0 actions is
-                // still a list of one, and 1 action must not auto-apply over
-                // the choice the user has not made yet.
+                // With our row present, 0 actions is still a list of one.
                 let ours = self.ed.code_action_add_dep.is_some();
                 match actions.len() {
                     // Say so. An empty answer used to be indistinguishable from
@@ -131,7 +155,7 @@ impl AppIde {
                             "Ctrl+Enter: rust-analyzer has no action at the cursor{reason}"
                         ));
                     }
-                    1 if !ours => self.begin_code_action(actions.into_iter().next().unwrap()),
+                    // One action is still a CHOICE — never applied unseen.
                     _ => {
                         self.ed.code_actions = actions;
                         self.ed.code_action_sel = 0;
@@ -196,7 +220,7 @@ impl AppIde {
         }
     }
 
-    /// Draw the code-action chooser popup (shown when > 1 action). A click or
+    /// Draw the code-action chooser popup (shown for 1 action or more). A click or
     /// Enter defers the choice to next frame's `poll_code_actions`; Esc closes.
     /// Called after the editor renders (like the completion popup).
     pub(super) fn show_code_action_popup(&mut self, ui: &mut egui::Ui) {
@@ -253,5 +277,60 @@ impl AppIde {
         if let Some(i) = chosen {
             self.ed.code_action_choice = Some(i);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::code_action_positions;
+
+    fn chars(s: &str) -> Vec<char> {
+        s.chars().collect()
+    }
+
+    /// The report: the caret inside an `async` closure's parameters on a `let`
+    /// line. Both places are asked — the caret first, for the closure's own
+    /// assists, then the binding, for "Add explicit type".
+    #[test]
+    fn a_caret_in_a_let_initializer_asks_there_and_at_the_binding() {
+        let src = "fn f() {\n    let print_modes = async |x: u8| { x };\n}\n";
+        let caret = src.find("|x").unwrap() + 1;
+        let binding = src.find("print_modes").unwrap();
+        let got = code_action_positions(&chars(src), caret, None);
+        assert_eq!(got, vec![(caret, caret), (binding, binding)]);
+    }
+
+    #[test]
+    fn a_caret_already_on_the_binding_is_asked_once() {
+        let src = "fn f() {\n    let total = 1 + 2;\n}\n";
+        let binding = src.find("total").unwrap();
+        assert_eq!(
+            code_action_positions(&chars(src), binding, None),
+            vec![(binding, binding)]
+        );
+    }
+
+    #[test]
+    fn a_caret_outside_any_let_is_asked_alone() {
+        let src = "fn f() {\n    do_it(1);\n}\n";
+        let caret = src.find("do_it").unwrap() + 2;
+        assert_eq!(
+            code_action_positions(&chars(src), caret, None),
+            vec![(caret, caret)]
+        );
+    }
+
+    /// A selection is the thing pointed at: asked as one span, never moved.
+    #[test]
+    fn a_selection_is_asked_as_is() {
+        let src = "fn f() {\n    let a = 1 + 2;\n}\n";
+        let s = src.find("1 +").unwrap();
+        let e = s + 5;
+        assert_eq!(code_action_positions(&chars(src), e, Some(s)), vec![(s, e)]);
+        assert_eq!(
+            code_action_positions(&chars(src), s, Some(s)).len(),
+            2,
+            "an empty selection is a caret"
+        );
     }
 }
