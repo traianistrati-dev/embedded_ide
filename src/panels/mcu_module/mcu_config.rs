@@ -22,6 +22,7 @@ use super::clock::persist as clock_persist;
 use super::mcu::{AutoBuild, Runtime};
 use super::modules::{ApiStyle, VirtualModule};
 use crate::panels::mcu_module::pins::logic::pin::{Edge, GpioMode, TaskPriority};
+use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 
 const MODULES_HEADER: &str = "@modules";
 const CLOCK_HEADER: &str = "@clock";
@@ -40,6 +41,7 @@ const GROUPS_HEADER: &str = "@groups";
 const WATCHDOG_HEADER: &str = "@watchdog";
 const COMP_HEADER: &str = "@comp";
 const LABELS_HEADER: &str = "@labels";
+const PINS_HEADER: &str = "@pins";
 
 /// The `@autobuild` section text (or "" for the default `Check`) — appended by
 /// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
@@ -552,6 +554,72 @@ pub fn parse_labels(text: &str) -> std::collections::BTreeMap<usize, String> {
         }
     }
     map
+}
+
+/// The `@pins` section — one `num=function label` per pin that has a function.
+///
+/// # Why this exists at all
+///
+/// A pin's FUNCTION had no store of its own either. On open it is recovered
+/// by `codegen::parse_main_rs`, which reads the `// GPIO Output` label the
+/// STM32 and ESP backends leave on every binding they generate. The nRF
+/// backend leaves no such label (`let mut p0_21_out = Output::new(p.P0_21,
+/// ...)`, with the pad name in a comment above and nothing about the
+/// function), so an nRF project came back with an empty diagram - and, since
+/// that is a state change, the next save wrote the empty block over the good
+/// file.
+///
+/// Written only by the families that need it: `Mcu::mcu_config_text` gates
+/// the call on `codegen::nrf::is_nrf`. Read unconditionally, since nothing
+/// else writes the section, with `parse_main_rs` the fallback for any project
+/// without it.
+///
+/// # Shape
+///
+/// `num=label`, keyed on the pin NUMBER and split on the FIRST `=`, as
+/// `@iomode`, `@irq` and `@labels` are: a number comes from the chip
+/// definition and never moves, where a pin name carries vendor tags. The
+/// value is [`PinFunction::label`], reversed by [`PinFunction::from_label`] -
+/// the pair the codegen comments already round-trip through, so a function
+/// has one encoding, not two. An `Unset` pin is not written: it has no
+/// binding to restore, and its label does not parse back.
+///
+/// Empty when no pin has a function, so a blank project round-trips without
+/// the section.
+pub fn pins_section(pins: &std::collections::BTreeMap<usize, PinFunction>) -> String {
+    let set: Vec<(&usize, &PinFunction)> = pins
+        .iter()
+        .filter(|(_, f)| **f != PinFunction::Unset)
+        .collect();
+    if set.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(PINS_HEADER);
+    s.push('\n');
+    for (num, f) in set {
+        s.push_str(&format!("{num}={}\n", f.label()));
+    }
+    s
+}
+
+/// Read `@pins` back. A line whose number does not parse, or whose label
+/// [`PinFunction::from_label`] does not know, is dropped rather than guessed
+/// at: that pin comes back `Unset`, as it would from a hand-edited file, and
+/// the pins around it still load.
+pub fn parse_pins(text: &str) -> Vec<(usize, PinFunction)> {
+    let Some(body) = section_body(text, PINS_HEADER) else {
+        return Vec::new();
+    };
+    body.lines()
+        .filter_map(|line| {
+            // The FIRST `=` only, as every keyed section here splits.
+            let (num, label) = line.split_once('=')?;
+            let num = num.trim().parse::<usize>().ok()?;
+            // The ends only: labels carry a double space INSIDE (`ADC0  IN0`).
+            let func = PinFunction::from_label(label.trim())?;
+            Some((num, func))
+        })
+        .collect()
 }
 
 /// Parse `@iomode` back into `pin -> GpioMode`; malformed lines are skipped.
@@ -1343,6 +1411,78 @@ mod labels_section_tests {
     fn a_line_without_a_pin_number_is_dropped() {
         let text = "@labels\nPC13=led\n=orphan\n13=real\n";
         assert_eq!(parse_labels(text), map(&[(13, "real")]));
+    }
+}
+
+#[cfg(test)]
+mod pins_section_tests {
+    use super::{parse_pins, pins_section};
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+    use std::collections::BTreeMap;
+
+    fn map(pairs: &[(usize, PinFunction)]) -> BTreeMap<usize, PinFunction> {
+        pairs.iter().cloned().collect()
+    }
+
+    /// One label of each shape the micro:bit offers, including the ones with
+    /// a double space in the middle (`ADC0  IN3`) that a trim must not touch.
+    #[test]
+    fn a_wired_board_round_trips() {
+        let want = vec![
+            (2, PinFunction::GpioOutput),
+            (5, PinFunction::GpioInput),
+            (7, PinFunction::AdcChannel { adc: 0, channel: 3 }),
+            (9, PinFunction::UsartTx(0)),
+            (11, PinFunction::SpiSck(2)),
+            (14, PinFunction::I2cSda(0)),
+            (
+                20,
+                PinFunction::TimerPwm {
+                    timer: 0,
+                    channel: 1,
+                },
+            ),
+        ];
+        let text = pins_section(&map(&want));
+        assert_eq!(parse_pins(&text), want, "{text}");
+    }
+
+    /// A blank project writes no section, and an old project without one
+    /// reads as nothing saved - which is what sends the open path to
+    /// `parse_main_rs`.
+    #[test]
+    fn nothing_wired_writes_nothing() {
+        assert!(pins_section(&BTreeMap::new()).is_empty());
+        assert!(
+            pins_section(&map(&[(3, PinFunction::Unset)])).is_empty(),
+            "nor an Unset pad, which has no binding to restore"
+        );
+        assert!(parse_pins("").is_empty());
+        assert!(parse_pins("@modules\nx\n").is_empty());
+    }
+
+    /// A label `from_label` does not know, or a line without a number, is
+    /// dropped on its own; the pins around it still load.
+    #[test]
+    fn an_unknown_label_is_skipped_not_fatal() {
+        let text =
+            "@pins\n2=GPIO Output\n3=Not configured\nP0.21=GPIO Input\n=GPIO Input\n5=GPIO Input\n";
+        assert_eq!(
+            parse_pins(text),
+            vec![(2, PinFunction::GpioOutput), (5, PinFunction::GpioInput)]
+        );
+    }
+
+    /// The section ends at the next header. The `@labels` line after it
+    /// WOULD parse as a function, so this proves the boundary rather than the
+    /// label check.
+    #[test]
+    fn the_section_stops_at_the_next_one() {
+        let text = format!(
+            "{}@labels\n4=GPIO Input\n",
+            pins_section(&map(&[(2, PinFunction::GpioOutput)]))
+        );
+        assert_eq!(parse_pins(&text), vec![(2, PinFunction::GpioOutput)]);
     }
 }
 

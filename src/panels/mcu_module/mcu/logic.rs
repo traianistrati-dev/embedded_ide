@@ -955,6 +955,28 @@ impl Mcu {
         }
     }
 
+    /// Restores pin assignments from the `@pins` section of `mcu.config`
+    /// (`mcu_config::parse_pins`) - the store for a family whose generated
+    /// code carries no label `parse_main_rs` could read back.
+    ///
+    /// The contract of [`Self::apply_saved_pins`], keyed by pin number:
+    ///
+    /// - Resets all pins to `Unset` first (clean slate).
+    /// - A number this layout does not have (a project opened against a
+    ///   re-imported definition) is silently skipped.
+    /// - Reserved pins are never overwritten.
+    /// - Does NOT trigger auto-partner assignment.
+    pub fn apply_saved_pins_by_number(&mut self, pins: &[(usize, PinFunction)]) {
+        self.reset_all_pins();
+        for (num, func) in pins {
+            if let Some(pin) = self.find_pin_mut(*num)
+                && !pin.reserved
+            {
+                pin.selected_function = func.clone();
+            }
+        }
+    }
+
     /// Restores the per-pin user labels parsed from a saved `src/main.rs` by
     /// `codegen::parse_pin_labels()` (the `_<label>` suffix on a binding name).
     /// Apply this *after* [`apply_saved_pins`], since clearing a pin to `Unset`
@@ -1124,6 +1146,28 @@ impl Mcu {
                 s.push('\n');
             }
             s.push_str(&labels);
+        }
+        // Pin functions (`@pins`) - CODE, and the whole of it: every binding
+        // in the generated block comes from these. Written for nRF only. Its
+        // backend leaves no `// label` on a binding for `parse_main_rs` to
+        // recover the function from, so without this an nRF project came back
+        // with an empty diagram on every open. Every other family still reads
+        // its pins out of main.rs, and a section it never writes cannot get in
+        // the way of that.
+        if crate::panels::mcu_module::codegen::nrf::is_nrf(&self.family) {
+            // `pins_section` leaves the Unset pads out.
+            let pins: std::collections::BTreeMap<usize, PinFunction> = self
+                .iter_all_pins()
+                .filter(|p| !p.reserved)
+                .map(|p| (p.number, p.selected_function.clone()))
+                .collect();
+            let pins = mcu_config::pins_section(&pins);
+            if !pins.is_empty() {
+                if !s.is_empty() {
+                    s.push('\n');
+                }
+                s.push_str(&pins);
+            }
         }
         s
     }
@@ -2622,6 +2666,99 @@ mod a_pin_name_survives_a_save {
         assert!(
             mcu.iter_all_pins().all(|p| p.custom_label.is_empty()),
             "nothing was named"
+        );
+    }
+}
+
+/// The pin functions of an nRF project go out in `@pins` and come back by
+/// number. The end-to-end reopen lives with the nRF backend (`nrf::pin_restore`);
+/// this is the gate and the apply's edge cases.
+#[cfg(test)]
+mod the_pins_section {
+    use crate::panels::mcu_module::builtins::builtin_definitions;
+    use crate::panels::mcu_module::mcu::Mcu;
+    use crate::panels::mcu_module::pins::PinFunction;
+
+    fn chip(id: &str) -> Mcu {
+        builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu()
+    }
+
+    /// The pads that can be an output, in the chip's own order.
+    fn gpios(mcu: &Mcu) -> Vec<usize> {
+        mcu.iter_all_pins()
+            .filter(|p| !p.reserved && p.available_functions.contains(&PinFunction::GpioOutput))
+            .map(|p| p.number)
+            .collect()
+    }
+
+    /// The write is gated to nRF: an STM32 project keeps reading its pins out
+    /// of main.rs, and never carries a section its own open path would then
+    /// prefer over that.
+    #[test]
+    fn other_families_do_not_write_the_section() {
+        let mut mcu = chip("stm32f103c8t6");
+        let pad = gpios(&mcu)[0];
+        mcu.find_pin_mut(pad).expect("the pad").selected_function = PinFunction::GpioOutput;
+        assert!(!mcu.mcu_config_text().contains("@pins"));
+    }
+
+    /// The apply is a clean slate: what the section does not name comes back
+    /// Unset, so a pin wired in the previously open project cannot bleed into
+    /// this one - the contract `apply_saved_pins` has always had.
+    #[test]
+    fn the_apply_starts_from_a_clean_slate() {
+        let mut mcu = chip("nrf52833_microbit_v2");
+        let [a, b, ..] = gpios(&mcu)[..] else {
+            panic!("two output-capable pads")
+        };
+        mcu.find_pin_mut(a).expect("pad a").selected_function = PinFunction::GpioOutput;
+
+        mcu.apply_saved_pins_by_number(&[(b, PinFunction::GpioInput)]);
+
+        assert_eq!(
+            mcu.find_pin(a).expect("pad a").selected_function,
+            PinFunction::Unset
+        );
+        assert_eq!(
+            mcu.find_pin(b).expect("pad b").selected_function,
+            PinFunction::GpioInput
+        );
+    }
+
+    /// A number this chip does not have (a project opened against a
+    /// re-imported definition) is skipped, and a reserved pad is left as the
+    /// definition set it, whatever the file says about it. The pad named
+    /// beside them still loads.
+    #[test]
+    fn an_unknown_number_is_skipped_and_a_reserved_pad_is_left_alone() {
+        let mut mcu = chip("nrf52833_microbit_v2");
+        let reserved = mcu
+            .iter_all_pins()
+            .find(|p| p.reserved)
+            .map(|p| (p.number, p.selected_function.clone()))
+            .expect("a reserved pad");
+        let pad = gpios(&mcu)[0];
+        let unknown = mcu.iter_all_pins().map(|p| p.number).max().unwrap_or(0) + 1;
+
+        mcu.apply_saved_pins_by_number(&[
+            (unknown, PinFunction::GpioOutput),
+            (reserved.0, PinFunction::GpioOutput),
+            (pad, PinFunction::GpioOutput),
+        ]);
+
+        assert_eq!(
+            mcu.find_pin(reserved.0)
+                .expect("the reserved pad")
+                .selected_function,
+            reserved.1
+        );
+        assert_eq!(
+            mcu.find_pin(pad).expect("the pad").selected_function,
+            PinFunction::GpioOutput
         );
     }
 }

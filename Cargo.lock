@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "embedded_ide_0"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "eframe",
  "egui",
