@@ -15,7 +15,7 @@
 //! caret's type is a fact only the editor holds. So: keep the whole array, show
 //! it, and float the entry the caret actually names to the top.
 
-use crate::app::EditorSlot;
+use crate::app::{EditorSlot, GotoOrigin};
 use eframe::egui;
 
 /// Weights for [`match_score`]. An `impl … for T` header naming what the caret
@@ -46,6 +46,9 @@ const NOISE: &[&str] = &[
 pub(crate) struct ImplTarget {
     /// Absolute path, as rust-analyzer reported it.
     pub path: String,
+    /// The URI, as rust-analyzer reported it — what a go-to asked FROM this
+    /// file sends back (see `DefinitionLoc::uri`).
+    pub uri: String,
     /// 0-based, LSP's own numbering — the navigation layer adds the 1.
     pub line: u32,
     pub character: u32,
@@ -70,12 +73,16 @@ impl ImplTarget {
 
 /// The open chooser. Lives on `AppIde` rather than `EditorState` because the
 /// answer it displays arrives at frame top, before either view has drawn, and
-/// is routed by `lsp_asker.definition` — the same slot recorded here.
+/// is routed by `lsp_asker.definition` — recorded here as `origin`.
 pub(crate) struct ImplPicker {
     pub targets: Vec<ImplTarget>,
     pub sel: usize,
     pub pos: egui::Pos2,
+    /// The editor pass that draws the list and takes its keys. The MAIN one for
+    /// a list the Definition tab asked for: the tab has no editor pass.
     pub slot: EditorSlot,
+    /// Who asked, which decides where the chosen row opens.
+    pub origin: GotoOrigin,
     /// "2 implementations" / "2 definitions" — which question was asked.
     pub title: String,
 }
@@ -204,14 +211,25 @@ fn impl_header_at(lines: &[&str], head: usize) -> Option<String> {
 ///
 /// An unreadable file still yields a target: the path and line are rust-analyzer's
 /// answer and stay navigable — only the description is missing.
+///
+/// A SINGLE target is not decorated at all. The description only ranks rows and
+/// labels the chooser, neither of which exists for one row, and finding the
+/// `impl` header scans the whole file — which the page it opens then scans
+/// again. On a 40 000-line register file that doubled a quarter-second stall.
 pub(crate) fn build_targets(locs: Vec<crate::lsp::DefinitionLoc>) -> Vec<ImplTarget> {
+    let decorate = locs.len() > 1;
     let mut cache: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     locs.into_iter()
         .map(|l| {
-            let content = cache
-                .entry(l.path.clone())
-                .or_insert_with(|| std::fs::read_to_string(&l.path).ok());
+            let content = if decorate {
+                cache
+                    .entry(l.path.clone())
+                    .or_insert_with(|| std::fs::read_to_string(&l.path).ok())
+                    .as_ref()
+            } else {
+                None
+            };
             let (signature, context) = match content {
                 Some(text) => {
                     let idx = l.line as usize;
@@ -226,6 +244,7 @@ pub(crate) fn build_targets(locs: Vec<crate::lsp::DefinitionLoc>) -> Vec<ImplTar
             };
             ImplTarget {
                 path: l.path,
+                uri: l.uri,
                 line: l.line,
                 character: l.character,
                 signature,
@@ -311,9 +330,9 @@ impl crate::app::AppIde {
         let Some(picker) = self.impl_picker.take() else {
             return;
         };
-        let slot = picker.slot;
+        let origin = picker.origin;
         if let Some(t) = picker.targets.into_iter().nth(i) {
-            self.goto_definition_target(&t, slot);
+            self.goto_definition_target(&t, origin);
         }
     }
 }
@@ -325,6 +344,7 @@ mod tests {
     fn target(path: &str, line: u32, sig: &str, ctx: Option<&str>) -> ImplTarget {
         ImplTarget {
             path: path.to_owned(),
+            uri: String::new(),
             line,
             character: 0,
             signature: sig.to_owned(),

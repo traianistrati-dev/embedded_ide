@@ -388,6 +388,11 @@ impl AppIde {
         }
         let reference_live = kbd_scope::reference_view_live(self.reference_drawn_frame, frame);
         let reference_owns_kbd = self.reference_was_focused && reference_live;
+        // The Definition tab owns the keyboard after a click in it. Its rows are
+        // labels and take no focus, so a click there leaves NOTHING focused —
+        // and the fallback below then handed F12 to this editor, which jumped
+        // from its own caret. See `definition_keeps_kbd` for when it lets go.
+        let definition_live = kbd_scope::view_live(self.def_drawn_frame, frame);
         // Every shortcut below is gated on this, and `&&` short-circuits —
         // so when it is false `consume_key` is never called and the event
         // SURVIVES for the other view, which runs later in the frame. That
@@ -401,7 +406,18 @@ impl AppIde {
             None => true,
             Some(fid) => egui::TextEdit::load_state(ui.ctx(), fid).is_none(),
         };
-        let editor_kbd_active = if is_main {
+        if is_main {
+            self.def_owns_kbd =
+                kbd_scope::definition_keeps_kbd(self.def_owns_kbd, definition_live, no_text_focus);
+        }
+        let definition_owns_kbd = is_main && self.def_owns_kbd;
+        // Two scopes. `nav_kbd_active` is for keys that open or move through
+        // things — the find bar, Ctrl+Tab, F3, F8 — and stays on while the
+        // Definition tab holds the keyboard: someone reading a definition may
+        // well want to search the project for it. `editor_kbd_active` is for
+        // keys that act at THIS editor's caret or edit its text, and those must
+        // not fire into a file the user is not looking at.
+        let nav_kbd_active = if is_main {
             !reference_owns_kbd
                 && (self.ed.editor_was_focused || self.ed.find.had_focus || no_text_focus)
         } else {
@@ -410,6 +426,7 @@ impl AppIde {
             // editor alone, or both would claim the same keystroke.
             reference_owns_kbd || self.ed.find.had_focus
         };
+        let editor_kbd_active = nav_kbd_active && !definition_owns_kbd;
         // Escape, read BEFORE any popup below consumes it. egui drops the
         // editor's focus on Escape before this code runs, and the restore
         // further down needs to know Escape happened — a popup that closed on
@@ -836,14 +853,14 @@ impl AppIde {
         // hold Ctrl to walk the history, release to commit). Consumed
         // BEFORE the editor so Tab never inserts indentation. The Shift
         // variant must be checked first (consume_key is Shift-lenient).
-        let mut cycle_prev_pressed = editor_kbd_active
+        let mut cycle_prev_pressed = nav_kbd_active
             && ui.input_mut(|i| {
                 i.consume_key(
                     egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
                     egui::Key::Tab,
                 )
             });
-        let mut cycle_next_pressed = editor_kbd_active
+        let mut cycle_next_pressed = nav_kbd_active
             && !cycle_prev_pressed
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab));
         // Ctrl+Left / Ctrl+Right (+Shift = select) → word movement.
@@ -1030,7 +1047,7 @@ impl AppIde {
                 .map(|(text, idx)| rename::identifier_at(text.text(), *idx))
                 .unwrap_or_default()
         };
-        if editor_kbd_active {
+        if nav_kbd_active {
             ui.input_mut(|i| {
                 use find_replace::FindMode as M;
                 let ctrl = egui::Modifiers::CTRL;
@@ -1085,7 +1102,7 @@ impl AppIde {
         // Ctrl+Shift+/ vs Ctrl+/), so checking the plain key first would let it
         // swallow the shifted press and Shift+F3 would step forwards.
         let (mut find_prev, mut find_next) = (false, false);
-        if editor_kbd_active && self.ed.find.can_step() {
+        if nav_kbd_active && self.ed.find.can_step() {
             ui.input_mut(|i| {
                 find_prev = i.consume_key(egui::Modifiers::SHIFT, egui::Key::F3);
                 find_next = !find_prev && i.consume_key(egui::Modifiers::NONE, egui::Key::F3);
@@ -1106,7 +1123,7 @@ impl AppIde {
         // bound nowhere else in the app (the debugger took F5 / F10 / F11), so
         // swallowing it on a clean file costs nothing.
         let mut err_step: Option<bool> = None;
-        if editor_kbd_active {
+        if nav_kbd_active {
             ui.input_mut(|i| {
                 if i.consume_key(egui::Modifiers::SHIFT, error_list::ERROR_STEP_KEY) {
                     err_step = Some(false);
@@ -1254,7 +1271,9 @@ impl AppIde {
                 // Reference file skip the unfold before Copy/Cut/line ops. The
                 // latched `reference_owns_kbd` also stops a stale flag (MCU zone
                 // collapsed) from blocking the main editor's unfold.
-                !(is_main && reference_owns_kbd) && !other_text_field
+                // The Definition tab likewise: a Ctrl+C there unfolded this
+                // file and cleared its undo history.
+                !(is_main && (reference_owns_kbd || definition_owns_kbd)) && !other_text_field
             } else {
                 editor_kbd_active
             };

@@ -217,6 +217,11 @@ pub struct InlayHint {
 pub struct DefinitionLoc {
     /// Absolute filesystem path (decoded from the `file://` URI).
     pub path: String,
+    /// The URI exactly as rust-analyzer sent it. A go-to asked FROM this file
+    /// (the Definition tab's chained F12) sends it back unchanged: rebuilding
+    /// it from `path` would canonicalize it, which resolves junctions and can
+    /// name a file the analyzer's VFS does not know by that spelling.
+    pub uri: String,
     pub line: u32,
     pub character: u32,
 }
@@ -430,6 +435,11 @@ pub struct LspState {
     /// whichever impl rust-analyzer happened to list first, no matter which type
     /// the caret was on.
     pub definition_results: Vec<DefinitionLoc>,
+    /// rust-analyzer's error text when the last go-to request FAILED rather than
+    /// found nothing. The two used to arrive as the same empty answer, and a
+    /// chained F12 from a file the analyzer no longer has loaded ("file not
+    /// found") read as "no definition here".
+    pub definition_error: Option<String>,
     /// The request id of the pending `textDocument/documentSymbol`, if any.
     symbols_req_id: Option<u64>,
     /// The rel_path the pending/last `symbols_result` was requested for.
@@ -528,6 +538,7 @@ impl Default for LspState {
             definition_response_received: false,
             definition_is_impl: false,
             definition_results: Vec::new(),
+            definition_error: None,
             symbols_req_id: None,
             symbols_for_file: String::new(),
             symbols_response_received: false,
@@ -1080,35 +1091,8 @@ impl LspState {
     /// the session, and the keypress looked like it did nothing.
     #[must_use]
     pub fn request_definition(&mut self, rel_path: &str, line: u32, character: u32) -> bool {
-        if self.sender.is_none() {
-            return false;
-        }
-        self.next_req_id += 1;
-        let id = self.next_req_id;
-        self.definition_req_id = Some(id);
-        // Drop any implementation request still in flight. The two share one
-        // result slot and the reader dispatches on whichever id matches, so a
-        // straggler would be consumed as THIS request's answer — a jump to
-        // wherever the previous keystroke pointed.
-        self.implementation_req_id = None;
-        self.definition_for = Some((rel_path.to_owned(), line + 1));
-        self.definition_response_received = false;
-        self.definition_is_impl = false;
-        self.definition_results.clear();
         let uri = format!("{}/{}", self.root_uri, rel_path);
-        self.send_raw(
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id":      id,
-                "method":  "textDocument/definition",
-                "params": {
-                    "textDocument": { "uri": uri },
-                    "position": { "line": line, "character": character },
-                }
-            })
-            .to_string(),
-        );
-        true
+        self.request_goto(&uri, Some(rel_path), line, character, false)
     }
 
     /// Request the implementation(s) of the symbol at `(line, character)` —
@@ -1119,29 +1103,76 @@ impl LspState {
     /// As [`request_definition`](Self::request_definition): `false` = not sent.
     #[must_use]
     pub fn request_implementation(&mut self, rel_path: &str, line: u32, character: u32) -> bool {
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.request_goto(&uri, Some(rel_path), line, character, true)
+    }
+
+    /// F12 / Ctrl+F12 at a position in a file OUTSIDE the workspace — a crate
+    /// in the registry or a sysroot file, as shown by the Definition tab — named
+    /// by the URI rust-analyzer itself reported for it.
+    ///
+    /// Never opened first (no `didOpen` / `didChange`). Measured against the
+    /// real server: a library file in the crate graph answers without one, and
+    /// `didOpen` of a file OUTSIDE the graph makes rust-analyzer reload the whole
+    /// workspace and run a flycheck — seconds of work for a read-only glance.
+    #[must_use]
+    pub fn request_goto_at_uri(
+        &mut self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        implementation: bool,
+    ) -> bool {
+        self.request_goto(uri, None, line, character, implementation)
+    }
+
+    /// The one sender behind all three go-to requests. `rel_path` is recorded
+    /// for the "nothing found" explanation, which only knows workspace files.
+    fn request_goto(
+        &mut self,
+        uri: &str,
+        rel_path: Option<&str>,
+        line: u32,
+        character: u32,
+        implementation: bool,
+    ) -> bool {
         if self.sender.is_none() {
             return false;
         }
         self.next_req_id += 1;
         let id = self.next_req_id;
-        self.implementation_req_id = Some(id);
-        // As `request_definition`, mirrored: whichever of the two asked last
-        // owns the slot. Without this the `definition_req_id` arm — tested
-        // FIRST in the reader — would answer a Ctrl+F12 with a stale F12 result.
-        self.definition_req_id = None;
-        // Ctrl+F12 never recorded what it asked about, so the "nothing found"
-        // message explained a line the LAST F12 was on, in a possibly different
-        // file. Same question, same bookkeeping.
-        self.definition_for = Some((rel_path.to_owned(), line + 1));
+        // The two requests share one result slot and the reader dispatches on
+        // whichever id matches, so the other kind's straggler must be dropped:
+        // it would be consumed as THIS request's answer — a jump to wherever the
+        // previous keystroke pointed. And the `definition_req_id` arm is tested
+        // FIRST in the reader, so a Ctrl+F12 would otherwise be answered with a
+        // stale F12 result.
+        if implementation {
+            self.implementation_req_id = Some(id);
+            self.definition_req_id = None;
+        } else {
+            self.definition_req_id = Some(id);
+            self.implementation_req_id = None;
+        }
+        // Ctrl+F12 once never recorded what it asked about, so the "nothing
+        // found" message explained a line the LAST F12 was on, in a possibly
+        // different file. Same question, same bookkeeping — and `None` for a file
+        // outside the workspace, which that explanation cannot speak for.
+        self.definition_for = rel_path.map(|r| (r.to_owned(), line + 1));
         self.definition_response_received = false;
-        self.definition_is_impl = true;
+        self.definition_is_impl = implementation;
         self.definition_results.clear();
-        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.definition_error = None;
+        let method = if implementation {
+            "textDocument/implementation"
+        } else {
+            "textDocument/definition"
+        };
         self.send_raw(
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id":      id,
-                "method":  "textDocument/implementation",
+                "method":  method,
                 "params": {
                     "textDocument": { "uri": uri },
                     "position": { "line": line, "character": character },
@@ -1150,6 +1181,20 @@ impl LspState {
             .to_string(),
         );
         true
+    }
+
+    /// Forget the go-to request in flight, and an answer not yet taken.
+    ///
+    /// For navigation that moved on while it was pending — Back in the
+    /// Definition tab. Its answer would otherwise land AFTER the step and push
+    /// the page just left back on top of the history, wiping Forward. Clearing
+    /// the id is enough: the reader matches replies by id and drops the rest.
+    pub fn cancel_goto(&mut self) {
+        self.definition_req_id = None;
+        self.implementation_req_id = None;
+        self.definition_response_received = false;
+        self.definition_results.clear();
+        self.definition_error = None;
     }
 
     /// Take every definition / implementation target once RA responded.
@@ -1459,6 +1504,7 @@ impl LspState {
         self.definition_response_received = false;
         self.definition_is_impl = false;
         self.definition_results.clear();
+        self.definition_error = None;
         self.symbols_req_id = None;
         self.symbols_for_file.clear();
         self.symbols_response_received = false;
@@ -2383,10 +2429,12 @@ fn handle_incoming(
                     ctx.request_repaint();
                 } else if s.definition_req_id == Some(req_id) {
                     s.definition_req_id = None;
+                    s.definition_error = msg["error"]["message"].as_str().map(str::to_owned);
                     s.definition_response_received = true; // no result, stop waiting
                     ctx.request_repaint();
                 } else if s.implementation_req_id == Some(req_id) {
                     s.implementation_req_id = None;
+                    s.definition_error = msg["error"]["message"].as_str().map(str::to_owned);
                     s.definition_response_received = true; // no result, stop waiting
                     ctx.request_repaint();
                 } else if s.symbols_req_id == Some(req_id) {
@@ -2816,6 +2864,7 @@ fn parse_one_location(loc: &serde_json::Value) -> Option<DefinitionLoc> {
     };
     Some(DefinitionLoc {
         path: uri_to_path(uri),
+        uri: uri.to_owned(),
         line: range["start"]["line"].as_u64()? as u32,
         character: range["start"]["character"].as_u64().unwrap_or(0) as u32,
     })
@@ -3263,6 +3312,22 @@ mod definition_list_tests {
         let got = parse_definition_list(&loc("parse_result.rs", 7));
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].line, 7);
+    }
+
+    /// A chained F12 from the Definition tab sends this URI back as it came.
+    /// Decoded and rebuilt, it would lose the analyzer's own spelling (here the
+    /// lower-case, percent-encoded drive) and could name a file its VFS does not
+    /// know by that name.
+    #[test]
+    fn the_analyzer_uri_is_kept_verbatim() {
+        let raw = "file:///c%3A/Users/x/.cargo/registry/src/heapless-0.8.0/src/vec.rs";
+        let got = parse_definition_list(&serde_json::json!({
+            "uri": raw,
+            "range": { "start": { "line": 3, "character": 1 },
+                       "end":   { "line": 3, "character": 4 } },
+        }));
+        assert_eq!(got[0].uri, raw);
+        assert!(got[0].path.ends_with("vec.rs"));
     }
 
     /// `LocationLink` carries the name span separately; the jump must land on

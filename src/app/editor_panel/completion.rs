@@ -363,9 +363,8 @@ impl AppIde {
         }
 
         // ── F12 / Ctrl+F12: go to definition / implementation ─────────────────
-        // Main editor only: the jump navigates `selected_file`, which IS the
-        // main editor — triggering it from the second one would move the other
-        // view out from under the user.
+        // From either editor: `slot` is recorded with the request, and a
+        // project-file answer opens in the view that asked.
         // Both funnel through the same result slot and navigation pipeline;
         // Ctrl+F12 resolves the `impl … for …` site where F12 on a trait
         // method would land on the trait's declaration.
@@ -407,8 +406,11 @@ impl AppIde {
                     };
                     // A new question replaces the old answer: leaving the
                     // chooser up would let Enter navigate to a row resolved from
-                    // a caret that has since moved.
+                    // a caret that has since moved. So does an older PARKED
+                    // question: left alive, it went out after this one and took
+                    // the single answer slot from it.
                     self.impl_picker = None;
+                    self.pending_goto = None;
                     // Can it answer RIGHT NOW? `Ready` alone is not enough: it
                     // flips on the first `$/progress` end of any rust-prefixed
                     // token, and `did_change` below auto-opens the document —
@@ -444,20 +446,23 @@ impl AppIde {
                         // Which view asked decides where the definition
                         // OPENS — the main editor switches `selected_file`, the
                         // Reference tab switches its own file.
-                        self.lsp_asker.definition = slot;
+                        self.lsp_asker.definition = crate::app::GotoOrigin::Editor(slot);
                         self.definition_in_flight = sent;
                     } else {
                         // Park it: the frame loop starts the analyzer, waits for
                         // it, and re-issues this exact request.
                         self.pending_goto = Some(crate::app::PendingGoto {
-                            file: owner_file,
-                            rel,
+                            doc: crate::app::GotoDoc::Project {
+                                file: owner_file,
+                                rel,
+                                text_hash: Self::content_hash(&display_code),
+                            },
                             line,
                             col,
                             implementation: ctrl_f12_pressed,
-                            text_hash: Self::content_hash(&display_code),
                             since: std::time::Instant::now(),
                             restart_fired: false,
+                            origin: crate::app::GotoOrigin::Editor(slot),
                         });
                     }
                 }

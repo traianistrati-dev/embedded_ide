@@ -903,13 +903,10 @@ impl AppIde {
                     && self.definition_view.is_some()
                     && ui
                         .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
-                        .on_hover_text("Close definition")
+                        .on_hover_text("Close the definition and its Back / Forward history")
                         .clicked()
                 {
-                    self.definition_view = None;
-                    if self.active_tab == McuTab::Definition {
-                        self.active_tab = self.definition_return_tab;
-                    }
+                    self.def_close();
                 }
             });
             }
@@ -3496,16 +3493,122 @@ impl AppIde {
     }
 
     fn show_definition_tab(&mut self, ui: &mut egui::Ui) {
+        use crate::app::definition_nav::{self, DefScroll, Step};
+        self.def_drawn_frame = Some(ui.ctx().cumulative_frame_nr());
+
+        // ── Keyboard ownership ─────────────────────────────────────────────
+        // GIVEN by a press on the tab's text or its Back / Forward buttons
+        // (below) — not by one on its scroll bars: dragging those beside the
+        // code must leave the editor typing. TAKEN by a press on another panel.
+        // A press on anything floating changes nothing: the chooser this tab
+        // opened hangs past its edge when the zone is narrow, and a click on a
+        // row out there must not hand F12 back to the main editor.
+        let tab_rect = ui.available_rect_before_wrap();
+        let press_pos = ui.input(|i| {
+            i.pointer
+                .any_pressed()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        });
+        if let Some(p) = press_pos
+            && !tab_rect.contains(p)
+            && ui
+                .ctx()
+                .layer_id_at(p)
+                .is_none_or(|l| l.order == egui::Order::Background)
+        {
+            self.def_owns_kbd = false;
+        }
+        let mut owns_kbd = self.def_owns_kbd;
+        let mut claim_kbd = false;
+
+        // ── Back / Forward ─────────────────────────────────────────────────
+        // Keys before the rows: a label holding a (hidden) selection takes
+        // Alt+Arrow as a caret move, and on a wide row that scrolls sideways.
+        let mut step: Option<Step> = None;
+        if owns_kbd {
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft) {
+                    step = Some(Step::Back);
+                } else if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowRight) {
+                    step = Some(Step::Forward);
+                }
+            });
+        }
+        // The mouse's own Back / Forward buttons, wherever the keyboard is: the
+        // pointer being over the tab says which page they mean.
+        if ui.rect_contains_pointer(tab_rect) {
+            ui.input(|i| {
+                if i.pointer.button_pressed(egui::PointerButton::Extra1) {
+                    step = Some(Step::Back);
+                } else if i.pointer.button_pressed(egui::PointerButton::Extra2) {
+                    step = Some(Step::Forward);
+                }
+            });
+        }
+        if let Some(header) = self.definition_view.as_ref().map(|d| d.header.clone()) {
+            let (behind, ahead) = self.def_history.counts();
+            let title = |s: Step| {
+                self.def_history
+                    .peek(s)
+                    .map(|e| e.title.clone())
+                    .unwrap_or_default()
+            };
+            let (back_to, fwd_to) = (title(Step::Back), title(Step::Forward));
+            ui.horizontal(|ui| {
+                let nav =
+                    |icon: &str| egui::Button::new(egui::RichText::new(icon).size(13.0)).small();
+                if ui
+                    .add_enabled(behind > 0, nav(ph::ARROW_LEFT))
+                    .on_hover_text(format!("Back to {back_to}  (Alt+Left)"))
+                    .on_disabled_hover_text("No earlier definition")
+                    .clicked()
+                {
+                    step = Some(Step::Back);
+                    claim_kbd = true;
+                }
+                if ui
+                    .add_enabled(ahead > 0, nav(ph::ARROW_RIGHT))
+                    .on_hover_text(format!("Forward to {fwd_to}  (Alt+Right)"))
+                    .on_disabled_hover_text("No later definition")
+                    .clicked()
+                {
+                    step = Some(Step::Forward);
+                    claim_kbd = true;
+                }
+                // Where this page sits in the walk.
+                ui.label(
+                    egui::RichText::new(format!("{}/{}", behind + 1, behind + ahead + 1))
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(140, 145, 155)),
+                );
+                // Truncated to the tab, never wider: a label in a horizontal row
+                // does not wrap, and a long path widened the whole layout under
+                // it — the code's scroll bar ended up past the visible edge.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&header)
+                            .size(11.0)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(150, 190, 240)),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&header);
+            });
+        }
+        if claim_kbd {
+            self.def_owns_kbd = true;
+            owns_kbd = true;
+        }
+        if let Some(s) = step {
+            self.def_step(s);
+        }
+
         let Some(def) = &self.definition_view else {
             ui.label(egui::RichText::new("No definition.").color(egui::Color32::GRAY));
             return;
         };
-        ui.label(
-            egui::RichText::new(&def.header)
-                .size(11.0)
-                .monospace()
-                .color(egui::Color32::from_rgb(150, 190, 240)),
-        );
         // What you opened, not just where it lives. The band below marks the
         // same item, but you should not have to find the band to know.
         if !def.signature.is_empty() {
@@ -3518,7 +3621,7 @@ impl AppIde {
             );
         }
         ui.separator();
-        let lines: Vec<&str> = def.code.lines().collect();
+        let line_count = def.line_count();
         let highlight = def.highlight;
         let (ext_lo, ext_hi) = def.extent;
         // Height of one monospace-12 line (matches the rows below).
@@ -3535,24 +3638,42 @@ impl AppIde {
         // with the rendered rows.
         ui.spacing_mut().item_spacing.y = 1.0;
         let pitch = row_h + ui.spacing().item_spacing.y;
-        let mut area = egui::ScrollArea::both().auto_shrink([false, false]);
-        if self.def_scroll_pending {
-            // Target near the top (2 lines of context above), then free.
-            let off = highlight.saturating_sub(2) as f32 * pitch;
-            area = area.vertical_scroll_offset(off);
-            self.def_scroll_pending = false;
+        // One id for every page: each navigation therefore SETS an offset, or
+        // the new page would open wherever the last one was scrolled to.
+        let mut area = egui::ScrollArea::both()
+            .id_salt("definition_tab")
+            .auto_shrink([false, false]);
+        match self.def_scroll_to.take() {
+            // A new page: the target near the top, 2 lines of context above.
+            Some(DefScroll::Target) => {
+                area =
+                    area.scroll_offset(egui::vec2(0.0, highlight.saturating_sub(2) as f32 * pitch));
+            }
+            // A page revisited: where the user left it.
+            Some(DefScroll::Restore(v)) => area = area.scroll_offset(v),
+            None => {}
         }
         // The word whose every occurrence is banded, and the double-click that
         // picks a new one. Collected here and applied AFTER the closure: `def`
-        // borrows `self.definition_view`, so the closure cannot write to it.
+        // borrows `self.definition_view`, so the closure cannot write to it —
+        // the same goes for the caret and a Ctrl+Click.
         let word = def.word.clone();
+        let caret = def.caret;
+        let ctrl_held = ui.input(|i| i.modifiers.command);
         let mut new_word: Option<String> = None;
         let mut clear_word = false;
+        let mut new_caret: Option<(usize, usize)> = None;
+        let mut ctrl_click: Option<(usize, usize, egui::Pos2)> = None;
+        let mut caret_anchor: Option<egui::Pos2> = None;
+        let pressed_now = press_pos.is_some();
+        let mut text_pressed = false;
+        let caret_bright = owns_kbd;
 
-        area.show_rows(ui, row_h, lines.len(), |ui, range| {
+        let out = area.show_rows(ui, row_h, line_count, |ui, range| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             for i in range {
-                let shown = if lines[i].is_empty() { " " } else { lines[i] };
+                let line = def.line(i);
+                let shown = if line.is_empty() { " " } else { line };
                 let inside = i >= ext_lo && i <= ext_hi;
                 // The whole ITEM carries a band, not just its first line: F12
                 // asks "where does this thing begin and end", and one coloured
@@ -3589,22 +3710,30 @@ impl AppIde {
                 };
 
                 // Laid out by hand rather than handed to `Label` as a job: the
-                // galley is needed twice more — to place the occurrence bands at
-                // real glyph positions, and to turn a double-click into the
-                // character it landed on. `Label` would keep it to itself.
+                // galley is needed three more times — to place the occurrence
+                // bands and the caret at real glyph positions, and to turn a
+                // click into the character it landed on. `Label` would keep it
+                // to itself.
                 let galley = ui.fonts_mut(|f| f.layout_job(job));
                 let resp = ui.add(egui::Label::new(galley.clone()).selectable(true));
+                // The widget the press went DOWN on — not `contains_pointer`,
+                // which is also true for a row lying under the scroll bar.
+                if pressed_now && resp.is_pointer_button_down_on() {
+                    text_pressed = true;
+                }
+                let x_of = |c: usize| {
+                    resp.rect.min.x + galley.pos_from_cursor(egui::text::CCursor::new(c)).min.x
+                };
 
                 if !word.is_empty() {
                     let painter = ui.painter();
                     for (a, b) in crate::app::word_ranges(shown, &word) {
-                        let x0 = galley.pos_from_cursor(egui::text::CCursor::new(a)).min.x;
-                        let x1 = galley.pos_from_cursor(egui::text::CCursor::new(b)).min.x;
+                        let (x0, x1) = (x_of(a), x_of(b));
                         if x1 > x0 {
                             painter.rect_filled(
                                 egui::Rect::from_min_max(
-                                    egui::pos2(resp.rect.min.x + x0, resp.rect.min.y),
-                                    egui::pos2(resp.rect.min.x + x1, resp.rect.max.y),
+                                    egui::pos2(x0, resp.rect.min.y),
+                                    egui::pos2(x1, resp.rect.max.y),
                                 ),
                                 2.0,
                                 DEF_WORD_BG,
@@ -3613,32 +3742,135 @@ impl AppIde {
                     }
                 }
 
+                // The tab's own caret: where F12 asks from. Full strength while
+                // the tab holds the keyboard, dimmed when a keypress would go
+                // elsewhere — so it shows where F12 will act, not just where
+                // the last click was. Steady, not blinking: a blink needs a
+                // repaint loop, and the idle cost of those was taken out.
+                if let Some((cl, cc)) = caret
+                    && cl == i
+                {
+                    let x = x_of(cc);
+                    let color = if caret_bright {
+                        ui.visuals().text_cursor.stroke.color
+                    } else {
+                        egui::Color32::from_rgb(110, 115, 125)
+                    };
+                    ui.painter()
+                        .vline(x, resp.rect.y_range(), egui::Stroke::new(1.5_f32, color));
+                    caret_anchor = Some(egui::pos2(x, resp.rect.max.y + 4.0));
+                }
+
+                // A click moves the caret; with Ctrl held it also asks.
+                if resp.clicked()
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    let idx = galley
+                        .cursor_from_pos(p - resp.rect.min)
+                        .index
+                        .min(line.chars().count());
+                    new_caret = Some((i, idx));
+                    if ctrl_held {
+                        ctrl_click = Some((i, idx, egui::pos2(p.x, resp.rect.max.y + 4.0)));
+                    }
+                }
+                // With Ctrl held, a name under the pointer is a link: underlined,
+                // with the hand cursor — the promise that a click goes there.
+                if ctrl_held
+                    && let Some(p) = resp.hover_pos()
+                    && let Some((a, b)) = definition_nav::ident_near(
+                        line,
+                        galley.cursor_from_pos(p - resp.rect.min).index,
+                    )
+                {
+                    ui.painter().hline(
+                        x_of(a)..=x_of(b),
+                        resp.rect.max.y - 1.0,
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(150, 190, 240)),
+                    );
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+
                 // Double-click, because that is the gesture that selects a word
                 // in the editor too — egui's own label selection cannot be read
                 // back (`LabelSelectionState` exposes only `has_selection`), so
                 // the word is worked out from where the pointer landed.
-                if resp.double_clicked() {
-                    if let Some(p) = resp.interact_pointer_pos() {
-                        let cur = galley.cursor_from_pos(p - resp.rect.min);
-                        let w = crate::app::word_at(shown, cur.index);
-                        if w.is_empty() {
-                            clear_word = true;
-                        } else {
-                            new_word = Some(w);
-                        }
+                if resp.double_clicked()
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    let cur = galley.cursor_from_pos(p - resp.rect.min);
+                    let w = crate::app::word_at(shown, cur.index);
+                    if w.is_empty() {
+                        clear_word = true;
+                    } else {
+                        new_word = Some(w);
                     }
                 }
             }
         });
 
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if text_pressed {
+            self.def_owns_kbd = true;
+            owns_kbd = true;
+            // A drag that STARTED in the editor keeps it focused, and the keys
+            // would go on typing into the file behind this tab.
+            ui.memory_mut(|m| m.stop_text_input());
+        }
+        // Only while the tab holds the keyboard: an Escape in the editor —
+        // closing its completion list — used to clear this tab's word too.
+        if owns_kbd && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             clear_word = true;
         }
+        // F12 / Ctrl+F12. The main editor left them in the queue: it does not
+        // claim the keyboard while this tab owns it. Ctrl first — `consume_key`
+        // would not confuse the two, but the editor checks in the same order.
+        let (f12, ctrl_f12) = if owns_kbd {
+            ui.input_mut(|i| {
+                let c = i.consume_key(egui::Modifiers::CTRL, egui::Key::F12);
+                let p = !c && i.consume_key(egui::Modifiers::NONE, egui::Key::F12);
+                (p, c)
+            })
+        } else {
+            (false, false)
+        };
+
+        let mut ask: Option<(usize, usize, bool, egui::Pos2)> = None;
         if let Some(def) = self.definition_view.as_mut() {
+            def.scroll = out.state.offset;
             if let Some(w) = new_word {
                 def.word = w;
             } else if clear_word {
                 def.word.clear();
+            }
+            if let Some(c) = new_caret {
+                def.caret = Some(c);
+            }
+            if let Some((l, c, at)) = ctrl_click {
+                ask = Some((l, c, false, at));
+            } else if (f12 || ctrl_f12)
+                && let Some((l, c)) = def.caret
+            {
+                // Under the caret when its row is on screen, else just inside
+                // the tab: a chooser must not open off-screen.
+                let at = caret_anchor.unwrap_or(tab_rect.left_top() + egui::vec2(24.0, 48.0));
+                ask = Some((l, c, ctrl_f12, at));
+            }
+        }
+        if let Some((l, c, implementation, at)) = ask {
+            let line_text = self
+                .definition_view
+                .as_ref()
+                .map(|d| d.line(l).to_owned())
+                .unwrap_or_default();
+            if definition_nav::ident_near(&line_text, c).is_none() {
+                // Nothing to ask about — say so, or the key looks broken.
+                self.set_status_msg(format!(
+                    "{} Click a name in the Definition tab first, then press F12",
+                    ph::INFO
+                ));
+            } else {
+                let col = definition_nav::utf16_col(&line_text, c);
+                self.def_request_from_tab(l as u32, col, implementation, at, line_text);
             }
         }
     }

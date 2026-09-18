@@ -18,7 +18,25 @@ use crate::app::EditorSlot;
 /// and a stale `true` sent every main-editor keystroke to a view that no longer
 /// runs.
 pub(super) fn reference_view_live(drawn: Option<u64>, frame: u64) -> bool {
+    view_live(drawn, frame)
+}
+
+/// The same rule for any view drawn AFTER the main pass — the Definition tab
+/// too, whose keyboard flag goes stale exactly the same way once it stops
+/// drawing (another tab picked, the MCU zone collapsed).
+pub(super) fn view_live(drawn: Option<u64>, frame: u64) -> bool {
     drawn.is_some_and(|d| d.saturating_add(1) >= frame)
+}
+
+/// Does the Definition tab keep the keyboard a click in it gave it?
+///
+/// It lets go when it stops drawing (another tab picked, the MCU zone
+/// collapsed) — a return to it later must not find the flag still on — and
+/// when a text field takes the focus: this editor, the find bar, a commit box.
+/// A press elsewhere with nothing focusable under it is handled where the tab
+/// draws, since only there is its rectangle known.
+pub(super) fn definition_keeps_kbd(owns: bool, live: bool, no_text_focus: bool) -> bool {
+    owns && live && no_text_focus
 }
 
 /// Should the completion popup owned by `owner` close in this pass?
@@ -54,7 +72,7 @@ pub(super) fn owner_lost_keyboard(
 
 #[cfg(test)]
 mod tests {
-    use super::{owner_lost_keyboard, reference_view_live};
+    use super::{definition_keeps_kbd, owner_lost_keyboard, reference_view_live, view_live};
     use crate::app::EditorSlot::{Main, Reference};
 
     /// The report: Ctrl+Space in the main editor while a file is open beside it.
@@ -113,6 +131,33 @@ mod tests {
         assert!(owner_lost_keyboard(
             Reference, true, true, true, false, true
         ));
+    }
+
+    /// The report behind the flag: a click in the Definition tab focuses
+    /// nothing, and that must leave the keyboard with the tab.
+    #[test]
+    fn the_definition_tab_keeps_the_keys_while_nothing_else_is_focused() {
+        assert!(definition_keeps_kbd(true, true, true));
+    }
+
+    #[test]
+    fn the_definition_tab_lets_go_to_a_text_field_or_when_hidden() {
+        assert!(
+            !definition_keeps_kbd(true, true, false),
+            "a text field took focus"
+        );
+        assert!(
+            !definition_keeps_kbd(true, false, true),
+            "the tab stopped drawing"
+        );
+        assert!(!definition_keeps_kbd(false, true, true), "never had it");
+    }
+
+    #[test]
+    fn any_view_is_live_only_while_it_keeps_drawing() {
+        assert!(view_live(Some(4), 5));
+        assert!(!view_live(Some(3), 5));
+        assert!(!view_live(None, 5));
     }
 
     #[test]

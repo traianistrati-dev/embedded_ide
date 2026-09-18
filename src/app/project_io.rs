@@ -45,6 +45,8 @@ impl AppIde {
         // Same reason: the dialog holds a project-root-RELATIVE path, which
         // means a different file once another project is loaded.
         self.move_file_dialog = None;
+        // Go-tos and the Definition tab's walk belong to the project being LEFT.
+        self.drop_project_gotos();
         // Through the closer, not a bare `None`: a cargo run started from that
         // window would otherwise keep going against the OLD project's folder,
         // with its only kill path gone along with the window.

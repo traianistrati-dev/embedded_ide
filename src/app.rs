@@ -52,6 +52,7 @@ mod flow_tab;
 
 mod structure_tab;
 
+mod definition_nav;
 mod editor_panel;
 pub(crate) mod editor_state;
 
@@ -199,27 +200,44 @@ pub fn collapsed_panel_height(ui: &egui::Ui, handle_h: f32) -> f32 {
 /// inside the editor's render path (the caret lives in the `TextEdit`'s state
 /// and the column is computed from the live buffer) — the frame loop that
 /// waits for the analyzer has neither.
-pub struct PendingGoto {
-    /// The file the caret was in. A deferred jump that fired against a
-    /// different file would be nonsense.
-    pub file: ProjectFileId,
-    /// Workspace-relative path, as the LSP request wants it.
-    pub rel: String,
+pub(crate) struct PendingGoto {
+    /// The file the position is in.
+    pub doc: GotoDoc,
     /// 0-based line, and the column in UTF-16 units (LSP's own unit).
     pub line: u32,
     pub col: u32,
     /// Ctrl+F12 rather than F12.
     pub implementation: bool,
-    /// Hash of the buffer the position was taken in. A cold analyzer start
-    /// takes tens of seconds, in which one pin click regenerates main.rs
-    /// wholesale — the same line and column would then point at a different
-    /// symbol, and the jump would be a lie.
-    pub text_hash: u64,
     /// When it was asked for, for the give-up deadline.
     pub since: std::time::Instant,
     /// The one-shot restart has been fired. Without this the wait would reset
     /// the analyzer it just spawned on the very next frame, for ever.
     pub restart_fired: bool,
+    /// Who asked — where the answer lands once the request finally goes out.
+    /// The parked path once dropped this, and a parked F12 from the Reference
+    /// editor opened in whichever view had asked last.
+    pub origin: GotoOrigin,
+}
+
+/// The file a parked go-to's position is in.
+pub(crate) enum GotoDoc {
+    /// A project file, open in an editor.
+    Project {
+        /// The file the caret was in. A deferred jump that fired against a
+        /// different file would be nonsense.
+        file: ProjectFileId,
+        /// Workspace-relative path, as the LSP request wants it.
+        rel: String,
+        /// Hash of the buffer the position was taken in. A cold analyzer start
+        /// takes tens of seconds, in which one pin click regenerates main.rs
+        /// wholesale — the same line and column would then point at a
+        /// different symbol, and the jump would be a lie.
+        text_hash: u64,
+    },
+    /// A read-only file outside the workspace (registry / sysroot) shown in the
+    /// Definition tab, named by rust-analyzer's own URI. Nothing edits it, so
+    /// there is no text to go stale under the position.
+    External { uri: String },
 }
 
 /// How long to wait for a cold analyzer before giving up on a deferred jump.
@@ -581,7 +599,27 @@ pub(crate) struct LspAsker {
     pub code_action: EditorSlot,
     pub rename: EditorSlot,
     pub inlay: EditorSlot,
-    pub definition: EditorSlot,
+    pub definition: GotoOrigin,
+}
+
+/// Where a go-to (F12 / Ctrl+F12) was asked from, which decides where its
+/// answer lands.
+///
+/// Not a third [`EditorSlot`]: the Definition tab has no editor state of its
+/// own, and `with_editor` / `ed_of` would silently read any slot that is not the
+/// current one as the Reference editor's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum GotoOrigin {
+    /// One of the two code editors.
+    Editor(EditorSlot),
+    /// The read-only Definition tab (a chained F12, Ctrl+F12 or Ctrl+Click).
+    DefinitionTab,
+}
+
+impl Default for GotoOrigin {
+    fn default() -> Self {
+        GotoOrigin::Editor(EditorSlot::Main)
+    }
 }
 
 /// The source snippet shown in the F12 "Definition" tab (MCU Configurator,
@@ -589,6 +627,22 @@ pub(crate) struct LspAsker {
 struct DefinitionView {
     /// Header line, e.g. `src/pins/utils/i2c1.rs  (line 42)`.
     header: String,
+    /// `crate/src/file.rs:42` — how the Back / Forward buttons name this page.
+    title: String,
+    /// Absolute path of the file shown, as rust-analyzer reported it.
+    path: String,
+    /// Its URI verbatim: what a chained F12 from this page sends back.
+    uri: String,
+    /// Where rust-analyzer pointed: 0-based line, UTF-16 column.
+    target: (u32, u32),
+    /// Byte range of every line of `code`, computed once — see
+    /// `definition_nav::line_ranges` for what doing it per frame cost.
+    line_ranges: Vec<(usize, usize)>,
+    /// The tab's own caret, `(line, char index)`: where F12 asks from. Starts on
+    /// the definition itself and moves with each click.
+    caret: Option<(usize, usize)>,
+    /// The scroll offset as last drawn — what Back returns to.
+    scroll: egui::Vec2,
     /// The definition's own line, trimmed — the header's second row, so you can
     /// see WHAT you opened without hunting for the band on screen.
     signature: String,
@@ -764,6 +818,28 @@ fn split_job_by_lines(job: &egui::text::LayoutJob) -> Vec<egui::text::LayoutJob>
                     format: s.format.clone(),
                 });
             }
+        }
+        // The `" "` alone was not enough: an empty line lies inside no section,
+        // and epaint lays out only the bytes a section covers — so the row had
+        // no glyphs and a height of 0, every row below it drew a pitch too
+        // high, and a click could not land on it. Cover it with the format of
+        // the section it sits in (the whitespace run), for the same font height.
+        if lj.sections.is_empty() {
+            let format = job
+                .sections
+                .iter()
+                .find(|s| s.byte_range.start <= line_start && line_start <= s.byte_range.end)
+                .or_else(|| job.sections.last())
+                .map(|s| s.format.clone())
+                .unwrap_or_else(|| egui::TextFormat {
+                    font_id: egui::FontId::monospace(DEF_FONT_SIZE),
+                    ..Default::default()
+                });
+            lj.sections.push(egui::text::LayoutSection {
+                leading_space: 0.0,
+                byte_range: 0..lj.text.len(),
+                format,
+            });
         }
         out.push(lj);
         line_start = line_end + 1; // past the '\n'
@@ -1029,9 +1105,17 @@ fn project_file_for_def(abs_path: &str, user_files: &[(String, String)]) -> Opti
 /// "Definition" tab. The WHOLE file is included (so the user can scroll above
 /// and below the target); the tab scrolls the target near the top on open.
 /// `None` if unreadable.
-fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
+///
+/// `known_extent` is the item's extent from an earlier visit (Back / Forward):
+/// finding it scans the whole file, 250 ms on a 40 000-line register file in a
+/// debug build. Ignored when it no longer fits the file.
+fn build_definition_view(
+    loc: &lsp::DefinitionLoc,
+    known_extent: Option<(usize, usize)>,
+) -> Option<DefinitionView> {
     let content = std::fs::read_to_string(&loc.path).ok()?;
-    let line_count = content.lines().count();
+    let line_ranges = definition_nav::line_ranges(&content);
+    let line_count = line_ranges.len();
     if line_count == 0 {
         return None;
     }
@@ -1043,7 +1127,10 @@ fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
     // whose HEAD is the definition line is exactly that item — a `fn`, a
     // `struct`, an `impl`, a `trait`. A one-line item opens nothing and stays
     // its own single line.
-    let extent = item_extent(&content, target);
+    let extent = match known_extent {
+        Some((lo, hi)) if lo <= target && target <= hi && hi < line_count => (lo, hi),
+        _ => item_extent(&content, target),
+    };
 
     let lines: Vec<&str> = content.lines().collect();
     let signature = lines
@@ -1070,8 +1157,19 @@ fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
         Vec::new()
     };
 
+    let caret = Some((
+        target,
+        definition_nav::char_of_utf16(lines[target], loc.character),
+    ));
     Some(DefinitionView {
         header: format!("{}  (line {})", short_path(&loc.path), loc.line + 1),
+        title: format!("{}:{}", short_path(&loc.path), loc.line + 1),
+        path: loc.path.clone(),
+        uri: loc.uri.clone(),
+        target: (loc.line, loc.character),
+        line_ranges,
+        caret,
+        scroll: egui::Vec2::ZERO,
         signature,
         code: content,     // full file
         highlight: target, // the def line's index in the file (0-based)
@@ -1737,9 +1835,22 @@ pub struct AppIde {
     /// answer it. Held until the analyzer is genuinely usable, then re-issued —
     /// see [`AppIde::poll_pending_goto`].
     pending_goto: Option<PendingGoto>,
-    /// One-shot: scroll the Definition tab to the highlighted line on the first
-    /// render after a new F12 snippet loads (then the user scrolls freely).
-    def_scroll_pending: bool,
+    /// One-shot scroll for the Definition tab's next draw: to the definition on
+    /// a new page, to where the user was reading on a page revisited.
+    def_scroll_to: Option<definition_nav::DefScroll>,
+    /// The Definition tab's pages behind and ahead of the one on screen.
+    def_history: definition_nav::DefHistory<definition_nav::DefEntry>,
+    /// A click on the Definition tab's text gave it the keyboard: F12, Ctrl+F12
+    /// and Alt+Left/Right are its own, and the main editor's caret and editing
+    /// shortcuts are off, until a text field takes focus or a press lands on a
+    /// panel outside it. Its rows are labels and take no focus, so without this
+    /// the main editor's "nobody is focused" fallback took F12 and jumped from
+    /// ITS caret. Navigation keys (find, Ctrl+Tab, F3, F8) keep working.
+    def_owns_kbd: bool,
+    /// `cumulative_frame_nr` of the last frame the Definition tab drew. The
+    /// flag above means nothing once the tab stops drawing — the same stale
+    /// trap as `reference_drawn_frame`.
+    def_drawn_frame: Option<u64>,
     /// The fetched definition snippet — its presence shows the "Definition" tab
     /// in the MCU Configurator (next to Structure).
     definition_view: Option<DefinitionView>,
@@ -2306,7 +2417,10 @@ impl AppIde {
             definition_caret_line: String::new(),
             impl_picker: None,
             pending_goto: None,
-            def_scroll_pending: false,
+            def_scroll_to: None,
+            def_history: definition_nav::DefHistory::default(),
+            def_owns_kbd: false,
+            def_drawn_frame: None,
             definition_view: None,
             reference_file: None,
             definition_return_tab: McuTab::Pins,
@@ -2599,14 +2713,19 @@ impl AppIde {
 
         // The position was taken in a buffer that has since changed — the same
         // line and column now mean something else.
-        let current = self.file_text_hash(p.file);
-        if current.is_some_and(|h| h != p.text_hash) {
-            self.pending_goto = None;
-            self.set_status_msg(format!(
-                "{} Go to definition: the file changed while the analyzer was loading",
-                egui_phosphor::regular::X_CIRCLE
-            ));
-            return;
+        if let GotoDoc::Project {
+            file, text_hash, ..
+        } = &p.doc
+        {
+            let current = self.file_text_hash(*file);
+            if current.is_some_and(|h| h != *text_hash) {
+                self.pending_goto = None;
+                self.set_status_msg(format!(
+                    "{} Go to definition: the file changed while the analyzer was loading",
+                    egui_phosphor::regular::X_CIRCLE
+                ));
+                return;
+            }
         }
 
         // "Can it answer this?" is `Ready` plus one of two things:
@@ -2620,7 +2739,13 @@ impl AppIde {
         // left the request parked and the status bar spinning until the deadline.
         let (status, usable) = {
             let lsp = self.lsp_state.lock().unwrap();
-            let usable = lsp.indexed || lsp.is_file_open(&p.rel);
+            let usable = match &p.doc {
+                GotoDoc::Project { rel, .. } => lsp.indexed || lsp.is_file_open(rel),
+                // Never opened (see `request_goto_at_uri`), so only the index
+                // says the crate graph — and this file with it — is loaded.
+                // Asked earlier, rust-analyzer answers "file not found".
+                GotoDoc::External { .. } => lsp.indexed,
+            };
             (lsp.status.clone(), usable)
         };
 
@@ -2628,23 +2753,7 @@ impl AppIde {
             // Usable at last: re-issue exactly what was asked for.
             crate::lsp::LspStatus::Ready if usable => {
                 let p = self.pending_goto.take().expect("checked above");
-                let sent = {
-                    let mut lsp = self.lsp_state.lock().unwrap();
-                    if p.implementation {
-                        lsp.request_implementation(&p.rel, p.line, p.col)
-                    } else {
-                        lsp.request_definition(&p.rel, p.line, p.col)
-                    }
-                };
-                // Only wait for an answer that can actually come.
-                self.definition_in_flight = sent;
-                if !sent {
-                    self.set_status_msg(format!(
-                        "{} Go to definition: the analyzer is not reachable",
-                        egui_phosphor::regular::X_CIRCLE
-                    ));
-                }
-                self.egui_ctx.request_repaint();
+                self.send_parked_goto(p);
             }
             // Dead. Start it — once.
             crate::lsp::LspStatus::Stopped | crate::lsp::LspStatus::Failed(_) => {
@@ -2701,21 +2810,39 @@ impl AppIde {
                 const GRACE: std::time::Duration = std::time::Duration::from_secs(2);
                 if p.since.elapsed() > GRACE {
                     let p = self.pending_goto.take().expect("checked above");
-                    let sent = {
-                        let mut lsp = self.lsp_state.lock().unwrap();
-                        if p.implementation {
-                            lsp.request_implementation(&p.rel, p.line, p.col)
-                        } else {
-                            lsp.request_definition(&p.rel, p.line, p.col)
-                        }
-                    };
-                    self.definition_in_flight = sent;
-                    self.egui_ctx.request_repaint();
+                    self.send_parked_goto(p);
                 }
             }
             // Starting / Indexing: just wait.
             _ => {}
         }
+    }
+
+    /// Re-issue a parked go-to exactly as it was asked, answered to whoever
+    /// asked it.
+    fn send_parked_goto(&mut self, p: PendingGoto) {
+        let sent = {
+            let mut lsp = self.lsp_state.lock().unwrap();
+            match &p.doc {
+                GotoDoc::Project { rel, .. } if p.implementation => {
+                    lsp.request_implementation(rel, p.line, p.col)
+                }
+                GotoDoc::Project { rel, .. } => lsp.request_definition(rel, p.line, p.col),
+                GotoDoc::External { uri } => {
+                    lsp.request_goto_at_uri(uri, p.line, p.col, p.implementation)
+                }
+            }
+        };
+        self.lsp_asker.definition = p.origin;
+        // Only wait for an answer that can actually come.
+        self.definition_in_flight = sent;
+        if !sent {
+            self.set_status_msg(format!(
+                "{} Go to definition: the analyzer is not reachable",
+                egui_phosphor::regular::X_CIRCLE
+            ));
+        }
+        self.egui_ctx.request_repaint();
     }
 
     /// Hash of a file's CURRENT in-memory text, for staleness checks.
@@ -3834,9 +3961,15 @@ impl AppIde {
         // ASKED (navigate + scroll the line into view). A definition in another
         // file (crate / std) is shown read-only in the Definition tab snippet.
         if self.definition_in_flight {
-            let (taken, is_impl) = {
+            let (taken, is_impl, error) = {
                 let mut lsp = self.lsp_state.lock().unwrap();
-                (lsp.take_definition_results(), lsp.definition_is_impl)
+                let taken = lsp.take_definition_results();
+                let error = if taken.is_some() {
+                    lsp.definition_error.take()
+                } else {
+                    None
+                };
+                (taken, lsp.definition_is_impl, error)
             };
             if let Some(locs) = taken {
                 self.definition_in_flight = false;
@@ -3857,6 +3990,23 @@ impl AppIde {
                     // did nothing", and a just-started analyzer answers this way
                     // more often than a warm one — an empty result and a
                     // JSON-RPC error arrive in the same shape.
+                    0 if asker.definition == GotoOrigin::DefinitionTab => {
+                        let (ready, indexed) = {
+                            let lsp = self.lsp_state.lock().unwrap();
+                            (matches!(lsp.status, lsp::LspStatus::Ready), lsp.indexed)
+                        };
+                        let reason = definition_nav::external_silence_reason(
+                            error.as_deref(),
+                            ready,
+                            indexed,
+                        )
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default();
+                        self.set_status_msg(format!(
+                            "{} No {noun} found at the Definition tab's caret{reason}",
+                            egui_phosphor::regular::X_CIRCLE
+                        ));
+                    }
                     0 => {
                         let asked = self.lsp_state.lock().unwrap().definition_for.clone();
                         let reason = asked
@@ -3888,7 +4038,12 @@ impl AppIde {
                             targets,
                             sel: 0,
                             pos: self.definition_anchor,
-                            slot: asker.definition,
+                            // Drawn, and its keys taken, by the MAIN editor's
+                            // pass for a request from the tab: the tab has no
+                            // editor pass of its own, and the list is a free
+                            // `Area` anchored under the tab's caret anyway.
+                            slot: asker.definition.editor(),
+                            origin: asker.definition,
                             title: format!("{n} {noun}s"),
                         });
                     }
@@ -3934,8 +4089,9 @@ impl AppIde {
     fn goto_definition_target(
         &mut self,
         t: &editor_panel::impl_picker::ImplTarget,
-        slot: EditorSlot,
+        origin: GotoOrigin,
     ) {
+        let slot = origin.editor();
         if let Some(id) = project_file_for_def(&t.path, &self.project_tree.user_src_files) {
             // Editable: open the file, scroll to the target, and mark the line
             // with a yellow band (like the Definition tab).
@@ -3956,42 +4112,25 @@ impl AppIde {
             let ed = self.ed_of(slot);
             ed.pending_scroll_to_line = Some((id, t.line as usize + 1));
             ed.highlighted_def_line = Some((id, t.line as usize + 1));
-            // Not an error — clear the snippet; the MCU tab bar auto-leaves the
-            // (now empty) Definition tab.
-            self.definition_view = None;
+            // The Definition tab and its history STAY. This used to clear the
+            // snippet (and the tab bar then left the tab), so any jump through
+            // a project file ended the walk and Back had nothing to go back to.
+            if origin == GotoOrigin::DefinitionTab {
+                // The eye is on the tab; the change happened beside it.
+                self.def_note_opened_in_editor(&t.path, t.line);
+            }
             return;
         }
+        // External file → read-only page in the Definition tab, the page on
+        // screen going into its history. An unreadable file says so there
+        // rather than leaving the previous answer up under a new question.
         let loc = lsp::DefinitionLoc {
             path: t.path.clone(),
+            uri: t.uri.clone(),
             line: t.line,
             character: t.character,
         };
-        if let Some(view) = build_definition_view(&loc) {
-            // External file → read-only snippet in the Definition tab (MCU
-            // Configurator), scrolled to the target line.
-            if self.active_tab != McuTab::Definition {
-                self.definition_return_tab = self.active_tab;
-            }
-            self.definition_view = Some(view);
-            self.active_tab = McuTab::Definition;
-            self.def_scroll_pending = true;
-            // That tab lives in the middle zone, so a collapsed layout would
-            // swallow the snippet — F12 would look like it did nothing. Open the
-            // zone back up.
-            self.side_panels_collapsed = false;
-        } else {
-            // Unreadable, or empty. This arm had NO else, and the consequences
-            // were the two things this codebase refuses at once: the previous
-            // answer's snippet stayed on screen under a new question — a
-            // believable lie — and the keypress reported nothing, which is
-            // indistinguishable from a broken shortcut. The answer is already
-            // drained by here, so saying so is the only honest move left.
-            self.set_status_msg(format!(
-                "{} Cannot open {}",
-                egui_phosphor::regular::X_CIRCLE,
-                short_path(&t.path)
-            ));
-        }
+        self.def_open(&loc);
     }
 
     /// Advance the "Save (wall clock)" envelope: note when the LSP flush
@@ -5783,12 +5922,70 @@ mod definition_view_tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("probe.rs");
         std::fs::write(&path, src).expect("write");
-        build_definition_view(&DefinitionLoc {
-            path: path.to_string_lossy().into_owned(),
-            line,
-            character: 0,
-        })
+        build_definition_view(
+            &DefinitionLoc {
+                path: path.to_string_lossy().into_owned(),
+                uri: String::new(),
+                line,
+                character: 0,
+            },
+            None,
+        )
         .expect("a view")
+    }
+
+    /// As `view`, at a column and with an extent remembered from a visit.
+    fn view_at(
+        tag: &str,
+        src: &str,
+        line: u32,
+        character: u32,
+        known: Option<(usize, usize)>,
+    ) -> DefinitionView {
+        let dir = std::env::temp_dir().join(format!("def_view_at_{tag}"));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("probe.rs");
+        std::fs::write(&path, src).expect("write");
+        build_definition_view(
+            &DefinitionLoc {
+                path: path.to_string_lossy().into_owned(),
+                uri: "file:///probe.rs".to_owned(),
+                line,
+                character,
+            },
+            known,
+        )
+        .expect("a view")
+    }
+
+    /// The tab's caret starts ON the name rust-analyzer pointed at, so F12
+    /// pressed straight away asks about the definition itself. The column is
+    /// UTF-16: the emoji before the name is two units but one char.
+    #[test]
+    fn the_caret_starts_on_the_definition_name() {
+        let src = "// top\n/*\u{1F600}*/fn read_all() {}\n";
+        let v = view_at("caret", src, 1, 9, None);
+        assert_eq!(v.caret, Some((1, 8)), "on the `r` of `read_all`");
+        assert_eq!(v.line(1), "/*\u{1F600}*/fn read_all() {}");
+        assert_eq!(v.uri, "file:///probe.rs", "kept for the next F12");
+    }
+
+    /// Back / Forward hand the extent back so the file is not scanned again —
+    /// but only while it still fits: a file that changed on disk gets a fresh one.
+    #[test]
+    fn a_remembered_extent_is_reused_only_while_it_fits() {
+        let src = "fn a() {}\nfn b() {\n    let x = 1;\n}\n";
+        assert_eq!(view_at("known", src, 1, 3, Some((1, 2))).extent, (1, 2));
+        assert_eq!(
+            view_at("stale", src, 1, 3, Some((1, 99))).extent,
+            (1, 3),
+            "past the end of the file: recomputed"
+        );
+        assert_eq!(
+            view_at("apart", src, 1, 3, Some((2, 3))).extent,
+            (1, 3),
+            "no longer around the target: recomputed"
+        );
     }
 
     /// The whole function, not just its declaration line — that is the question
@@ -5919,6 +6116,28 @@ mod definition_view_tests {
         let rows = split_job_by_lines(&job);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[1].text, " ");
+    }
+
+    /// The space needs a SECTION too: epaint lays out only covered bytes, and
+    /// a row with none was 0 px tall — the rows below drifted off the pitch
+    /// `show_rows` scrolls by, and a click could not land on it.
+    #[test]
+    fn an_empty_line_inside_the_item_keeps_a_full_row() {
+        let job = crate::editor::gui::code_editor::rust_layout_job(
+            "fn f() {\n    let a = 1;\n\n    let b = 2;\n}",
+            &ColorTheme::GRUVBOX,
+            super::DEF_FONT_SIZE,
+            &Syntax::rust(),
+            crate::editor::gui::code_editor::Marks::default(),
+        );
+        for (i, row) in split_job_by_lines(&job).iter().enumerate() {
+            let covered: usize = row.sections.iter().map(|s| s.byte_range.len()).sum();
+            assert!(
+                covered >= row.text.len(),
+                "row {i} {:?} is not fully covered",
+                row.text
+            );
+        }
     }
 }
 

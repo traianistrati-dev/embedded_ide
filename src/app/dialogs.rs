@@ -1363,6 +1363,11 @@ impl AppIde {
                         self.active_tab = McuTab::System;
                         self.lsp_state.lock().unwrap().reset();
                         self.lsp_selected_diagnostic = None;
+                        // A new project is a project change like any Open:
+                        // go-tos and the Definition tab's walk belong to the
+                        // old one. This path does not go through
+                        // `load_project_from_dir`, so it says so itself.
+                        self.drop_project_gotos();
                         // Same reason as in `load_project_from_dir`: the RA
                         // workspace content changes wholesale, so the flush must
                         // not trust what it wrote for the previous project.
