@@ -1082,9 +1082,12 @@ impl LspState {
     /// Resolve a lazily-returned code action (`codeAction/resolve`). RA requires
     /// the WHOLE action object back (with its `data`), so `action_raw` is sent
     /// verbatim. Poll [`take_code_action_resolve_result`].
-    pub fn request_code_action_resolve(&mut self, action_raw: serde_json::Value) {
+    /// Returns `false` when nothing went out (no live session) — the caller
+    /// must not wait for an answer then.
+    #[must_use]
+    pub fn request_code_action_resolve(&mut self, action_raw: serde_json::Value) -> bool {
         if self.sender.is_none() {
-            return;
+            return false;
         }
         self.next_req_id += 1;
         let id = self.next_req_id;
@@ -1100,6 +1103,7 @@ impl LspState {
             })
             .to_string(),
         );
+        true
     }
 
     /// Take the resolved edits (`Some(Some(edits))` = resolved, `Some(None)` =

@@ -178,8 +178,13 @@ pub(crate) struct EditorState {
     /// early return it guards then refuses every later Ctrl+Enter, silently.
     pub(crate) code_action_sent_at: Option<std::time::Instant>,
 
-    /// `true` after a codeAction/resolve request, until its edits arrive.
-    pub(crate) code_action_resolve_in_flight: bool,
+    /// What the `codeAction/resolve` in flight is for, until its edits arrive:
+    /// a preview of the chooser's selected row, or the chosen action itself.
+    pub(crate) code_action_resolve_for: Option<CodeActionResolve>,
+
+    /// A line under the chooser saying why an expected action is missing —
+    /// "Add explicit type" on a binding whose type cannot be written.
+    pub(crate) code_action_note: Option<String>,
 
     /// The code actions to choose from (popup shown when > 1).
     pub(crate) code_actions: Vec<lsp::CodeAction>,
@@ -313,7 +318,8 @@ impl EditorState {
             rename_in_flight: false,
             code_action_in_flight: false,
             code_action_sent_at: None,
-            code_action_resolve_in_flight: false,
+            code_action_resolve_for: None,
+            code_action_note: None,
             code_actions: Vec::new(),
             code_action_popup_open: false,
             code_action_sel: 0,
@@ -334,4 +340,12 @@ impl EditorState {
             fold_regions: editor_panel::fold::RegionsCache::default(),
         }
     }
+}
+
+/// What an in-flight `codeAction/resolve` is for.
+pub(crate) enum CodeActionResolve {
+    /// The chooser's row at this index — resolved only to SHOW what it changes.
+    Preview(usize),
+    /// The chosen action — applied when its edit arrives.
+    Apply(lsp::CodeAction),
 }

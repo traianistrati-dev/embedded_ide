@@ -11,9 +11,20 @@
 //! chosen action with an inline edit applies immediately; a lazy one is
 //! `codeAction/resolve`d first. All applies run at frame TOP so the editor's
 //! end-of-frame write-back can't revert them (the Clippy-fix gotcha).
+//!
+//! Two guards, because what rust-analyzer sends is not always what it says:
+//! - The chooser resolves the SELECTED row ahead of time and shows what it will
+//!   change ("replaces lines 334-631 with 612"). "Inline variable" on a long
+//!   closure rewrites hundreds of lines under a two-word title.
+//! - An edit that would turn a file that parses into one that does not is
+//!   refused. rust-analyzer's "Inline variable" on an `async` closure produced
+//!   exactly that — tokens glued together (`letselected_mode`), 128 syntax
+//!   errors — and it applied without a word.
 
+use crate::app::editor_state::CodeActionResolve;
 use crate::app::{AppIde, ProjectFileId};
 use crate::editor::gui::text_pos::{lsp_cursor_pos, selected_file_rel_path};
+use crate::lsp::RenameEdit;
 use eframe::egui;
 
 /// The spans to ask rust-analyzer about for one Ctrl+Enter, as char ranges in
@@ -46,7 +57,114 @@ fn code_action_positions(
     out
 }
 
+/// The first syntax error in `text` as `(1-based line, message)`, `None` when it
+/// parses as a Rust file.
+fn syntax_error(text: &str) -> Option<(usize, String)> {
+    // `span-locations` keeps a copy of every parsed source per thread until
+    // this is called (see `flow_map::parse::charts_of`); no span outlives us.
+    proc_macro2::extra::invalidate_current_thread_spans();
+    syn::parse_file(text)
+        .err()
+        .map(|e| (e.span().start().line.max(1), e.to_string()))
+}
+
+/// Would these edits break a file that parses today? `(rel_path, line, error)`
+/// of the first such file. A file that already fails to parse is not judged —
+/// editing one that is mid-change must stay possible.
+fn breaks_syntax(
+    edits: &[RenameEdit],
+    text_of: impl Fn(&str) -> Option<String>,
+) -> Option<(String, usize, String)> {
+    let mut files: Vec<&str> = edits.iter().map(|e| e.rel_path.as_str()).collect();
+    files.sort_unstable();
+    files.dedup();
+    for rel in files.into_iter().filter(|r| r.ends_with(".rs")) {
+        let Some(before) = text_of(rel) else { continue };
+        if syntax_error(&before).is_some() {
+            continue;
+        }
+        let mine: Vec<RenameEdit> = edits
+            .iter()
+            .filter(|e| e.rel_path == rel)
+            .cloned()
+            .collect();
+        let after = crate::app::apply_text_edits(&before, mine);
+        if let Some((line, msg)) = syntax_error(&after) {
+            return Some((rel.to_owned(), line, msg));
+        }
+    }
+    None
+}
+
+/// What an action's edits change, in one line, and whether that is a LOT —
+/// enough that the row deserves a second look before Enter.
+fn edit_summary(edits: &[RenameEdit]) -> (String, bool) {
+    let mut files: Vec<&str> = edits.iter().map(|e| e.rel_path.as_str()).collect();
+    files.sort_unstable();
+    files.dedup();
+    let mut large = false;
+    let parts: Vec<String> = files
+        .iter()
+        .map(|rel| {
+            let mine: Vec<&RenameEdit> = edits.iter().filter(|e| e.rel_path == *rel).collect();
+            let removed: usize = mine
+                .iter()
+                .map(|e| (e.end_line - e.start_line) as usize + 1)
+                .sum();
+            let added: usize = mine.iter().map(|e| e.new_text.lines().count().max(1)).sum();
+            large |= removed > 20 || added > 40;
+            let name = rel.rsplit('/').next().unwrap_or(rel);
+            if let [e] = mine.as_slice() {
+                let (a, b) = (e.start_line + 1, e.end_line + 1);
+                if a == b {
+                    format!("{name}: edits line {a}")
+                } else {
+                    format!("{name}: replaces lines {a}-{b} ({removed} lines) with {added}")
+                }
+            } else {
+                format!("{name}: {} edits, {removed} lines -> {added}", mine.len())
+            }
+        })
+        .collect();
+    (parts.join("; "), large)
+}
+
+/// Is this inferred type one that cannot be written in a `let`? A closure's
+/// type has no name, and rust-analyzer shows it as `impl Fn…` / `{closure…}`,
+/// so "Add explicit type" is never offered for it.
+fn unnameable_type(hint_label: &str) -> bool {
+    ["impl ", "{closure", "{async closure", "{unknown}"]
+        .iter()
+        .any(|p| hint_label.contains(p))
+}
+
 impl AppIde {
+    /// The text of `rel` as it is now (main.rs or a user file).
+    fn source_text(&self, rel: &str) -> Option<String> {
+        if rel == "src/main.rs" {
+            return Some(self.generated_code.clone());
+        }
+        self.project_tree
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == rel)
+            .map(|(_, c)| c.clone())
+    }
+
+    /// Apply a chosen action's edits — unless they would break a file's syntax.
+    fn apply_code_action_checked(&mut self, title: &str, edits: Vec<RenameEdit>) {
+        if let Some((rel, line, msg)) = breaks_syntax(&edits, |r| self.source_text(r)) {
+            self.set_status_msg(format!(
+                "{} \"{title}\" not applied: rust-analyzer's edit would break {rel} (line {line}: {msg})",
+                egui_phosphor::regular::WARNING
+            ));
+            return;
+        }
+        let (summary, _) = edit_summary(&edits);
+        self.apply_rename_edits(edits);
+        self.set_status_msg(format!("Applied \"{title}\" - {summary}"));
+    }
+
     /// Fire a codeAction request for the cursor position (Ctrl+Enter). Syncs
     /// the live text to RA first so the position matches. `cursor_char_idx` is
     /// the caret char index; `anchor` the caret's screen rect for the popup.
@@ -104,6 +222,40 @@ impl AppIde {
         // and needing a running analyzer to be told about it would be absurd.
         self.ed.code_action_add_dep = self.add_dep_candidate(display_code, idx);
         self.ed.code_action_popup_pos = anchor;
+        // Say why "Add explicit type" will be missing, when the caret is in a
+        // `let` whose type cannot be written. Kept only if the answer indeed
+        // lacks it (see `poll_code_actions`).
+        let on_let = sel_end_char_idx.is_none_or(|e| e == idx)
+            && super::let_annotation::let_binding_pos(&chars, idx).is_some();
+        self.ed.code_action_note = on_let.then(|| {
+            match self
+                .ed
+                .inlay_hint
+                .as_ref()
+                .map(|h| h.label.trim_start_matches(':').trim())
+            {
+                Some(label) if unnameable_type(label) => {
+                    let short: String = label.chars().take(48).collect();
+                    let more = if label.chars().count() > 48 {
+                        "..."
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "No \"Add explicit type\": `{short}{more}` cannot be written in a `let` - \
+                         a closure's type has no name"
+                    )
+                }
+                _ => "No \"Add explicit type\" offered for this binding".to_owned(),
+            }
+        });
+        // A preview belongs to the list it was asked for; the new list replaces it.
+        if matches!(
+            self.ed.code_action_resolve_for,
+            Some(CodeActionResolve::Preview(_))
+        ) {
+            self.ed.code_action_resolve_for = None;
+        }
         {
             let mut lsp = self.lsp_state.lock().unwrap();
             if !matches!(lsp.status, crate::lsp::LspStatus::Ready) {
@@ -135,6 +287,13 @@ impl AppIde {
                 self.ed.code_action_in_flight = false;
                 // With our row present, 0 actions is still a list of one.
                 let ours = self.ed.code_action_add_dep.is_some();
+                // The note is about a MISSING "Add explicit type".
+                if actions
+                    .iter()
+                    .any(|a| a.title.to_ascii_lowercase().contains("explicit type"))
+                {
+                    self.ed.code_action_note = None;
+                }
                 match actions.len() {
                     // Say so. An empty answer used to be indistinguishable from
                     // a broken shortcut — which is how "Ctrl+Enter does not
@@ -151,8 +310,14 @@ impl AppIde {
                             .and_then(|(rel, line)| self.caret_silence_reason(&rel, line))
                             .map(|r| format!(" ({r})"))
                             .unwrap_or_default();
+                        let note = self
+                            .ed
+                            .code_action_note
+                            .take()
+                            .map(|n| format!(" - {n}"))
+                            .unwrap_or_default();
                         self.set_status_msg(format!(
-                            "Ctrl+Enter: rust-analyzer has no action at the cursor{reason}"
+                            "Ctrl+Enter: rust-analyzer has no action at the cursor{reason}{note}"
                         ));
                     }
                     // One action is still a CHOICE — never applied unseen.
@@ -183,23 +348,55 @@ impl AppIde {
             }
             self.ed.code_actions.clear();
             self.ed.code_action_add_dep = None;
+            self.ed.code_action_note = None;
             self.ed.code_action_popup_open = false;
         }
         self.poll_add_dep();
 
-        // 3) The resolve result arrived → apply.
-        if self.ed.code_action_resolve_in_flight {
+        // 3) The resolve result arrived → store the preview, or apply.
+        if self.ed.code_action_resolve_for.is_some() {
             let res = self
                 .lsp_state
                 .lock()
                 .unwrap()
                 .take_code_action_resolve_result();
             if let Some(edits) = res {
-                self.ed.code_action_resolve_in_flight = false;
-                if let Some(edits) = edits {
-                    if !edits.is_empty() {
-                        self.apply_rename_edits(edits);
+                match self.ed.code_action_resolve_for.take() {
+                    Some(CodeActionResolve::Preview(i)) => {
+                        if let Some(a) = self.ed.code_actions.get_mut(i) {
+                            a.edits = Some(edits.unwrap_or_default());
+                        }
                     }
+                    Some(CodeActionResolve::Apply(a)) => match edits {
+                        Some(e) if !e.is_empty() => self.apply_code_action_checked(&a.title, e),
+                        _ => self.set_status_msg(format!("\"{}\" changes nothing here", a.title)),
+                    },
+                    None => {}
+                }
+            }
+        }
+
+        // 4) Preview the selected row: resolve its edit ahead of the choice, so
+        //    the list can say what it changes. One at a time; the next frame
+        //    picks up a selection that moved meanwhile.
+        if self.ed.code_action_popup_open && self.ed.code_action_resolve_for.is_none() {
+            let offset = usize::from(self.ed.code_action_add_dep.is_some());
+            let row = self.ed.code_action_sel.checked_sub(offset);
+            if let Some(i) = row
+                && let Some(a) = self.ed.code_actions.get(i)
+                && a.edits.is_none()
+            {
+                let raw = a.raw.clone();
+                if self
+                    .lsp_state
+                    .lock()
+                    .unwrap()
+                    .request_code_action_resolve(raw)
+                {
+                    self.ed.code_action_resolve_for = Some(CodeActionResolve::Preview(i));
+                } else if let Some(a) = self.ed.code_actions.get_mut(i) {
+                    // No analyzer to ask: say so instead of "checking…" forever.
+                    a.edits = Some(Vec::new());
                 }
             }
         }
@@ -208,14 +405,25 @@ impl AppIde {
     /// Apply an action's inline edit, or `codeAction/resolve` it when the edit
     /// was deferred by RA.
     fn begin_code_action(&mut self, action: crate::lsp::CodeAction) {
-        match action.edits {
-            Some(edits) if !edits.is_empty() => self.apply_rename_edits(edits),
-            _ => {
-                self.lsp_state
+        match action.edits.clone() {
+            Some(edits) if !edits.is_empty() => {
+                self.apply_code_action_checked(&action.title, edits)
+            }
+            Some(_) => self.set_status_msg(format!("\"{}\" changes nothing here", action.title)),
+            None => {
+                // A preview of another row may still be in flight; this request
+                // supersedes it (only the newest resolve id is answered).
+                let sent = self
+                    .lsp_state
                     .lock()
                     .unwrap()
-                    .request_code_action_resolve(action.raw);
-                self.ed.code_action_resolve_in_flight = true;
+                    .request_code_action_resolve(action.raw.clone());
+                if sent {
+                    self.ed.code_action_resolve_for = Some(CodeActionResolve::Apply(action));
+                } else {
+                    self.ed.code_action_resolve_for = None;
+                    self.set_status_msg("Ctrl+Enter: rust-analyzer is not running".to_owned());
+                }
             }
         }
     }
@@ -272,6 +480,40 @@ impl AppIde {
                             chosen = Some(i);
                         }
                     }
+                    // What the selected row will change — before Enter, not after.
+                    let preview = sel
+                        .checked_sub(offset)
+                        .and_then(|i| self.ed.code_actions.get(i))
+                        .map(|a| match &a.edits {
+                            Some(e) if !e.is_empty() => {
+                                let (text, large) = edit_summary(e);
+                                let color = if large {
+                                    egui::Color32::from_rgb(230, 180, 80)
+                                } else {
+                                    egui::Color32::from_gray(150)
+                                };
+                                (text, color)
+                            }
+                            Some(_) => ("no change".to_owned(), egui::Color32::from_gray(130)),
+                            None => (
+                                "checking what it changes...".to_owned(),
+                                egui::Color32::from_gray(120),
+                            ),
+                        });
+                    if preview.is_some() || self.ed.code_action_note.is_some() {
+                        ui.separator();
+                    }
+                    if let Some((text, color)) = preview {
+                        ui.label(egui::RichText::new(text).size(10.5).color(color));
+                    }
+                    if let Some(note) = &self.ed.code_action_note {
+                        ui.label(
+                            egui::RichText::new(note)
+                                .size(10.5)
+                                .italics()
+                                .color(egui::Color32::from_gray(135)),
+                        );
+                    }
                 });
             });
         if let Some(i) = chosen {
@@ -282,10 +524,101 @@ impl AppIde {
 
 #[cfg(test)]
 mod tests {
-    use super::code_action_positions;
+    use super::{breaks_syntax, code_action_positions, edit_summary, unnameable_type};
+    use crate::lsp::RenameEdit;
 
     fn chars(s: &str) -> Vec<char> {
         s.chars().collect()
+    }
+
+    fn edit(rel: &str, (sl, sc): (u32, u32), (el, ec): (u32, u32), text: &str) -> RenameEdit {
+        RenameEdit {
+            rel_path: rel.to_owned(),
+            start_line: sl,
+            start_char: sc,
+            end_line: el,
+            end_char: ec,
+            new_text: text.to_owned(),
+        }
+    }
+
+    /// The report: rust-analyzer's "Inline variable" on an async closure glued
+    /// tokens together (`letselected_mode`). An edit like that is refused.
+    #[test]
+    fn an_edit_that_breaks_a_parsing_file_is_refused() {
+        let src = "fn main() {
+    let f = async |x: u8| { let y = x; y };
+    let _ = f;
+}
+";
+        let glued = edit("src/main.rs", (1, 4), (2, 14), "let = selected_mode;");
+        let got = breaks_syntax(&[glued], |_| Some(src.to_owned()));
+        let (rel, line, _msg) = got.expect("refused");
+        assert_eq!(rel, "src/main.rs");
+        assert_eq!(line, 2);
+    }
+
+    #[test]
+    fn an_edit_that_keeps_the_syntax_passes() {
+        let src = "fn main() {
+    let f = 1;
+}
+";
+        let typed = edit("src/main.rs", (1, 9), (1, 9), ": i32");
+        assert!(breaks_syntax(&[typed], |_| Some(src.to_owned())).is_none());
+    }
+
+    /// A file that already fails to parse is being edited; judging it would
+    /// block every action until the user finished typing.
+    #[test]
+    fn a_file_that_already_fails_is_not_judged() {
+        let src = "fn main() {
+    let f = 
+}
+";
+        let e = edit("src/main.rs", (1, 4), (1, 4), "}}}");
+        assert!(breaks_syntax(&[e], |_| Some(src.to_owned())).is_none());
+        let toml = edit("Cargo.toml", (0, 0), (0, 0), "[[[");
+        assert!(
+            breaks_syntax(&[toml], |_| Some(
+                "x = 1
+"
+                .to_owned()
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn the_summary_names_the_lines_and_flags_a_large_rewrite() {
+        let big = edit(
+            "src/main.rs",
+            (333, 4),
+            (630, 1),
+            &"x
+"
+            .repeat(612),
+        );
+        let (text, large) = edit_summary(&[big]);
+        assert_eq!(text, "main.rs: replaces lines 334-631 (298 lines) with 612");
+        assert!(large);
+        let small = edit("src/main.rs", (9, 9), (9, 9), ": i32");
+        assert_eq!(
+            edit_summary(&[small]),
+            ("main.rs: edits line 10".to_owned(), false)
+        );
+    }
+
+    #[test]
+    fn closure_types_are_recognised_as_unwritable() {
+        assert!(unnameable_type(
+            "impl AsyncFn(&mut Ssd1306Async<…>, &[SettingMode])"
+        ));
+        assert!(unnameable_type("{closure@src/main.rs:12:13}"));
+        assert!(!unnameable_type(
+            "Ssd1306Async<I2CInterface<I2c<'_, Async>>>"
+        ));
+        assert!(!unnameable_type("u32"));
     }
 
     /// The report: the caret inside an `async` closure's parameters on a `let`
