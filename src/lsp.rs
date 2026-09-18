@@ -470,8 +470,16 @@ pub struct LspState {
     /// ("Fetching metadata", "Building CrateGraph", …) and every `window/`
     /// showMessage / logMessage (warning+). Shown in the Analyzer tab so a failed
     /// workspace load is DIAGNOSABLE instead of a silent stuck "Checking…".
-    /// Cleared on `reset()`; capped at `LOAD_LOG_CAP`.
+    /// Cleared on `reset()`; capped at `LOAD_LOG_CAP`. Every line also goes to
+    /// [`ra_trace_path`] on disk, which a restart does not wipe.
     pub load_log: Vec<String>,
+    /// The last lines rust-analyzer wrote to stderr — its panics and error
+    /// logs. The reason an "exited unexpectedly" had none: stderr used to go
+    /// to the null device. Capped at `STDERR_TAIL`; cleared per session.
+    stderr_tail: std::collections::VecDeque<String>,
+    /// stderr lines already copied into `load_log` this session, so a chatty
+    /// server cannot push the load phases out of it.
+    stderr_logged: usize,
 }
 
 impl Default for LspState {
@@ -535,6 +543,8 @@ impl Default for LspState {
             calls_refs_results: HashMap::new(),
             child: None,
             load_log: Vec::new(),
+            stderr_tail: std::collections::VecDeque::new(),
+            stderr_logged: 0,
         }
     }
 }
@@ -542,13 +552,81 @@ impl Default for LspState {
 /// Cap on `LspState::load_log` — a startup trace, not a full server log.
 const LOAD_LOG_CAP: usize = 250;
 
+/// Last rust-analyzer stderr lines kept for an exit message.
+const STDERR_TAIL: usize = 40;
+
+/// stderr lines copied into the Analyzer tab's log per session; the rest still
+/// reach [`ra_trace_path`] and `stderr_tail`.
+const STDERR_TO_LOAD_LOG: usize = 60;
+
+/// Where the rust-analyzer trace is kept across restarts and app launches: the
+/// Analyzer tab's log lines, with a clock time, plus RA's own stderr.
+///
+/// The in-memory log is wiped by every restart — which is exactly the moment a
+/// user reaches for after a failed load, so the reason was gone by the time
+/// anyone looked. Per instance, like the LSP debug log.
+pub fn ra_trace_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "embedded_ide_ra_trace{}.log",
+        crate::workspace::suffix()
+    ))
+}
+
+/// Bytes after which the trace rotates to `<name>.1`.
+const RA_TRACE_CAP: u64 = 1024 * 1024;
+
+/// Append one line to [`ra_trace_path`], stamped with the Activity tab's clock.
+/// Best effort: a trace that cannot be written must never disturb the analyzer.
+fn append_ra_trace(line: &str) {
+    if cfg!(test) {
+        return;
+    }
+    let path = ra_trace_path();
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= RA_TRACE_CAP) {
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(
+            f,
+            "{}  {line}",
+            crate::activity::fmt_clock(std::time::SystemTime::now())
+        );
+    }
+}
+
+/// The status message for a rust-analyzer that exited on its own: the exit
+/// code when there is one, and its last stderr lines, which carry the panic.
+fn exit_message(code: Option<i32>, stderr_tail: &[String]) -> String {
+    let mut msg = match code {
+        Some(c) => format!("rust-analyzer exited unexpectedly (exit code {c})."),
+        None => "rust-analyzer exited unexpectedly.".to_owned(),
+    };
+    let last: Vec<&str> = stderr_tail
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !last.is_empty() {
+        let from = last.len().saturating_sub(3);
+        msg.push_str("\nLast output: ");
+        msg.push_str(&last[from..].join("\n"));
+    }
+    msg
+}
+
 impl LspState {
     // ── Sending helpers ───────────────────────────────────────────────────────
 
     /// Append a line to the RA startup trace (Analyzer tab), oldest dropped past
     /// the cap. Timestamps aren't added — order is the useful signal.
     pub fn push_load_log(&mut self, line: impl Into<String>) {
-        self.load_log.push(line.into());
+        let line = line.into();
+        append_ra_trace(&line);
+        self.load_log.push(line);
         if self.load_log.len() > LOAD_LOG_CAP {
             let overflow = self.load_log.len() - LOAD_LOG_CAP;
             self.load_log.drain(0..overflow);
@@ -1401,6 +1479,8 @@ impl LspState {
         self.calls_refs_pending.clear();
         self.calls_refs_results.clear();
         self.load_log.clear();
+        self.stderr_tail.clear();
+        self.stderr_logged = 0;
     }
 }
 
@@ -1466,7 +1546,9 @@ fn launch(
         .current_dir(&workspace_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // Piped, not null: a panic or a failed load is written HERE, and with
+        // stderr discarded an exit mid-load said nothing at all.
+        .stderr(Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
@@ -1490,6 +1572,7 @@ fn launch(
 
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
 
     // Channel: any thread with a Sender → write thread → RA stdin
     let (tx, rx) = mpsc::channel::<String>();
@@ -1509,6 +1592,33 @@ fn launch(
         s.sender = Some(tx.clone());
         s.child = Some(child);
         s.push_load_log("• rust-analyzer process started");
+    }
+
+    // ── stderr thread ─────────────────────────────────────────────────────────
+    // Drained for as long as the process lives (an unread pipe would block the
+    // server once its buffer fills). Lines go to the disk trace always, to the
+    // Analyzer tab up to a cap, and the last few into the exit message.
+    {
+        let state = Arc::clone(&state);
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                let mut s = state.lock().unwrap();
+                if s.generation != my_gen {
+                    continue; // a restarted session's leftovers: drain only
+                }
+                s.stderr_tail.push_back(line.clone());
+                if s.stderr_tail.len() > STDERR_TAIL {
+                    s.stderr_tail.pop_front();
+                }
+                if s.stderr_logged < STDERR_TO_LOAD_LOG {
+                    s.stderr_logged += 1;
+                    s.push_load_log(format!("[stderr] {line}"));
+                } else {
+                    append_ra_trace(&format!("[stderr] {line}"));
+                }
+            }
+        });
     }
 
     // ── Write thread ──────────────────────────────────────────────────────────
@@ -1627,18 +1737,32 @@ fn launch(
     }
 
     // RA exited (or we got EOF).
+    //
+    // Reap OUR exited child (releases the process handle) and keep its exit
+    // code for the message. If the generation moved on, `state.child` already
+    // belongs to the NEW RA — leave it alone (ours was killed+reaped by
+    // `kill_child`). The wait runs outside the lock: stdout is closed, so the
+    // process is gone or going, but the UI thread must never wait on it.
+    let child = {
+        let mut s = state.lock().unwrap();
+        if s.generation != my_gen {
+            return;
+        }
+        s.child.take()
+    };
+    let code = child
+        .and_then(|mut c| c.wait().ok())
+        .and_then(|status| status.code());
+    // A moment for the stderr thread to hand over the lines written just
+    // before the exit — the panic message is usually the very last thing.
+    thread::sleep(std::time::Duration::from_millis(150));
     let mut s = state.lock().unwrap();
-    if s.generation == my_gen {
-        if s.status.is_active() {
-            s.status = LspStatus::Failed("rust-analyzer exited unexpectedly.".into());
-            ctx.request_repaint();
-        }
-        // Reap OUR exited child (releases the process handle). If the
-        // generation moved on, `state.child` already belongs to the NEW RA —
-        // leave it alone (ours was killed+reaped by `kill_child`).
-        if let Some(mut child) = s.child.take() {
-            let _ = child.wait();
-        }
+    if s.generation == my_gen && s.status.is_active() {
+        let tail: Vec<String> = s.stderr_tail.iter().cloned().collect();
+        let msg = exit_message(code, &tail);
+        s.push_load_log(format!("[error] {msg}"));
+        s.status = LspStatus::Failed(msg);
+        ctx.request_repaint();
     }
 }
 
@@ -3454,6 +3578,47 @@ mod completion_item_tests {
         let bare = serde_json::json!({ "label": "baz", "kind": 6 });
         let item = parse_completion_item(&bare).expect("parses");
         assert_eq!(item.insert_text, "baz");
+    }
+}
+
+#[cfg(test)]
+mod exit_message_tests {
+    use super::exit_message;
+
+    #[test]
+    fn a_bare_exit_says_so() {
+        assert_eq!(
+            exit_message(None, &[]),
+            "rust-analyzer exited unexpectedly."
+        );
+    }
+
+    /// The point of piping stderr: the exit code and the panic reach the
+    /// Analyzer tab instead of an unexplained "exited".
+    #[test]
+    fn the_exit_code_and_the_last_output_are_reported() {
+        let tail: Vec<String> = [
+            "",
+            "thread 'main' panicked at crates/load-cargo/src/lib.rs:12:5:",
+            "  ",
+            "called `Result::unwrap()` on an `Err` value: Os { code: 5 }",
+            "note: run with `RUST_BACKTRACE=1`",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let msg = exit_message(Some(101), &tail);
+        assert!(
+            msg.starts_with("rust-analyzer exited unexpectedly (exit code 101)."),
+            "{msg}"
+        );
+        assert!(msg.contains("panicked at"), "{msg}");
+        assert!(msg.ends_with("RUST_BACKTRACE=1`"), "{msg}");
+        assert_eq!(
+            msg.lines().count(),
+            4,
+            "the message and the last three lines: {msg}"
+        );
     }
 }
 

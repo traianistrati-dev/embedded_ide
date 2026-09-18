@@ -155,6 +155,9 @@ pub fn show_ra_tab(
                     for line in &load_log {
                         let color = if line.starts_with("[error]") {
                             egui::Color32::from_rgb(230, 110, 95)
+                        } else if line.starts_with("[stderr]") {
+                            // rust-analyzer's own error output: panics land here.
+                            egui::Color32::from_rgb(215, 140, 120)
                         } else if line.starts_with("[warn]") {
                             egui::Color32::from_rgb(220, 180, 80)
                         } else if line.starts_with('•') {
@@ -173,6 +176,17 @@ pub fn show_ra_tab(
                         );
                     }
                 });
+            // A restart empties the list above; the file keeps every session.
+            let trace = lsp::ra_trace_path();
+            ui.label(
+                egui::RichText::new(format!(
+                    "Full trace, kept across restarts: {}",
+                    trace.display()
+                ))
+                .size(10.0)
+                .color(egui::Color32::from_gray(120)),
+            )
+            .on_hover_text("Timestamps use the Activity tab's clock.");
         });
     }
 
