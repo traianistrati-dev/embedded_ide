@@ -11,7 +11,7 @@
 //! to [`BACKENDS`]. New *chips* inside an already-supported family need no code
 //! here — they are pure data (a `.ron` definition).
 
-use super::common::USER_TAIL;
+use super::common::{EdgeHook, USER_TAIL};
 use super::{embassy_async, embassy_common, rcc, rtic, stm32, wba};
 use crate::panels::mcu_module::codegen_esp::{self, EspRuntime};
 use crate::panels::mcu_module::comparator;
@@ -78,6 +78,15 @@ pub trait FamilyBackend {
     /// Per-peripheral init module bodies for `src/pins/configs/` — `(file_name,
     /// generated_body)`. Default: none (families without separate config files).
     fn config_files(&self, _mcu: &Mcu) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// The hooks the generated handlers call, one per armed input, so `Mcu`
+    /// can seed each below the user tail (`common::ensure_edge_hooks`).
+    /// Default: none, for a backend whose handler still carries its body
+    /// inline between the markers - it reports nothing, and no hook it does
+    /// not call is ever seeded.
+    fn edge_hooks(&self, _mcu: &Mcu) -> Vec<EdgeHook> {
         Vec::new()
     }
 
