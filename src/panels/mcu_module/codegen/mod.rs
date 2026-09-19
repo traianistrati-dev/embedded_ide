@@ -134,6 +134,13 @@ impl Mcu {
         // Module/clock state is persisted out-of-source in `mcu.config`
         // (see `Mcu::mcu_config_text`), not as comment markers in main.rs.
         let code = common::ensure_module_models(code, &self.modules);
+        // The handler of an armed input calls a hook the user owns: seeded
+        // once below the tail, never rewritten (see `common::EdgeHook`).
+        let hooks = self
+            .backend()
+            .map(|b| b.edge_hooks(self))
+            .unwrap_or_default();
+        let code = common::ensure_edge_hooks(code, &hooks);
         // The devices the user grouped, gathered into one comment.
         let code = common::with_device_comment(code, self);
         // Strict-lints: exempt the generated entry fn (its init uses unwrap/as…).
@@ -152,6 +159,13 @@ impl Mcu {
             .unwrap_or_else(|| existing.to_owned());
         // Module/clock state is persisted in `mcu.config`, not in main.rs.
         let code = common::ensure_module_models(code, &self.modules);
+        // The handler of an armed input calls a hook the user owns: seeded
+        // once below the tail, never rewritten (see `common::EdgeHook`).
+        let hooks = self
+            .backend()
+            .map(|b| b.edge_hooks(self))
+            .unwrap_or_default();
+        let code = common::ensure_edge_hooks(code, &hooks);
         // Rebuilt with the block, so renaming a device in the panel renames it
         // here on the next save.
         let code = common::with_device_comment(code, self);

@@ -30,14 +30,14 @@
 //! inside `main` instead.
 
 use super::common::{
-    ASYNC_USER_TAIL, GEN_BEGIN, GEN_END, USER_TAIL, blank_separated, mcu_id_marker_line,
-    retarget_pristine_tail, var_suffix,
+    ASYNC_USER_TAIL, EdgeHook, GEN_BEGIN, GEN_END, USER_TAIL, blank_separated, edge_hook_name,
+    mcu_id_marker_line, retarget_pristine_tail, var_suffix,
 };
 use super::family::FamilyBackend;
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::modules::UsartModuleConfig;
 use crate::panels::mcu_module::pins::PinFunction;
-use crate::panels::mcu_module::pins::logic::pin::GpioMode;
+use crate::panels::mcu_module::pins::logic::pin::{GpioMode, Pin};
 
 pub struct NrfBackend;
 
@@ -1122,12 +1122,8 @@ fn async_gpio_lines(mcu: &Mcu) -> (String, String) {
         let Some(pp) = nrf_pin(&p.name) else {
             continue;
         };
-        let var = format!("{}_{}", ident(pp), var_suffix(&p.selected_function));
-        let what = format!(
-            "{}{}",
-            label(pp),
-            board_name(&p.name).map_or(String::new(), |b| format!(" ({b})"))
-        );
+        let var = async_binding(pp, p);
+        let what = describe(pp, p);
         match p.selected_function {
             PinFunction::GpioOutput => {
                 // Open-drain is a DRIVE here, not a type: `Standard0Disconnect1`
@@ -1157,8 +1153,12 @@ fn async_gpio_lines(mcu: &Mcu) -> (String, String) {
                     Edge::Falling => ("wait_for_falling_edge", "A falling edge"),
                     Edge::Both => ("wait_for_any_edge", "Either edge"),
                 };
+                // The body is NOT here: this task is rebuilt on every
+                // regeneration, so it calls a hook seeded once below the tail
+                // (`common::ensure_edge_hooks`), which is the user's to fill.
+                let hook = edge_hook_name(&var);
                 tasks.push_str(&format!(
-                    "/// {desc} on {what}. The task owns the pin.\n#[embassy_executor::task]\nasync fn {var}_irq(mut pin: embassy_nrf::gpio::Input<'static>) {{\n    loop {{\n        pin.{wait}().await;\n        // The edge arrived. Your code here.\n    }}\n}}\n\n"
+                    "/// {desc} on {what}. The task owns the pin;\n/// `{hook}` below `main` is yours.\n#[embassy_executor::task]\nasync fn {var}_irq(mut pin: embassy_nrf::gpio::Input<'static>) {{\n    loop {{\n        pin.{wait}().await;\n        {hook}(pin.is_high()).await;\n    }}\n}}\n\n"
                 ));
                 // embassy-executor 0.10: the task FUNCTION returns the Result
                 // (its pool can be exhausted), so the `unwrap` sits inside
@@ -1171,6 +1171,40 @@ fn async_gpio_lines(mcu: &Mcu) -> (String, String) {
         }
     }
     (tasks, blank_separated(pins_out))
+}
+
+/// The binding an async GPIO line declares: `p0_14_in`, `p0_21_out`. The
+/// pin's label is NOT in it, so a rename never renames the task or its hook.
+fn async_binding(pp: (u8, u8), p: &Pin) -> String {
+    format!("{}_{}", ident(pp), var_suffix(&p.selected_function))
+}
+
+/// The pad as the generated comment names it: `P0.14 (pad 5, BTN_A)`.
+fn describe(pp: (u8, u8), p: &Pin) -> String {
+    format!(
+        "{}{}",
+        label(pp),
+        board_name(&p.name).map_or(String::new(), |b| format!(" ({b})"))
+    )
+}
+
+/// The hooks the armed inputs' tasks call, in the order the tasks are
+/// emitted. Same binding and description as the task, from the same helpers,
+/// so the call and the seed cannot drift apart.
+fn async_edge_hooks(mcu: &Mcu) -> Vec<EdgeHook> {
+    mcu.iter_all_pins()
+        .filter(|p| !p.reserved && p.selected_function == PinFunction::GpioInput && p.irq.is_some())
+        .filter_map(|p| nrf_pin(&p.name).map(|pp| (pp, p)))
+        .map(|(pp, p)| {
+            let var = async_binding(pp, p);
+            EdgeHook {
+                name: edge_hook_name(&var),
+                what: describe(pp, p),
+                caller: format!("{var}_irq"),
+                is_async: true,
+            }
+        })
+        .collect()
 }
 
 /// The two clock muxes, as `init`'s `Config`, and the `init` call itself.
@@ -1636,6 +1670,13 @@ impl FamilyBackend for AsyncNrfBackend {
             async_section(mcu).trim_end_matches('\n'),
             retarget_pristine_tail(&existing[end..], true)
         )
+    }
+
+    /// One per armed input: the hook its task calls. The Blocking backend
+    /// generates no handler and keeps the default, so a switch to Blocking
+    /// leaves a seeded hook alone as dead code, and a switch back calls it.
+    fn edge_hooks(&self, mcu: &Mcu) -> Vec<EdgeHook> {
+        async_edge_hooks(mcu)
     }
 }
 
@@ -2480,7 +2521,8 @@ mod async_codegen {
         let main = mcu.fresh_main_rs();
         for want in [
             "#[embassy_executor::task]\nasync fn p0_14_in_irq(mut pin: embassy_nrf::gpio::Input<'static>) {",
-            "pin.wait_for_falling_edge().await;",
+            // The body is a call to the user's hook, not a comment to fill in.
+            "pin.wait_for_falling_edge().await;\n        on_p0_14_in_edge(pin.is_high()).await;",
             "let p0_14_in = Input::new(p.P0_14, Pull::Up);\n    spawner.spawn(p0_14_in_irq(p0_14_in).unwrap());",
             "async fn main(spawner: embassy_executor::Spawner) {",
             "let p0_23_in = Input::new(p.P0_23, Pull::None);",
@@ -3065,5 +3107,179 @@ mod pin_restore {
                 "{runtime:?}: reload changed the generated file"
             );
         }
+    }
+}
+
+/// The body of an armed input's handler is the user's, and it lives below the
+/// tail - the task between the markers only calls it.
+#[cfg(test)]
+mod edge_hook {
+    use super::blocking_codegen::microbit;
+    use super::{GEN_BEGIN, GEN_END};
+    use crate::panels::mcu_module::mcu::{Mcu, Runtime};
+    use crate::panels::mcu_module::pins::PinFunction;
+    use crate::panels::mcu_module::pins::logic::pin::Edge;
+
+    /// A micro:bit with Button A armed on a falling edge, on Async.
+    fn armed() -> Mcu {
+        let mut mcu = microbit(&[("P0.14", PinFunction::GpioInput)]);
+        mcu.runtime = Runtime::Async;
+        assert!(mcu.is_async());
+        arm(&mut mcu, Some(Edge::Falling));
+        mcu
+    }
+
+    fn arm(mcu: &mut Mcu, edge: Option<Edge>) {
+        for p in mcu.iter_all_pins_mut() {
+            if p.name.starts_with("P0.14") {
+                p.irq = edge;
+            }
+        }
+    }
+
+    /// The generated block alone.
+    fn block(main: &str) -> &str {
+        let begin = main.find(GEN_BEGIN).expect("begin");
+        let end = main.find(GEN_END).expect("end");
+        &main[begin..end]
+    }
+
+    const CALL: &str = "        on_p0_14_in_edge(pin.is_high()).await;\n";
+    const SEED_HEAD: &str = "async fn on_p0_14_in_edge(_high: bool) {\n";
+    const BODY: &str = "    FLAG.store(true, core::sync::atomic::Ordering::Relaxed);\n";
+
+    /// Fill the seed's body in, the way a user would.
+    fn edited(main: &str) -> String {
+        let out = main.replacen("    // Your code here.\n", BODY, 1);
+        assert_ne!(out, main, "the seed was there to edit:\n{main}");
+        out
+    }
+
+    /// A fresh file: the task calls the hook, nothing in the block invites an
+    /// edit any more, and the seed sits once below the tail with the clippy
+    /// allow a Strict project needs.
+    #[test]
+    fn a_fresh_file_calls_the_hook_and_seeds_it_below_the_tail() {
+        let main = armed().fresh_main_rs();
+        assert!(block(&main).contains(CALL), "{main}");
+        assert!(!block(&main).contains("code here"), "{main}");
+        assert_eq!(main.matches(SEED_HEAD).count(), 1, "{main}");
+        let seed = main.find(SEED_HEAD).expect("seed");
+        assert!(
+            seed > main.find("// Your main loop code here.").expect("tail"),
+            "{main}"
+        );
+        assert!(
+            main[..seed].ends_with(
+                "#[allow(clippy::unused_async)] // drop once the body awaits something\n"
+            ),
+            "{main}"
+        );
+        assert!(
+            main.contains("/// P0.14 (pad 5, BTN_A) - called from the `p0_14_in_irq` task"),
+            "{main}"
+        );
+    }
+
+    /// The user's body survives every regeneration that used to lose it: a
+    /// pin change on the canvas, a rename of the pin, and a change of edge -
+    /// none of which renames the hook.
+    #[test]
+    fn the_body_survives_a_pin_change_a_rename_and_an_edge_change() {
+        let mut mcu = armed();
+        let mut main = edited(&mcu.fresh_main_rs());
+
+        for (what, change) in [
+            (
+                "another pin wired",
+                Box::new(|m: &mut Mcu| {
+                    let led = m
+                        .iter_all_pins()
+                        .find(|p| p.name.starts_with("P0.21"))
+                        .expect("P0.21")
+                        .number;
+                    m.find_pin_mut(led).expect("pad").selected_function = PinFunction::GpioOutput;
+                }) as Box<dyn Fn(&mut Mcu)>,
+            ),
+            (
+                "the pin renamed",
+                Box::new(|m: &mut Mcu| {
+                    for p in m.iter_all_pins_mut() {
+                        if p.name.starts_with("P0.14") {
+                            p.custom_label = "Button A".into();
+                        }
+                    }
+                }),
+            ),
+            (
+                "the edge changed",
+                Box::new(|m: &mut Mcu| arm(m, Some(Edge::Both))),
+            ),
+        ] {
+            change(&mut mcu);
+            main = mcu.update_main_rs(&main);
+            assert_eq!(main.matches(BODY).count(), 1, "{what}:\n{main}");
+            assert_eq!(main.matches(SEED_HEAD).count(), 1, "{what}:\n{main}");
+            assert!(block(&main).contains(CALL), "{what}:\n{main}");
+        }
+        assert!(
+            block(&main).contains("wait_for_any_edge"),
+            "the last change took:\n{main}"
+        );
+    }
+
+    /// Blocking generates no handler, so the hook goes uncalled and stays as
+    /// dead code - it names no crate, so it compiles either way. Back on
+    /// Async it is called again, with the body intact and no second seed.
+    #[test]
+    fn a_switch_to_blocking_keeps_the_hook_and_back_to_async_calls_it() {
+        let mut mcu = armed();
+        let main = edited(&mcu.fresh_main_rs());
+
+        mcu.runtime = Runtime::Blocking;
+        let blocking = mcu.update_main_rs(&main);
+        assert!(!block(&blocking).contains("on_p0_14_in_edge"), "{blocking}");
+        assert_eq!(blocking.matches(SEED_HEAD).count(), 1, "{blocking}");
+        assert_eq!(blocking.matches(BODY).count(), 1, "{blocking}");
+
+        mcu.runtime = Runtime::Async;
+        let back = mcu.update_main_rs(&blocking);
+        assert!(block(&back).contains(CALL), "{back}");
+        assert_eq!(back.matches(SEED_HEAD).count(), 1, "{back}");
+        assert_eq!(back.matches(BODY).count(), 1, "{back}");
+    }
+
+    /// A project saved before this change: the task carries the old inline
+    /// comment and there is no hook. One update gives it the call and one
+    /// seed - whatever was typed into the block is gone, as it would have been
+    /// on the next regeneration anyway.
+    #[test]
+    fn an_old_project_gets_the_call_and_one_seed() {
+        let mcu = armed();
+        let fresh = mcu.fresh_main_rs();
+        let seed = fresh
+            .find("\n/// P0.14 (pad 5, BTN_A) - called")
+            .expect("seed");
+        let old = fresh[..seed]
+            .replacen(CALL, "        // The edge arrived. Your code here.\n", 1)
+            .replacen(
+                "The task owns the pin;\n/// `on_p0_14_in_edge` below `main` is yours.",
+                "The task owns the pin.",
+                1,
+            );
+        assert!(!old.contains("on_p0_14_in_edge"), "{old}");
+
+        let main = mcu.update_main_rs(&old);
+        assert!(block(&main).contains(CALL), "{main}");
+        assert_eq!(main.matches(SEED_HEAD).count(), 1, "{main}");
+    }
+
+    /// A pin that is not armed reports no hook, so nothing is seeded for it.
+    #[test]
+    fn a_plain_input_seeds_nothing() {
+        let mut mcu = armed();
+        arm(&mut mcu, None);
+        let main = mcu.fresh_main_rs();
+        assert!(!main.contains("on_p0_14_in_edge"), "{main}");
     }
 }

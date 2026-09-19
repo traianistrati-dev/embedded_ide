@@ -401,6 +401,111 @@ pub fn ensure_module_models(mut file: String, modules: &[VirtualModule]) -> Stri
     file
 }
 
+// ── Edge hooks — the user's handler for an armed input ───────────────────────
+//
+// The task (or interrupt handler) an armed input generates sits INSIDE the
+// markers, so a body typed into it was lost on the next regeneration - any
+// change on the Pins, Peripherals or Clock tab. The generated code calls a
+// function instead: seeded ONCE below the user tail, and never rewritten.
+
+/// One armed input's hook, reported by the backend that emitted the call
+/// (`FamilyBackend::edge_hooks`) so `Mcu` can seed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeHook {
+    /// The function the generated handler calls: [`edge_hook_name`].
+    pub name: String,
+    /// The pin, as the generated comment names it (`P0.14 (pad 5, BTN_A)`).
+    pub what: String,
+    /// The generated task or handler that calls it, for the seed's doc.
+    pub caller: String,
+    /// `async fn` where the caller is an executor task, so the body can
+    /// `.await` a debounce; plain `fn` where it runs in an interrupt handler.
+    pub is_async: bool,
+}
+
+/// The hook's name, from the binding the handler is named after:
+/// `p0_14_in` → `on_p0_14_in_edge`.
+pub fn edge_hook_name(binding: &str) -> String {
+    format!("on_{binding}_edge")
+}
+
+/// The seed: the hook as it is first written below the tail. Names no crate
+/// on purpose - it has to compile under either runtime, since a switch to a
+/// runtime with no handler leaves it as dead code rather than removing it.
+/// The edge is left out of the doc: changing it does not rename the hook, and
+/// a stale line in the user's text is not ours to fix.
+///
+/// The async seed has no `.await`, and `clippy::unused_async` is in
+/// `pedantic`, which the Strict profile denies - without the `#[allow]` a
+/// file the IDE just wrote would fail `cargo clippy`.
+pub fn hook_seed(hook: &EdgeHook) -> String {
+    if hook.is_async {
+        format!(
+            "/// {} - called from the `{}` task\n\
+             /// with the level after the edge. Yours: kept across regeneration.\n\
+             #[allow(clippy::unused_async)] // drop once the body awaits something\n\
+             async fn {}(_high: bool) {{\n\
+             \x20   // Your code here.\n\
+             }}\n",
+            hook.what, hook.caller, hook.name
+        )
+    } else {
+        format!(
+            "/// {} - called from `{}` with the level after the edge. Runs in the\n\
+             /// interrupt, inside a critical section: keep it short.\n\
+             /// Yours: kept across regeneration.\n\
+             fn {}(_high: bool) {{\n\
+             \x20   // Your code here.\n\
+             }}\n",
+            hook.what, hook.caller, hook.name
+        )
+    }
+}
+
+/// Seed each hook the user's region does not already have. The precedent is
+/// [`ensure_module_models`]: append at the end of the file when absent, and
+/// otherwise leave the file alone - the hook is the user's the moment it is
+/// written, and a body they typed is never touched.
+///
+/// "Has" is the bare identifier anywhere AFTER `GEN_END`, not `fn name(` over
+/// the whole file: a user who moves the hook into `src/handlers.rs` and writes
+/// `use handlers::on_p0_14_in_edge;` in the tail has no definition left here,
+/// and seeding one would collide with the `use`. The block cannot give a false
+/// hit, since it sits before `GEN_END` and holds the call, never a definition.
+pub fn ensure_edge_hooks(mut file: String, hooks: &[EdgeHook]) -> String {
+    let user_region_starts = file.find(GEN_END).map_or(0, |i| i + GEN_END.len());
+    let seeds: Vec<String> = hooks
+        .iter()
+        .filter(|h| !has_ident(&file[user_region_starts..], &h.name))
+        .map(hook_seed)
+        .collect();
+    if seeds.is_empty() {
+        return file;
+    }
+    if !file.ends_with('\n') {
+        file.push('\n');
+    }
+    for seed in seeds {
+        file.push('\n');
+        file.push_str(&seed);
+    }
+    file
+}
+
+/// Whether `ident` occurs in `text` as a whole identifier - not as the tail of
+/// `on_p0_14_in_edge_old`, nor the head of `on_p0_14_in_edge2`.
+fn has_ident(text: &str, ident: &str) -> bool {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(ident).any(|(at, _)| {
+        let before = text[..at].chars().next_back().is_none_or(|c| !is_ident(c));
+        let after = text[at + ident.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_ident(c));
+        before && after
+    })
+}
+
 // ── Variable name suffix ──────────────────────────────────────────────────────
 
 use super::super::pins::logic::pin_function::PinFunction;
@@ -1488,5 +1593,131 @@ mod device_comment_tests {
             "grouping changed a line of CODE"
         );
         assert!(grouped.contains("wildly distinctive name"));
+    }
+}
+
+#[cfg(test)]
+mod edge_hook_tests {
+    use super::{
+        EdgeHook, GEN_BEGIN, GEN_END, USER_TAIL, edge_hook_name, ensure_edge_hooks, hook_seed,
+    };
+
+    fn hook(binding: &str) -> EdgeHook {
+        EdgeHook {
+            name: edge_hook_name(binding),
+            what: format!("{binding} pad"),
+            caller: format!("{binding}_irq"),
+            is_async: true,
+        }
+    }
+
+    /// A file in the shape every backend leaves: the block, then the tail.
+    fn file() -> String {
+        format!("{GEN_BEGIN}\nfn main() {{\n    on_p0_14_in_edge(true);\n{GEN_END}\n{USER_TAIL}")
+    }
+
+    /// The seed goes in once, below the tail, and a second pass changes
+    /// nothing: the hook is the user's from the first write.
+    #[test]
+    fn seeds_once_below_the_tail_and_is_idempotent() {
+        let once = ensure_edge_hooks(file(), &[hook("p0_14_in")]);
+        assert_eq!(once.matches("fn on_p0_14_in_edge(").count(), 1, "{once}");
+        assert!(
+            once.find("fn on_p0_14_in_edge(") > once.find(USER_TAIL),
+            "{once}"
+        );
+        assert!(once.contains("#[allow(clippy::unused_async)]"), "{once}");
+        assert_eq!(ensure_edge_hooks(once.clone(), &[hook("p0_14_in")]), once);
+    }
+
+    /// The call inside the block is not a definition: it must not stop the
+    /// seed, or a project with an armed pin would never get its hook.
+    #[test]
+    fn the_call_in_the_block_does_not_count_as_present() {
+        assert!(
+            file().contains("on_p0_14_in_edge(true)"),
+            "the fixture calls it"
+        );
+        let out = ensure_edge_hooks(file(), &[hook("p0_14_in")]);
+        assert!(
+            out.contains("async fn on_p0_14_in_edge(_high: bool)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn nothing_armed_seeds_nothing() {
+        assert_eq!(ensure_edge_hooks(file(), &[]), file());
+    }
+
+    /// The body the user typed is theirs: a regeneration leaves it byte for
+    /// byte, and a second hook lands beside it without touching it.
+    #[test]
+    fn an_edited_body_is_left_alone_and_a_second_hook_lands_beside_it() {
+        let seeded = ensure_edge_hooks(file(), &[hook("p0_14_in")]);
+        let edited = seeded.replace(
+            "    // Your code here.\n",
+            "    FLAG.store(true, Relaxed);\n",
+        );
+        assert_ne!(edited, seeded, "the edit took");
+
+        let again = ensure_edge_hooks(edited.clone(), &[hook("p0_14_in"), hook("p0_23_in")]);
+        assert!(
+            again.starts_with(&edited),
+            "the file up to the new seed is untouched:\n{again}"
+        );
+        assert!(again.contains("FLAG.store(true, Relaxed);"), "{again}");
+        assert_eq!(again.matches("fn on_p0_23_in_edge(").count(), 1, "{again}");
+        assert!(again.find("fn on_p0_23_in_edge(") > again.find("fn on_p0_14_in_edge("));
+    }
+
+    /// A hook moved out of main.rs and brought back with a `use` in the tail
+    /// is present: seeding another would collide with the `use`. A different
+    /// identifier that merely contains the name is not present.
+    #[test]
+    fn a_use_in_the_tail_counts_and_a_longer_name_does_not() {
+        let with_use = format!("{}use handlers::on_p0_14_in_edge;\n", file());
+        assert_eq!(
+            ensure_edge_hooks(with_use.clone(), &[hook("p0_14_in")]),
+            with_use
+        );
+
+        let longer = format!("{}fn on_p0_14_in_edge_old(_high: bool) {{}}\n", file());
+        let out = ensure_edge_hooks(longer, &[hook("p0_14_in")]);
+        assert!(
+            out.contains("async fn on_p0_14_in_edge(_high: bool)"),
+            "{out}"
+        );
+    }
+
+    /// The seed lands after a module model (`ensure_module_models` runs
+    /// first), still outside `main`.
+    #[test]
+    fn lands_after_a_module_model() {
+        let with_model = format!("{}\n// Data model for x\nmod x {{\n}}\n", file());
+        let out = ensure_edge_hooks(with_model, &[hook("p0_14_in")]);
+        assert!(
+            out.find("fn on_p0_14_in_edge(") > out.find("mod x {"),
+            "{out}"
+        );
+    }
+
+    /// The sync flavor, for a backend whose handler is an interrupt: no
+    /// `async`, no clippy allow, and the critical-section warning.
+    #[test]
+    fn the_sync_seed_has_no_async_and_says_where_it_runs() {
+        let seed = hook_seed(&EdgeHook {
+            is_async: false,
+            ..hook("pa0_in")
+        });
+        assert!(
+            seed.contains("\nfn on_pa0_in_edge(_high: bool) {\n"),
+            "{seed}"
+        );
+        assert!(
+            !seed.contains("async") && !seed.contains("allow("),
+            "{seed}"
+        );
+        assert!(seed.contains("critical section: keep it short"), "{seed}");
     }
 }

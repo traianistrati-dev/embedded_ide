@@ -1,6 +1,6 @@
 [package]
 name = "embedded_ide_0"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 authors = ["Traian Istrati"]
 license = "MIT OR Apache-2.0"
