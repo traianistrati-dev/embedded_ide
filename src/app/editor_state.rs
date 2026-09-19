@@ -186,6 +186,11 @@ pub(crate) struct EditorState {
     /// "Add explicit type" on a binding whose type cannot be written.
     pub(crate) code_action_note: Option<String>,
 
+    /// "Add explicit type" built from the caret line's type hint, offered when
+    /// rust-analyzer's own assist is missing from the list — see
+    /// `code_action::hint_type_action`.
+    pub(crate) code_action_hint_type: Option<lsp::CodeAction>,
+
     /// The code actions to choose from (popup shown when > 1).
     pub(crate) code_actions: Vec<lsp::CodeAction>,
 
@@ -320,6 +325,7 @@ impl EditorState {
             code_action_sent_at: None,
             code_action_resolve_for: None,
             code_action_note: None,
+            code_action_hint_type: None,
             code_actions: Vec::new(),
             code_action_popup_open: false,
             code_action_sel: 0,

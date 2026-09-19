@@ -138,6 +138,50 @@ fn unnameable_type(hint_label: &str) -> bool {
         .any(|p| hint_label.contains(p))
 }
 
+/// "Add explicit type" made from the type hint rust-analyzer drew for this
+/// binding — for when its own assist is not in the list.
+///
+/// rust-analyzer refuses "Insert explicit type" for some types it can perfectly
+/// well write: on `let s = format_text_with_u32(.., &mut out);`, returning
+/// `&'a str`, not one of five caret positions offered it. Yet the inlay hint
+/// for that very binding carries a ready edit (`: &str` right after the name)
+/// — the one Tab inserts. So the list offers that edit under the name the user
+/// is looking for. `None` when the hint is for another line, has no edit, or
+/// names a type that cannot be written (a closure's).
+fn hint_type_action(
+    hint: Option<&crate::lsp::InlayHint>,
+    binding_line: u32,
+) -> Option<crate::lsp::CodeAction> {
+    let h = hint?;
+    if h.line != binding_line || h.text_edits.is_empty() {
+        return None;
+    }
+    let label = h.label.trim_start_matches(':').trim();
+    if label.is_empty() || unnameable_type(label) {
+        return None;
+    }
+    Some(crate::lsp::CodeAction {
+        title: format!("Add explicit type `{label}`"),
+        edits: Some(h.text_edits.clone()),
+        raw: serde_json::Value::Null,
+    })
+}
+
+/// `actions` with the hint-made "Add explicit type" in front, unless
+/// rust-analyzer offered its own.
+fn with_hint_type(
+    mut actions: Vec<crate::lsp::CodeAction>,
+    hint_type: Option<crate::lsp::CodeAction>,
+) -> Vec<crate::lsp::CodeAction> {
+    let has_own = actions
+        .iter()
+        .any(|a| a.title.to_ascii_lowercase().contains("explicit type"));
+    if let (false, Some(h)) = (has_own, hint_type) {
+        actions.insert(0, h);
+    }
+    actions
+}
+
 impl AppIde {
     /// The text of `rel` as it is now (main.rs or a user file).
     fn source_text(&self, rel: &str) -> Option<String> {
@@ -225,8 +269,17 @@ impl AppIde {
         // Say why "Add explicit type" will be missing, when the caret is in a
         // `let` whose type cannot be written. Kept only if the answer indeed
         // lacks it (see `poll_code_actions`).
-        let on_let = sel_end_char_idx.is_none_or(|e| e == idx)
-            && super::let_annotation::let_binding_pos(&chars, idx).is_some();
+        let binding = sel_end_char_idx
+            .is_none_or(|e| e == idx)
+            .then(|| super::let_annotation::let_binding_pos(&chars, idx))
+            .flatten();
+        let on_let = binding.is_some();
+        self.ed.code_action_hint_type = binding.and_then(|t| {
+            hint_type_action(
+                self.ed.inlay_hint.as_ref(),
+                lsp_cursor_pos(display_code, t).0,
+            )
+        });
         self.ed.code_action_note = on_let.then(|| {
             match self
                 .ed
@@ -285,6 +338,7 @@ impl AppIde {
             let actions = self.lsp_state.lock().unwrap().take_code_actions_result();
             if let Some(actions) = actions {
                 self.ed.code_action_in_flight = false;
+                let actions = with_hint_type(actions, self.ed.code_action_hint_type.take());
                 // With our row present, 0 actions is still a list of one.
                 let ours = self.ed.code_action_add_dep.is_some();
                 // The note is about a MISSING "Add explicit type".
@@ -524,7 +578,10 @@ impl AppIde {
 
 #[cfg(test)]
 mod tests {
-    use super::{breaks_syntax, code_action_positions, edit_summary, unnameable_type};
+    use super::{
+        breaks_syntax, code_action_positions, edit_summary, hint_type_action, unnameable_type,
+        with_hint_type,
+    };
     use crate::lsp::RenameEdit;
 
     fn chars(s: &str) -> Vec<char> {
@@ -540,6 +597,63 @@ mod tests {
             end_char: ec,
             new_text: text.to_owned(),
         }
+    }
+
+    fn hint(line: u32, label: &str, with_edit: bool) -> crate::lsp::InlayHint {
+        crate::lsp::InlayHint {
+            line,
+            character: 27,
+            label: label.to_owned(),
+            text_edits: if with_edit {
+                vec![edit("src/main.rs", (line, 27), (line, 27), label)]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn action(title: &str) -> crate::lsp::CodeAction {
+        crate::lsp::CodeAction {
+            title: title.to_owned(),
+            edits: None,
+            raw: serde_json::json!({ "title": title, "data": 1 }),
+        }
+    }
+
+    /// The report: `let new_val_str = format_text_with_u32(..)` — the hint
+    /// says `: &str` and carries the edit, rust-analyzer offers no "Insert
+    /// explicit type". The list gets it, first, applying exactly that edit.
+    #[test]
+    fn a_hint_with_an_edit_becomes_add_explicit_type() {
+        let h = hint(318, ": &str", true);
+        let got = hint_type_action(Some(&h), 318).expect("offered");
+        assert_eq!(got.title, "Add explicit type `&str`");
+        assert_eq!(
+            got.edits.as_deref().map(|e| e[0].new_text.as_str()),
+            Some(": &str")
+        );
+        let list = with_hint_type(vec![action("Inline variable")], Some(got));
+        let titles: Vec<&str> = list.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["Add explicit type `&str`", "Inline variable"]);
+    }
+
+    #[test]
+    fn no_hint_row_for_another_line_no_edit_or_a_closure() {
+        assert!(hint_type_action(Some(&hint(318, ": &str", true)), 319).is_none());
+        assert!(hint_type_action(Some(&hint(318, ": &str", false)), 318).is_none());
+        let closure = hint(318, ": impl AsyncFn(&str, u32)", true);
+        assert!(hint_type_action(Some(&closure), 318).is_none());
+        assert!(hint_type_action(None, 318).is_none());
+    }
+
+    /// rust-analyzer's own assist wins: no second, look-alike row.
+    #[test]
+    fn rust_analyzers_own_explicit_type_is_not_doubled() {
+        let own = action("Insert explicit type `u32`");
+        let made = hint_type_action(Some(&hint(3, ": u32", true)), 3);
+        let list = with_hint_type(vec![own], made);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "Insert explicit type `u32`");
     }
 
     /// The report: rust-analyzer's "Inline variable" on an async closure glued
