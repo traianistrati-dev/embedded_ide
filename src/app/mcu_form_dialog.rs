@@ -13,9 +13,9 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 
 impl AppIde {
-    /// Open the form blank, or seeded from an existing definition (Clone/Edit).
+    /// Open the form empty, or seeded from an existing definition (Clone/Edit).
     pub(crate) fn open_mcu_form(&mut self, seed: Option<McuForm>) {
-        self.mcu_form = Some(seed.unwrap_or_else(McuForm::blank));
+        self.mcu_form = Some(seed.unwrap_or_else(McuForm::empty));
         self.mcu_form_clock_note = None;
         // Reopen at the normal size — reset both the maximize STATE and the
         // first-frame force (which overrides egui's persisted window rect).
@@ -126,7 +126,9 @@ impl AppIde {
                                 .size(11.0),
                             )
                             .on_hover_text(
-                                "Set Family / CPU / Toolchain / Target from the chip name \
+                                "Set Family / CPU / Toolchain / Target / HAL line from the chip \
+                                 name, and the clock tree and memory origins when it names \
+                                 another family \
                                  (e.g. STM32WBA55CG -> stm32wba · Cortex-M33 · thumbv8m.main-none-eabihf)",
                             )
                             .clicked()
@@ -134,9 +136,12 @@ impl AppIde {
                             form.auto_fill_identity();
                         }
                         ui.label(
-                            egui::RichText::new("fills Family/CPU/Toolchain/Target from the name")
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(140)),
+                            egui::RichText::new(
+                                "STM32 names only: fills Family, CPU, Toolchain, Target, \
+                                 HAL line, clock tree and memory origins",
+                            )
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(140)),
                         );
                     });
 
@@ -173,10 +178,16 @@ impl AppIde {
                             .num_columns(4)
                             .spacing([8.0, 5.0])
                             .show(ui, |ui| {
+                                // Sized, not `desired_width`: a Grid offers a cell
+                                // that is not in the last column only the width
+                                // the column had last frame, which starts at the
+                                // minimum. The edit never got to ask for more, and
+                                // `0x20000000` showed as `0x200`.
+                                let origin_size = [110.0, ui.spacing().interact_size.y];
                                 ui.label("Flash origin");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut form.flash_origin)
-                                        .desired_width(220.0),
+                                ui.add_sized(
+                                    origin_size,
+                                    egui::TextEdit::singleline(&mut form.flash_origin),
                                 );
                                 ui.label("Flash size");
                                 ui.add(
@@ -185,9 +196,9 @@ impl AppIde {
                                 );
                                 ui.end_row();
                                 ui.label("RAM origin");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut form.ram_origin)
-                                        .desired_width(220.0),
+                                ui.add_sized(
+                                    origin_size,
+                                    egui::TextEdit::singleline(&mut form.ram_origin),
                                 );
                                 ui.label("RAM size");
                                 ui.add(
@@ -223,6 +234,23 @@ impl AppIde {
                     );
                     ui.add(
                         egui::TextEdit::multiline(&mut form.hal_dep)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Async projects use this line instead (leave empty for one crate):",
+                        )
+                        .size(11.0),
+                    )
+                    .on_hover_text(
+                        "For a family whose Async runtime needs a different HAL crate, such as \
+                         embassy-rp or embassy-nrf. It replaces the line above in an Async \
+                         project's Cargo.toml.",
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut form.hal_dep_async)
                             .desired_rows(2)
                             .desired_width(f32::INFINITY)
                             .font(egui::TextStyle::Monospace),
