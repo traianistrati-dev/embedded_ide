@@ -12,11 +12,12 @@ safe across regenerations.
 
 ![A tour of RustOnChip](docs/rust_on_chip_tour.gif)
 
-> Status: early development (`v0.1`). **Fifteen chips ship built in** — one
+> Status: early development (`v0.2.4`). **Fifteen chips ship built in** — one
 > STM32, nine ESP32, all four Raspberry Pi Pico boards and the BBC micro:bit v2 —
 > and the rest of the STM32 catalogue is reachable by importing a part from ST's
 > own database. A new chip inside a supported family is plain data, no rebuild.
-
+> Renamed from `embedded_ide` on 2026-09-20. The old URL still redirects — update your
+> remote with `git remote set-url origin https://github.com/traianistrati-dev/rust_on_chip.git`.
 ---
 
 ## What you can do
