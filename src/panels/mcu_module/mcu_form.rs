@@ -205,6 +205,17 @@ pub struct McuForm {
     /// Datasheet maximum core frequency in MHz. `None` when the vendor file
     /// states none — shown as nothing, never as a family guess.
     pub max_mhz: Option<u32>,
+    /// The chip on this board, carried through untouched like `dma`: the form
+    /// has no field for it, and dropping it turns a board back into a bare part.
+    pub board_chip: Option<String>,
+    /// On-die RAM in KiB, carried through like `dma` for as long as the RAM
+    /// size below is the one it was loaded with — see [`Self::sram_kb_kept`].
+    ///
+    /// Set together with `loaded_ram_size`, or not at all: a value whose
+    /// `loaded_ram_size` does not match `ram_size` is dropped on save.
+    pub sram_kb: Option<u32>,
+    /// `ram_size` as the definition had it, which is what `sram_kb` describes.
+    pub loaded_ram_size: String,
     /// The chip's DMA channels, carried through untouched: imported from the
     /// vendor database, not authorable here (see [`super::mcu_def::DmaDef`]).
     /// Editing a chip in this form must not silently drop them.
@@ -227,12 +238,23 @@ pub struct McuForm {
     // Probe / flash + dependency line
     pub probe_chip: String,
     pub hal_dep: String,
+    /// The dependency line an Async project gets INSTEAD of `hal_dep`, for a
+    /// family that swaps HAL crates with the runtime (RP, nRF). Empty for a
+    /// chip that keeps one crate. Shown in the form, because a line that
+    /// replaces the visible one must not be invisible itself.
+    pub hal_dep_async: String,
     // Clock model
     pub clock: ClockChoice,
     /// A hand-imported [`ClockDef::Graph`] the form cannot re-author: carried
     /// through Edit → Save verbatim while the choice stays `None`, so editing
     /// an imported chip never silently drops its clock tree.
     pub imported_clock: Option<ClockDef>,
+    /// Where `imported_clock` came from: `true` when [`Self::from_definition`]
+    /// carried it in with the chip the form was opened on, `false` when
+    /// [`Self::set_imported_clock`] attached it to THIS form. Only the first
+    /// kind goes stale when Auto-fill moves the form to another family. Read
+    /// only while `imported_clock` is `Some`.
+    pub clock_carried_in: bool,
     // Pins, per side
     pub pins: [Vec<PinRow>; 4],
     /// A ball grid (WLCSP / BGA) the form cannot re-author yet: carried through
@@ -251,7 +273,56 @@ impl Default for McuForm {
 }
 
 impl McuForm {
-    /// A blank STM32-flavoured starting point (the most common authoring case).
+    /// What the New MCU form opens with: nothing.
+    ///
+    /// It used to open on [`Self::blank`], and every one of those STM32F1
+    /// values is VALID, so none of them was ever flagged: an nRF52840 typed
+    /// into it kept Cortex-M3, `thumbv7m-none-eabi`, flash at `0x08000000` and
+    /// the F1 clock tree, and saved without an error. Empty fields are ones
+    /// [`Self::errors`] asks for.
+    ///
+    /// The toolchain is the one field that cannot be empty; it stays on the
+    /// ARM one, which is what decides that the memory fields are required.
+    ///
+    /// Every field is written out rather than spread from [`Self::blank`]: a
+    /// field added there with an STM32 value would otherwise reach this form
+    /// too, silently, which is the shape of the bug this all started from.
+    pub fn empty() -> Self {
+        Self {
+            id: String::new(),
+            display_name: String::new(),
+            family: String::new(),
+            cpu: String::new(),
+            package: String::new(),
+            max_mhz: None,
+            board_chip: None,
+            sram_kb: None,
+            loaded_ram_size: String::new(),
+            dma: None,
+            irq_vectors: Vec::new(),
+            usart_ip: None,
+            sdmmc_ip: None,
+            toolchain: ToolchainKind::RustEmbedded,
+            target: String::new(),
+            flash_origin: String::new(),
+            flash_size: String::new(),
+            ram_origin: String::new(),
+            ram_size: String::new(),
+            memory_comment: String::new(),
+            probe_chip: String::new(),
+            hal_dep: String::new(),
+            hal_dep_async: String::new(),
+            clock: ClockChoice::None,
+            imported_clock: None,
+            clock_carried_in: false,
+            pins: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            grid: None,
+            editing: false,
+        }
+    }
+
+    /// An STM32F1-flavored form: the base the importers and the tests fill in.
+    /// Not what the dialog opens with — see [`Self::empty`].
     pub fn blank() -> Self {
         Self {
             grid: None,
@@ -261,6 +332,9 @@ impl McuForm {
             cpu: "Cortex-M3".into(),
             package: String::new(),
             max_mhz: None,
+            board_chip: None,
+            sram_kb: None,
+            loaded_ram_size: String::new(),
             dma: None,
             irq_vectors: Vec::new(),
             usart_ip: None,
@@ -274,8 +348,10 @@ impl McuForm {
             memory_comment: String::new(),
             probe_chip: String::new(),
             hal_dep: "stm32f1xx-hal = { version = \"0.10\", features = [\"rt\"] }".into(),
+            hal_dep_async: String::new(),
             clock: ClockChoice::Stm32f1,
             imported_clock: None,
+            clock_carried_in: false,
             pins: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             editing: false,
         }
@@ -295,6 +371,17 @@ impl McuForm {
         else {
             return false;
         };
+        // Whether this form is being moved to ANOTHER family decides what else
+        // below is stale. A re-fill on the same family changes nothing but the
+        // derived fields, so a value typed into this chip survives it.
+        //
+        // Both sides go through the SAME derivation. A chip imported from the
+        // vendor data carries the vendor's family key, and that can be finer
+        // than a name yields: `stm32l4+` and `stm32wb0` are both real keys,
+        // and compared raw against `stm32l4` / `stm32wb` an unrenamed L4+ part
+        // read as a move - and lost its own clock tree to the L4 template.
+        let new_family = super::mcu_identity::family_from_name(self.family.trim()).as_deref()
+            != Some(family.as_str());
         self.family = family;
         self.cpu = cpu.to_string();
         self.toolchain = toolchain;
@@ -304,6 +391,41 @@ impl McuForm {
         // a non-F1 STM32 on the blank form's `stm32f1xx-hal` default, so the
         // generated project wouldn't compile until the line was hand-edited.
         self.hal_dep = super::stm32_pin_data::hal_dep_for_name(&self.family, &name);
+        // Only STM32 names are recognized, and an STM32 keeps one crate for
+        // both runtimes. A line left over from the chip this form was cloned
+        // from would replace the one just written in every Async project.
+        self.hal_dep_async.clear();
+        // The memory map and the clock tree are per-FAMILY, so they follow the
+        // family across. Cloning a board and renaming it is how a form ends up
+        // describing another part, and it arrives carrying the old family's
+        // answers: a micro:bit cloned to an STM32 kept flash at `0x00000000`
+        // and an nRF clock graph, under `family = stm32f4`.
+        //
+        // Only when the family actually moved. A re-fill on the same family
+        // leaves a bootloader offset, or a clock tree imported from CubeMX,
+        // exactly where the user put it.
+        if new_family {
+            // Every STM32 maps flash and SRAM at these two — the same pair the
+            // XML importer writes for all ~2800 parts it knows.
+            self.flash_origin = "0x08000000".into();
+            self.ram_origin = "0x20000000".into();
+            // A graph that came in with the old chip describes clocks this one
+            // does not have. One ATTACHED to this form is the user's answer for
+            // this chip, and is never dropped: the AI import attaches its tree
+            // from a request that can land before the one that gets here, and
+            // dropping it made the result depend on which reply came first.
+            if self.clock_carried_in {
+                self.imported_clock = None;
+                self.clock_carried_in = false;
+            }
+            // The dropdown follows the family - unless an attached graph is
+            // what is in effect, which a family template would shadow.
+            let attached_in_effect =
+                self.imported_clock.is_some() && self.clock == ClockChoice::None;
+            if !attached_in_effect {
+                self.clock = ClockChoice::for_family(&self.family);
+            }
+        }
         if self.probe_chip.trim().is_empty() {
             self.probe_chip = name;
         }
@@ -368,6 +490,9 @@ impl McuForm {
             cpu: def.cpu.clone(),
             package: def.package.clone(),
             max_mhz: def.max_mhz,
+            board_chip: def.board_chip.clone(),
+            sram_kb: def.sram_kb,
+            loaded_ram_size: def.project.ram_size.clone(),
             dma: def.dma.clone(),
             irq_vectors: def.irq_vectors.clone(),
             usart_ip: def.usart_ip.clone(),
@@ -381,12 +506,14 @@ impl McuForm {
             memory_comment: def.project.memory_comment.clone(),
             probe_chip: def.project.probe_chip.clone(),
             hal_dep: def.project.hal_dep.clone(),
+            hal_dep_async: def.project.hal_dep_async.clone().unwrap_or_default(),
             clock: ClockChoice::from_def(&def.clock),
             imported_clock: match (&def.clock, ClockChoice::from_def(&def.clock)) {
                 // A graph the form can't re-author (not the WBA one).
                 (ClockDef::Graph(_), ClockChoice::None) => Some(def.clock.clone()),
                 _ => None,
             },
+            clock_carried_in: true,
             pins: [
                 side(&def.pins.top),
                 side(&def.pins.bottom),
@@ -430,7 +557,13 @@ impl McuForm {
                 ("RAM origin", &self.ram_origin),
                 ("RAM size", &self.ram_size),
             ] {
-                if parse_ld_number(v).is_none() {
+                // An empty field is missing, not malformed: `('')` is not a
+                // value anyone typed.
+                if v.trim().is_empty() {
+                    e.push(format!(
+                        "{label} is required — hex (0x…), decimal, or a K/M suffix (e.g. 64K)."
+                    ));
+                } else if parse_ld_number(v).is_none() {
                     e.push(format!(
                         "{label} ('{v}') is not a valid value — use hex (0x…), \
                          decimal, or a K/M suffix (e.g. 64K)."
@@ -472,11 +605,42 @@ impl McuForm {
         let mut w = Vec::new();
         // Warn exactly when no codegen backend claims this family — so a family
         // handled by the generic STM32 (embassy) backend never flags.
-        if crate::panels::mcu_module::codegen::family::backend_for(self.family.trim()).is_none() {
+        // Not for an empty family: `errors` already asks for one, and "Family ''
+        // has no backend" says the same thing a second time, worse.
+        if !self.family.trim().is_empty()
+            && crate::panels::mcu_module::codegen::family::backend_for(self.family.trim()).is_none()
+        {
             w.push(format!(
                 "Family '{}' has no codegen backend yet — the chip loads and its \
                  pins/clock show, but configuring a peripheral won't generate init \
                  code until a backend is added.",
+                self.family.trim()
+            ));
+        }
+        // ARM only: most Espressif parts leave this empty, because the ESP
+        // template writes the esp-hal line itself.
+        if self.toolchain == ToolchainKind::RustEmbedded && self.hal_dep.trim().is_empty() {
+            w.push(
+                "HAL dependency line is empty — the generated Cargo.toml will name no HAL \
+                 crate, and the project will not build."
+                    .into(),
+            );
+        }
+        // Asked of `async_flavor_for`, the one place that decides which async
+        // stack a family gets, so this cannot disagree with the generator. The
+        // RP and nRF stacks take their HAL line from the chip, and with none an
+        // Async project pairs embassy code with the blocking crate's manifest.
+        use crate::panels::mcu_module::project_gen::{AsyncFlavor, async_flavor_for};
+        if self.hal_dep_async.trim().is_empty()
+            && matches!(
+                async_flavor_for(self.family.trim(), ""),
+                AsyncFlavor::Rp | AsyncFlavor::Nrf
+            )
+        {
+            w.push(format!(
+                "Family '{}' uses a different HAL crate on the Async runtime, and the \
+                 async dependency line is empty — an Async project will not build. Add \
+                 the embassy line (see a built-in board of this family for its shape).",
                 self.family.trim()
             ));
         }
@@ -523,7 +687,20 @@ impl McuForm {
     /// travels when a chip `.ron` is loaded.
     pub fn set_imported_clock(&mut self, gc: crate::panels::mcu_module::clock::graph::GraphClock) {
         self.imported_clock = Some(ClockDef::Graph(gc));
+        self.clock_carried_in = false;
         self.clock = ClockChoice::None;
+    }
+
+    /// `sram_kb`, unless the RAM size was changed to another figure.
+    ///
+    /// The catalogue reads `sram_kb` before `ram_size`, so a chip edited from
+    /// 128K to 256K would go on being listed with 128. Dropping it lets the
+    /// new `ram_size` answer. An EMPTY `ram_size` is not another figure: an
+    /// Espressif part has none, and `sram_kb` is the only RAM size it states.
+    fn sram_kb_kept(&self) -> Option<u32> {
+        let now = self.ram_size.trim();
+        self.sram_kb
+            .filter(|_| now.is_empty() || now == self.loaded_ram_size.trim())
     }
 
     /// Build the [`McuDefinition`]. Call only when [`errors`] is empty; blank
@@ -547,15 +724,15 @@ impl McuForm {
                 .collect()
         };
         McuDefinition {
-            board_chip: None,
+            board_chip: self.board_chip.clone(),
             id: self.id.trim().to_string(),
             display_name: self.display_name.trim().to_string(),
             family: self.family.trim().to_string(),
             package: self.package.trim().to_string(),
             max_mhz: self.max_mhz,
-            // Not authored in the form: the form writes a linker script, and
-            // `ram_size` is where it puts the figure.
-            sram_kb: None,
+            // The form has no field for this. An edited chip keeps the value
+            // from its definition.
+            sram_kb: self.sram_kb_kept(),
             dma: self.dma.clone(),
             irq_vectors: self.irq_vectors.clone(),
             usart_ip: self.usart_ip.clone(),
@@ -570,7 +747,8 @@ impl McuForm {
                 ram_origin: self.ram_origin.trim().to_string(),
                 ram_size: self.ram_size.trim().to_string(),
                 hal_dep: self.hal_dep.trim().to_string(),
-                hal_dep_async: None,
+                hal_dep_async: Some(self.hal_dep_async.trim().to_string())
+                    .filter(|l| !l.is_empty()),
                 probe_chip: self.probe_chip.trim().to_string(),
                 memory_comment: self.memory_comment.trim().to_string(),
             },
@@ -1168,6 +1346,256 @@ mod tests {
         assert_eq!(rebuilt.project, def.project);
     }
 
+    /// Edit then Save, with nothing touched, must write back what it read.
+    /// The form has no field for `board_chip`, `sram_kb` or `hal_dep_async`, and
+    /// once rebuilt all three as `None`: the saved file overrides the built-in,
+    /// so a board lost its chip square and its Async manifest named the
+    /// blocking HAL.
+    ///
+    /// Pin functions whose token does not read back (`rmt0` on the ESP parts)
+    /// are left out of BOTH sides: that is `token_to_function`'s own defect,
+    /// and it would hide this one behind it. Everything else about a pin is
+    /// still compared.
+    #[test]
+    fn every_builtin_survives_an_untouched_edit() {
+        let reads_back = |f: &PinFunction| {
+            function_to_token(f)
+                .and_then(|t| token_to_function(&t))
+                .as_ref()
+                == Some(f)
+        };
+        let comparable = |mut d: McuDefinition| {
+            let p = &mut d.pins;
+            for pin in [&mut p.top, &mut p.bottom, &mut p.left, &mut p.right]
+                .into_iter()
+                .flatten()
+            {
+                pin.functions.retain(reads_back);
+            }
+            d
+        };
+        for def in crate::panels::mcu_module::builtins::builtin_definitions() {
+            let rebuilt = McuForm::from_definition(&def).to_definition();
+            assert_eq!(comparable(rebuilt), comparable(def.clone()), "{}", def.id);
+        }
+    }
+
+    /// The async line REPLACES `hal_dep` in every Async project, so one left
+    /// over from the chip a form was cloned from must not outlive Auto-fill
+    /// rewriting `hal_dep` for a different part.
+    #[test]
+    fn auto_fill_drops_the_async_line_of_the_chip_it_was_cloned_from() {
+        let mut f = McuForm::from_definition(&builtin_for("nrf52833_microbit_v2").unwrap());
+        assert!(f.hal_dep_async.starts_with("embassy-nrf"));
+        f.display_name = "STM32F411RETx".into();
+        assert!(f.auto_fill_identity());
+        assert_eq!(f.to_definition().project.hal_dep_async, None);
+    }
+
+    /// The New MCU form opens empty, and says what it needs. It opened on F1
+    /// values before, which are all valid and so were never questioned.
+    #[test]
+    fn the_empty_form_asks_for_everything_it_used_to_assume() {
+        let f = McuForm::empty();
+        let errs = f.errors();
+        for needed in [
+            "Family is required",
+            "Target triple is required",
+            "Flash origin",
+            "Flash size",
+            "RAM origin",
+            "RAM size",
+        ] {
+            assert!(
+                errs.iter().any(|e| e.contains(needed)),
+                "{needed}: {errs:?}"
+            );
+        }
+        assert!(f.warnings().iter().any(|w| w.contains("HAL dependency")));
+        // Asked for once each, as missing: not as a malformed `('')`, and not a
+        // second time as a family with no backend.
+        assert!(!errs.iter().any(|e| e.contains("('')")), "{errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.starts_with("Flash origin is required"))
+        );
+        assert!(!f.warnings().iter().any(|w| w.contains("codegen backend")));
+        assert_eq!(f.clock, ClockChoice::None);
+        assert!(f.cpu.is_empty());
+    }
+
+    /// Auto-fill makes an empty form a complete STM32 one, short of the two
+    /// sizes, which are per-part. It does not overwrite a typed origin.
+    #[test]
+    fn auto_fill_completes_an_empty_form_for_an_stm32() {
+        let mut f = McuForm::empty();
+        f.id = "stm32f411re".into();
+        f.display_name = "STM32F411RETx".into();
+        assert!(f.auto_fill_identity());
+        assert_eq!(f.flash_origin, "0x08000000");
+        assert_eq!(f.ram_origin, "0x20000000");
+        assert_eq!(f.clock, ClockChoice::Stm32f4);
+        assert!(!f.hal_dep.is_empty());
+        f.flash_size = "512K".into();
+        f.ram_size = "128K".into();
+        assert!(f.errors().is_empty(), "{:?}", f.errors());
+
+        // A re-fill on the family the form is already on leaves what was typed
+        // into it: this is where a bootloader offset lives.
+        let mut same = McuForm::empty();
+        same.family = "stm32f4".into();
+        same.display_name = "STM32F411RETx".into();
+        same.flash_origin = "0x08004000".into();
+        assert!(same.auto_fill_identity());
+        assert_eq!(same.flash_origin, "0x08004000");
+    }
+
+    /// Cloning a board is how a form comes to describe another part, and it
+    /// arrives holding the old family's memory map and clock graph. Auto-fill
+    /// is where it is told which part it now is.
+    #[test]
+    fn auto_fill_moves_the_memory_map_and_clock_to_the_new_family() {
+        let mut f = McuForm::from_definition(&builtin_for("nrf52833_microbit_v2").unwrap());
+        assert_eq!(f.flash_origin, "0x00000000", "the nRF map");
+        assert!(f.imported_clock.is_some(), "the nRF graph");
+
+        f.id = "stm32f411re".into();
+        f.display_name = "STM32F411RETx".into();
+        assert!(f.auto_fill_identity());
+        assert_eq!(f.flash_origin, "0x08000000");
+        assert_eq!(f.ram_origin, "0x20000000");
+        assert_eq!(f.clock, ClockChoice::Stm32f4);
+        assert!(f.imported_clock.is_none(), "the nRF graph is gone");
+
+        // What gets saved is the F4 tree, not the nRF one.
+        match f.to_definition().clock {
+            ClockDef::Graph(gc) => assert!(crate::panels::mcu_module::clock::graph::is_f4_graph(
+                &gc.graph
+            )),
+            other => panic!("expected the F4 graph, got {other:?}"),
+        }
+    }
+
+    /// A tree ATTACHED to this form is the user's answer for this chip. The AI
+    /// import attaches one from a request of its own, which can land before
+    /// the pins request that runs Auto-fill, so dropping it on a family move
+    /// made the saved clock depend on which reply arrived first.
+    #[test]
+    fn auto_fill_keeps_a_tree_attached_to_this_form() {
+        let attached = || match builtin_for("nrf52833_microbit_v2").unwrap().clock {
+            ClockDef::Graph(gc) => gc,
+            other => panic!("expected a graph, got {other:?}"),
+        };
+
+        let mut f = McuForm::empty();
+        f.set_imported_clock(attached());
+        f.display_name = "STM32F411RETx".into();
+        assert!(f.auto_fill_identity());
+        assert_eq!(f.to_definition().clock, ClockDef::Graph(attached()));
+
+        // On a cloned form too: attaching replaces the carried-in graph, and
+        // what replaced it is not the old chip's.
+        let mut cloned = McuForm::from_definition(&builtin_for("rp2040_pico").unwrap());
+        cloned.set_imported_clock(attached());
+        cloned.display_name = "STM32F411RETx".into();
+        assert!(cloned.auto_fill_identity());
+        assert_eq!(cloned.to_definition().clock, ClockDef::Graph(attached()));
+
+        // Shadowed by a dropdown model the user picked over it: the dropdown
+        // follows the family, and the attached tree is still held.
+        let mut shadowed = McuForm::empty();
+        shadowed.set_imported_clock(attached());
+        shadowed.clock = ClockChoice::Stm32f1;
+        shadowed.display_name = "STM32G431KBTx".into();
+        assert!(shadowed.auto_fill_identity());
+        assert_eq!(shadowed.clock, ClockChoice::Stm32g4);
+        assert!(shadowed.imported_clock.is_some());
+    }
+
+    /// The vendor's family key can be finer than a part name yields. An
+    /// unrenamed L4+ chip is not a move, and keeps its own tree and origins.
+    #[test]
+    fn a_finer_vendor_family_key_is_not_a_family_move() {
+        let mut def = builtin_for("nrf52833_microbit_v2").unwrap();
+        def.family = "stm32l4+".into();
+        def.display_name = "STM32L4R5ZITx".into();
+        def.project.flash_origin = "0x08004000".into();
+        let mut f = McuForm::from_definition(&def);
+        assert!(f.imported_clock.is_some());
+
+        assert!(f.auto_fill_identity());
+        assert!(f.imported_clock.is_some(), "its own tree");
+        assert_eq!(f.clock, ClockChoice::None);
+        assert_eq!(f.flash_origin, "0x08004000");
+
+        // Typed in capitals is the same family as well.
+        let mut typed = McuForm::empty();
+        typed.family = "STM32F4".into();
+        typed.display_name = "STM32F411RETx".into();
+        typed.flash_origin = "0x08004000".into();
+        assert!(typed.auto_fill_identity());
+        assert_eq!(typed.flash_origin, "0x08004000");
+    }
+
+    /// A family with no modelled tree takes none, rather than the old one.
+    #[test]
+    fn a_family_without_a_tree_does_not_inherit_the_old_one() {
+        let mut f = McuForm::from_definition(&builtin_for("nrf52833_microbit_v2").unwrap());
+        f.display_name = "STM32H563ZITx".into();
+        assert!(f.auto_fill_identity());
+        assert_ne!(f.family, "nrf52833");
+        assert_eq!(f.clock, ClockChoice::None);
+        assert!(f.imported_clock.is_none());
+    }
+
+    /// A family whose Async stack names another crate needs the line that says
+    /// which. The built-ins are held to that by their own tests; a chip
+    /// authored here is held to it by nothing but this warning.
+    #[test]
+    fn a_missing_async_line_warns_only_where_async_swaps_crates() {
+        let warns = |f: &McuForm| f.warnings().iter().any(|w| w.contains("async dependency"));
+
+        let mut nrf = McuForm::from_definition(&builtin_for("nrf52833_microbit_v2").unwrap());
+        assert!(!warns(&nrf), "the built-in has its line");
+        nrf.hal_dep_async = " ".into();
+        assert!(warns(&nrf));
+
+        let mut rp = McuForm::from_definition(&builtin_for("rp2040_pico").unwrap());
+        rp.hal_dep_async.clear();
+        assert!(warns(&rp));
+
+        // One crate for both runtimes: nothing is missing.
+        assert!(!warns(&McuForm::blank()), "stm32f1");
+        assert!(!warns(&McuForm::from_definition(
+            &builtin_for("esp32c3").unwrap()
+        )));
+    }
+
+    /// An emptied box is "this chip keeps one crate", not an empty line in the
+    /// saved file.
+    #[test]
+    fn a_cleared_async_line_is_saved_as_none() {
+        let mut f = McuForm::from_definition(&builtin_for("nrf52833_microbit_v2").unwrap());
+        f.hal_dep_async = "  ".into();
+        assert_eq!(f.to_definition().project.hal_dep_async, None);
+    }
+
+    /// `sram_kb` describes the RAM size the chip was loaded with.
+    #[test]
+    fn sram_kb_follows_the_ram_size_it_was_loaded_with() {
+        let mut f = McuForm::from_definition(&builtin_for("nrf52833_microbit_v2").unwrap());
+        assert_eq!(f.to_definition().sram_kb, Some(128));
+        f.ram_size = "256K".into();
+        assert_eq!(f.to_definition().sram_kb, None, "stale beside 256K");
+        f.ram_size = " 128K ".into();
+        assert_eq!(f.to_definition().sram_kb, Some(128), "changed back");
+
+        // An ESP part has no `ram_size` at all: nothing was changed.
+        let esp = McuForm::from_definition(&builtin_for("esp32c3").unwrap());
+        assert!(esp.ram_size.is_empty());
+        assert!(esp.to_definition().sram_kb.is_some());
+    }
+
     /// The WBA clock choice: the def carries the WBA graph + the WBA ceilings,
     /// Edit detects it back, and a FOREIGN imported graph survives Edit→Save.
     #[test]
@@ -1407,6 +1835,19 @@ mod tests {
         assert!(f.warnings().iter().any(|w| w.contains("Package is empty")));
         f.package = "UFQFPN48".into();
         assert!(!f.warnings().iter().any(|w| w.contains("Package is empty")));
+    }
+
+    /// A typed value that does not parse still gets the message that quotes it.
+    #[test]
+    fn a_malformed_memory_value_is_quoted_back() {
+        let mut f = McuForm::blank();
+        f.ram_size = "20 kilobytes".into();
+        let errs = f.errors();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("RAM size ('20 kilobytes') is not a valid value")),
+            "{errs:?}"
+        );
     }
 
     #[test]

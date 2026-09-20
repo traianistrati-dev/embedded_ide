@@ -955,12 +955,6 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
     // NOTE: `package` is deliberately NOT patched from the extraction — it is a
     // USER input that drives which pin-number column the model reads, so the
     // model's echo must never override it.
-    patch(
-        &mut form.flash_origin,
-        &chip.flash_origin,
-        "Flash origin",
-        &mut r,
-    );
     // Sizes go through a sanitizer: the model occasionally trails junk onto the
     // value (e.g. "8K probe_chip"), which would fail the memory-value check and
     // block Save. Keep just the leading `0x…` / `<n>` / `<n>K|M` token.
@@ -970,7 +964,6 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
         "Flash size",
         &mut r,
     );
-    patch(&mut form.ram_origin, &chip.ram_origin, "RAM origin", &mut r);
     patch(
         &mut form.ram_size,
         &sanitize_mem_size(&chip.ram_size),
@@ -994,8 +987,15 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
         // Give the chip its family's clock tree so the Clock tab works and real
         // RCC codegen is emitted — same mapping the XML importer uses. Only when
         // the family actually has one (else leave the user's current choice).
+        //
+        // Not over an imported tree, which the dropdown would shadow: the clock
+        // half of a combined import is a request of its own and can have
+        // attached its tree before this one got here. With this guard the two
+        // replies give the same clock in either order.
         let clk = crate::panels::mcu_module::mcu_form::ClockChoice::for_family(&form.family);
-        if clk != crate::panels::mcu_module::mcu_form::ClockChoice::None {
+        if clk != crate::panels::mcu_module::mcu_form::ClockChoice::None
+            && form.imported_clock.is_none()
+        {
             form.clock = clk;
             r.patched.push(format!("Clock = {}", clk.label()));
         }
@@ -1003,6 +1003,17 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
         patch(&mut form.family, &chip.family, "Family", &mut r);
         patch(&mut form.cpu, &chip.cpu, "CPU", &mut r);
     }
+    // The origins AFTER Auto-fill, which writes the STM32 pair when it moves
+    // the form to another family. What the datasheet states wins, as it did
+    // when the form opened on that pair; the pair is the fallback for a reply
+    // that states none. Patched first, they were reported and then replaced.
+    patch(
+        &mut form.flash_origin,
+        &chip.flash_origin,
+        "Flash origin",
+        &mut r,
+    );
+    patch(&mut form.ram_origin, &chip.ram_origin, "RAM origin", &mut r);
 
     // Derive an id from the display name if the user hasn't set one — the id is
     // the file name + registry key and must be a–z 0–9 _ only.
@@ -3261,6 +3272,71 @@ mod tests {
         let chip = ExtractedChip::default(); // everything empty
         apply_to_form(&chip, &mut form);
         assert_eq!(form.display_name, "KEEP");
+    }
+
+    /// A combined import is two requests, and either reply can land first. The
+    /// clock one attaches its tree to the form; this one must not then put the
+    /// family template over it, or the saved clock depends on the network.
+    #[test]
+    fn apply_leaves_a_tree_the_clock_half_already_attached() {
+        use crate::panels::mcu_module::mcu_def::ClockDef;
+        let tree = match crate::panels::mcu_module::builtins::builtin_for("nrf52833_microbit_v2")
+            .unwrap()
+            .clock
+        {
+            ClockDef::Graph(gc) => gc,
+            other => panic!("expected a graph, got {other:?}"),
+        };
+        let chip = ExtractedChip {
+            display_name: "STM32F411RETx".into(),
+            ..Default::default()
+        };
+
+        // Clock first, pins second.
+        let mut clock_first = McuForm::empty();
+        clock_first.set_imported_clock(tree.clone());
+        let r = apply_to_form(&chip, &mut clock_first);
+        assert!(
+            !r.patched.iter().any(|p| p.starts_with("Clock = ")),
+            "{:?}",
+            r.patched
+        );
+
+        // Pins first, clock second.
+        let mut pins_first = McuForm::empty();
+        apply_to_form(&chip, &mut pins_first);
+        pins_first.set_imported_clock(tree.clone());
+
+        let want = ClockDef::Graph(tree);
+        assert_eq!(clock_first.to_definition().clock, want);
+        assert_eq!(pins_first.to_definition().clock, want);
+    }
+
+    /// What the datasheet states for the origins wins; the STM32 pair is what
+    /// an empty form gets when the reply states none. And the report names the
+    /// value the form ends up holding.
+    #[test]
+    fn apply_keeps_the_datasheet_origins_and_falls_back_to_the_stm32_pair() {
+        let stated = ExtractedChip {
+            display_name: "STM32F411RETx".into(),
+            flash_origin: "0x08004000".into(),
+            ram_origin: "0x20001000".into(),
+            ..Default::default()
+        };
+        let mut form = McuForm::empty();
+        let r = apply_to_form(&stated, &mut form);
+        assert_eq!(form.flash_origin, "0x08004000");
+        assert_eq!(form.ram_origin, "0x20001000");
+        assert!(r.patched.iter().any(|p| p == "Flash origin = 0x08004000"));
+
+        let silent = ExtractedChip {
+            display_name: "STM32F411RETx".into(),
+            ..Default::default()
+        };
+        let mut form = McuForm::empty();
+        apply_to_form(&silent, &mut form);
+        assert_eq!(form.flash_origin, "0x08000000");
+        assert_eq!(form.ram_origin, "0x20000000");
     }
 
     /// A non-F1 STM32 import must derive the build-critical fields from the part

@@ -2094,6 +2094,20 @@ mod tests {
         assert_eq!(sev("CARGO_FEATURE_* env"), Some(Severity::Blocking));
     }
 
+    /// Held by every test that writes a `CARGO_FEATURE_*` variable. The
+    /// environment is one per process and tests run in parallel: without this,
+    /// one test's variable appears and vanishes between two reads of another.
+    static CARGO_FEATURE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A panic while holding it poisons the lock, not the environment (each
+    /// holder removes its variable before it can assert), so the poison is
+    /// ignored rather than failing the other test with an unrelated message.
+    fn cargo_feature_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        CARGO_FEATURE_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// End to end, the way the startup self-check actually runs it: the entry's
     /// OWN `check_cmd` through `run_check_blocking`, then into the list the
     /// banner reads. The two halves were already tested separately, which is
@@ -2105,6 +2119,7 @@ mod tests {
     fn the_catalog_entry_is_wired_to_the_check() {
         const VAR: &str = "CARGO_FEATURE_EIDE_WIRING";
         const NAME: &str = "CARGO_FEATURE_* env";
+        let _env = cargo_feature_env_lock();
 
         let s = make_tools_state();
         let mut s = s.lock().unwrap();
@@ -2316,11 +2331,12 @@ mod tests {
     /// are pinned, and the message has to name the variable (that name is the
     /// entire diagnosis) and the error the user will otherwise be staring at.
     ///
-    /// Serialised by construction: one test touching the process environment,
-    /// restoring it before it returns.
+    /// Serialized with the other test that writes such a variable, and restores
+    /// the environment before it returns.
     #[test]
     fn a_stray_cargo_feature_variable_is_reported() {
         const NAME: &str = "CARGO_FEATURE_EIDE_SELFTEST";
+        let _env = cargo_feature_env_lock();
         let before = std::env::var(NAME).ok();
         assert!(before.is_none(), "{NAME} is not something anyone sets");
 
