@@ -275,10 +275,13 @@ impl AppIde {
                     crate::startup::save_mode(mode);
                 }
                 ui.label(
-                    egui::RichText::new(
-                        "Tip: start the IDE with a folder path to open it directly — \
-                         embedded_ide_0 <project folder>. One shortcut per project.",
-                    )
+                    // The executable's own name, so the tip cannot fall behind
+                    // a rename again (it said `embedded_ide_0` after one).
+                    egui::RichText::new(concat!(
+                        "Tip: start the IDE with a folder path to open it directly — ",
+                        env!("CARGO_PKG_NAME"),
+                        " <project folder>. One shortcut per project."
+                    ))
                     .size(9.5)
                     .italics()
                     .color(egui::Color32::from_gray(120)),
@@ -328,7 +331,10 @@ impl AppIde {
             }
             Some(Choice::Browse) => {
                 if let Some(dir) = rfd::FileDialog::new()
-                    .set_title("Open Embedded IDE Project — pick the project root folder")
+                    .set_title(format!(
+                        "Open {} Project — pick the project root folder",
+                        crate::names::APP_DISPLAY_NAME
+                    ))
                     .pick_folder()
                 {
                     self.startup_picker = None;

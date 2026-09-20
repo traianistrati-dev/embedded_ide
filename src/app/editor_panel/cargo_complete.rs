@@ -1447,7 +1447,15 @@ fn fetch_versions_with_timeout(
 ) -> Result<IndexData, String> {
     let url = format!("https://index.crates.io/{}", sparse_index_path(name));
     let body = ureq::get(&url)
-        .set("User-Agent", "embedded_ide_0 (crate version lookup)")
+        .set(
+            "User-Agent",
+            concat!(
+                env!("CARGO_PKG_NAME"),
+                "/",
+                env!("CARGO_PKG_VERSION"),
+                " (crate version lookup)"
+            ),
+        )
         .timeout(timeout)
         .call()
         .map_err(|e| match e {

@@ -757,7 +757,7 @@ mod tests {
         assert!(out.contains("embedded-io-async = \"0.7\""), "{out}");
     }
 
-    /// `# <embedded-ide>` means "the IDE may take this away again on a feature
+    /// `# <rust_on_chip>` means "the IDE may take this away again on a feature
     /// toggle". A dependency the user asked for by name is theirs.
     #[test]
     fn the_added_line_is_not_marked_as_ide_owned() {
@@ -766,7 +766,10 @@ mod tests {
             .lines()
             .find(|l| l.starts_with("embedded-io-async"))
             .expect("the line");
-        assert!(!line.contains("<embedded-ide>"), "{line}");
+        assert!(
+            !crate::panels::mcu_module::project_gen::is_ide_owned(line),
+            "{line}"
+        );
     }
 
     #[test]

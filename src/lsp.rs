@@ -581,7 +581,7 @@ const STDERR_TO_LOAD_LOG: usize = 60;
 /// anyone looked. Per instance, like the LSP debug log.
 pub fn ra_trace_path() -> PathBuf {
     std::env::temp_dir().join(format!(
-        "embedded_ide_ra_trace{}.log",
+        "rust_on_chip_ra_trace{}.log",
         crate::workspace::suffix()
     ))
 }
@@ -2093,7 +2093,7 @@ static LOG_FILE: Mutex<Option<(std::fs::File, u64)>> = Mutex::new(None);
 
 /// Append a line to the LSP debug log in the system temp dir.
 ///
-/// File: `<TEMP>/embedded_ide_lsp.log` — plus this instance's slot suffix, so
+/// File: `<TEMP>/rust_on_chip_lsp.log` — plus this instance's slot suffix, so
 /// two IDE windows don't interleave their handshakes into one unreadable file.
 /// No-op in release, and in debug unless `EIDE_LSP_LOG` is set.
 #[cfg(debug_assertions)]
@@ -2102,7 +2102,7 @@ fn lsp_log(line: &str) {
         return;
     }
     let path = std::env::temp_dir().join(format!(
-        "embedded_ide_lsp{}.log",
+        "rust_on_chip_lsp{}.log",
         crate::workspace::suffix()
     ));
     let Ok(mut slot) = LOG_FILE.lock() else {

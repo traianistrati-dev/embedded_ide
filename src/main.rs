@@ -28,6 +28,7 @@ pub mod flash_stop;
 pub mod git;
 pub mod lsp;
 pub mod msvc;
+pub mod names;
 pub mod openocd;
 pub mod panels;
 pub mod probe;
@@ -346,7 +347,7 @@ mod window_geometry_tests {
 
 /// The project folder asked for on the command line, if any.
 ///
-/// Accepts `embedded_ide_0 <folder>` and `embedded_ide_0 --project <folder>`.
+/// Accepts `rust_on_chip <folder>` and `rust_on_chip --project <folder>`.
 /// The bare form is what makes a per-project Windows shortcut, a drag of a
 /// folder onto the exe, and "Open with" all work without extra syntax.
 ///
@@ -390,7 +391,7 @@ mod project_arg_tests {
     use super::project_arg;
 
     fn args(list: &[&str]) -> std::vec::IntoIter<String> {
-        std::iter::once("embedded_ide_0.exe".to_owned())
+        std::iter::once("rust_on_chip.exe".to_owned())
             .chain(list.iter().map(|s| (*s).to_owned()))
             .collect::<Vec<_>>()
             .into_iter()
@@ -471,13 +472,16 @@ fn main() -> eframe::Result<()> {
     // decided which project both would reopen, so instances past the first get
     // their own. Slot 1 keeps the original name, and with it the state every
     // existing install already has.
-    let app_name = format!("Embedded IDE{}", workspace::suffix());
+    //
+    // FROZEN at the 2026-09-20 rename: this is the storage identity, not the
+    // product name — see `names::LEGACY_EFRAME_NAME`.
+    let app_name = format!("{}{}", names::LEGACY_EFRAME_NAME, workspace::suffix());
     // The title is set explicitly so the storage name above doesn't leak into
     // it verbatim — a second window says "#2", which is what you want on a
     // taskbar, not "Embedded IDE_2".
     let title = match workspace::slot() {
-        1 => "Embedded IDE".to_owned(),
-        s => format!("Embedded IDE #{s}"),
+        1 => names::APP_DISPLAY_NAME.to_owned(),
+        s => format!("{} #{s}", names::APP_DISPLAY_NAME),
     };
 
     // Drop any geometry an earlier session stored, or it would override the

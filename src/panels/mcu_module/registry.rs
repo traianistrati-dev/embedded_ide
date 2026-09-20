@@ -27,7 +27,8 @@ pub fn user_config_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)) // Linux
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))); // Unix
-    base.map(|b| b.join("embedded_ide_0"))
+    // Frozen at the rename: this folder holds the user's imported chips.
+    base.map(|b| b.join(crate::names::LEGACY_DATA_DIR))
 }
 
 /// Per-user folder scanned for imported `.ron` definitions.
@@ -271,7 +272,7 @@ mod one_shot_import {
 
     /// ```text
     /// EIDE_IMPORT_XML="…/STM32G474R(B-C-E)Tx.xml" \
-    ///   cargo test --bin embedded_ide_0 import_one_chip -- --ignored --nocapture
+    ///   cargo test --bin rust_on_chip import_one_chip -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "writes a chip definition into the user's config folder"]

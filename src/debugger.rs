@@ -958,8 +958,8 @@ fn run_session(
     wire.request(
         "initialize",
         json!({
-            "clientID": "embedded-ide",
-            "clientName": "Embedded IDE",
+            "clientID": env!("CARGO_PKG_NAME"),
+            "clientName": crate::names::APP_DISPLAY_NAME,
             "adapterID": "probe-rs",
             "linesStartAt1": true,
             "columnsStartAt1": true,

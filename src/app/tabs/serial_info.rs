@@ -93,7 +93,7 @@ pub fn show_bridge_info(
             y: 110.0,
             w: 280.0,
             h: 120.0,
-            title: "Embedded IDE".into(),
+            title: crate::names::APP_DISPLAY_NAME.into(),
             sub: "relays every byte".into(),
         },
     ];

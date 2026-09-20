@@ -1061,6 +1061,9 @@ mod narrow_layout_tests {
 // Everything that must survive an application restart.
 // Stored via eframe's platform storage (Registry on Windows, ~/.local on Linux).
 
+// Frozen at the 2026-09-20 rename, like the storage folder it lives in
+// (`names::LEGACY_EFRAME_NAME`): eframe keeps unknown keys forever, so a new
+// key would only strand the old value beside it.
 const STORAGE_KEY: &str = "embedded_ide_project_v1";
 
 /// Byte offset in `text` of the 0-based LSP position `(line, character)`.
@@ -4892,9 +4895,9 @@ impl eframe::App for AppIde {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "{}  \"{name}\" is already open in another Embedded IDE \
-                                     window.",
-                                    egui_phosphor::regular::WARNING
+                                    "{}  \"{name}\" is already open in another {} window.",
+                                    egui_phosphor::regular::WARNING,
+                                    crate::names::APP_DISPLAY_NAME
                                 ))
                                 .size(11.5)
                                 .strong()

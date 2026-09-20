@@ -280,7 +280,10 @@ impl AppIde {
     pub(super) fn pick_and_open_project(&mut self, save_needed: &mut bool) {
         let chosen = self.pending_open_dir.take().or_else(|| {
             rfd::FileDialog::new()
-                .set_title("Open Embedded IDE Project — pick the project root folder")
+                .set_title(format!(
+                    "Open {} Project — pick the project root folder",
+                    crate::names::APP_DISPLAY_NAME
+                ))
                 .pick_folder()
         });
         if let Some(folder) = chosen {
@@ -1977,7 +1980,7 @@ mod real_import_tests {
     /// Writes to the user's chip registry, so it is `#[ignore]`d:
     ///
     /// ```text
-    /// cargo test --bin embedded_ide_0 import_wl30_for_real -- --ignored --nocapture
+    /// cargo test --bin rust_on_chip import_wl30_for_real -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "writes a definition into the user's chip registry"]
@@ -2891,7 +2894,7 @@ mod chip_gaps_tests {
     /// Ignored because it needs the database:
     ///
     /// ```text
-    /// cargo test --bin embedded_ide_0 wl30_is_the_chip_this_preflight_exists_for -- --ignored --nocapture
+    /// cargo test --bin rust_on_chip wl30_is_the_chip_this_preflight_exists_for -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "needs the STM32Cube database"]

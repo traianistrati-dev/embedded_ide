@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 
 /// Marker that identifies our token on the system clipboard. Anything pasted
 /// into the tree that does not start with this is ordinary text and ignored.
+// Kept at the 2026-09-20 rename: an old and a new window share the clipboard.
 pub const TOKEN_PREFIX: &str = "embedded-ide-clip:v1:";
 
 /// How many payloads to keep in the staging directory. Pruned on every copy —

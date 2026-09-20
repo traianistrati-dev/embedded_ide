@@ -358,12 +358,18 @@ fn section_lines<'a>(text: &'a str, header: &'a str) -> impl Iterator<Item = &'a
 /// happily removed a dependency the **user** had written by hand (e.g. adding
 /// `embedded-hal` for your own code, then switching Runtime, which flips the
 /// IDE's internal "needs" flag to false). Only marked lines may be removed.
-pub const DEP_MARKER: &str = "# <embedded-ide>";
+pub const DEP_MARKER: &str = "# <rust_on_chip>";
 
-/// `true` when the line carries [`DEP_MARKER`], i.e. the IDE wrote it and may
-/// take it away again.
-fn is_ide_owned(line: &str) -> bool {
-    line.contains(DEP_MARKER)
+/// The marker before the 2026-09-20 rename, still in every older project.
+/// Read forever: a `Cargo.toml` without GENERATED markers is never rewritten,
+/// so its old-marked lines would otherwise become the user's for good and
+/// never be removed when their feature is switched off.
+pub const LEGACY_DEP_MARKER: &str = "# <embedded-ide>";
+
+/// `true` when the line carries [`DEP_MARKER`] (or its pre-rename spelling),
+/// i.e. the IDE wrote it and may take it away again.
+pub(crate) fn is_ide_owned(line: &str) -> bool {
+    line.contains(DEP_MARKER) || line.contains(LEGACY_DEP_MARKER)
 }
 
 /// The Rust identifier a Cargo dependency key maps to (`embedded-hal` →
@@ -977,7 +983,7 @@ mod the_hal_crate_follows_a_runtime_switch {
     /// How many marked `embedded-hal-async` lines `toml` has.
     fn ide_added(toml: &str) -> usize {
         toml.lines()
-            .filter(|l| l.trim_start().starts_with("embedded-hal-async") && l.contains(DEP_MARKER))
+            .filter(|l| l.trim_start().starts_with("embedded-hal-async") && is_ide_owned(l))
             .count()
     }
 
@@ -1221,7 +1227,12 @@ pub fn ensure_async_deps(
 
 /// Markers bounding the IDE-managed strict-lints block (so it can be found +
 /// removed cleanly on toggle-off, and never duplicated on toggle-on).
-const STRICT_LINTS_BEGIN: &str = "# <<< strict-lints (Embedded IDE) - toggle in MCU System >>>";
+///
+/// No product name in it since the 2026-09-20 rename, so the next one cannot
+/// orphan it. The older spelling is still recognised when stripping.
+const STRICT_LINTS_BEGIN: &str = "# <<< strict-lints - toggle in MCU System >>>";
+const LEGACY_STRICT_LINTS_BEGIN: &str =
+    "# <<< strict-lints (Embedded IDE) - toggle in MCU System >>>";
 const STRICT_LINTS_END: &str = "# <<< strict-lints end >>>";
 
 /// The `[lints.clippy]` block written when the strict-lints toggle is ON. A
@@ -1274,7 +1285,12 @@ pub fn ensure_strict_lints(cargo_toml: &str, enabled: bool) -> String {
             continue; // orphan END marker with no header — leave it be
         }
         // Include the BEGIN marker + one blank separator above, when present.
-        if start > 0 && lines[start - 1].trim() == STRICT_LINTS_BEGIN {
+        if start > 0
+            && matches!(
+                lines[start - 1].trim(),
+                STRICT_LINTS_BEGIN | LEGACY_STRICT_LINTS_BEGIN
+            )
+        {
             start -= 1;
         }
         if start > 0 && lines[start - 1].trim().is_empty() {
@@ -1339,7 +1355,10 @@ const DEBUG_BUILD_LEGACY_KEYS: [&str; 1] = ["lto"];
 /// verbatim (padding and all) so switching back restores the project's own
 /// profile byte for byte — not a guess at what the default "should" be. A key
 /// the file didn't have at all is recorded as `absent` and removed again.
-const DEBUG_BUILD_TAG: &str = "# <embedded-ide debug-build was:";
+const DEBUG_BUILD_TAG: &str = "# <rust_on_chip debug-build was:";
+/// The tag before the 2026-09-20 rename. Still read, or switching the toggle off
+/// in an older project would no longer hand back the user's own line.
+const LEGACY_DEBUG_BUILD_TAG: &str = "# <embedded-ide debug-build was:";
 const DEBUG_BUILD_ABSENT: &str = "absent";
 
 /// Turn the debug-friendly `[profile.release]` on or off, in place.
@@ -1451,12 +1470,23 @@ fn line_key(line: &str) -> Option<String> {
 /// The line parked in this line's [`DEBUG_BUILD_TAG`], verbatim — `None` when
 /// the toggle didn't write it. Terminated by the LAST `>`, so an original that
 /// carried its own `>` (inside a comment) still comes back whole.
+///
+/// Either spelling of the tag counts, and the FIRST one in the line is the
+/// outer one. A build from before the 2026-09-20 rename does not know the new
+/// tag, so with the toggle on it parks an already-tagged line whole — the old
+/// tag wrapping the new one. Taking the new tag first would return the outer
+/// line's tail with a stray `>` (invalid TOML); instead the parked text is
+/// unwound until no tag is left, which is the user's own line.
 fn tagged_original(line: &str) -> Option<String> {
-    let (_, rest) = line.split_once(DEBUG_BUILD_TAG)?;
+    let (at, tag) = [DEBUG_BUILD_TAG, LEGACY_DEBUG_BUILD_TAG]
+        .into_iter()
+        .filter_map(|t| line.find(t).map(|i| (i, t)))
+        .min_by_key(|&(i, _)| i)?;
+    let rest = &line[at + tag.len()..];
     // Exactly the one separating space is ours; the rest is the original's.
     let rest = rest.strip_prefix(' ').unwrap_or(rest);
     let (was, _) = rest.rsplit_once('>')?;
-    Some(was.to_owned())
+    Some(tagged_original(was).unwrap_or_else(|| was.to_owned()))
 }
 
 /// A stable fingerprint of every DEPENDENCY line in `cargo_toml` — the bodies of
@@ -1956,7 +1986,7 @@ fn remove_stale_rs(root: &Path, dir: &Path, keep: &std::collections::HashSet<Str
 
 /// Default `src/main.rs` for an ESP32-C3 project (no pin layout configured yet).
 pub fn esp32c3_fresh_main_rs() -> String {
-    r#"// Auto-generated by Embedded IDE
+    r#"// Auto-generated by RustOnChip
 // MCU: ESP32-C3 | HAL: esp-hal
 
 #![no_std]
@@ -2538,14 +2568,48 @@ mod tests {
         assert!(!off.contains("debug"), "{off}");
     }
 
+    /// A project switched on before the 2026-09-20 rename parks its lines under
+    /// the OLD tag. Switching off must still hand them back, and switching on
+    /// again must not nest a new tag inside the old one.
+    #[test]
+    fn debug_build_reads_lines_parked_under_the_pre_rename_tag() {
+        let base = "[package]\nname = \"x\"\n\n[profile.release]\nopt-level = 3\nlto = \"fat\"\n";
+        let on = ensure_debug_build(base, true).replace(DEBUG_BUILD_TAG, LEGACY_DEBUG_BUILD_TAG);
+        assert!(on.contains(LEGACY_DEBUG_BUILD_TAG), "{on}");
+        assert_eq!(ensure_debug_build(&on, false), base);
+        let again = ensure_debug_build(&on, true);
+        assert!(
+            again
+                .lines()
+                .all(|l| l.matches("debug-build was:").count() <= 1),
+            "no line may carry two parked originals:\n{again}"
+        );
+        assert_eq!(ensure_debug_build(&again, false), base);
+    }
+
+    /// A build from before the rename, meeting a project the new one switched
+    /// on, parks the already-tagged line whole: the old tag wraps the new one.
+    /// Switching off must still hand back the user's own line, as valid TOML.
+    #[test]
+    fn debug_build_unwinds_a_tag_nested_by_a_pre_rename_build() {
+        let base = "[profile.release]\nopt-level = 3\n";
+        let nested = format!(
+            "[profile.release]\nopt-level = 1  {LEGACY_DEBUG_BUILD_TAG} opt-level = 1  \
+             {DEBUG_BUILD_TAG} opt-level = 3>>\n\
+             debug = true  {LEGACY_DEBUG_BUILD_TAG} debug = true  {DEBUG_BUILD_TAG} absent>>\n"
+        );
+        assert_eq!(ensure_debug_build(&nested, false), base);
+    }
+
     /// An `lto = false` written by the FIRST version of this toggle (which owned
     /// that key and made mid-size projects overflow Flash) is handed back on the
-    /// next pass, whichever way the toggle is set.
+    /// next pass, whichever way the toggle is set. That version predates the
+    /// rename, so the fixture carries the tag it really wrote.
     #[test]
     fn debug_build_restores_legacy_lto_override() {
         let legacy = format!(
-            "[profile.release]\nopt-level     = 1  {DEBUG_BUILD_TAG} opt-level     = \"s\">\n\
-             lto           = false  {DEBUG_BUILD_TAG} lto           = true>\n"
+            "[profile.release]\nopt-level     = 1  {LEGACY_DEBUG_BUILD_TAG} opt-level     = \"s\">\n\
+             lto           = false  {LEGACY_DEBUG_BUILD_TAG} lto           = true>\n"
         );
         for on in [true, false] {
             let fixed = ensure_debug_build(&legacy, on);
@@ -2559,6 +2623,41 @@ mod tests {
         assert_eq!(
             ensure_debug_build(&legacy, false),
             "[profile.release]\nopt-level     = \"s\"\nlto           = true\n"
+        );
+    }
+
+    /// The BEGIN marker named the product until the 2026-09-20 rename. Left
+    /// unrecognised it would stay behind as an orphan comment in every older
+    /// project, with a new block appended under it.
+    #[test]
+    fn strict_lints_strips_a_pre_rename_begin_marker() {
+        let on = ensure_strict_lints("[package]\nname = \"x\"\n", true);
+        let legacy = on.replace(STRICT_LINTS_BEGIN, LEGACY_STRICT_LINTS_BEGIN);
+        assert!(legacy.contains(LEGACY_STRICT_LINTS_BEGIN), "{legacy}");
+        let off = ensure_strict_lints(&legacy, false);
+        assert!(!off.contains("strict-lints"), "{off}");
+        let again = ensure_strict_lints(&legacy, true);
+        assert_eq!(again.matches(STRICT_LINTS_END).count(), 1, "{again}");
+        assert!(!again.contains(LEGACY_STRICT_LINTS_BEGIN), "{again}");
+    }
+
+    /// Dependencies the IDE added before the rename carry the old marker. They
+    /// are still the IDE's to remove when their feature is switched off.
+    #[test]
+    fn a_dependency_marked_before_the_rename_is_still_the_ides() {
+        let toml =
+            format!("[dependencies]\nheapless = \"0.8\"   {LEGACY_DEP_MARKER}\nserde = \"1\"\n");
+        let out = edit_dep_lines(&toml, false, &["heapless", "serde"], &[]);
+        assert!(!out.contains("heapless"), "the IDE's own line goes:\n{out}");
+        assert!(
+            out.contains("serde = \"1\""),
+            "the user's line stays:\n{out}"
+        );
+        // New lines are stamped with the new marker only.
+        let added = edit_dep_lines("[dependencies]\n", true, &[], &["nb = \"1\""]);
+        assert!(
+            added.contains(DEP_MARKER) && !added.contains(LEGACY_DEP_MARKER),
+            "{added}"
         );
     }
 

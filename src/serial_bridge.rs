@@ -114,6 +114,8 @@ fn link_paths() -> (PathBuf, PathBuf) {
     // fight over the same two device nodes.
     let sfx = crate::workspace::suffix();
     (
+        // Kept at the 2026-09-20 rename: users type the app-side path into
+        // other tools' settings.
         base.join(format!("embedded_ide_bridge_app{sfx}")),
         base.join(format!("embedded_ide_bridge_ide{sfx}")),
     )
