@@ -31,8 +31,9 @@ use super::mcu::{Mcu, Runtime};
 
 // Re-export public API for backward compatibility
 pub use common::{
-    GEN_BEGIN, GEN_END, MCU_ID_MARKER, USER_TAIL, mcu_id_marker_line, parse_main_rs, parse_mcu_id,
-    parse_pin_labels, pin_binding, sanitize_label, var_suffix,
+    AUTOGEN_BANNER, GEN_BEGIN, GEN_END, LEGACY_AUTOGEN_BANNER, MCU_ID_MARKER, USER_TAIL,
+    mcu_id_marker_line, parse_main_rs, parse_mcu_id, parse_pin_labels, pin_binding, sanitize_label,
+    var_suffix,
 };
 
 /// Type-parameter name for a pin in a Custom module's struct: the pin's own name

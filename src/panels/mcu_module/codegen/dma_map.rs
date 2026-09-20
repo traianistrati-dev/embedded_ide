@@ -491,7 +491,7 @@ mod tests {
     /// Ignored: needs the database on disk.
     ///
     /// ```text
-    /// cargo test --bin embedded_ide_0 the_hand_tables_match -- --ignored --nocapture
+    /// cargo test --bin rust_on_chip the_hand_tables_match -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "needs the STM32Cube database on disk"]

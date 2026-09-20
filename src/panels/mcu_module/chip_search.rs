@@ -739,7 +739,7 @@ mod tests {
     /// come from the folder that knows more — or merely from the one listed
     /// first?
     ///
-    /// `cargo test --bin embedded_ide_0 the_unified_set -- --ignored --nocapture`
+    /// `cargo test --bin rust_on_chip the_unified_set -- --ignored --nocapture`
     #[test]
     #[ignore = "needs real vendor data on this machine"]
     fn the_unified_set_keeps_one_copy_of_each_part() {
@@ -823,7 +823,7 @@ mod tests {
     /// skeleton — asked of the SAME predicate codegen uses, one representative
     /// chip per family, against the real vendor data.
     ///
-    /// `cargo test --bin embedded_ide_0 which_families_generate_clock -- --ignored --nocapture`
+    /// `cargo test --bin rust_on_chip which_families_generate_clock -- --ignored --nocapture`
     #[test]
     #[ignore = "needs real vendor data on this machine"]
     fn which_families_generate_clock_code() {
@@ -927,7 +927,7 @@ KEEPS THE COMMENTED SKELETON ({}):",
     /// Dump one family's clock-tree node ids, which is what a codegen recipe
     /// has to read. `EIDE_FAMILY=stm32n6` picks the family.
     ///
-    /// `cargo test --bin embedded_ide_0 dump_clock_tree -- --ignored --nocapture`
+    /// `cargo test --bin rust_on_chip dump_clock_tree -- --ignored --nocapture`
     #[test]
     #[ignore = "needs real vendor data on this machine"]
     fn dump_clock_tree_nodes() {
@@ -1000,7 +1000,7 @@ KEEPS THE COMMENTED SKELETON ({}):",
 
     /// The N6 clock block, emitted from the vendor's own tree.
     ///
-    /// `cargo test --bin embedded_ide_0 n6_clock_block -- --ignored --nocapture`
+    /// `cargo test --bin rust_on_chip n6_clock_block -- --ignored --nocapture`
     #[test]
     #[ignore = "needs real vendor data on this machine"]
     fn n6_clock_block_comes_out_of_the_real_tree() {

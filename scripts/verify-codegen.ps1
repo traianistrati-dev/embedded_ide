@@ -422,7 +422,7 @@ foreach ($c in $cases) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
     Set-Location $repo
-    $out = cargo test --bin embedded_ide_0 $c.t -- --ignored --nocapture 2>&1
+    $out = cargo test --bins $c.t -- --ignored --nocapture 2>&1
     if ($out | Select-String -Pattern "panicked at|test result: FAILED") {
         $results += [pscustomobject]@{ Case = $c.n; Status = "EMIT FAILED"; Detail = "the harness's own assertions" }
         continue

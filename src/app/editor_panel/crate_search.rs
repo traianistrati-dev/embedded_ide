@@ -37,7 +37,12 @@ const PER_PAGE: usize = 100;
 /// A bound on remembered queries — a session types a few dozen at most.
 const MAX_CACHED: usize = 64;
 /// crates.io refuses API requests without an identifying User-Agent (403).
-const USER_AGENT: &str = "embedded_ide_0 (Cargo.toml crate completion)";
+const USER_AGENT: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    "/",
+    env!("CARGO_PKG_VERSION"),
+    " (Cargo.toml crate completion)"
+);
 
 /// One crate as the search answered it.
 #[derive(Clone, Debug, PartialEq)]

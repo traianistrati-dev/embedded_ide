@@ -70,7 +70,7 @@ fn base() -> PathBuf {
     // it is a worse place, but this module's contract is that `dir()` always
     // answers, and refusing to build at all would be worse still.
     cache
-        .map(|b| b.join("embedded_ide_0"))
+        .map(|b| b.join(crate::names::LEGACY_DATA_DIR))
         .unwrap_or_else(legacy_base)
 }
 
@@ -108,7 +108,11 @@ pub fn init() {
     // Every slot is taken (or the cache dir is unwritable). A pid-unique
     // directory is worse — a cold `target/` every launch — but it is still
     // correct, and correctness is the point of this module.
-    let dir = base.join(format!("embedded_ide_0_check_p{}", std::process::id()));
+    let dir = base.join(format!(
+        "{}_p{}",
+        crate::names::LEGACY_SLOT_PREFIX,
+        std::process::id()
+    ));
     let _ = std::fs::create_dir_all(&dir);
     let _ = WORKSPACE.set((dir, 0));
 }
@@ -184,7 +188,7 @@ fn sweepable(dir: &Path, ours: &Path, cutoff: std::time::Duration) -> bool {
     let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    if !name.starts_with("embedded_ide_0_check") {
+    if !name.starts_with(crate::names::LEGACY_SLOT_PREFIX) {
         return false;
     }
     // Age from the directory itself: a `target/` written yesterday updates it,
@@ -216,9 +220,9 @@ fn sweepable(dir: &Path, ours: &Path, cutoff: std::time::Duration) -> bool {
 /// existing install keeps its build cache.
 fn slot_name(slot: u32) -> String {
     if slot <= 1 {
-        "embedded_ide_0_check".to_owned()
+        crate::names::LEGACY_SLOT_PREFIX.to_owned()
     } else {
-        format!("embedded_ide_0_check_{slot}")
+        format!("{}_{slot}", crate::names::LEGACY_SLOT_PREFIX)
     }
 }
 

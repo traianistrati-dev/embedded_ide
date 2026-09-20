@@ -1,7 +1,7 @@
 //! The window title — which is also the label Windows puts over each taskbar
 //! thumbnail, and the text in Alt+Tab.
 //!
-//! It used to be fixed at startup ("Embedded IDE", "Embedded IDE #2"), chosen
+//! It used to be fixed at startup (the app name, then "… #2"), chosen
 //! before any project was loaded, so two windows peeked from the taskbar were
 //! indistinguishable — the thumbnails showed different projects while the
 //! labels said nothing. The project name is what the user is actually looking
@@ -44,8 +44,8 @@ pub(crate) fn compose(project: Option<&str>, tag: Option<&str>, duplicate: bool)
     match (project, tag) {
         (Some(name), Some(tag)) if duplicate => format!("{} {tag}", truncate(name, MAX_NAME)),
         (Some(name), _) => truncate(name, MAX_NAME),
-        (None, Some(tag)) => format!("Embedded IDE {tag}"),
-        (None, None) => "Embedded IDE".to_owned(),
+        (None, Some(tag)) => format!("{} {tag}", crate::names::APP_DISPLAY_NAME),
+        (None, None) => crate::names::APP_DISPLAY_NAME.to_owned(),
     }
 }
 
@@ -64,8 +64,8 @@ mod tests {
     #[test]
     fn the_marker_appears_only_where_it_disambiguates() {
         // Nothing open: the marker is all there is.
-        assert_eq!(compose(None, Some("#2"), false), "Embedded IDE #2");
-        assert_eq!(compose(None, None, false), "Embedded IDE");
+        assert_eq!(compose(None, Some("#2"), false), "RustOnChip #2");
+        assert_eq!(compose(None, None, false), "RustOnChip");
         // Same project in both windows: identical names, so the marker is back.
         assert_eq!(
             compose(Some("radar"), Some("#3"), true),

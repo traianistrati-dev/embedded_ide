@@ -73,7 +73,8 @@ impl AppIde {
         // pin diagram + clock graph are active when parse_main_rs() is applied.
         //
         // Two signals, in priority order:
-        //   1. The `// embedded-ide:mcu=<id>` marker in src/main.rs — written by
+        //   1. The `// rust_on_chip:mcu=<id>` marker in src/main.rs (or its
+        //      pre-rename `// embedded-ide:mcu=` spelling) — written by
         //      our own codegen. This pins the EXACT definition (incl. imported
         //      chips that share a HAL crate with a built-in, which step 2 can't
         //      disambiguate — e.g. "esp32c3-graph" vs "esp32c3").

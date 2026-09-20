@@ -1485,7 +1485,16 @@ const UDEV_DIRS: [&str; 3] = [
 /// (Compiled everywhere for exactly that reason; only Linux CALLS it.)
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn udev_rule_matches(file_name: &str) -> bool {
-    const MARKERS: [&str; 4] = ["probe-rs", "openocd", "stlink", "dfu"];
+    // The last two are this app's own file, before and after the rename: it
+    // was never recognised here, so the check reported it missing.
+    const MARKERS: [&str; 6] = [
+        "probe-rs",
+        "openocd",
+        "stlink",
+        "dfu",
+        "rust_on_chip",
+        "embedded-ide",
+    ];
     let lower = file_name.to_ascii_lowercase();
     lower.ends_with(".rules") && MARKERS.iter().any(|m| lower.contains(m))
 }
@@ -2042,6 +2051,9 @@ mod tests {
         assert!(udev_rule_matches("69-probe-rs.rules"));
         assert!(udev_rule_matches("60-openocd.rules"));
         assert!(udev_rule_matches("49-stlinkv2.rules"));
+        // The app's own rules file, in both spellings.
+        assert!(udev_rule_matches(crate::udev::RULES_FILE_NAME));
+        assert!(udev_rule_matches(crate::udev::LEGACY_RULES_FILE_NAME));
         // Not a rules file, and not about a probe.
         assert!(!udev_rule_matches("70-probe-rs.txt"));
         assert!(!udev_rule_matches("99-systemd.rules"));

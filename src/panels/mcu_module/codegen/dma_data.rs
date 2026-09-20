@@ -551,7 +551,7 @@ mod tests {
     /// the whole database rather than on the three shapes above:
     ///
     /// ```text
-    /// cargo test --bin embedded_ide_0 value_and_name_agree_across_the_database -- --ignored --nocapture
+    /// cargo test --bin rust_on_chip value_and_name_agree_across_the_database -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "needs the STM32Cube database"]
@@ -740,7 +740,7 @@ mod tests {
     /// disk (a ~2 GB checkout) and reads a few thousand files.
     ///
     /// ```text
-    /// cargo test --bin embedded_ide_0 sweep_the_vendor_database -- --ignored --nocapture
+    /// cargo test --bin rust_on_chip sweep_the_vendor_database -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "needs the STM32Cube database on disk"]

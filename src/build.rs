@@ -98,7 +98,7 @@ fn crash_report(
     backtrace: &str,
 ) -> String {
     format!(
-        "\n==== embedded_ide_0 panic ====\n\
+        "\n==== {name} panic ====\n\
          when:      {}\n\
          version:   {}\n\
          thread:    {thread}\n\
@@ -107,6 +107,7 @@ fn crash_report(
          backtrace:\n{backtrace}\n",
         fmt_utc(now),
         env!("CARGO_PKG_VERSION"),
+        name = env!("CARGO_PKG_NAME"),
     )
 }
 
@@ -1094,16 +1095,19 @@ mod crash_log_tests {
             "src/app/mcu_panel.rs:412:9",
             "main",
             UNIX_EPOCH + Duration::from_secs(1_786_106_096),
-            "   0: embedded_ide_0::app::foo\n   1: core::panicking",
+            "   0: rust_on_chip::app::foo\n   1: core::panicking",
         );
         assert!(r.contains("2026-08-07 12:34:56 UTC"), "{r}");
         assert!(r.contains(env!("CARGO_PKG_VERSION")), "{r}");
         assert!(r.contains("thread:    main"), "{r}");
         assert!(r.contains("src/app/mcu_panel.rs:412:9"), "{r}");
         assert!(r.contains("the len is 3 but the index is 7"), "{r}");
-        assert!(r.contains("embedded_ide_0::app::foo"), "{r}");
+        assert!(r.contains("rust_on_chip::app::foo"), "{r}");
         // Leading blank line + banner, so consecutive reports stay separable.
-        assert!(r.starts_with("\n==== embedded_ide_0 panic ===="), "{r}");
+        assert!(
+            r.starts_with(&format!("\n==== {} panic ====", env!("CARGO_PKG_NAME"))),
+            "{r}"
+        );
     }
 
     #[test]

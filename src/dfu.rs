@@ -1,4 +1,4 @@
-//! USB DFU flashing support for the Embedded IDE.
+//! USB DFU flashing support for RustOnChip.
 //!
 //! Workflow:
 //!   1. `detect_dfu(state, ctx)` — background thread: runs `dfu-util -l`,

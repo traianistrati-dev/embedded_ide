@@ -1,4 +1,4 @@
-# Embedded IDE
+# RustOnChip
 
 A desktop IDE for **bare-metal Rust** firmware. Pick a microcontroller, configure
 its pins, peripherals and clock tree visually, and the IDE writes a complete,
@@ -10,7 +10,7 @@ It is built for the workflow of small MCU projects: you spend your time deciding
 decisions into correct HAL setup code. Your own application logic is always kept
 safe across regenerations.
 
-![A tour of the Embedded IDE](docs/embedded_ide_tour.gif)
+![A tour of RustOnChip](docs/rust_on_chip_tour.gif)
 
 > Status: early development (`v0.1`). **Fifteen chips ship built in** — one
 > STM32, nine ESP32, all four Raspberry Pi Pico boards and the BBC micro:bit v2 —
@@ -302,7 +302,8 @@ zooms and pans like the Pins one.
 - **All config files are editable.** Their chip-derived parts live in a
   `GENERATED` block (using each file's own comment style — `//`, `#`, `/* */`),
   and anything you add outside is kept when the block is regenerated.
-- **IDE-added dependencies are marked** with a `# <embedded-ide>` comment. Only
+- **IDE-added dependencies are marked** with a `# <rust_on_chip>` comment (`# <embedded-ide>` in projects created
+  before the rename, which is still recognised). Only
   marked lines are ever removed — never one your code depends on.
 - **Names in the generated block never move.** A binding is suffixed with the
   *pad*, not with a peripheral index that shifts when you rewire, because your
@@ -552,7 +553,7 @@ The bottom panel carries twelve tabs.
 - **Activity** — a per-action timing breakdown of Save / Build / Flash / Clippy.
 - **Required Tools** — checks whether the external tools each workflow needs are
   installed, so you find out before you flash, not during. On Linux it also
-  generates a `69-embedded-ide.rules` udev file for probe and serial access; the
+  generates a `69-rust_on_chip.rules` udev file for probe and serial access; the
   IDE never writes to `/etc` itself.
 
 A **Size** button on the toolbar (and on the Flash tab, automatically after a
@@ -578,7 +579,7 @@ flash) builds `--release` and parses the ELF itself into Flash/RAM bars against
   rust-analyzer session runs against a throw-away copy under the temp dir, and
   each process takes its own slot, so a second window is a second window and not
   a data hazard.
-- `embedded_ide_0 <folder>` (or `--project`) opens a specific project, beating
+- `rust_on_chip <folder>` (or `--project`) opens a specific project, beating
   the per-slot persisted one.
 
 ---
