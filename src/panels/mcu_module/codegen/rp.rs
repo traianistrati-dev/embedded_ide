@@ -3380,7 +3380,7 @@ mod buffered_uart_transport {
     }
 
     /// The manifest gate. `has_cfg("usart")` can never fire on an RP async
-    /// project - the backend writes no config files - so without this the
+    /// project - the backend writes no bus config files - so without this the
     /// emitted `static_cell::StaticCell` would have no crate behind it.
     #[test]
     fn the_dependency_gate_follows_the_transport() {

@@ -16,8 +16,8 @@
 use crate::app::AppIde;
 use crate::panels::mcu_module::comparator::{self, CompConfig, CompSettings};
 use crate::panels::mcu_module::watchdog::{
-    self as wdg, EspWatchdogLimits, EspWdtConfig, IwdgConfig, RpWdtConfig, WatchdogLimits,
-    WwdgConfig,
+    self as wdg, EspWatchdogLimits, EspWdtConfig, IwdgConfig, NrfWdtConfig, RpWdtConfig,
+    WatchdogLimits, WwdgConfig,
 };
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -130,12 +130,16 @@ impl AppIde {
 
             let esp = wdg::is_esp(&family);
             let rp = wdg::is_rp(&family);
+            let nrf = wdg::is_nrf(&family);
             ui.label(dim(if esp {
                 "Watchdog values are durations - esp-hal works out the prescaler and \
                  counter from them at run time, against the clock as it then is."
             } else if rp {
                 "Watchdog values are durations - the counter runs on a 1 us tick, so \
                  what matters here is whether the HAL accepts the period you ask for."
+            } else if nrf {
+                "Watchdog values are durations - the generated code turns them into \
+                 ticks of the 32.768 kHz LFCLK, which is what the WDT counts."
             } else {
                 "Watchdog values are durations - the HAL derives the prescaler and \
                  counter from them, so what matters here is whether the chip can reach \
@@ -159,6 +163,8 @@ impl AppIde {
 
             if rp {
                 rp_wdt_card(ui, &mut mcu.watchdog.rp, &family, is_async);
+            } else if nrf {
+                nrf_wdt_card(ui, &mut mcu.watchdog.nrf, is_async);
             } else if esp {
                 // A different chip's watchdogs entirely — different names,
                 // different clocks, different lifecycles. Sharing the IWDG card
@@ -200,10 +206,17 @@ fn duration_row(ui: &mut egui::Ui, label: &str, value: &mut u32, range: (u32, u3
         ui.label(label);
         ui.add(
             egui::DragValue::new(value)
-                // Clamped to what the chip can express, so the common way of
-                // reaching an invalid value is simply not available. Typing one
-                // still is, which is what the warning below is for.
+                // Dragging and typing are clamped to what the chip can express,
+                // so an edit cannot produce an invalid value.
                 .range(range.0..=range.1)
+                // But a value that is ALREADY stored is left alone. egui's
+                // default clamps it on every frame, silently: a Runtime switch
+                // that lowers the ceiling (an RP2350 goes from 16.8 s on Async to
+                // 8.39 s on Blocking), a Clock-tab change that moves the WWDG
+                // range, or a hand-edited mcu.config - each was rewritten the
+                // moment the tab was drawn, and the warning below, which exists
+                // for exactly those cases, never saw an out-of-range value.
+                .clamp_existing_to_range(false)
                 .speed((range.1 as f64 - range.0 as f64) / 500.0)
                 .suffix(" us"),
         );
@@ -390,8 +403,8 @@ fn rp_wdt_card(ui: &mut egui::Ui, cfg: &mut Option<RpWdtConfig>, family: &str, i
         });
         ui.label(dim(format!(
             "Counts a 1 us tick taken from the crystal, so its period does NOT move with \
-             the Clock tab. Range {} .. {} - the ceiling is {}'s, and one step past it \
-             panics at boot.",
+             the Clock tab. Range {} .. {} - the ceiling is {}'s, which panics at boot one \
+             step past it, so the generated file stops the build there first.",
             human_us(lo),
             human_us(hi),
             wdg::rp_driver(family, is_async)
@@ -463,12 +476,71 @@ fn esp_mwdt_card(
     );
 }
 
+/// The nRF52 WDT: one period, and the lifecycle that surprises people.
+///
+/// Neither end of its range is a panic - both HALs raise a too-short period to
+/// 15 ticks without a word - so the card spends its words elsewhere: it
+/// CANNOT be stopped, a reflash through a debugger does not clear it, and on
+/// Async starting it is configuring it.
+fn nrf_wdt_card(ui: &mut egui::Ui, cfg: &mut Option<NrfWdtConfig>, is_async: bool) {
+    let (lo, hi) = wdg::nrf_range_us();
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        let mut on = cfg.is_some();
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut on, "").changed() {
+                *cfg = on.then(NrfWdtConfig::default_for);
+            }
+            ui.label(egui::RichText::new(format!("{}  WDT", ph::SHIELD)).strong());
+            ui.label(dim("the chip's only watchdog"));
+        });
+        ui.label(dim(format!(
+            "Counts the 32.768 kHz LFCLK in 30.5 us ticks - a period is rounded UP to \
+             the next tick, and is only as accurate as the LFCLK source on the Clock \
+             tab. Range {} .. {}.",
+            human_us(lo),
+            human_us(hi)
+        )));
+        let Some(c) = cfg.as_mut() else { return };
+        ui.add_space(6.0);
+        duration_row(ui, "Period", &mut c.timeout_us, (lo, hi));
+        ui.add_space(4.0);
+        ui.label(dim(if is_async {
+            "NOT started: on embassy-nrf starting it IS configuring it, so the generated \
+             code only hands you the peripheral - call start() when ready."
+        } else {
+            "Configured but NOT started: it starts biting when you call activate()."
+        }));
+        // What a reflash does is the HAL's call, and the two disagree - so the
+        // card says the one for this runtime, not a sentence true of only one.
+        ui.label(dim(if is_async {
+            "Once started it CANNOT be stopped - not even by a reflash, which a debugger \
+             does through a soft reset. embassy-nrf picks up a running watchdog with \
+             exactly this configuration, so reflashing an unchanged project carries on; \
+             after a change, the old one resets the board once, then this one starts. It \
+             pauses while a debugger halts the core."
+        } else {
+            "Once started it CANNOT be stopped - not even by a reflash, which a debugger \
+             does through a soft reset. nrf-hal refuses any watchdog already running, so \
+             after each reflash of a project that started it, the old one resets the board \
+             once, then this one is configured. It pauses while a debugger halts the core."
+        }));
+        problem_and_reset(
+            ui,
+            wdg::nrf_wdt_problem(c),
+            "Restore the default period, 1 s",
+            || *c = NrfWdtConfig::default_for(),
+        );
+    });
+}
+
 /// The shared footer: what is wrong (if anything) and the way back to a value
 /// that is known good.
 ///
-/// The warning is not decoration. Every problem it reports is a **panic at
-/// boot**, not a compile error, so this line is the only place the mistake can
-/// be caught before a board resets in a loop.
+/// The warning is not decoration. On the STM32 cards every problem it reports
+/// is a **panic at boot**, not a compile error, so this line is the only place
+/// the mistake can be caught before a board resets in a loop. (The RP file
+/// also refuses it at build time; on the ESP and nRF ones it is a period the
+/// chip would quietly not run.)
 ///
 /// `hint` says what Reset restores, because it is not the same thing on every
 /// card: the STM32 ones go to the longest period, the ESP and RP ones to 1 s.
@@ -954,6 +1026,27 @@ fn comp_card(
 mod tests {
     use super::*;
 
+    /// A stored period the range no longer allows must survive being DRAWN,
+    /// or the problem line under the field can never report it.
+    ///
+    /// egui's `DragValue::range` clamps the existing value on every frame by
+    /// default. On an RP2350 that turned a 12 s Async period into 8.39 s the
+    /// moment the tab was opened after a switch to Blocking - silently, since
+    /// the warning then only ever saw a value already in range.
+    #[test]
+    fn drawing_a_period_does_not_clamp_the_stored_value() {
+        let ctx = egui::Context::default();
+        let mut period: u32 = 12_000_000;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            duration_row(ui, "Period", &mut period, (1, 8_388_607));
+        });
+        assert_eq!(period, 12_000_000, "the field rewrote the stored period");
+        assert!(
+            wdg::rp_wdt_problem(&RpWdtConfig { timeout_us: period }, "rp235x", false).is_some(),
+            "and so the problem line has something to report"
+        );
+    }
+
     /// A watchdog on its own keeps the `pins/configs/` path alive.
     ///
     /// `sync_config_files` drops the WHOLE subtree - and `pub mod configs;` with
@@ -975,12 +1068,13 @@ mod tests {
         for d in builtin_definitions() {
             let esp = is_esp(&d.family);
             let rp = wdg::is_rp(&d.family);
-            if !esp && !rp && d.family != "stm32f1" {
+            let nrf = wdg::is_nrf(&d.family);
+            if !esp && !rp && !nrf && d.family != "stm32f1" {
                 continue; // no watchdog backend to speak of
             }
-            // The RP boards on BOTH runtimes: they are two backends, and the
-            // Async one had no config files at all before the watchdog.
-            let runtimes: &[Runtime] = if rp {
+            // The RP and nRF boards on BOTH runtimes: they are two backends
+            // each, and neither Async one had config files before the watchdog.
+            let runtimes: &[Runtime] = if rp || nrf {
                 &[Runtime::Blocking, Runtime::Async]
             } else {
                 &[Runtime::Blocking]
@@ -1000,6 +1094,8 @@ mod tests {
                     });
                 } else if rp {
                     mcu.watchdog.rp = Some(RpWdtConfig::default_for());
+                } else if nrf {
+                    mcu.watchdog.nrf = Some(NrfWdtConfig::default_for());
                 } else {
                     mcu.watchdog.iwdg = Some(wdg::IwdgConfig {
                         timeout_us: 2_000_000,
@@ -1009,7 +1105,7 @@ mod tests {
                 let names: Vec<String> = mcu.config_files().into_iter().map(|(n, _)| n).collect();
                 let want = if esp {
                     "rwdt.rs"
-                } else if rp {
+                } else if rp || nrf {
                     "watchdog.rs"
                 } else {
                     "iwdg.rs"

@@ -85,14 +85,19 @@ pub fn wwdg_supported(family: &str) -> bool {
 /// Is watchdog code actually GENERATED for this family yet?
 ///
 /// Separate from [`wwdg_supported`], which is about the HAL. This is about
-/// the IDE: every STM32 backend calls `watchdog_gen`, both ESP backends do,
-/// and both RP ones.
+/// the IDE: every STM32 backend calls `watchdog_gen`, and so do both ESP, both
+/// RP and both nRF ones.
 ///
 /// Kept as a function rather than folded away because it is what stops the
 /// tab offering controls that reach no generated file, and the next family
 /// added to the IDE starts out on the wrong side of it.
 pub fn codegen_supported(family: &str) -> bool {
-    family.starts_with("stm32") || is_esp(family) || is_rp(family)
+    family.starts_with("stm32") || is_esp(family) || is_rp(family) || is_nrf(family)
+}
+
+/// An nRF52 family key (`nrf52833`) - the nRF backend's own test.
+pub fn is_nrf(family: &str) -> bool {
+    crate::panels::mcu_module::codegen::nrf::is_nrf(family)
 }
 
 /// An ESP32 family key. They are CHIP ids (`esp32c3`), not series.
@@ -346,16 +351,82 @@ pub fn rp_driver(family: &str, is_async: bool) -> &'static str {
     }
 }
 
-/// Why an RP period would panic at boot, or `None` when it is fine.
+/// Why an RP period cannot be built, or `None` when it is fine.
+///
+/// The driver would panic at boot; the generated file's `const` assert stops
+/// the BUILD first. Typically reached through a Runtime switch, which lowers
+/// the RP2350's ceiling under a period that was valid on Async.
 pub fn rp_wdt_problem(cfg: &RpWdtConfig, family: &str, is_async: bool) -> Option<String> {
     let (lo, hi) = rp_range_us(family, is_async);
     (!(lo..=hi).contains(&cfg.timeout_us)).then(|| {
         format!(
-            "{} is outside the range {}..={} us that {} accepts on this runtime - it panics at boot",
+            "{} is outside the range {}..={} us that {} accepts on this runtime - the build \
+             will stop on it, since the driver would panic at boot",
             cfg.timeout_us,
             lo,
             hi,
             rp_driver(family, is_async)
+        )
+    })
+}
+
+/// The nRF52 WDT: a period, and nothing else.
+///
+/// It counts the 32.768 kHz LFCLK and, once started, cannot be stopped by
+/// anything short of a reset that clears it - which a soft reset is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NrfWdtConfig {
+    pub timeout_us: u32,
+}
+
+impl NrfWdtConfig {
+    /// One second, like the ESP and RP ones: every value in the range is
+    /// expressible, so the default can be the useful one.
+    pub fn default_for() -> Self {
+        Self {
+            timeout_us: 1_000_000,
+        }
+    }
+}
+
+/// The clock the nRF52 WDT counts, on every part: the LFCLK.
+pub const NRF_LFCLK_HZ: u64 = 32_768;
+
+/// A period in microseconds as the WDT's CRV takes it: LFCLK ticks, rounded
+/// UP, so the watchdog never bites sooner than the period asked for. Both
+/// nrf-hal's `set_lfosc_ticks` and embassy-nrf's `timeout_ticks` take this.
+pub fn nrf_ticks(timeout_us: u32) -> u32 {
+    (timeout_us as u64 * NRF_LFCLK_HZ).div_ceil(1_000_000) as u32
+}
+
+/// The fewest ticks the WDT is given: both HALs raise anything shorter to it,
+/// SILENTLY (`max(15)` in nrf-hal's `set_lfosc_ticks`, `MIN_TICKS` in
+/// embassy-nrf).
+pub const NRF_MIN_TICKS: u32 = 15;
+
+/// The nRF52 WDT periods worth offering, in microseconds.
+///
+/// Unlike the RP and STM32 ranges, neither end is a panic. The floor is the
+/// shortest period that rounds UP to [`NRF_MIN_TICKS`] - 428 us, since 15
+/// ticks are 457.8 us and [`nrf_ticks`] rounds up. Below it the HAL would run
+/// 15 ticks while the tab showed less. (It was 458 us - the HALs' own number -
+/// which [`nrf_ticks`] turns into 16 ticks, so the real minimum could not be
+/// set at all.) The ceiling is the tab's `u32` of microseconds: 71.6 minutes
+/// is 1.4e8 ticks, and the CRV register holds 32 bits of them (36 hours).
+pub fn nrf_range_us() -> (u32, u32) {
+    // us * HZ / 1e6 must exceed MIN - 1 ticks for the ceiling to reach MIN.
+    let floor = (NRF_MIN_TICKS as u64 - 1) * 1_000_000 / NRF_LFCLK_HZ + 1;
+    (floor as u32, u32::MAX)
+}
+
+/// Why an nRF period would not be the one the chip runs, or `None`.
+pub fn nrf_wdt_problem(cfg: &NrfWdtConfig) -> Option<String> {
+    let (lo, hi) = nrf_range_us();
+    (!(lo..=hi).contains(&cfg.timeout_us)).then(|| {
+        format!(
+            "{} us is below the WDT's {NRF_MIN_TICKS}-tick minimum (anything under {lo} us) - \
+             the HAL would quietly run {NRF_MIN_TICKS} ticks, 457.8 us, instead",
+            cfg.timeout_us
         )
     })
 }
@@ -372,7 +443,8 @@ pub fn mwdt_range_us() -> (u32, u32) {
     (1, u32::MAX)
 }
 
-/// The STM32 pair, the ESP three and the RP one. Each `None` until switched on.
+/// The STM32 pair, the ESP three, the RP one and the nRF one. Each `None` until
+/// switched on.
 ///
 /// One struct for every family rather than an enum: the tab reaches for the
 /// two fields its family uses and the generator ignores the rest, so carrying
@@ -393,6 +465,9 @@ pub struct WatchdogSettings {
     /// RP2040 / RP2350: the chip's one watchdog.
     #[serde(default)]
     pub rp: Option<RpWdtConfig>,
+    /// nRF52: the WDT.
+    #[serde(default)]
+    pub nrf: Option<NrfWdtConfig>,
 }
 
 impl EspWdtConfig {
@@ -666,8 +741,40 @@ mod tests {
             assert!(codegen_supported(fam), "{fam}");
             assert!(is_rp(fam), "{fam}");
         }
-        // The family whose backend still generates no watchdog file.
-        assert!(!codegen_supported("nrf52833"));
+        // And the nRF52s, last. This asserted the opposite until 2026-09-21.
+        assert!(codegen_supported("nrf52833") && is_nrf("nrf52833"));
+        // A family with no watchdog backend still stays out.
+        assert!(!codegen_supported("stm8s"));
+    }
+
+    /// The CRV counts LFCLK ticks, and the conversion rounds UP: a watchdog
+    /// must never bite sooner than the period the user typed.
+    #[test]
+    fn the_nrf_period_becomes_lfclk_ticks_rounded_up() {
+        assert_eq!(nrf_ticks(1_000_000), 32_768);
+        // 15 ticks is 457.76 us; 458 is the first whole microsecond past it.
+        assert_eq!(nrf_ticks(457), 15);
+        assert_eq!(nrf_ticks(458), 16);
+        // One microsecond is a fraction of a tick, and still a whole one.
+        assert_eq!(nrf_ticks(1), 1);
+        // The tab's ceiling fits the 32-bit CRV with room to spare.
+        assert_eq!(nrf_ticks(u32::MAX), 140_737_489);
+    }
+
+    /// Below 15 ticks both HALs substitute 15 without a word, so the floor is
+    /// where the period stops being the one the chip runs - not a panic.
+    #[test]
+    fn the_nrf_floor_is_the_hals_silent_minimum() {
+        let (lo, hi) = nrf_range_us();
+        assert_eq!((lo, hi), (428, u32::MAX));
+        // The floor IS the minimum: it rounds up to exactly 15 ticks, and one
+        // microsecond less would be the 14 the HAL quietly raises.
+        assert_eq!(nrf_ticks(lo), NRF_MIN_TICKS);
+        assert_eq!(nrf_ticks(lo - 1), NRF_MIN_TICKS - 1);
+        assert_eq!(nrf_wdt_problem(&NrfWdtConfig::default_for()), None);
+        assert_eq!(nrf_wdt_problem(&NrfWdtConfig { timeout_us: lo }), None);
+        let msg = nrf_wdt_problem(&NrfWdtConfig { timeout_us: 100 }).expect("below 15 ticks");
+        assert!(msg.contains("428") && msg.contains("15 ticks"), "{msg}");
     }
 
     /// The ceiling is the DRIVER's, and the RP2350 has two: rp235x-hal kept the

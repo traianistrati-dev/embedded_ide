@@ -544,6 +544,9 @@ fn section(mcu: &Mcu) -> String {
         "    let p = {hal}::pac::Peripherals::take().unwrap();\n\n"
     ));
     o.push_str(&clock_lines(mcu, &hal));
+    // After the clocks, so the LFCLK source the Clock tab picked is the one the
+    // WDT will count. Configured only - nothing bites until `activate`.
+    o.push_str(&super::watchdog_gen::nrf_init_lines(&mcu.watchdog, false));
     // Port 1 only where the definition names a P1 pin: the nRF52832, 52810 and
     // 52811 have P0 alone, and their HALs have no `p1` module to take.
     let has_p1 = mcu
@@ -1021,6 +1024,13 @@ impl FamilyBackend for NrfBackend {
                 }
             }
         }
+        // Into this list, not beside it: an empty list drops the whole
+        // `configs/` subtree, so a watchdog alone has to count like any bus.
+        out.extend(super::watchdog_gen::nrf_config_files(
+            &mcu.watchdog,
+            &mcu.family,
+            false,
+        ));
         out
     }
 
@@ -1060,7 +1070,7 @@ impl FamilyBackend for NrfBackend {
 //   handed over by value: no ports to split, nothing to degrade.
 // - The serial blocks are async and each needs its interrupt bound, so the
 //   buses are built in `main.rs` against one `bind_interrupts!` struct, and no
-//   config files are written.
+//   bus config files are written - the watchdog's is the only one.
 // - An armed input becomes a task that waits on it.
 
 pub struct AsyncNrfBackend;
@@ -1625,6 +1635,8 @@ fn async_section(mcu: &Mcu) -> String {
     o.push_str("    // Imported here, not in the header: a runtime switch keeps the header, and\n    // on Blocking embassy-nrf is not a dependency.\n");
     o.push_str("    #[allow(unused_imports)]\n    use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};\n\n");
     o.push_str(&async_clock_lines(mcu));
+    // Only the peripheral: starting it is configuring it on this HAL.
+    o.push_str(&super::watchdog_gen::nrf_init_lines(&mcu.watchdog, true));
     o.push_str(&async_nfc_note(mcu));
     o.push_str(&gpio);
     if !gpio.is_empty() && !buses.body.is_empty() {
@@ -1648,6 +1660,12 @@ impl FamilyBackend for AsyncNrfBackend {
 
     // `gpio_modes` is the trait default here too: `Input::new` takes all three
     // pulls and `OutputDrive` has open-drain, so the full set is what is emitted.
+
+    /// Only the watchdog: every bus on this runtime is built inline in
+    /// main.rs. Without this the file would never be written.
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        super::watchdog_gen::nrf_config_files(&mcu.watchdog, &mcu.family, true)
+    }
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
         format!(
@@ -2377,10 +2395,21 @@ mod blocking_codegen {
     #[test]
     #[ignore = "writes projects to disk for a manual cross-compile"]
     fn emit_nrf_project() {
-        for (mcu, dir_name) in [
-            (everything(), "eide_nrf52833_check"),
-            (the_other_branches(), "eide_nrf52833_alt_check"),
+        // The watchdog at both ends of the tab's range: the longest period
+        // (1.4e8 ticks in the CRV) on one project, the floor - exactly the
+        // 15-tick minimum - on the other.
+        let floor = crate::panels::mcu_module::watchdog::nrf_range_us().0;
+        for (mut mcu, dir_name, timeout_us) in [
+            (everything(), "eide_nrf52833_check", u32::MAX),
+            (the_other_branches(), "eide_nrf52833_alt_check", floor),
         ] {
+            mcu.watchdog.nrf =
+                Some(crate::panels::mcu_module::watchdog::NrfWdtConfig { timeout_us });
+            assert!(
+                mcu.fresh_main_rs()
+                    .contains("let watchdog = pins::configs::watchdog::init(p.WDT);"),
+                "{dir_name}: no watchdog in main.rs"
+            );
             emit(&mcu, dir_name);
         }
     }
@@ -2967,10 +2996,14 @@ mod async_codegen {
     #[test]
     #[ignore = "writes projects to disk for a manual cross-compile"]
     fn emit_nrf_async_project() {
-        for (mcu, dir_name) in [
+        for (mut mcu, dir_name) in [
             (on_async(everything()), "eide_nrf52833_async_check"),
             (the_other_async_branches(), "eide_nrf52833_async_alt_check"),
         ] {
+            // The watchdog rides along, set BEFORE the blocking clone below, so
+            // the runtime switch carries it the way a user's project would.
+            mcu.watchdog.nrf =
+                Some(crate::panels::mcu_module::watchdog::NrfWdtConfig::default_for());
             let def = builtins::builtin_definitions()
                 .into_iter()
                 .find(|d| d.id == "nrf52833_microbit_v2")
@@ -3003,11 +3036,27 @@ mod async_codegen {
                 files.cargo_toml,
                 "the switch lands on the fresh manifest"
             );
-            assert!(mcu.config_files().is_empty());
-            let user: Vec<(String, String)> = vec![
+            // What the app writes: every config file `config_files` returns.
+            // This asserted there were none and wrote an empty `configs/mod.rs` -
+            // true until the watchdog became this backend's first config file.
+            let configs = mcu.config_files();
+            let names: Vec<&str> = configs.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, ["watchdog.rs"], "{dir_name}");
+            let mut user: Vec<(String, String)> = vec![
                 ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
-                ("src/pins/configs/mod.rs".into(), String::new()),
+                (
+                    "src/pins/configs/mod.rs".into(),
+                    configs
+                        .iter()
+                        .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+                        .collect(),
+                ),
             ];
+            user.extend(
+                configs
+                    .into_iter()
+                    .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+            );
             let dir = std::env::temp_dir().join(dir_name);
             let _ = std::fs::remove_dir_all(&dir);
             project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
@@ -3282,5 +3331,115 @@ mod edge_hook {
         arm(&mut mcu, None);
         let main = mcu.fresh_main_rs();
         assert!(!main.contains("on_p0_14_in_edge"), "{main}");
+    }
+}
+
+/// The WDT on both nRF runtimes. The two HALs disagree about the one thing
+/// that matters most - whether configuring starts it - so each runtime gets
+/// the shape that keeps a freshly generated project from resetting itself.
+#[cfg(test)]
+mod watchdog_nrf {
+    use crate::panels::mcu_module::builtins;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::watchdog::NrfWdtConfig;
+
+    fn microbit(runtime: Runtime, timeout_us: Option<u32>) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "nrf52833_microbit_v2")
+            .expect("built-in micro:bit v2")
+            .build_mcu();
+        mcu.runtime = runtime;
+        mcu.watchdog.nrf = timeout_us.map(|timeout_us| NrfWdtConfig { timeout_us });
+        mcu
+    }
+
+    fn file(mcu: &super::Mcu) -> String {
+        mcu.config_files()
+            .into_iter()
+            .find(|(n, _)| n == "watchdog.rs")
+            .map(|(_, b)| b)
+            .expect("watchdog.rs")
+    }
+
+    #[test]
+    fn nothing_is_generated_until_the_watchdog_is_switched_on() {
+        for rt in [Runtime::Blocking, Runtime::Async] {
+            let mcu = microbit(rt, None);
+            assert!(!mcu.fresh_main_rs().contains("watchdog"), "{rt:?}");
+            assert!(mcu.config_files().is_empty(), "{rt:?}");
+        }
+    }
+
+    /// nrf-hal keeps configuring and starting apart, so Blocking configures
+    /// in main.rs and leaves `activate` to the user.
+    #[test]
+    fn blocking_configures_and_leaves_activate_to_the_user() {
+        let mcu = microbit(Runtime::Blocking, Some(1_000_000));
+        let main = mcu.fresh_main_rs();
+        assert!(
+            main.contains("let watchdog = pins::configs::watchdog::init(p.WDT);"),
+            "{main}"
+        );
+        assert!(
+            !main.contains(".activate"),
+            "never started for the user:\n{main}"
+        );
+        let body = file(&mcu);
+        assert!(body.contains("const TIMEOUT_TICKS: u32 = 32768;"), "{body}");
+        assert!(
+            body.contains("use nrf52833_hal::wdt::{Inactive, Watchdog};"),
+            "{body}"
+        );
+        assert!(
+            body.contains("pub fn init(wdt: WDT) -> Result<Handle, WDT>"),
+            "{body}"
+        );
+        assert!(body.contains("set_lfosc_ticks(TIMEOUT_TICKS)"), "{body}");
+        // Paused at a breakpoint - nrf-hal's own default, said out loud.
+        assert!(body.contains("run_during_debug_halt(false)"), "{body}");
+        // The reflash note is THIS HAL's: nrf-hal refuses any running WDT. The
+        // embassy wording ("adopts") would be false here.
+        assert!(body.contains("nrf-hal refuses ANY watchdog"), "{body}");
+        assert!(!body.contains("ADOPTS"), "{body}");
+    }
+
+    /// embassy-nrf starts the WDT in the call that configures it, so the
+    /// generated block must not make that call: a fresh project's loop sleeps
+    /// a minute, and a 1 s watchdog started for it would reset it forever.
+    #[test]
+    fn async_hands_over_the_peripheral_and_never_starts_it() {
+        let mcu = microbit(Runtime::Async, Some(458));
+        let main = mcu.fresh_main_rs();
+        assert!(main.contains("let watchdog = p.WDT;"), "{main}");
+        assert!(
+            !main.contains("watchdog::start(watchdog);")
+                && !main.contains("= pins::configs::watchdog"),
+            "started from the generated block:\n{main}"
+        );
+        let body = file(&mcu);
+        // 458 us is 15.008 ticks: rounded UP, never sooner than asked.
+        assert!(body.contains("const TIMEOUT_TICKS: u32 = 16;"), "{body}");
+        // `Config` is #[non_exhaustive]: a struct literal would not compile.
+        assert!(
+            body.contains("let mut config = Config::default();"),
+            "{body}"
+        );
+        // embassy-nrf's default keeps it running under a debugger; ours pauses.
+        assert!(body.contains("HaltConfig::Pause"), "{body}");
+        assert!(body.contains("Watchdog::try_new(wdt, config)"), "{body}");
+        // embassy-nrf adopts a watchdog left running with the SAME config, so
+        // the note must not claim every leftover one is refused.
+        assert!(
+            body.contains("ADOPTS") && !body.contains("refuses ANY"),
+            "{body}"
+        );
+        // The example sleeps half the PERIOD, not a fixed time a short period
+        // would be outlasted by - 458 us here, well under any fixed 100 ms.
+        assert!(body.contains("pub const TIMEOUT_US: u64 = 458;"), "{body}");
+        assert!(
+            body.contains("Timer::after_micros(pins::configs::watchdog::TIMEOUT_US / 2)"),
+            "{body}"
+        );
     }
 }

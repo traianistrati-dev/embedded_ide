@@ -124,6 +124,13 @@ pub fn watchdog_section(w: &crate::panels::mcu_module::watchdog::WatchdogSetting
             c.timeout_us
         ));
     }
+    if let Some(c) = w.nrf {
+        body.push_str(&format!(
+            "nrf_watchdog {}
+",
+            c.timeout_us
+        ));
+    }
     if body.is_empty() {
         String::new()
     } else {
@@ -139,7 +146,7 @@ pub fn watchdog_section(w: &crate::panels::mcu_module::watchdog::WatchdogSetting
 /// generated firmware, and silently substituting a number would do exactly that.
 pub fn parse_watchdog(text: &str) -> crate::panels::mcu_module::watchdog::WatchdogSettings {
     use crate::panels::mcu_module::watchdog::{
-        EspWdtConfig, IwdgConfig, RpWdtConfig, WatchdogSettings, WwdgConfig,
+        EspWdtConfig, IwdgConfig, NrfWdtConfig, RpWdtConfig, WatchdogSettings, WwdgConfig,
     };
     let mut out = WatchdogSettings::default();
     let Some(body) = section_body(text, WATCHDOG_HEADER) else {
@@ -150,6 +157,7 @@ pub fn parse_watchdog(text: &str) -> crate::panels::mcu_module::watchdog::Watchd
         match (it.next(), it.next().and_then(|v| v.parse().ok())) {
             (Some("iwdg"), Some(timeout_us)) => out.iwdg = Some(IwdgConfig { timeout_us }),
             (Some("rp_watchdog"), Some(timeout_us)) => out.rp = Some(RpWdtConfig { timeout_us }),
+            (Some("nrf_watchdog"), Some(timeout_us)) => out.nrf = Some(NrfWdtConfig { timeout_us }),
             (Some("rwdt"), Some(timeout_us)) => out.rwdt = Some(EspWdtConfig { timeout_us }),
             (Some("mwdt0"), Some(timeout_us)) => out.mwdt0 = Some(EspWdtConfig { timeout_us }),
             (Some("mwdt1"), Some(timeout_us)) => out.mwdt1 = Some(EspWdtConfig { timeout_us }),
@@ -1157,6 +1165,27 @@ mod watchdog_section_tests {
             ..Default::default()
         };
         assert_eq!(parse_watchdog(&watchdog_section(&esp)).rp, None);
+    }
+
+    /// The nRF WDT likewise, and it is not read as the RP one: both are "the
+    /// chip's watchdog", which is exactly why each has its own key.
+    #[test]
+    fn the_nrf_watchdog_round_trips_on_its_own_key() {
+        use crate::panels::mcu_module::watchdog::{NrfWdtConfig, RpWdtConfig};
+        let w = WatchdogSettings {
+            nrf: Some(NrfWdtConfig { timeout_us: 458 }),
+            ..Default::default()
+        };
+        let text = watchdog_section(&w);
+        assert_eq!(parse_watchdog(&text), w, "{text}");
+        assert!(text.contains("nrf_watchdog 458"), "{text}");
+        assert!(!text.contains("rp_watchdog"), "{text}");
+
+        let rp = WatchdogSettings {
+            rp: Some(RpWdtConfig { timeout_us: 1_000 }),
+            ..Default::default()
+        };
+        assert_eq!(parse_watchdog(&watchdog_section(&rp)).nrf, None);
     }
 
     #[test]

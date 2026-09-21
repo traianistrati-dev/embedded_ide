@@ -479,6 +479,185 @@ pub fn rp_init_lines(w: &WatchdogSettings, is_async: bool) -> String {
     s
 }
 
+/// The part of the nRF file both runtimes share: the period, and the one fact
+/// about this watchdog nobody expects.
+///
+/// # Why a reflash is the case to design for
+///
+/// The WDT cannot be stopped, and a SOFT reset does not clear it - nrf-hal says
+/// so of its own `try_new`. A debugger usually reflashes and restarts through
+/// a soft reset, so the next image regularly boots with the previous one's
+/// watchdog still counting. What happens next is the HAL's, and the two
+/// differ - each runtime's part says which (see the templates below).
+///
+/// The period is written twice on purpose: `TIMEOUT_TICKS` is what the HAL
+/// takes, `TIMEOUT_US` is what a user's own timing should be derived from -
+/// the Async example sleeps half of it, where a fixed sleep bootlooped any
+/// period shorter than itself.
+const NRF_TMPL_HEAD: &str = r#"// <<< GENERATED>>>
+// Watchdog config (from the Configuration tab) - auto-updated; edit it there.
+pub const TIMEOUT_US: u64 = {US};
+// The same period in ticks of the 32.768 kHz LFCLK, rounded up to a whole tick.
+pub const TIMEOUT_TICKS: u32 = {TICKS};
+// <<< GENERATED END >>>
+
+// Everything below is editable - your changes are preserved on regeneration.
+//
+// The WDT counts the 32.768 kHz LFCLK, so its period does not move with the
+// HFCLK - but it is only as accurate as the LFCLK source the Clock tab picks.
+//
+// ONCE STARTED IT CANNOT BE STOPPED - not even by a soft reset, which is how a
+// debugger usually restarts after a reflash. So an image can boot with the
+// PREVIOUS image's watchdog still counting. What the HAL does then is below.
+"#;
+
+/// `src/pins/configs/watchdog.rs` on a Blocking nRF project (`nrf52833-hal`).
+///
+/// `init` configures and does NOT start: nrf-hal keeps the two apart, as
+/// `try_new` + `set_lfosc_ticks` and then `activate`.
+const NRF_BLOCKING_TMPL: &str = r#"//
+// nrf-hal refuses ANY watchdog that is already running, whatever its period.
+// So after every reflash of a project that has activated it, `init` returns
+// `Err`. Do not pet that one - you did not configure it: it resets the chip
+// once (RESETREAS then reads DOG), that reset clears it, and the next boot
+// configures this period.
+use {HAL}::pac::WDT;
+use {HAL}::wdt::{Inactive, Watchdog};
+
+/// Handle type, so it can be stored in a struct.
+pub type Handle = Watchdog<Inactive>;
+
+/// Configure the watchdog. It is NOT running yet - call
+/// `activate::<count::One>()` on it when your start-up is far enough along to
+/// keep petting it.
+///
+/// `Err` hands the peripheral back when a watchdog is ALREADY counting - see
+/// the note above.
+pub fn init(wdt: WDT) -> Result<Handle, WDT> {
+    let mut watchdog = Watchdog::try_new(wdt)?;
+    watchdog.set_lfosc_ticks(TIMEOUT_TICKS);
+    // Hold the count while a debugger halts the core, so a breakpoint does
+    // not become a reset.
+    watchdog.run_during_debug_halt(false);
+    Ok(watchdog)
+}
+
+// -- Using the watchdog --
+//
+//     use {HAL}::wdt::count;
+//     if let Ok(w) = watchdog {
+//         let mut parts = w.activate::<count::One>();  // from here on it resets the chip
+//         loop {
+//             parts.handles.0.pet();                   // at least once every period
+//         }
+//     }
+"#;
+
+/// `src/pins/configs/watchdog.rs` on an Async nRF project (`embassy-nrf`).
+///
+/// # Why main.rs does not call `start`
+///
+/// embassy-nrf's `try_new` configures AND starts, in one call, and the watchdog
+/// cannot be stopped after. Calling it from the generated block would reset a
+/// freshly generated project within one period - its loop sleeps for a
+/// minute - so main.rs only hands over the peripheral, and the user starts it.
+///
+/// `Config` is `#[non_exhaustive]`, which is why it is built from `default()`
+/// and then assigned field by field rather than written as a literal.
+const NRF_ASYNC_TMPL: &str = r#"//
+// embassy-nrf ADOPTS a running watchdog whose configuration matches this one
+// exactly - period, debug-halt and sleep behaviour, number of handles - and
+// pets it: reflashing an unchanged project simply carries on. Anything else,
+// a changed period for one, is `Err`. Do not pet that one - you did not
+// configure it: it resets the chip once, that reset clears it, and the next
+// boot starts this period.
+use embassy_nrf::Peri;
+use embassy_nrf::peripherals::WDT;
+use embassy_nrf::wdt::{Config, HaltConfig, Watchdog, WatchdogHandle};
+
+/// Configure AND start the watchdog - on embassy-nrf they are one call, so
+/// main.rs does not make it: call this when your start-up is far enough along
+/// to keep petting the handle it returns.
+///
+/// `Err` hands the peripheral back when a watchdog is already counting with a
+/// different configuration - see the note above.
+pub fn start(
+    wdt: Peri<'static, WDT>,
+) -> Result<(Watchdog, [WatchdogHandle; 1]), Peri<'static, WDT>> {
+    let mut config = Config::default();
+    config.timeout_ticks = TIMEOUT_TICKS;
+    // Hold the count while a debugger halts the core, so a breakpoint does
+    // not become a reset. embassy-nrf's own default keeps it running.
+    config.action_during_debug_halt = HaltConfig::Pause;
+    Watchdog::try_new(wdt, config)
+}
+
+// -- Using the watchdog --
+//
+//     if let Ok((_wdt, [mut handle])) = pins::configs::watchdog::start(watchdog) {
+//         loop {
+//             handle.pet();                              // at least once every period
+//             // Half the period, from the period - never a fixed sleep, which
+//             // would outlast any period shorter than itself.
+//             embassy_time::Timer::after_micros(pins::configs::watchdog::TIMEOUT_US / 2).await;
+//         }
+//     }
+"#;
+
+/// The `pins/configs/watchdog.rs` an nRF project calls for, or none.
+///
+/// Apart from [`config_files`] for the same reason as [`rp_config_files`]:
+/// two HAL crates, chosen by runtime, and only the nRF backends know which.
+pub fn nrf_config_files(
+    w: &WatchdogSettings,
+    family: &str,
+    is_async: bool,
+) -> Vec<(String, String)> {
+    let Some(c) = w.nrf else {
+        return Vec::new();
+    };
+    let head = NRF_TMPL_HEAD
+        .replace("{US}", &c.timeout_us.to_string())
+        .replace("{TICKS}", &watchdog::nrf_ticks(c.timeout_us).to_string());
+    let body = if is_async {
+        NRF_ASYNC_TMPL.to_owned()
+    } else {
+        // One HAL crate per chip, named after it (`nrf52833_hal`).
+        NRF_BLOCKING_TMPL.replace("{HAL}", &format!("{family}_hal"))
+    };
+    vec![("watchdog.rs".to_owned(), format!("{head}{body}"))]
+}
+
+/// The `main.rs` lines for [`nrf_config_files`]'s file, or "" when it is off.
+///
+/// Bound as `watchdog` on both runtimes, but it is not the same thing: on
+/// Blocking the configured, not-yet-started driver (or the `Err` of a
+/// leftover one), on Async only the peripheral, because starting it there is
+/// configuring it.
+pub fn nrf_init_lines(w: &WatchdogSettings, is_async: bool) -> String {
+    if w.nrf.is_none() {
+        return String::new();
+    }
+    let mut s = String::from("    // ── Watchdog ──\n");
+    if is_async {
+        s.push_str(
+            "    // NOT started: on embassy-nrf starting is configuring, and it cannot be\n",
+        );
+        s.push_str("    // stopped - call pins::configs::watchdog::start(watchdog) when ready.\n");
+        s.push_str("    #[allow(unused_variables)]\n");
+        s.push_str("    let watchdog = p.WDT;\n");
+    } else {
+        s.push_str(
+            "    // Configured, NOT started - `Err` is a watchdog the previous image left\n",
+        );
+        s.push_str("    // counting; see pins::configs::watchdog before relying on it.\n");
+        s.push_str("    #[allow(unused_variables)]\n");
+        s.push_str("    let watchdog = pins::configs::watchdog::init(p.WDT);\n");
+    }
+    s.push('\n');
+    s
+}
+
 /// The `pins/configs/*.rs` files the watchdog settings call for.
 ///
 /// `family` decides what is even possible: `stm32f1xx-hal` has no window

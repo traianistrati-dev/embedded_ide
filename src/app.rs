@@ -3655,7 +3655,8 @@ impl AppIde {
                 is_async,
                 async_flavor,
                 // `has_cfg` matches a config-FILE prefix, and the async RP
-                // backend writes no config files at all - so a Pico with a
+                // backend writes no BUS config files (its only one is the
+                // watchdog's) - so a Pico with a
                 // `BufferedUart` in main.rs would ask for `static_cell` against
                 // a manifest that never got the line. A Pico W hides it, since
                 // the radio adds that crate for its own reasons.
