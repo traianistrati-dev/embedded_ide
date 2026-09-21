@@ -417,6 +417,23 @@ pub struct Mcu {
     /// See [`PinGroup`](crate::panels::mcu_module::mcu_config::PinGroup) for
     /// why membership is by pad rather than by module.
     pub groups: Vec<crate::panels::mcu_module::mcu_config::PinGroup>,
+    /// Notes, a documentation link and an image per Virtual Module, keyed by
+    /// `(kind, instance)` - "USART1" - and NOT by module id.
+    ///
+    /// A module does not survive what these must: `reconcile_modules` drops a
+    /// derived module whenever its peripheral has no pins and rebuilds it with
+    /// a NEW id, and `free_module_id` hands a freed id to the next module
+    /// created. `(kind, instance)` is what `reconcile_modules` itself matches
+    /// on, and nothing that touches `modules` (reconcile, Remove, undo) sees
+    /// this map. A key with no live module is an orphan and re-attaches when
+    /// that peripheral is wired again. See [`crate::panels::mcu_module::modules::notes`].
+    ///
+    /// Persisted in `mcu.config` `@modulenotes`. NOT codegen input, so it is
+    /// deliberately absent from `calculate_mcu_state_hash`.
+    pub module_notes: std::collections::BTreeMap<
+        crate::panels::mcu_module::modules::NotesKey,
+        crate::panels::mcu_module::modules::ModuleNotes,
+    >,
     /// IWDG / WWDG settings from the Configuration tab. Not a `VirtualModule`:
     /// those live on the Pins canvas and own pins, and a watchdog has none.
     /// Persisted in `mcu.config` `@watchdog`; feeds `calculate_mcu_state_hash`

@@ -64,6 +64,8 @@ impl AppIde {
         // open and never cleared, so a second project opened in the same window
         // kept the first one's baud rate.
         self.serial.baud_seeded = false;
+        // The same relative image path names a different file in this project.
+        self.module_note_images.clear();
         self.project_dir = Some(root.to_path_buf());
         // Take this folder for this window (or find out another one has it).
         self.claim_open_project();
@@ -157,6 +159,18 @@ impl AppIde {
             // Same for the Flow tab: a new project's files are different text
             // even when a content hash happens to collide.
             self.flow_cache = None;
+        }
+
+        // ── Virtual Module notes ─────────────────────────────────────────────
+        // On EVERY open, outside the main.rs branch below: a project with no
+        // main.rs or no mcu.config must still clear the previous project's
+        // notes rather than inherit them. `restore_module_notes` assigns.
+        if let Some(mcu) = &mut self.mcu {
+            let cfg = std::fs::read_to_string(
+                root.join(crate::panels::mcu_module::mcu_config::FILE_NAME),
+            )
+            .ok();
+            mcu.restore_module_notes(cfg.as_deref());
         }
 
         // ── Restore pin state from mcu.config and src/main.rs ────────────────

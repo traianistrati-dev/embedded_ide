@@ -1675,6 +1675,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2996,6 +2998,7 @@ dependencies = [
  "egui",
  "egui-phosphor",
  "egui_code_editor",
+ "image",
  "libc",
  "notify",
  "proc-macro2",
@@ -3011,6 +3014,7 @@ dependencies = [
  "tempfile",
  "toml_edit",
  "ureq",
+ "url",
 ]
 
 [[package]]

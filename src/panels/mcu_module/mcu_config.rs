@@ -42,6 +42,7 @@ const WATCHDOG_HEADER: &str = "@watchdog";
 const COMP_HEADER: &str = "@comp";
 const LABELS_HEADER: &str = "@labels";
 const PINS_HEADER: &str = "@pins";
+const NOTES_HEADER: &str = "@modulenotes";
 
 /// The `@autobuild` section text (or "" for the default `Check`) — appended by
 /// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
@@ -810,6 +811,97 @@ pub fn parse_gpio_api(text: &str) -> ApiStyle {
         Some("Native") => ApiStyle::Native,
         _ => ApiStyle::Portable,
     }
+}
+
+/// One `@modulenotes` entry: a single RON line.
+///
+/// ONE LINE PER ENTRY, not one RON list like `@modules`, so a line that does
+/// not parse loses only itself. That matters more here than anywhere else in the
+/// file: this is the section a user is most likely to hand-edit, and `@modules`
+/// shows what the alternative costs - one bad field there drops the whole list.
+///
+/// A line can never start a new section. `ron` writes every string through
+/// `escape_debug`, so a newline in the notes becomes `\n` and the line always
+/// begins with `(` - never with the `@` that [`section_body`] stops at.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NoteLine {
+    kind: crate::panels::mcu_module::modules::ModuleKind,
+    instance: u8,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    link: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    image: String,
+}
+
+/// Write `@modulenotes`: one line per peripheral instance that holds notes.
+///
+/// Empty when there are none, so a project that never used notes round-trips
+/// byte for byte without the section.
+pub fn notes_section(
+    notes: &std::collections::BTreeMap<
+        crate::panels::mcu_module::modules::NotesKey,
+        crate::panels::mcu_module::modules::ModuleNotes,
+    >,
+) -> String {
+    let mut lines = Vec::new();
+    for ((kind, instance), n) in notes {
+        if n.is_empty() {
+            continue;
+        }
+        let line = NoteLine {
+            kind: *kind,
+            instance: *instance,
+            text: n.text.clone(),
+            link: n.link.trim().to_owned(),
+            image: n.image.trim().to_owned(),
+        };
+        if let Ok(l) = ron::to_string(&line) {
+            lines.push(l);
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(NOTES_HEADER);
+    s.push('\n');
+    for l in lines {
+        s.push_str(&l);
+        s.push('\n');
+    }
+    s
+}
+
+/// Read `@modulenotes` back. A line that does not parse is skipped - it and
+/// only it - and an entry with nothing in it is not kept.
+///
+/// Unknown fields are ignored (`ron` skips them), so a file written by a newer
+/// IDE still opens here.
+pub fn parse_notes(
+    text: &str,
+) -> std::collections::BTreeMap<
+    crate::panels::mcu_module::modules::NotesKey,
+    crate::panels::mcu_module::modules::ModuleNotes,
+> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(body) = section_body(text, NOTES_HEADER) else {
+        return map;
+    };
+    for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let Ok(n) = ron::from_str::<NoteLine>(line) else {
+            continue;
+        };
+        let notes = crate::panels::mcu_module::modules::ModuleNotes {
+            text: n.text,
+            link: n.link,
+            image: n.image,
+        };
+        if !notes.is_empty() {
+            map.insert((n.kind, n.instance), notes);
+        }
+    }
+    map
 }
 
 /// The lines belonging to `header`: everything after the header line up to (but
@@ -1614,5 +1706,81 @@ mod irq_priority_round_trip {
     #[test]
     fn nothing_armed_writes_no_section() {
         assert!(irq_section(&BTreeMap::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod module_notes_section_tests {
+    use super::*;
+    use crate::panels::mcu_module::modules::{ModuleKind, ModuleNotes};
+    use std::collections::BTreeMap;
+
+    fn one(text: &str, link: &str, image: &str) -> BTreeMap<(ModuleKind, u8), ModuleNotes> {
+        let mut m = BTreeMap::new();
+        m.insert(
+            (ModuleKind::GenericInterfaceUsart, 1),
+            ModuleNotes {
+                text: text.into(),
+                link: link.into(),
+                image: image.into(),
+            },
+        );
+        m
+    }
+
+    /// Everything a user can type survives, and each entry stays ONE line - a
+    /// newline, a quote, a backslash, a tab, combining marks, and a line that
+    /// looks exactly like a section header.
+    #[test]
+    fn notes_round_trip_with_newlines_quotes_and_at_signs() {
+        let text = "GPS NEO-6M\n@modules\n\"9600\" \\ baud\tu\u{0308} done";
+        let map = one(text, "https://x.example/neo.pdf", "docs/modules/neo.jpg");
+        let s = notes_section(&map);
+        let body = section_body(&s, NOTES_HEADER).unwrap();
+        assert_eq!(body.lines().count(), 1, "one line per entry:\n{s}");
+        assert!(body.trim_start().starts_with('('), "{body}");
+        assert_eq!(parse_notes(&s), map);
+    }
+
+    /// A note containing `@labels` must not end its own section early and eat
+    /// the real one that follows.
+    #[test]
+    fn notes_cannot_cut_the_next_section() {
+        let mut labels = BTreeMap::new();
+        labels.insert(12usize, "BOOT".to_owned());
+        let file = format!(
+            "{}\n{}",
+            notes_section(&one("see @labels\n@labels", "", "")),
+            labels_section(&labels)
+        );
+        assert_eq!(parse_labels(&file), labels);
+        assert_eq!(parse_notes(&file).len(), 1);
+    }
+
+    #[test]
+    fn a_project_without_notes_writes_no_section() {
+        assert_eq!(notes_section(&BTreeMap::new()), "");
+        assert_eq!(
+            notes_section(&one("  ", " ", "")),
+            "",
+            "whitespace is empty"
+        );
+    }
+
+    #[test]
+    fn one_bad_line_loses_only_itself() {
+        let good = notes_section(&one("kept", "", ""));
+        let file = format!("{good}(kind: NotAKind, instance: 2, text: \"x\")\n");
+        let got = parse_notes(&file);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[&(ModuleKind::GenericInterfaceUsart, 1)].text, "kept");
+    }
+
+    /// A file written by a newer IDE, with a field this one does not know.
+    #[test]
+    fn an_unknown_field_is_ignored() {
+        let file = "@modulenotes\n(kind: GenericInterfaceSpi, instance: 3, text: \"t\", colour: \"red\")\n";
+        let got = parse_notes(file);
+        assert_eq!(got[&(ModuleKind::GenericInterfaceSpi, 3)].text, "t");
     }
 }

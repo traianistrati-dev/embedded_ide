@@ -33,6 +33,7 @@ mod device_groups;
 mod dialogs;
 mod extract_crate_dialog;
 mod mcu_form_dialog;
+mod module_notes_ui;
 
 mod diag_panel;
 
@@ -1458,6 +1459,10 @@ pub struct AppIde {
     /// once. Measured while rendering, so it is applied one frame later — the
     /// caret button opens the panel to exactly this.
     vmod_list_h: f32,
+    /// Textures for the images attached to Virtual Module notes, one per file.
+    /// Here and not on `Mcu`, which has no project folder and cannot hold a GPU
+    /// handle. Cleared when a project opens or a new one starts.
+    module_note_images: module_notes_ui::NoteImages,
     /// Height of the Virtual-module panel's BODY — the list and the configs,
     /// not the toolbar above them.
     ///
@@ -2319,6 +2324,7 @@ impl AppIde {
             mcu_fn_list_rect: egui::Rect::NOTHING,
             vmod_needed_h: 0.0,
             vmod_list_h: 0.0,
+            module_note_images: Default::default(),
             vmod_body_h: 150.0,
             vmod_open_sig: 0,
             vmod_collapsed: false,
@@ -3372,6 +3378,11 @@ impl AppIde {
             hash_debug(&mut hasher, g);
         }
 
+        // NOT `mcu.module_notes` either, for the same reason as `pos`: nothing
+        // under `codegen/` reads the notes, the link or the image, and they
+        // reach `mcu.config` through `mcu_config_text` at save time. Hashing
+        // them would regenerate main.rs and every config file on each
+        // keystroke typed into a notes box.
         // Hash modules
         for module in &mcu.modules {
             module.id.hash(&mut hasher);
@@ -3606,9 +3617,7 @@ impl AppIde {
             // change HALs (nrf52833-hal / embassy-nrf, rp2040-hal / embassy-rp),
             // and every `ensure_*` below edits the manifest that comes out of it.
             let base_toml = match self.selected_build_cfg() {
-                Some((cfg, tc)) => {
-                    project_gen::refresh_hal_dependency(&self.cargo_toml, &cfg, &tc)
-                }
+                Some((cfg, tc)) => project_gen::refresh_hal_dependency(&self.cargo_toml, &cfg, &tc),
                 None => self.cargo_toml.clone(),
             };
             let new_toml = project_gen::ensure_peripheral_deps(
@@ -6260,6 +6269,22 @@ mod the_state_hash_is_the_codegen_inputs {
         assert_ne!(before, h(&mcu), "ticking it regenerates");
         mcu.clock_manual = !mcu.clock_manual;
         assert_eq!(before, h(&mcu), "and unticking it regenerates back");
+    }
+
+    /// Typing notes, a link or an image path into a Virtual Module is not a
+    /// project change. The notes are not a codegen input, so each keystroke
+    /// must not regenerate main.rs and every config file.
+    #[test]
+    fn typing_module_notes_regenerates_nothing() {
+        let mut mcu = chip("stm32f103c8t6");
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let before = h(&mcu);
+        let key = (mcu.modules[0].kind, mcu.modules[0].instance());
+        let n = mcu.notes_mut(key);
+        n.text = "u-blox NEO-6M".into();
+        n.link = "https://x.example/neo6m.pdf".into();
+        n.image = "docs/modules/neo6m.jpg".into();
+        assert_eq!(before, h(&mcu), "the notes changed, the project did not");
     }
 
     /// A module box's place on the canvas is not code.

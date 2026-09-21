@@ -392,8 +392,12 @@ fn panel_show_body(
     has_modules: bool,
     has_groups: bool,
     anything_to_group: bool,
+    // Notes whose module is gone. The last module going is exactly when
+    // the other three all turn false, so without this the list of them
+    // disappeared the moment it had something to list.
+    has_orphan_notes: bool,
 ) -> bool {
-    !collapsed && (has_modules || has_groups || anything_to_group)
+    !collapsed && (has_modules || has_groups || anything_to_group || has_orphan_notes)
 }
 
 fn add_module_block_reason(
@@ -1474,6 +1478,7 @@ impl AppIde {
                                 !mcu.modules.is_empty(),
                                 !mcu.groups.is_empty(),
                                 anything_to_group,
+                                !mcu.orphan_notes().is_empty(),
                             );
                             if show_body {
                                 use crate::panels::mcu_module::mcu::logic::module_style;
@@ -1627,6 +1632,16 @@ impl AppIde {
                                 // the two loops borrow `mcu.modules` in turn.
                                 let mut open_ids: Vec<String> = Vec::new();
                                 let mut clicked: Option<String> = None;
+                                // Notes: an orphan deleted in the list is applied
+                                // after it, like `clicked` - the list is drawn
+                                // while `mcu.modules` is borrowed. The project
+                                // folder and the image cache are other fields of
+                                // `self`, so they can ride along beside `mcu`.
+                                let mut orphan_delete: Option<
+                                    crate::panels::mcu_module::modules::NotesKey,
+                                > = None;
+                                let notes_root = self.project_dir.clone();
+                                let note_images = &mut self.module_note_images;
                                 // Deferred, like `clicked`: the (i) button is
                                 // drawn inside the loop that borrows
                                 // `mcu.modules`, and flipping `info_id` there
@@ -1747,6 +1762,20 @@ impl AppIde {
                                                                             .strong()
                                                                             .color(c),
                                                                     );
+                                                                    // Says the module has notes
+                                                                    // without opening it; the
+                                                                    // hover is their first lines.
+                                                                    if let Some(p) = mcu
+                                                                        .notes_for(m)
+                                                                        .and_then(|n| n.preview())
+                                                                    {
+                                                                        ui.label(
+                                                                            egui::RichText::new(ph::NOTE)
+                                                                                .size(11.0)
+                                                                                .color(c),
+                                                                        )
+                                                                        .on_hover_text(p);
+                                                                    }
                                                                 });
                                                             })
                                                             .response
@@ -1761,6 +1790,12 @@ impl AppIde {
                                                         }
                                                         ui.add_space(2.0);
                                                     }
+                                                    super::module_notes_ui::orphan_rows(
+                                                        ui,
+                                                        mcu,
+                                                        notes_root.as_deref(),
+                                                        &mut orphan_delete,
+                                                    );
                                                 });
                                             // What "show me the whole list"
                                             // costs — the caret button opens the
@@ -1996,6 +2031,21 @@ impl AppIde {
                                                     said.insert(m.id.clone(), my_out);
                                                 }
                                                 ui.add_space(4.0);
+                                                // Notes, link, image. Outside the
+                                                // settings grid on purpose: a
+                                                // TextEdit in a grid column that is
+                                                // not the last one collapses to
+                                                // 40 px for good. Keyed by the
+                                                // module's (kind, instance), not
+                                                // by `m` - see `Mcu::module_notes`.
+                                                super::module_notes_ui::notes_section(
+                                                    ui,
+                                                    &mut mcu.module_notes,
+                                                    (m.kind, m.instance()),
+                                                    notes_root.as_deref(),
+                                                    note_images,
+                                                );
+                                                ui.add_space(4.0);
                                                 if confirm_id.as_deref() == Some(m.id.as_str()) {
                                                     // Armed → inline confirm (removing
                                                     // resets this module's pins).
@@ -2107,6 +2157,9 @@ impl AppIde {
                                     } else {
                                         Some(id)
                                     };
+                                }
+                                if let Some(key) = orphan_delete {
+                                    mcu.delete_notes(key);
                                 }
                                 if let Some(id) = clicked {
                                     let mut st =
@@ -4259,11 +4312,11 @@ mod the_panel_body_appears_when_there_is_something_in_it {
     #[test]
     fn a_bare_chip_shows_its_body_the_moment_a_device_exists() {
         assert!(
-            !panel_show_body(false, false, false, false),
+            !panel_show_body(false, false, false, false, false),
             "nothing to show yet"
         );
         assert!(
-            panel_show_body(false, false, true, false),
+            panel_show_body(false, false, true, false, false),
             "one device is enough - this is what makes `+ Device` not a no-op"
         );
     }
@@ -4271,14 +4324,37 @@ mod the_panel_body_appears_when_there_is_something_in_it {
     /// Each of the three reasons stands on its own.
     #[test]
     fn any_one_of_the_three_is_enough() {
-        assert!(panel_show_body(false, true, false, false), "a module");
-        assert!(panel_show_body(false, false, true, false), "a device");
-        assert!(panel_show_body(false, false, false, true), "a pad to group");
+        assert!(
+            panel_show_body(false, true, false, false, false),
+            "a module"
+        );
+        assert!(
+            panel_show_body(false, false, true, false, false),
+            "a device"
+        );
+        assert!(
+            panel_show_body(false, false, false, true, false),
+            "a pad to group"
+        );
+    }
+
+    /// Orphaned notes keep the body open on their own. The state that makes
+    /// them - the last module gone, every pad clear, as after Reset pins - is
+    /// exactly the state in which none of the other three reasons holds, so
+    /// without this the "Notes without a module" list vanished the moment it
+    /// had something to show, and the notes could be neither seen nor deleted.
+    #[test]
+    fn orphaned_notes_alone_keep_the_body_open() {
+        assert!(panel_show_body(false, false, false, false, true));
+        assert!(
+            !panel_show_body(true, false, false, false, true),
+            "collapsed still wins"
+        );
     }
 
     /// Collapsed outranks all three: the user asked for the bar alone.
     #[test]
     fn collapsed_wins_over_everything() {
-        assert!(!panel_show_body(true, true, true, true));
+        assert!(!panel_show_body(true, true, true, true, true));
     }
 }

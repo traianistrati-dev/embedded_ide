@@ -9,6 +9,7 @@
 
 pub mod autowire;
 pub mod model;
+pub mod notes;
 pub mod persist;
 
 pub use model::{
@@ -25,6 +26,8 @@ pub use model::{
     UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, UsbRole,
     VirtualModule, XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of, usart_data_bits,
 };
+
+pub use notes::{ModuleNotes, NotesKey};
 
 use std::collections::BTreeMap;
 

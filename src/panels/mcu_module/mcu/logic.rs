@@ -153,6 +153,7 @@ impl Mcu {
             rotated: false,
             io_pin_pos: std::collections::BTreeMap::new(),
             groups: Vec::new(),
+            module_notes: std::collections::BTreeMap::new(),
             watchdog: Default::default(),
             comp: Default::default(),
         }
@@ -340,11 +341,22 @@ impl Mcu {
         // pins in its config panel, so the auto-wiring path below doesn't apply.
         if kind.is_custom() {
             use crate::panels::mcu_module::modules::VirtualModule;
+            // Past every live Custom AND every Custom key that still holds
+            // notes. Notes are keyed by (kind, instance), so reusing the number
+            // of a removed Custom would hand the new, empty module the old one's
+            // notes. Undoing the Remove restores the same instance, so those
+            // notes still come back where they belong.
             let inst = (self
                 .modules
                 .iter()
                 .filter(|m| m.kind.is_custom())
                 .map(|m| m.instance())
+                .chain(
+                    self.module_notes
+                        .iter()
+                        .filter(|((k, _), n)| k.is_custom() && !n.is_empty())
+                        .map(|((_, i), _)| *i),
+                )
                 .max()
                 .unwrap_or(0))
                 + 1;
@@ -1147,6 +1159,15 @@ impl Mcu {
             }
             s.push_str(&labels);
         }
+        // Virtual Module notes (`@modulenotes`). Written here like any other
+        // section, but NOT codegen input - see `Mcu::module_notes`.
+        let notes = mcu_config::notes_section(&self.module_notes);
+        if !notes.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&notes);
+        }
         // Pin functions (`@pins`) - CODE, and the whole of it: every binding
         // in the generated block comes from these. Written for nRF only. Its
         // backend leaves no `// label` on a binding for `parse_main_rs` to
@@ -1170,6 +1191,21 @@ impl Mcu {
             }
         }
         s
+    }
+
+    /// Restore the Virtual Module notes from `@modulenotes`, REPLACING whatever
+    /// the map held.
+    ///
+    /// It assigns rather than merges, and it is called on every project open
+    /// with or without a `mcu.config`: a project with no notes must come up
+    /// with none, not with the previous project's. The module list does not
+    /// work that way - it is replaced only by a non-empty `@modules`, which is
+    /// how a same-chip Open can keep the last project's Custom modules - and
+    /// the notes deliberately do not share that.
+    pub fn restore_module_notes(&mut self, text: Option<&str>) {
+        self.module_notes = text
+            .map(crate::panels::mcu_module::mcu_config::parse_notes)
+            .unwrap_or_default();
     }
 
     /// Restore the per-pin user labels from `@labels`.
@@ -1867,6 +1903,44 @@ impl Mcu {
         }
     }
 
+    /// The notes shown on `m`, if it has any worth showing. Looked up by
+    /// `(kind, instance)`, never by id - see [`Mcu::module_notes`].
+    pub fn notes_for(
+        &self,
+        m: &crate::panels::mcu_module::modules::VirtualModule,
+    ) -> Option<&crate::panels::mcu_module::modules::ModuleNotes> {
+        self.module_notes
+            .get(&(m.kind, m.instance()))
+            .filter(|n| !n.is_empty())
+    }
+
+    /// The notes for one peripheral instance, created empty on first write. An
+    /// entry left empty costs nothing: it is neither saved nor listed.
+    pub fn notes_mut(
+        &mut self,
+        key: crate::panels::mcu_module::modules::NotesKey,
+    ) -> &mut crate::panels::mcu_module::modules::ModuleNotes {
+        self.module_notes.entry(key).or_default()
+    }
+
+    /// Keys that hold notes no live module shows - the "Notes without a module"
+    /// list. In key order, empty entries left out.
+    pub fn orphan_notes(&self) -> Vec<crate::panels::mcu_module::modules::NotesKey> {
+        self.module_notes
+            .iter()
+            .filter(|(k, n)| {
+                !n.is_empty() && !self.modules.iter().any(|m| (m.kind, m.instance()) == **k)
+            })
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
+    /// Forget one peripheral's notes. The image FILE stays: the IDE never
+    /// deletes one (see `notes::store_image`).
+    pub fn delete_notes(&mut self, key: crate::panels::mcu_module::modules::NotesKey) {
+        self.module_notes.remove(&key);
+    }
+
     /// A module id nothing else is using.
     ///
     /// # Why `len() + 1` was not one
@@ -2063,6 +2137,190 @@ mod reset_pins_tests {
         // part of the loss the confirm has to warn about.
         mcu.reconcile_modules();
         assert!(mcu.modules.is_empty(), "{:?}", mcu.modules.len());
+    }
+}
+
+#[cfg(test)]
+mod module_notes_tests {
+    use crate::panels::mcu_module::create_stm32f103c8tx;
+    use crate::panels::mcu_module::modules::{ModuleKind, ModuleNotes};
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+    fn note(text: &str) -> ModuleNotes {
+        ModuleNotes {
+            text: text.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// The case the whole design exists for. Clearing a bus to move it drops
+    /// the module and a re-wire mints a NEW id - so notes stored on the module,
+    /// or keyed by its id, would be gone. Keyed by (kind, instance), they are
+    /// an orphan in between and come back by themselves.
+    #[test]
+    fn notes_survive_unwiring_and_rewiring_the_bus() {
+        let mut mcu = crate::panels::mcu_module::builtins::builtin_for("esp32c3")
+            .expect("a bundled ESP32-C3")
+            .build_mcu();
+        let mut pads = Vec::new();
+        for f in [PinFunction::UsartTx(0), PinFunction::UsartRx(0)] {
+            let n = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset && p.available_functions.contains(&f)
+                })
+                .map(|p| p.number)
+                .expect("a free USART0 pad");
+            mcu.apply_pin_function(n, f.clone());
+            pads.push((n, f));
+        }
+        let key = (ModuleKind::GenericInterfaceUsart, 0);
+        *mcu.notes_mut(key) = note("GPS NEO-6M, 9600 baud");
+
+        for (n, _) in &pads {
+            mcu.apply_pin_function(*n, PinFunction::Unset);
+        }
+        assert!(mcu.modules.is_empty(), "the module went with its pads");
+        assert_eq!(mcu.orphan_notes(), vec![key], "and its notes are an orphan");
+
+        for (n, f) in &pads {
+            mcu.apply_pin_function(*n, f.clone());
+        }
+        let m = mcu.modules[0].clone();
+        assert!(mcu.orphan_notes().is_empty(), "re-attached");
+        assert_eq!(mcu.notes_for(&m).unwrap().text, "GPS NEO-6M, 9600 baud");
+    }
+
+    /// Reset pins drops every derived module on the next reconcile, and Ctrl+Z
+    /// brings the modules back from a snapshot that holds no notes at all.
+    #[test]
+    fn reset_pins_then_undo_keeps_the_notes() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let key = (mcu.modules[0].kind, mcu.modules[0].instance());
+        *mcu.notes_mut(key) = note("level shifter on RX");
+        mcu.push_module_undo("Reset pins".into());
+
+        mcu.reset_all_pins();
+        mcu.reconcile_modules();
+        assert!(mcu.modules.is_empty());
+        assert_eq!(mcu.module_notes.len(), 1, "the map is untouched");
+
+        assert!(mcu.undo_modules().is_some());
+        let m = mcu.modules[0].clone();
+        assert_eq!(mcu.notes_for(&m).unwrap().text, "level shifter on RX");
+    }
+
+    /// Notes are not in the undo snapshot, so undoing a module edit never
+    /// throws away text typed after it.
+    #[test]
+    fn undo_never_reverts_typed_notes() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        mcu.push_module_undo("before".into());
+        let key = (mcu.modules[0].kind, mcu.modules[0].instance());
+        *mcu.notes_mut(key) = note("typed after the snapshot");
+        assert!(mcu.undo_modules().is_some());
+        assert_eq!(mcu.module_notes[&key].text, "typed after the snapshot");
+    }
+
+    /// A new Custom must not open with the notes of a removed one. With no
+    /// notes around, the numbering is exactly what it always was.
+    #[test]
+    fn a_new_custom_never_inherits_orphaned_notes() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::Custom));
+        assert_eq!(mcu.modules[0].instance(), 1);
+        let id = mcu.modules[0].id.clone();
+        mcu.remove_module(&id);
+        assert!(mcu.add_module(ModuleKind::Custom));
+        assert_eq!(mcu.modules[0].instance(), 1, "no notes: old numbering");
+
+        *mcu.notes_mut((ModuleKind::Custom, 1)) = note("breadboard LEDs");
+        let id = mcu.modules[0].id.clone();
+        mcu.remove_module(&id);
+        assert!(mcu.add_module(ModuleKind::Custom));
+        let m = mcu.modules[0].clone();
+        assert_eq!(m.instance(), 2, "skips the number that holds notes");
+        assert!(mcu.notes_for(&m).is_none());
+        assert_eq!(mcu.orphan_notes(), vec![(ModuleKind::Custom, 1)]);
+    }
+
+    #[test]
+    fn orphans_are_non_empty_keys_without_a_live_module() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let live = (mcu.modules[0].kind, mcu.modules[0].instance());
+        *mcu.notes_mut(live) = note("live");
+        *mcu.notes_mut((ModuleKind::GenericInterfaceSpi, 2)) = note("gone");
+        mcu.notes_mut((ModuleKind::GenericInterfaceI2c, 1)); // empty: not an orphan
+        assert_eq!(
+            mcu.orphan_notes(),
+            vec![(ModuleKind::GenericInterfaceSpi, 2)]
+        );
+
+        mcu.delete_notes((ModuleKind::GenericInterfaceSpi, 2));
+        assert!(mcu.orphan_notes().is_empty());
+        assert!(mcu.module_notes.contains_key(&live), "only that key went");
+    }
+}
+
+#[cfg(test)]
+mod module_notes_persist_tests {
+    use crate::panels::mcu_module::create_stm32f103c8tx;
+    use crate::panels::mcu_module::modules::{ModuleKind, ModuleNotes};
+
+    /// A project that never used notes is written exactly as before - no new
+    /// section, no new byte - and reads back to the same text.
+    #[test]
+    fn a_project_without_notes_round_trips_byte_identically() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let text = mcu.mcu_config_text();
+        assert!(!text.contains("@modulenotes"), "{text}");
+
+        let mut back = create_stm32f103c8tx();
+        back.apply_mcu_config(&text);
+        back.restore_module_notes(Some(&text));
+        assert!(back.module_notes.is_empty());
+    }
+
+    #[test]
+    fn notes_round_trip_through_mcu_config_text() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let key = (mcu.modules[0].kind, mcu.modules[0].instance());
+        *mcu.notes_mut(key) = ModuleNotes {
+            text: "u-blox NEO-6M\n3.3 V only".into(),
+            link: "https://x.example/neo6m.pdf".into(),
+            image: "docs/modules/neo6m.jpg".into(),
+        };
+        let text = mcu.mcu_config_text();
+        assert!(text.contains("@modulenotes"), "{text}");
+
+        let mut back = create_stm32f103c8tx();
+        back.restore_module_notes(Some(&text));
+        assert_eq!(back.module_notes, mcu.module_notes);
+    }
+
+    /// Opening a project replaces the notes even when it has none - otherwise
+    /// the previous project's would carry over into it.
+    #[test]
+    fn opening_a_project_replaces_the_notes_even_when_it_has_none() {
+        let mut mcu = create_stm32f103c8tx();
+        *mcu.notes_mut((ModuleKind::GenericInterfaceSpi, 1)) = ModuleNotes {
+            text: "from the last project".into(),
+            ..Default::default()
+        };
+        mcu.restore_module_notes(Some("@clock\nhse=8000000\n"));
+        assert!(mcu.module_notes.is_empty(), "a config without the section");
+
+        *mcu.notes_mut((ModuleKind::GenericInterfaceSpi, 1)) = ModuleNotes {
+            text: "again".into(),
+            ..Default::default()
+        };
+        mcu.restore_module_notes(None);
+        assert!(mcu.module_notes.is_empty(), "no mcu.config at all");
     }
 }
 

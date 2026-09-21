@@ -25,6 +25,20 @@ roxmltree = "0.20"
 # the lockfile transitively, so this costs no extra build.
 toml_edit  = "0.25"
 
+# Decoding the images attached to Virtual Module notes. Already in the tree -
+# eframe pulls `image` 0.25 through arboard, with png and bmp - so this adds no
+# crate to Cargo.lock. It only turns on `jpeg`, whose zune-jpeg is already
+# locked (reached through tiff on other targets) and is two small pure-Rust
+# crates to compile here. `default-features = false` is NOT optional: the
+# defaults switch on rayon and every format, which WOULD add crates.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+
+# Parsing a Virtual Module note's link the way the browser launcher will, so a
+# link that does not parse is refused here rather than opened as a local file
+# (see `notes::openable_link`). Already in Cargo.lock through ureq and
+# webbrowser, so this adds no crate.
+url = "2"
+
 # Parsing the user's own Rust into a control-flow chart (the Flow tab). `syn`
 # was ALREADY in the tree (serde_derive pulls 2.0.117), so this adds no crate —
 # it only turns on `full`, which is what makes expressions (if / match / loop /

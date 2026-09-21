@@ -944,7 +944,7 @@ fn draw_box(
     // matching how a selected pin is called out on the chip. EVERY text in the
     // box grows by `SELECTED_TEXT_SCALE`, not just the title.
     selected: bool,
-) {
+) -> egui::Rect {
     // Background: the panel dark, tinted towards the module's own colour, or a
     // red pulse while the remove-confirm for this module is open.
     //
@@ -1041,7 +1041,8 @@ fn draw_box(
         paint_legend(&painter.with_clip_rect(rect), &l, grey);
     }
     let title_size = TITLE_SIZE * scale;
-    painter.text(
+    // Kept: returned, so the caller can put the notes glyph beside it.
+    let title_rect = painter.text(
         rect.center_top() + egui::vec2(0.0, 13.0),
         egui::Align2::CENTER_CENTER,
         module_base_name(m),
@@ -1079,6 +1080,7 @@ fn draw_box(
         egui::FontId::proportional(HANDLE_SIZE * scale),
         SUB_COLOUR,
     );
+    title_rect
 }
 
 /// Where a box's variable-name caption sits.
@@ -2089,6 +2091,65 @@ const BOX_LEGEND_TOP: f32 = 56.0;
 /// bevelled on any of the five silhouettes, and nothing else is drawn there
 /// since the name row moved to the panel. It also reads better - the box is one
 /// centred column, and the picture is the last thing in it.
+/// Size of the notes glyph on a box, in the box's own unscaled units.
+const NOTE_GLYPH: f32 = 12.0;
+
+/// Where a box's notes glyph goes: just right of the title, on its line.
+///
+/// `None` when any corner of it would leave the box's REAL outline. The corners
+/// facing away from the chip are bevelled, and how deep depends on the box's own
+/// size (see [`silhouette`]) - on a box above the chip both TOP corners are cut,
+/// which is exactly the title's row. So the test is against that same polygon,
+/// not a guessed margin. A long title on a bevelled box simply gets no glyph;
+/// the module's row in the panel list still shows one.
+fn note_glyph_rect(
+    title: egui::Rect,
+    rect: egui::Rect,
+    shape: BoxShape,
+    side: Side,
+) -> Option<egui::Rect> {
+    const GAP: f32 = 4.0;
+    let g = egui::Rect::from_min_size(
+        egui::pos2(title.right() + GAP, title.center().y - NOTE_GLYPH / 2.0),
+        egui::vec2(NOTE_GLYPH, NOTE_GLYPH),
+    );
+    let outline = silhouette(rect, shape, side);
+    [
+        g.left_top(),
+        g.right_top(),
+        g.left_bottom(),
+        g.right_bottom(),
+    ]
+    .into_iter()
+    .all(|p| inside_convex(&outline, p))
+    .then_some(g)
+}
+
+/// Whether `p` lies inside, or on, a convex polygon given in either winding.
+///
+/// Every [`silhouette`] is convex - a rectangle with corners cut straight or
+/// rounded - so the point is inside exactly when it is on the same side of
+/// every edge. Zero-length edges are skipped rather than trusted for a sign.
+fn inside_convex(poly: &[egui::Pos2], p: egui::Pos2) -> bool {
+    if poly.len() < 3 {
+        return false;
+    }
+    let mut sign = 0.0_f32;
+    for (i, a) in poly.iter().enumerate() {
+        let b = poly[(i + 1) % poly.len()];
+        let cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        if cross.abs() < 1e-3 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if cross.signum() != sign {
+            return false;
+        }
+    }
+    true
+}
+
 fn box_legend_rect(rect: egui::Rect, shape: BoxShape) -> Option<egui::Rect> {
     // NOT scaled with the box texts. The box itself does not grow when
     // selected, so a legend that did would move under a title that also grew.
@@ -2382,7 +2443,7 @@ pub fn draw_modules(
         let m = &mcu.modules[*i];
         let inst = m.instance();
         let removing = removing_id.as_deref() == Some(m.id.as_str());
-        draw_box(
+        let title_rect = draw_box(
             painter,
             *rect,
             m,
@@ -2465,6 +2526,24 @@ pub fn draw_modules(
                 egui::Sense::click_and_drag(),
             )
             .on_hover_cursor(egui::CursorIcon::Grab);
+        // The box has notes. The tooltip rides on the HEADER's own response
+        // rather than a second widget over it: one on top would be the one the
+        // pointer lands on, and the box has to stay draggable through the glyph.
+        if let Some(preview) = mcu.notes_for(&mcu.modules[*i]).and_then(|n| n.preview()) {
+            let shape = BoxShape::of(mcu.modules[*i].kind);
+            if let Some(g) = note_glyph_rect(title_rect, *rect, shape, *side) {
+                painter.text(
+                    g.center(),
+                    egui::Align2::CENTER_CENTER,
+                    ph::NOTE,
+                    egui::FontId::proportional(NOTE_GLYPH),
+                    SUB_COLOUR,
+                );
+                if resp.hover_pos().is_some_and(|p| g.contains(p)) {
+                    resp.clone().on_hover_text(preview);
+                }
+            }
+        }
         if resp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             // drag_delta is already in scene coords (the Scene layer transform is
@@ -9626,5 +9705,80 @@ mod the_signal_legends {
         assert_ne!(LEGEND_GREY, LEGEND_ACCENT);
         assert_ne!(LEGEND_GREY_OFF, LEGEND_ACCENT);
         assert_ne!(LEGEND_GREY, LEGEND_GREY_OFF);
+    }
+}
+
+#[cfg(test)]
+mod the_note_glyph {
+    use super::*;
+
+    const SHAPES: [BoxShape; 6] = [
+        BoxShape::Serial,
+        BoxShape::Memory,
+        BoxShape::Parallel,
+        BoxShape::Driver,
+        BoxShape::OffBoard,
+        BoxShape::Custom,
+    ];
+    const SIDES: [Side; 4] = [Side::Right, Side::Left, Side::Top, Side::Bottom];
+
+    fn boxr() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(170.0, 98.0))
+    }
+
+    /// A title of ordinary width, where `draw_box` paints it.
+    fn title(width: f32) -> egui::Rect {
+        egui::Rect::from_center_size(
+            boxr().center_top() + egui::vec2(0.0, 13.0),
+            egui::vec2(width, 14.0),
+        )
+    }
+
+    #[test]
+    fn the_note_glyph_sits_right_of_the_title_inside_the_box() {
+        let t = title(40.0);
+        for shape in SHAPES {
+            for side in SIDES {
+                let g = note_glyph_rect(t, boxr(), shape, side)
+                    .unwrap_or_else(|| panic!("{shape:?} on {side:?}: no room for the glyph"));
+                assert!(g.left() > t.right(), "right of the title");
+                assert!((g.center().y - t.center().y).abs() < 0.5, "on its line");
+            }
+        }
+    }
+
+    /// Past the box - and, the part a margin would get wrong, inside the
+    /// rectangle but in a CUT corner.
+    #[test]
+    fn a_title_that_fills_the_box_gets_no_glyph() {
+        assert!(note_glyph_rect(title(160.0), boxr(), BoxShape::Serial, Side::Right).is_none());
+
+        let t = title(120.0);
+        assert!(
+            note_glyph_rect(t, boxr(), BoxShape::Serial, Side::Top).is_some(),
+            "a square box has the room"
+        );
+        assert!(
+            note_glyph_rect(t, boxr(), BoxShape::Driver, Side::Top).is_none(),
+            "a box above the chip has both TOP corners cut, on the title row"
+        );
+    }
+
+    #[test]
+    fn inside_convex_is_inside() {
+        let sq = [
+            egui::pos2(0.0, 0.0),
+            egui::pos2(10.0, 0.0),
+            egui::pos2(10.0, 10.0),
+            egui::pos2(0.0, 10.0),
+        ];
+        assert!(inside_convex(&sq, egui::pos2(5.0, 5.0)));
+        assert!(
+            inside_convex(&sq, egui::pos2(10.0, 5.0)),
+            "on an edge counts"
+        );
+        assert!(!inside_convex(&sq, egui::pos2(11.0, 5.0)));
+        let rev: Vec<_> = sq.iter().rev().copied().collect();
+        assert!(inside_convex(&rev, egui::pos2(5.0, 5.0)), "either winding");
     }
 }

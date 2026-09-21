@@ -1333,6 +1333,7 @@ impl AppIde {
                         // main.rs tail in a project that says it is new.
                         self.selected_mcu_id = self.pending_mcu_id.take().unwrap_or_default();
                         self.mcu = Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
+                        self.module_note_images.clear();
                         // Ask the index what this chip's HAL feature is, once,
                         // off-thread. Picking a chip is the last moment before
                         // a project exists on it — after this the answer only

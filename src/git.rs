@@ -1559,13 +1559,32 @@ pub fn restore_file_to_head(dir: &Path, path: &str) -> Result<String, String> {
 /// Only this one file is touched — nothing about HEAD or any other file moves,
 /// which is what makes restoring from history reversible: the result shows up
 /// as an ordinary uncommitted change.
+/// A committed blob as the text `restore_file_at` writes back - or a refusal
+/// when it is not text.
+///
+/// The restore folds CR LF to LF, which is right for source and CORRUPTION for
+/// anything else: `from_utf8_lossy` replaced every invalid byte with U+FFFD,
+/// and the fold then deleted bytes out of what was left. A PNG's own signature
+/// is `89 50 4E 47 0D 0A 1A 0A`, so an image restored from the Git tab came
+/// back broken at byte 5. That became reachable once projects started to hold
+/// images (Virtual Module notes copy them into `docs/modules/`), so a binary is
+/// now left exactly as it is, and the tab says why.
+fn blob_as_text(bytes: &[u8]) -> Result<String, String> {
+    std::str::from_utf8(bytes)
+        .map(|s| s.replace("\r\n", "\n"))
+        .map_err(|_| {
+            "binary file: the IDE restores text files only, so this one was left as it is"
+                .to_owned()
+        })
+}
+
 pub fn restore_file_at(dir: &Path, rev: &str, path: &str) -> Result<String, String> {
     let out = run_git(dir, &["show".into(), format!("{rev}:{path}")])
         .map_err(|e| format!("couldn't run git show: {e}"))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    let content = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    let content = blob_as_text(&out.stdout)?;
     let dest = dir.join(path);
     // Skip the write when the working file already holds this exact content — a
     // needless rewrite only bumps the mtime, which `git status` then flags as a
@@ -2860,5 +2879,28 @@ index abc..def 100644
             "only the real edit is unsaved"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod restore_binary_tests {
+    use super::blob_as_text;
+
+    /// The PNG signature itself carries a CR LF, so the old lossy path broke
+    /// every image at byte 5. Refused now, never rewritten.
+    #[test]
+    fn a_binary_blob_is_refused_not_mangled() {
+        let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF];
+        assert!(blob_as_text(&png).is_err());
+    }
+
+    /// Text keeps the old behaviour exactly: CR LF folded to LF.
+    #[test]
+    fn a_text_blob_is_still_lf_normalized() {
+        assert_eq!(blob_as_text(b"a\r\nb\n").unwrap(), "a\nb\n");
+        assert_eq!(
+            blob_as_text("\u{00fc}\r\n".as_bytes()).unwrap(),
+            "\u{00fc}\n"
+        );
     }
 }
