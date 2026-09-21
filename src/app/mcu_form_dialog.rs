@@ -437,20 +437,38 @@ impl AppIde {
 
             // ── Validation feedback ────────────────────────────────────────
             ui.separator();
-            for w in &warnings {
+            // In a scroll area of its own, with a ceiling. The list has no
+            // bound - one line per bad token per pin - and unbounded it grew
+            // the window past the screen: a chip with several hundred of them
+            // put Save, Cancel and the title bar out of reach, and a modal
+            // that cannot be closed takes the whole app with it. With the
+            // form's 62% above, this leaves the buttons on screen.
+            if errors.len() > 1 {
                 ui.label(
-                    egui::RichText::new(format!("{} {w}", ph::WARNING))
-                        .size(10.5)
-                        .color(egui::Color32::from_rgb(220, 170, 70)),
-                );
-            }
-            for e in &errors {
-                ui.label(
-                    egui::RichText::new(format!("{} {e}", ph::X_CIRCLE))
+                    egui::RichText::new(format!("{} errors", errors.len()))
                         .size(10.5)
                         .color(egui::Color32::from_rgb(230, 110, 90)),
                 );
             }
+            egui::ScrollArea::vertical()
+                .id_salt("mcu_form_feedback")
+                .max_height(ui.ctx().content_rect().height() * 0.18)
+                .show(ui, |ui| {
+                    for w in &warnings {
+                        ui.label(
+                            egui::RichText::new(format!("{} {w}", ph::WARNING))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(220, 170, 70)),
+                        );
+                    }
+                    for e in &errors {
+                        ui.label(
+                            egui::RichText::new(format!("{} {e}", ph::X_CIRCLE))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(230, 110, 90)),
+                        );
+                    }
+                });
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
