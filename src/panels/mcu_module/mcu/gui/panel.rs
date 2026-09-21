@@ -409,7 +409,15 @@ pub fn draw_pin_functions(
     let list_screen = to_global * list_rect;
 
     if let Some(func) = mcu.show_info.clone()
-        && !info::draw_info_popup(&func, list_screen, ui)
+        && !info::draw_info_popup(
+            &func,
+            list_screen,
+            ui,
+            crate::panels::mcu_module::uart_baud::max_baud_text(
+                &crate::panels::mcu_module::uart_baud::Chip::of(mcu),
+                &func,
+            ),
+        )
     {
         mcu.show_info = None;
     }

@@ -842,19 +842,24 @@ impl PinFunction {
 
 // ── Shared spec helpers ──────────────────────────────────────────────────────
 
+/// The spec row whose value only the chip and its clock can give - the ⓘ popup
+/// fills it in (see `mcu::gui::info::draw_info_popup`).
+pub const MAX_BAUD_KEY: &str = "Max baud rate";
+
 fn usart_common_specs(n: u8) -> Vec<(String, String)> {
-    let max_baud = if n == 1 {
-        "4.5 Mbit/s  (APB2 72 MHz)"
-    } else {
-        "2.25 Mbit/s  (APB1 36 MHz)"
-    };
+    // Not a number: the ceiling is a fraction of whatever clock feeds this
+    // peripheral, which the Clock tab moves - and this function sees neither
+    // the chip nor the clock. It used to print the F103's figures at 72 MHz,
+    // on every chip's USART and LPUART alike. The popup puts the real one in
+    // its place when the chip can be checked (`uart_baud::max_baud_text`).
+    let max_baud = "Set by the clock feeding it - see the module's Baud rate row";
     vec![
         ("Peripheral".into(), format!("USART{n}")),
         (
             "Mode".into(),
             "Full-duplex async (also sync with CK)".into(),
         ),
-        ("Max baud rate".into(), max_baud.into()),
+        (MAX_BAUD_KEY.into(), max_baud.into()),
         ("Data bits".into(), "8 or 9 bits".into()),
         ("Stop bits".into(), "0.5 / 1 / 1.5 / 2".into()),
         ("Parity".into(), "None, Even, Odd".into()),

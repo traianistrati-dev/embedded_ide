@@ -57,9 +57,10 @@ pub const DEFAULT_BLOCK_GAP_MS: u64 = 20;
 ///
 /// 74880 is the odd one and is here for the Espressif parts. A board whose
 /// crystal is 26 MHz boots with the ROM's UART divisor sized for 40 MHz, so its
-/// boot log arrives at 115200 x 26 / 40, which is exactly 74880. Without this
-/// entry that log is unreadable here at any setting, because neither picker
-/// takes a typed value.
+/// boot log arrives at 115200 x 26 / 40, which is exactly 74880. Both pickers
+/// take a typed rate now (see [`baud_picker`]), but this one stays a preset:
+/// it is the rate a user needs exactly when they do not know why their board
+/// prints garbage, so it has to be findable without knowing the number.
 ///
 /// WHICH parts can be that board is read from the shipped definitions, not
 /// asserted: `esp32` and `esp32c2` are the only two of the nine that offer
@@ -79,6 +80,110 @@ pub const DEFAULT_BLOCK_GAP_MS: u64 = 20;
 pub const BAUDS: [u32; 9] = [
     9600, 19200, 38400, 57600, 74880, 115200, 230400, 460800, 921600,
 ];
+
+/// The slowest rate either picker takes as a typed value. Nothing the IDE
+/// generates for is useful below it, and it keeps 0 - a divide by zero in two
+/// of the HALs - out of the field.
+pub const BAUD_MIN: u32 = 300;
+/// The fastest typed rate: above every UART the IDE generates for. The real
+/// ceiling is a fraction of the chip's clock, which the module panel works out
+/// and REPORTS - see `uart_baud` - rather than enforcing it here.
+pub const BAUD_MAX: u32 = 25_000_000;
+
+/// Whether `baud` is one of the shared presets.
+pub fn is_preset(baud: u32) -> bool {
+    BAUDS.contains(&baud)
+}
+
+/// What a preset carries beside its number in the dropdown.
+pub struct BaudTag {
+    pub text: String,
+    pub color: egui::Color32,
+    pub hover: String,
+}
+
+/// The baud picker both panels draw: the presets, then "Custom…" for any
+/// other rate.
+///
+/// ONE widget for the same reason [`BAUDS`] is one list: the Serial tab seeds
+/// its rate from a USART module, so every rate a module can hold has to be one
+/// the tab can show and re-select. A rate outside the presets is simply shown
+/// in the typed field.
+///
+/// The typed field commits on Enter or when it loses focus, never per
+/// keystroke: the module's rate is hashed into the generated config file, and
+/// typing `250000` would otherwise write it at 2, 25, 250... baud on the way.
+/// Dragging is off for the same reason. It does not clamp a stored value that
+/// is already outside `range` either - a hand-edited `mcu.config` keeps its
+/// number, and the caller reports it instead of the widget rewriting it.
+///
+/// `tag` annotates each preset (the module panel passes the rate's error at
+/// the current clock); the Serial tab passes one that says nothing.
+pub fn baud_picker(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    baud: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+    tag: &dyn Fn(u32) -> Option<BaudTag>,
+) {
+    // "Custom…" with a preset still in the field is a state the value alone
+    // cannot hold, so it is remembered per picker until a preset is chosen.
+    let custom_id = ui.make_persistent_id((id_salt, "baud_custom"));
+    let mut custom =
+        !is_preset(*baud) || ui.data(|d| d.get_temp::<bool>(custom_id)).unwrap_or(false);
+    ui.horizontal(|ui| {
+        let shown = if custom {
+            "Custom".to_owned()
+        } else {
+            baud.to_string()
+        };
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                for b in BAUDS {
+                    let t = tag(b);
+                    let mut text = egui::RichText::new(match &t {
+                        Some(t) if !t.text.is_empty() => format!("{b}   {}", t.text),
+                        _ => b.to_string(),
+                    });
+                    if let Some(t) = &t {
+                        text = text.color(t.color);
+                    }
+                    let mut r = ui.selectable_label(!custom && *baud == b, text);
+                    if let Some(t) = t {
+                        r = r.on_hover_text(t.hover);
+                    }
+                    if r.clicked() {
+                        *baud = b;
+                        custom = false;
+                    }
+                }
+                ui.separator();
+                if ui
+                    .selectable_label(custom, "Custom…")
+                    .on_hover_text("Type any rate - the one the other end of the link runs at.")
+                    .clicked()
+                {
+                    custom = true;
+                }
+            });
+        if custom {
+            ui.add(
+                egui::DragValue::new(baud)
+                    .range(range)
+                    .clamp_existing_to_range(false)
+                    .update_while_editing(false)
+                    .speed(0.0)
+                    .suffix(" baud"),
+            )
+            .on_hover_text("Click and type the rate; Enter applies it.");
+        }
+    });
+    // Only the explicit choice is remembered. Storing `custom` itself would
+    // latch it: a picker once shown a non-preset (a seeded 250000, say) would
+    // stay on "Custom" after the value became a preset from outside.
+    ui.data_mut(|d| d.insert_temp(custom_id, custom && is_preset(*baud)));
+}
 
 /// One contiguous burst of bytes in one direction.
 ///
@@ -1689,6 +1794,104 @@ mod tests {
 #[cfg(test)]
 mod baud_list_tests {
     use super::{BAUDS, port_label};
+
+    /// Every string one frame of `picker` paints, rendered headless.
+    fn painted(baud: &mut u32, picker: impl Fn(&mut eframe::egui::Ui, &mut u32)) -> Vec<String> {
+        use eframe::egui;
+        fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let shapes = ctx.run_ui(input, |ui| picker(ui, baud)).shapes;
+        let mut out = Vec::new();
+        for s in &shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    fn picker(ui: &mut eframe::egui::Ui, baud: &mut u32) {
+        super::baud_picker(ui, "t", baud, super::BAUD_MIN..=super::BAUD_MAX, &|_| None);
+    }
+
+    /// A rate outside the presets - one a USART module seeds into the Serial
+    /// tab, say - shows as "Custom" with the number in the typed field. Before
+    /// the field existed, the tab could show such a rate but never get back to
+    /// it once another was picked.
+    #[test]
+    fn a_rate_outside_the_presets_is_shown_in_the_typed_field() {
+        let mut baud = 250_000;
+        let texts = painted(&mut baud, picker);
+        assert!(texts.iter().any(|t| t == "Custom"), "{texts:?}");
+        // egui paints a DragValue's number and its suffix as two texts.
+        assert!(texts.iter().any(|t| t == "250000"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == " baud"), "{texts:?}");
+        assert_eq!(baud, 250_000, "drawing does not touch the rate");
+    }
+
+    /// A picker that once showed a custom rate goes back to the preset when
+    /// the value becomes one from outside - the Serial tab re-seeded by the
+    /// next project, say. The remembered choice must not latch "Custom".
+    #[test]
+    fn a_custom_rate_does_not_latch_the_picker() {
+        use eframe::egui;
+        let ctx = egui::Context::default();
+        let frame = |baud: &mut u32| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let shapes = ctx.run_ui(input, |ui| picker(ui, baud)).shapes;
+            let mut out = Vec::new();
+            for s in &shapes {
+                if let egui::Shape::Text(t) = &s.shape {
+                    out.push(t.galley.text().to_owned());
+                }
+            }
+            out
+        };
+        let mut baud = 250_000;
+        assert!(frame(&mut baud).iter().any(|t| t == "Custom"));
+        baud = 115_200;
+        let texts = frame(&mut baud);
+        assert!(texts.iter().any(|t| t == "115200"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "Custom"), "{texts:?}");
+    }
+
+    /// A preset reads as itself, with no typed field beside it.
+    #[test]
+    fn a_preset_shows_no_typed_field() {
+        let mut baud = 115_200;
+        let texts = painted(&mut baud, picker);
+        assert!(texts.iter().any(|t| t == "115200"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.ends_with(" baud")), "{texts:?}");
+    }
+
+    /// A stored rate outside the typed range is REPORTED, not rewritten: the
+    /// widget must not clamp a hand-edited `mcu.config` on sight, because the
+    /// rate is hashed into generated code.
+    #[test]
+    fn a_stored_rate_outside_the_range_is_left_alone() {
+        let mut baud = 100;
+        let texts = painted(&mut baud, picker);
+        assert_eq!(baud, 100);
+        assert!(texts.iter().any(|t| t == "100"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == " baud"), "{texts:?}");
+    }
 
     /// The default a fresh console starts at has to be selectable, or the very
     /// first thing the combo shows is a value it cannot get back to.

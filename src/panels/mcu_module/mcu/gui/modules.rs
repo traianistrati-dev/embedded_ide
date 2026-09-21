@@ -2978,6 +2978,52 @@ fn free_pwm_channels(
     on_chip.difference(wired).cloned().collect()
 }
 
+/// The colour a baud verdict is drawn in: dim when fine or unjudged, then the
+/// Configuration tab's amber and the Serial tab's red.
+fn baud_color(s: Option<crate::panels::mcu_module::uart_baud::Severity>) -> egui::Color32 {
+    use crate::panels::mcu_module::uart_baud::Severity;
+    match s {
+        None | Some(Severity::Ok) => egui::Color32::from_gray(140),
+        Some(Severity::Marginal) => egui::Color32::from_rgb(235, 150, 90),
+        Some(Severity::Broken) => egui::Color32::from_rgb(220, 90, 80),
+    }
+}
+
+/// The USART/LPUART "Baud rate" cell: the shared picker (the Serial tab's, so a
+/// rate set here stays selectable there), then what the chip's UART makes of
+/// the rate at the current clock.
+///
+/// Two short lines rather than one wrapped sentence, because a grid cell does
+/// not wrap; the full explanation is on the first line's hover. The presets
+/// carry their own error in the dropdown, so a bad one is visible before it is
+/// picked.
+fn baud_row(ui: &mut egui::Ui, baud: &mut u32, plan: &crate::panels::mcu_module::uart_baud::Plan) {
+    use crate::panels::mcu_module::uart_baud as ub;
+    ui.vertical(|ui| {
+        crate::serial::baud_picker(ui, "baud", baud, ub::typed_range(plan), &|b| {
+            ub::preset_tag(plan, b).map(|(text, sev, hover)| crate::serial::BaudTag {
+                text,
+                color: baud_color(Some(sev)),
+                hover,
+            })
+        });
+        let h = ub::hint(plan, *baud);
+        ui.label(
+            egui::RichText::new(&h.verdict)
+                .size(10.5)
+                .color(baud_color(h.severity)),
+        )
+        .on_hover_text(&h.why);
+        if let Some(range) = &h.range {
+            ui.label(
+                egui::RichText::new(range)
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(120)),
+            );
+        }
+    });
+}
+
 pub fn module_config_ui(
     ui: &mut egui::Ui,
     m: &mut VirtualModule,
@@ -3026,6 +3072,9 @@ pub fn module_config_ui(
     // some forty `if`s and three early `return`s decide which rows exist, and a
     // second pass would have to mirror every one of them.
     out: &mut ConfigOut,
+    // What the chip's UART does with a baud rate at the CURRENT clock. Read by
+    // the caller before `mcu.modules` is borrowed, like `dma`.
+    baud_chip: &crate::panels::mcu_module::uart_baud::Chip,
 ) {
     // Read what we need off `m` BEFORE `m.config` is borrowed mutably below.
     let is_custom = m.kind.is_custom();
@@ -4395,15 +4444,7 @@ pub fn module_config_ui(
                 ModuleConfig::Usart(cfg) | ModuleConfig::Lpuart(cfg) => {
                     out.field("Baud rate", docs::USART_BAUD);
                     ui.label("Baud rate");
-                    egui::ComboBox::from_id_salt("baud")
-                        .selected_text(cfg.baud_rate.to_string())
-                        .show_ui(ui, |ui| {
-                            // The Serial tab's list, not a second copy of it:
-                            // opening that tab seeds its baud from here.
-                            for b in crate::serial::BAUDS {
-                                ui.selectable_value(&mut cfg.baud_rate, b, b.to_string());
-                            }
-                        });
+                    baud_row(ui, &mut cfg.baud_rate, &baud_chip.plan(cfg.instance));
                     ui.end_row();
                     // Right after baud rate, because the two are read together:
                     // the buffer is only meaningful as "how many bytes at this
@@ -7024,6 +7065,14 @@ mod tests {
                 None,
                 line_extras,
                 &mut out,
+                &crate::panels::mcu_module::uart_baud::Chip::bare(
+                    family,
+                    if is_async {
+                        crate::panels::mcu_module::mcu::Runtime::Async
+                    } else {
+                        crate::panels::mcu_module::mcu::Runtime::Blocking
+                    },
+                ),
             );
         });
         out
@@ -8205,6 +8254,85 @@ mod tests {
         );
         assert!(is_advanced_timer(1) && is_advanced_timer(8) && is_advanced_timer(20));
         assert!(!is_advanced_timer(16) && !is_advanced_timer(2));
+    }
+}
+
+#[cfg(test)]
+mod the_baud_row_reports_the_wire {
+    use super::baud_row;
+    use crate::panels::mcu_module::uart_baud::{Divider, Plan, Source};
+    use eframe::egui;
+
+    fn painted(baud: u32, plan: &Plan) -> Vec<String> {
+        fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut baud = baud;
+        let shapes = ctx.run_ui(input, |ui| baud_row(ui, &mut baud, plan)).shapes;
+        let mut out = Vec::new();
+        for s in &shapes {
+            walk(&s.shape, &mut out);
+        }
+        out
+    }
+
+    /// The row prints what the HAL will do and the range at the current clock
+    /// - here the F1 left on its 8 MHz HSI, where the top preset is an assert.
+    #[test]
+    fn a_preset_the_clock_cannot_make_says_so_under_the_field() {
+        let plan = Plan::Checked(Source {
+            divider: Divider::F1 { pclk: 8_000_000 },
+            clock: "PCLK2",
+        });
+        let texts = painted(921_600, &plan);
+        assert!(texts.iter().any(|t| t == "921600"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "panics at boot"), "{texts:?}");
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "range 123 – 500 000 at PCLK2 8 MHz"),
+            "{texts:?}"
+        );
+    }
+
+    /// A custom rate gets the typed field AND the verdict under it.
+    #[test]
+    fn a_custom_rate_is_judged_too() {
+        let plan = Plan::Checked(Source {
+            divider: Divider::F1 { pclk: 72_000_000 },
+            clock: "PCLK2",
+        });
+        let texts = painted(250_000, &plan);
+        // The typed field: its number and suffix are painted apart.
+        assert!(texts.iter().any(|t| t == "250000"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == " baud"), "{texts:?}");
+        assert!(
+            texts.iter().any(|t| t == "runs at 250 000 baud · exact"),
+            "{texts:?}"
+        );
+    }
+
+    /// Where the rate goes nowhere, the row says that instead of a range.
+    #[test]
+    fn a_runtime_without_a_driver_says_the_rate_is_unused() {
+        let texts = painted(115_200, &Plan::NotUsed("no driver"));
+        assert!(
+            texts.iter().any(|t| t == "not used by the generated code"),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t.starts_with("range")), "{texts:?}");
     }
 }
 

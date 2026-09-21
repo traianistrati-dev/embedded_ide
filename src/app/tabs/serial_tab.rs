@@ -13,8 +13,8 @@ use crate::serial::{
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
-/// Common baud rates offered in the dropdown.
-use crate::serial::BAUDS;
+/// The shared baud picker and its typed-rate limits.
+use crate::serial::{BAUD_MAX, BAUD_MIN, baud_picker};
 
 /// Height of the send-area resize handle / minimum send-area height.
 const HANDLE_H: f32 = 6.0;
@@ -103,13 +103,16 @@ pub fn show_serial_tab(
 
         ui.add_space(8.0);
         ui.label("Baud:");
-        egui::ComboBox::from_id_salt("serial_baud")
-            .selected_text(serial.baud.to_string())
-            .show_ui(ui, |ui| {
-                for b in BAUDS {
-                    ui.selectable_value(&mut serial.baud, b, b.to_string());
-                }
-            });
+        // The module panel's picker, so a custom rate seeded from a USART
+        // module stays selectable here. No per-rate tags: this end is the
+        // host's adapter, whose clock nothing here knows.
+        baud_picker(
+            ui,
+            "serial_baud",
+            &mut serial.baud,
+            BAUD_MIN..=BAUD_MAX,
+            &|_| None,
+        );
 
         ui.add_space(8.0);
         if connected {

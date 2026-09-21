@@ -25,6 +25,7 @@ pub mod project_gen;
 pub mod registry;
 pub mod stm32_pin_data;
 pub mod structure_config;
+pub mod uart_baud;
 pub mod watchdog;
 
 // ── Core types re-exports (convenience imports) ──────────────────

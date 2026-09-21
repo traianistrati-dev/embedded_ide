@@ -1581,6 +1581,10 @@ impl AppIde {
                                 // chip's channels while `mcu.modules` is
                                 // borrowed mutably below.
                                 let chip_dma = mcu.dma.clone();
+                                // The clock, read now for the same reason: the
+                                // baud row reports against it.
+                                let baud_chip =
+                                    crate::panels::mcu_module::uart_baud::Chip::of(mcu);
                                 let family = mcu.family.clone();
                                 // Read before `mcu.modules` is borrowed mutably.
                                 let usart_line_extras =
@@ -1985,6 +1989,7 @@ impl AppIde {
                                                         &mut pin_fn_choice, is_async, is_native,
                                                         &family, pending, chip_dma.as_ref(),
                                                         usart_line_extras, &mut my_out,
+                                                        &baud_chip,
                                                     );
                                                 });
                                                 if !my_out.is_empty() {

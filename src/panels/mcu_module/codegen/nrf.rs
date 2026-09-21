@@ -659,7 +659,7 @@ fn bus_speed(mcu: &Mcu, kind: &str, n: u8) -> u32 {
 }
 
 /// The UARTE's fixed baud settings, as the PAC names them.
-const BAUDS: [(u32, &str); 18] = [
+pub(crate) const BAUDS: [(u32, &str); 18] = [
     (1_200, "BAUD1200"),
     (2_400, "BAUD2400"),
     (4_800, "BAUD4800"),
@@ -681,7 +681,7 @@ const BAUDS: [(u32, &str); 18] = [
 ];
 
 /// The nearest baud the UARTE has.
-fn baud_variant(hz: u32) -> (u32, &'static str) {
+pub(crate) fn baud_variant(hz: u32) -> (u32, &'static str) {
     BAUDS
         .iter()
         .copied()

@@ -2401,7 +2401,7 @@ fn pwm_actual_hz(family: &str, div: u32, top: u16) -> u32 {
 ///
 /// Only the ASYNC backend may assume this. The blocking one builds its clocks
 /// from the Clock tab, so it has to ask that instead - see [`blocking_sys_hz`].
-fn async_sys_hz(family: &str) -> u32 {
+pub(crate) fn async_sys_hz(family: &str) -> u32 {
     if family == "rp235x" {
         150_000_000
     } else {
@@ -2419,6 +2419,42 @@ fn blocking_sys_hz(mcu: &Mcu) -> u32 {
     let cfg = pll_from(mcu, "pll_sys", xtal_hz(mcu));
     let mhz = cfg.vco_mhz / cfg.pd1.max(1) / cfg.pd2.max(1);
     mhz.saturating_mul(1_000_000).max(1)
+}
+
+/// [`blocking_sys_hz`] without its whole-MHz rounding: clk_peri, which
+/// `ClocksManager::init_default` leaves on clk_sys, as the UART divider sees
+/// it - the same `(ref * fbdiv) / (pd1 * pd2)` rp-hal's PLL reports, in Hz.
+///
+/// The PWM helpers are fine with whole megahertz; a baud error is not - a VCO
+/// of 1596 MHz over 5 × 2 is 159.6 MHz, which whole megahertz would call 159,
+/// moving every rate the UART check reports.
+pub(crate) fn blocking_peri_hz(mcu: &Mcu) -> u32 {
+    let cfg = pll_from(mcu, "pll_sys", xtal_hz(mcu));
+    let div = (cfg.pd1.max(1) * cfg.pd2.max(1)) as u64;
+    (cfg.vco_mhz as u64 * 1_000_000 / div).clamp(1, u32::MAX as u64) as u32
+}
+
+/// Whether rp-hal accepts BOTH of the Clock tab's PLLs.
+///
+/// The generated blocking `main` sets up PLL_SYS and PLL_USB with
+/// `setup_pll_blocking(..).map_err(|_| false).unwrap()`, so a PLL rp-hal
+/// refuses panics the board before any peripheral exists - and the tab offers
+/// some: post divider 7, and VCOs outside rp-hal's window. A mirror of
+/// `PhaseLockedLoop::new` (pll.rs, identical in rp2040-hal 0.12 and rp235x-hal
+/// 0.4 but for the VCO floor), with `refdiv: 1` as emitted.
+pub(crate) fn blocking_plls_ok(mcu: &Mcu) -> bool {
+    let xtal = xtal_hz(mcu);
+    let vco_min_mhz = if mcu.family == "rp235x" { 400 } else { 750 };
+    ["pll_sys", "pll_usb"].iter().all(|prefix| {
+        let cfg = pll_from(mcu, prefix, xtal);
+        let vco_hz = cfg.vco_mhz as u64 * 1_000_000;
+        let fbdiv = vco_hz / (xtal.max(1) as u64);
+        (vco_min_mhz..=1_600).contains(&cfg.vco_mhz)
+            && (1..7).contains(&cfg.pd1)
+            && (1..7).contains(&cfg.pd2)
+            && (5_000_000..vco_hz / 16).contains(&(xtal as u64))
+            && (16..320).contains(&fbdiv)
+    })
 }
 
 fn pwm_actual_hz_at(sys: u32, div: u32, top: u16) -> u32 {

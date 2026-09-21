@@ -1523,8 +1523,7 @@ pub const SHARED_DATA_MODELS: &str = "Free-text Rust this module carries for the
 
 // ── USART / LPUART ───────────────────────────────────────────────────────────
 
-pub const USART_BAUD: &str = "Bits per second on the wire, both ways. It has to match the other \
-                              end exactly - there is no negotiation on a UART.";
+pub const USART_BAUD: &str = "Bits per second on the wire, both ways. It has to match the other end exactly - there is no negotiation on a UART. Pick a preset, or Custom… for any other rate. Where the IDE can check the chip, the line under the field says what it really makes of the rate at the current clock, and each preset shows its error in the list: the ceiling is a fraction of the clock feeding the peripheral, not a property of the chip.";
 
 pub const USART_DATA_BITS: &str = "Bits in one character, parity NOT counted. 8 is what almost \
                                    everything uses; 9 exists for the addressed multi-drop modes.";

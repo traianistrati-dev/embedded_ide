@@ -105,39 +105,150 @@ fn freq_lit(hz: u32) -> String {
 /// default 72 MHz config produces exactly the original
 /// `use_hse(8).sysclk(72).pclk1(36)` chain (no spurious diffs).
 pub fn clock_setup_chain(clock: &ClockConfig) -> String {
-    let c: Stm32f1Clock = match clock {
-        // The graph is the only clock model — read its node states back into
-        // the typed codegen intermediate.
-        ClockConfig::Graph(gc) => {
-            crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.for_codegen())
-        }
-        ClockConfig::None => Stm32f1Clock::default(),
-    };
-    let f = frequencies(&c);
+    let a = cfgr_args(&typed_f1_clock(clock));
     // Newline + 17 spaces → lines up the `.method()` calls under `rcc.cfgr`.
     const IND: &str = "\n                 ";
 
     let mut s = String::from("rcc.cfgr");
+    if let Some(hse) = a.hse {
+        s.push_str(&format!("{IND}.use_hse({})", freq_lit(hse)));
+    }
+    s.push_str(&format!("{IND}.sysclk({})", freq_lit(a.sysclk)));
+    s.push_str(&format!("{IND}.pclk1({})", freq_lit(a.pclk1)));
+    if let Some(hclk) = a.hclk {
+        s.push_str(&format!("{IND}.hclk({})", freq_lit(hclk)));
+    }
+    if let Some(pclk2) = a.pclk2 {
+        s.push_str(&format!("{IND}.pclk2({})", freq_lit(pclk2)));
+    }
+    if let Some(adcclk) = a.adcclk {
+        s.push_str(&format!("{IND}.adcclk({})", freq_lit(adcclk)));
+    }
+    s.push_str(&format!("{IND}.freeze(&mut flash.acr)"));
+    s
+}
+
+/// The graph read back into the typed codegen intermediate. The graph is the
+/// only clock model; a chip without one gets the Blue Pill default.
+fn typed_f1_clock(clock: &ClockConfig) -> Stm32f1Clock {
+    match clock {
+        ClockConfig::Graph(gc) => {
+            crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.for_codegen())
+        }
+        ClockConfig::None => Stm32f1Clock::default(),
+    }
+}
+
+/// What [`clock_setup_chain`] hands the `rcc.cfgr` builder, `None` where it
+/// leaves the HAL's own default. One struct for the emitter AND for
+/// [`f1_hal_pclks`], so the clocks the UART check assumes are always the ones
+/// the HAL is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CfgrArgs {
+    hse: Option<u32>,
+    sysclk: u32,
+    pclk1: u32,
+    hclk: Option<u32>,
+    pclk2: Option<u32>,
+    adcclk: Option<u32>,
+}
+
+fn cfgr_args(c: &Stm32f1Clock) -> CfgrArgs {
+    let f = frequencies(c);
     let use_hse = c.hse_enabled
         && (c.sysclk_src == SysclkSrc::Hse
             || (c.sysclk_src == SysclkSrc::Pll
                 && matches!(c.pll_src, PllSrc::Hse | PllSrc::HseDiv2)));
-    if use_hse {
-        s.push_str(&format!("{IND}.use_hse({})", freq_lit(c.hse_hz)));
+    CfgrArgs {
+        hse: use_hse.then_some(c.hse_hz),
+        sysclk: f.sysclk,
+        pclk1: f.pclk1,
+        hclk: (c.ahb_pre != 1).then_some(f.hclk),
+        pclk2: (c.apb2_pre != 1).then_some(f.pclk2),
+        adcclk: (c.adc_pre != 6).then_some(f.adcclk),
     }
-    s.push_str(&format!("{IND}.sysclk({})", freq_lit(f.sysclk)));
-    s.push_str(&format!("{IND}.pclk1({})", freq_lit(f.pclk1)));
-    if c.ahb_pre != 1 {
-        s.push_str(&format!("{IND}.hclk({})", freq_lit(f.hclk)));
+}
+
+/// PCLK1 and PCLK2 as stm32f1xx-hal 0.10 will REALLY program them from the
+/// emitted chain - or `None` when its `freeze` asserts, and the chip panics
+/// before any peripheral exists.
+///
+/// Not the Clock tab's numbers. The chain only hands the HAL target
+/// frequencies, and the HAL derives its own dividers from them, which differs
+/// from the tab in three places:
+///
+/// * it cannot program PLLXTPRE, so HSE/2 into the PLL becomes HSE, and the
+///   multiplier is re-derived from `sysclk / hse` (truncating) - HSE 8 MHz,
+///   /2, x9 asks for 36 MHz and gets 32;
+/// * it rounds the APB1 ratio UP, so an odd HCLK asked to halve lands on /4;
+/// * it asserts its own ceilings (PCLK1 36 MHz, ADCCLK 14 MHz, ...) in
+///   `get_clocks`, which the tab only flags.
+///
+/// A mirror of `Config::from_cfgr` + `get_clocks` (rcc.rs 550-720), arm for
+/// arm, including where each prescaler match rounds.
+pub fn f1_hal_pclks(clock: &ClockConfig) -> Option<(u32, u32)> {
+    hal_pclks(&cfgr_args(&typed_f1_clock(clock)))
+}
+
+fn hal_pclks(a: &CfgrArgs) -> Option<(u32, u32)> {
+    const HSI: u32 = 8_000_000;
+    let pllsrc = a.hse.unwrap_or(HSI / 2);
+    let sysclk = match a.sysclk / pllsrc {
+        1 => a.hse.unwrap_or(HSI),
+        // Clamped to 1, then `pllmul as u8 - 2`: an overflow in the HAL itself.
+        0 => return None,
+        m => pllsrc * m.min(16),
+    };
+    let hpre = match a.hclk {
+        Some(h) if h > 0 => match sysclk / h {
+            0..=1 => 1,
+            2 => 2,
+            3..=5 => 4,
+            6..=11 => 8,
+            12..=39 => 16,
+            40..=95 => 64,
+            96..=191 => 128,
+            192..=383 => 256,
+            _ => 512,
+        },
+        Some(_) => return None,
+        None => 1,
+    };
+    let hclk = sysclk / hpre;
+    if a.pclk1 == 0 {
+        return None;
     }
-    if c.apb2_pre != 1 {
-        s.push_str(&format!("{IND}.pclk2({})", freq_lit(f.pclk2)));
-    }
-    if c.adc_pre != 6 {
-        s.push_str(&format!("{IND}.adcclk({})", freq_lit(f.adcclk)));
-    }
-    s.push_str(&format!("{IND}.freeze(&mut flash.acr)"));
-    s
+    let ppre = |ratio: u32| match ratio {
+        0..=1 => 1,
+        2 => 2,
+        3..=5 => 4,
+        6..=11 => 8,
+        _ => 16,
+    };
+    // APB1 rounds its ratio UP; APB2 below does not.
+    let pclk1 = hclk / ppre(hclk.div_ceil(a.pclk1));
+    let pclk2 = match a.pclk2 {
+        Some(p) if p > 0 => hclk / ppre(hclk / p),
+        Some(_) => return None,
+        None => hclk,
+    };
+    let apre = match a.adcclk {
+        Some(ad) if ad > 0 => match pclk2 / ad {
+            0..=2 => 2,
+            3..=4 => 4,
+            5..=7 => 6,
+            _ => 8,
+        },
+        Some(_) => return None,
+        None => 8,
+    };
+    let adcclk = pclk2 / apre;
+    let ok = sysclk <= 72_000_000
+        && hclk <= 72_000_000
+        && pclk1 <= 36_000_000
+        && pclk2 <= 72_000_000
+        && adcclk <= 14_000_000;
+    ok.then_some((pclk1, pclk2))
 }
 
 // ── Generated section builder ─────────────────────────────────────────────────
@@ -4490,5 +4601,83 @@ mod stale_io_mode_tests {
         assert!(none_in.starts_with("into_floating_input"), "{none_in}");
         let none_out = into_expr(&PinFunction::GpioOutput, None, "gpioa", "crl");
         assert!(none_out.starts_with("into_push_pull_output"), "{none_out}");
+    }
+}
+
+#[cfg(test)]
+mod hal_clock_tests {
+    use super::{CfgrArgs, cfgr_args, hal_pclks};
+    use crate::panels::mcu_module::clock::model::{PllSrc, Stm32f1Clock, SysclkSrc};
+
+    fn pclks(c: Stm32f1Clock) -> Option<(u32, u32)> {
+        hal_pclks(&cfgr_args(&c))
+    }
+
+    /// The Blue Pill default comes out as the Clock tab draws it.
+    #[test]
+    fn the_default_clock_is_what_the_tab_says() {
+        assert_eq!(
+            pclks(Stm32f1Clock::default()),
+            Some((36_000_000, 72_000_000))
+        );
+    }
+
+    /// stm32f1xx-hal cannot program PLLXTPRE: HSE 8 MHz /2 x9 is drawn as
+    /// 36 MHz, but the HAL feeds the PLL the whole 8 MHz and re-derives the
+    /// multiplier from 36 / 8 = 4, running at 32 MHz.
+    #[test]
+    fn hse_halved_into_the_pll_is_not_what_the_hal_runs() {
+        let c = Stm32f1Clock {
+            pll_src: PllSrc::HseDiv2,
+            ..Stm32f1Clock::default()
+        };
+        assert_eq!(pclks(c), Some((16_000_000, 32_000_000)));
+    }
+
+    /// An odd HCLK asked to halve: the HAL rounds the APB1 ratio UP and lands
+    /// on /4. 72 MHz / 512 is 140 625; the tab says 70 312, the HAL 35 156.
+    #[test]
+    fn an_odd_hclk_halved_lands_on_div4() {
+        let c = Stm32f1Clock {
+            ahb_pre: 512,
+            ..Stm32f1Clock::default()
+        };
+        assert_eq!(pclks(c), Some((35_156, 140_625)));
+    }
+
+    /// A clock `get_clocks` asserts on: APB1 left at /1 puts PCLK1 at 72 MHz.
+    #[test]
+    fn a_clock_over_the_hal_ceilings_panics_in_freeze() {
+        let c = Stm32f1Clock {
+            apb1_pre: 1,
+            ..Stm32f1Clock::default()
+        };
+        assert_eq!(pclks(c), None);
+    }
+
+    /// The HSI with no PLL: 8 MHz everywhere, as the tab says.
+    #[test]
+    fn the_bare_hsi_runs_at_8_mhz() {
+        let c = Stm32f1Clock {
+            hse_enabled: false,
+            sysclk_src: SysclkSrc::Hsi,
+            apb1_pre: 1,
+            ..Stm32f1Clock::default()
+        };
+        assert_eq!(pclks(c), Some((8_000_000, 8_000_000)));
+    }
+
+    /// The divide-by-zero guards: a zero target is the HAL dividing by it.
+    #[test]
+    fn zero_targets_are_refused() {
+        let base = cfgr_args(&Stm32f1Clock::default());
+        assert_eq!(hal_pclks(&CfgrArgs { pclk1: 0, ..base }), None);
+        assert_eq!(
+            hal_pclks(&CfgrArgs {
+                hclk: Some(0),
+                ..base
+            }),
+            None
+        );
     }
 }
