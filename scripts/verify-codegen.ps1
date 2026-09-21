@@ -276,6 +276,22 @@ $ALL_CASES = @(
     # which is not the channel number.
     @{ n = "ESP32-C3, two PWM channels";   t = "emit_esp32c3_project";       e = @{ EIDE_ESP_PWM = "0,2" }; q = $true; fam = "esp" }
 
+    # The watchdogs on EVERY bundled Espressif part. The harness switches all
+    # three on unless EIDE_ESP_WDG=0, so the six C3 rows above already build
+    # them on both runtimes - including async, where the scheduler owns TIMG0.
+    # These eight are the other chips: each is its own esp-hal build, so a C3
+    # pass says nothing about them. The C2 has no TIMG1 and its row asks for
+    # MWDT1 anyway: it compiles only if the generator dropped it.
+    # Full-only: eight esp-hal builds, three on the Xtensa toolchain.
+    @{ n = "ESP32 watchdogs (Xtensa)";     t = "emit_esp32c3_project";       e = @{ EIDE_ESP_CHIP = "esp32";    EIDE_ESP_RUNTIME = "blocking" }; q = $false; fam = "esp" }
+    @{ n = "ESP32-S2 watchdogs (Xtensa)";  t = "emit_esp32c3_project";       e = @{ EIDE_ESP_CHIP = "esp32s2";  EIDE_ESP_RUNTIME = "blocking" }; q = $false; fam = "esp" }
+    @{ n = "ESP32-S3 watchdogs (Xtensa)";  t = "emit_esp32c3_project";       e = @{ EIDE_ESP_CHIP = "esp32s3";  EIDE_ESP_RUNTIME = "blocking" }; q = $false; fam = "esp" }
+    @{ n = "ESP32-C2 watchdogs, no TIMG1"; t = "emit_esp32c3_project";       e = @{ EIDE_ESP_CHIP = "esp32c2";  EIDE_ESP_RUNTIME = "blocking" }; q = $false; fam = "esp" }
+    @{ n = "ESP32-C5 watchdogs";           t = "emit_esp32c3_project";       e = @{ EIDE_ESP_CHIP = "esp32c5";  EIDE_ESP_RUNTIME = "blocking" }; q = $false; fam = "esp" }
+    @{ n = "ESP32-C6 watchdogs";           t = "emit_esp32c3_project";       e = @{ EIDE_ESP_CHIP = "esp32c6";  EIDE_ESP_RUNTIME = "blocking" }; q = $false; fam = "esp" }
+    @{ n = "ESP32-C61 watchdogs";          t = "emit_esp32c3_project";       e = @{ EIDE_ESP_CHIP = "esp32c61"; EIDE_ESP_RUNTIME = "blocking" }; q = $false; fam = "esp" }
+    @{ n = "ESP32-H2 watchdogs";           t = "emit_esp32c3_project";       e = @{ EIDE_ESP_CHIP = "esp32h2";  EIDE_ESP_RUNTIME = "blocking" }; q = $false; fam = "esp" }
+
     # A third HAL family, and the first that is not STM32 or Espressif. One
     # harness, FOUR boards: Pico and Pico W on thumbv6m, Pico 2 and Pico 2 W on
     # thumbv8m, each printing its own `target:`.
@@ -387,7 +403,7 @@ $ALL_CASES = @(
 $KNOBS = @("EIDE_F1_DMA", "EIDE_SPI_TXONLY", "EIDE_USART_HALF", "EIDE_I2C_HALF",
            "EIDE_CAN_HALF", "EIDE_USB", "EIDE_F1_RUNTIME", "ESP_ASYNC_RUNTIME",
            "EIDE_ESP_PWM", "EIDE_ESP_RUNTIME", "EIDE_ESP_IRQ", "EIDE_ESP_CHIP",
-           "EIDE_ESP_PULL")
+           "EIDE_ESP_PULL", "EIDE_ESP_WDG")
 
 if ($Hook.Count -gt 0) {
     $known = $ALL_CASES | ForEach-Object { $_.fam } | Sort-Object -Unique

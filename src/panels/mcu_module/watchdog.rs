@@ -237,11 +237,39 @@ pub struct EspWatchdogLimits {
     pub has_mwdt1: bool,
 }
 
+/// Nominal RC_SLOW per bundled chip, from `rc_slow_clk_frequency` in
+/// `esp-metadata-generated` 0.4.0 — the version esp-hal 1.1.2 pins.
+///
+/// Read, not assumed: until 2026-09-21 this was "150 kHz on the ESP32, 136
+/// everywhere else", and three parts are not 136. The S2 runs at 90 kHz, so its
+/// RWDT floor was offered at 16 us where one written tick needs 24.
+const RC_SLOW_HZ: &[(&str, u32)] = &[
+    ("esp32", 150_000),
+    ("esp32c2", 136_000),
+    ("esp32c3", 136_000),
+    ("esp32c5", 130_000),
+    ("esp32c6", 136_000),
+    ("esp32c61", 136_000),
+    ("esp32h2", 130_000),
+    ("esp32s2", 90_000),
+    ("esp32s3", 136_000),
+];
+
+/// This chip's RC_SLOW. A chip missing from [`RC_SLOW_HZ`] gets the SLOWEST
+/// one, whose RWDT floor is the highest: every period it then offers is
+/// writable on any part in the table.
+fn rc_slow_hz(chip: &str) -> u32 {
+    RC_SLOW_HZ
+        .iter()
+        .find(|&&(c, _)| c == chip)
+        .or_else(|| RC_SLOW_HZ.iter().min_by_key(|&&(_, hz)| hz))
+        .map_or(90_000, |&(_, hz)| hz)
+}
+
 /// The watchdog limits for an ESP chip id (`esp32c3`, `esp32s3`, …).
 pub fn esp_limits_for(chip: &str) -> EspWatchdogLimits {
     EspWatchdogLimits {
-        // The original ESP32's RC runs at 150 kHz; every later part at 136.
-        rtc_slow_hz: if chip == "esp32" { 150_000 } else { 136_000 },
+        rtc_slow_hz: rc_slow_hz(chip),
         rwdt_shift: u32::from(chip != "esp32"),
         has_mwdt1: chip != "esp32c2",
     }
@@ -580,9 +608,54 @@ mod tests {
         assert_eq!(rwdt_range_us(&esp_limits_for("esp32")).0, 7);
         // 136 kHz, shifted by one: 8 us per tick, two ticks per write.
         assert_eq!(rwdt_range_us(&esp_limits_for("esp32c3")).0, 16);
+        // 90 kHz: 12 us per tick, so 24. It was offered at 16 while the table
+        // said 136 kHz for the S2 - and below 24 the stage is written as 0.
+        assert_eq!(rwdt_range_us(&esp_limits_for("esp32s2")).0, 24);
+        // 130 kHz still rounds to 8 us per tick: only the card's text moved.
+        assert_eq!(rwdt_range_us(&esp_limits_for("esp32c5")).0, 16);
         // The ceiling belongs to the tab's `u32` of microseconds, not to the
         // chip: at 136 kHz a full u32 of us is 5.8e8 ticks in a 32-bit hold.
         assert_eq!(rwdt_range_us(&esp_limits_for("esp32c3")).1, u32::MAX);
         assert_eq!(mwdt_range_us(), (1, u32::MAX));
+    }
+
+    /// Each part's RC_SLOW as esp-hal's own metadata states it, written out
+    /// here rather than read back from [`RC_SLOW_HZ`] so the two are an
+    /// independent record: `rc_slow_clk_frequency` in
+    /// `esp-metadata-generated` 0.4.0, the version esp-hal 1.1.2 pins.
+    #[test]
+    fn the_rtc_slow_clock_is_per_chip() {
+        for (chip, hz) in [
+            ("esp32", 150_000),
+            ("esp32c2", 136_000),
+            ("esp32c3", 136_000),
+            ("esp32c5", 130_000),
+            ("esp32c6", 136_000),
+            ("esp32c61", 136_000),
+            ("esp32h2", 130_000),
+            ("esp32s2", 90_000),
+            ("esp32s3", 136_000),
+        ] {
+            assert_eq!(esp_limits_for(chip).rtc_slow_hz, hz, "{chip}");
+        }
+        // A part the table does not know gets the slowest clock, so the floor
+        // it is offered is the highest any known part needs.
+        assert_eq!(esp_limits_for("esp32p4").rtc_slow_hz, 90_000);
+    }
+
+    /// A new bundled ESP chip must have its RC_SLOW looked up, not inherit the
+    /// fallback: the fallback keeps the floor safe but prints a clock on the
+    /// card that is not the chip's.
+    #[test]
+    fn every_bundled_esp_chip_has_a_checked_rtc_slow_clock() {
+        for d in crate::panels::mcu_module::builtins::builtin_definitions() {
+            if is_esp(&d.family) {
+                assert!(
+                    RC_SLOW_HZ.iter().any(|&(c, _)| c == d.family),
+                    "{}: add its rc_slow_clk_frequency (esp-metadata-generated) to RC_SLOW_HZ",
+                    d.family
+                );
+            }
+        }
     }
 }

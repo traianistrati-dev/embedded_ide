@@ -1854,6 +1854,9 @@ mod emit_for_manual_compile {
     ///
     /// `EIDE_ESP_RUNTIME=async` builds the esp-rtos variant instead;
     /// `EIDE_ESP_PWM=0,1,2` picks which LEDC channels are wired (default 1).
+    /// All three watchdogs are switched on unless `EIDE_ESP_WDG=0`: the RWDT's
+    /// `Rtc` and the timer-group `Wdt`s are the only ESP files no other matrix
+    /// case compiles.
     ///
     /// ```text
     /// cargo test --bin rust_on_chip emit_esp32c3_project -- --ignored --nocapture
@@ -1982,7 +1985,36 @@ mod emit_for_manual_compile {
             }
         }
 
+        // All three watchdogs on every chip - MWDT1 included on the C2, which
+        // has no TIMG1. Dropping it there is the GENERATOR's job, and the C2
+        // project compiles only if it does. `EIDE_ESP_WDG=0` leaves them out.
+        let wdg = std::env::var("EIDE_ESP_WDG").as_deref() != Ok("0");
+        if wdg {
+            use crate::panels::mcu_module::watchdog::EspWdtConfig;
+            mcu.watchdog.rwdt = Some(EspWdtConfig {
+                timeout_us: 2_000_000,
+            });
+            mcu.watchdog.mwdt0 = Some(EspWdtConfig {
+                timeout_us: 1_500_000,
+            });
+            mcu.watchdog.mwdt1 = Some(EspWdtConfig {
+                timeout_us: 500_000,
+            });
+        }
+
         let main_rs = mcu.fresh_main_rs();
+        if wdg {
+            assert!(
+                main_rs.contains("pins::configs::rwdt::init(peripherals.LPWR)"),
+                "no RWDT in main.rs:\n{main_rs}"
+            );
+            let timg1 = crate::panels::mcu_module::watchdog::esp_limits_for(&chip).has_mwdt1;
+            assert_eq!(
+                main_rs.contains("pins::configs::mwdt1::init()"),
+                timg1,
+                "[{chip}] MWDT1 in main.rs must follow TIMG1:\n{main_rs}"
+            );
+        }
         // Only where the chip HAS a LEDC: esp32c5 and esp32c61 carry none,
         // so their definitions offer no PWM function to wire in at all.
         if mcu
