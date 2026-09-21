@@ -85,19 +85,25 @@ pub fn wwdg_supported(family: &str) -> bool {
 /// Is watchdog code actually GENERATED for this family yet?
 ///
 /// Separate from [`wwdg_supported`], which is about the HAL. This is about
-/// the IDE: every STM32 backend calls `watchdog_gen`, and both ESP backends
-/// now do too.
+/// the IDE: every STM32 backend calls `watchdog_gen`, both ESP backends do,
+/// and both RP ones.
 ///
 /// Kept as a function rather than folded away because it is what stops the
 /// tab offering controls that reach no generated file, and the next family
 /// added to the IDE starts out on the wrong side of it.
 pub fn codegen_supported(family: &str) -> bool {
-    family.starts_with("stm32") || is_esp(family)
+    family.starts_with("stm32") || is_esp(family) || is_rp(family)
 }
 
 /// An ESP32 family key. They are CHIP ids (`esp32c3`), not series.
 pub fn is_esp(family: &str) -> bool {
     family.starts_with("esp32")
+}
+
+/// An RP family key (`rp2040`, `rp235x`) - the RP backend's own test, so the
+/// two cannot disagree about which boards are Picos.
+pub fn is_rp(family: &str) -> bool {
+    crate::panels::mcu_module::codegen::rp::is_rp(family)
 }
 
 /// The watchdog limits for an IDE family key (`stm32f4`, `stm32g0`, …).
@@ -286,6 +292,74 @@ pub fn rwdt_range_us(l: &EspWatchdogLimits) -> (u32, u32) {
     ((per_tick_us << l.rwdt_shift).max(1) as u32, u32::MAX)
 }
 
+/// The RP watchdog: a period, and nothing else.
+///
+/// No window and no expiry action - the RP2040 and RP2350 watchdog does one
+/// thing when it runs out, a reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RpWdtConfig {
+    pub timeout_us: u32,
+}
+
+impl RpWdtConfig {
+    /// One second. NOT the longest period, unlike [`IwdgConfig::default_for`]:
+    /// the ceiling here moves with the RUNTIME, so a longest-for-Async default
+    /// would become a boot panic the moment the project switched to Blocking.
+    /// One second is inside every chip's range on every runtime.
+    pub fn default_for() -> Self {
+        Self {
+            timeout_us: 1_000_000,
+        }
+    }
+}
+
+/// The RP watchdog periods the driver accepts, in microseconds.
+///
+/// The ceiling belongs to the DRIVER, not the 24-bit counter, and one step past
+/// it is a **panic at boot** in all three:
+///
+/// * `rp2040-hal` 0.12 and `rp235x-hal` 0.4: `start()` refuses anything above
+///   `0xFFFFFF / 2`. The halving is the RP2040's count-by-two erratum
+///   (RP2040-E1), and rp235x-hal kept the check although it loads the period
+///   undoubled - so an RP2350 on Blocking stops at 8.39 s as well.
+/// * `embassy-rp` 0.10: `feed()`, which `start()` calls, stops at
+///   `0xFFFFFF / 2` on the RP2040 and at `0xFFFFFF` on the RP2350.
+///
+/// So the same chip has two ceilings, and a Runtime switch can put a stored
+/// period out of range. The floor is one tick of the 1 us watchdog clock.
+pub fn rp_range_us(family: &str, is_async: bool) -> (u32, u32) {
+    let max = if is_async && family == "rp235x" {
+        0xFF_FFFF
+    } else {
+        0xFF_FFFF / 2
+    };
+    (1, max)
+}
+
+/// The crate whose limit [`rp_range_us`] reproduces, for messages that point
+/// at the code that would panic.
+pub fn rp_driver(family: &str, is_async: bool) -> &'static str {
+    match (is_async, family == "rp2040") {
+        (true, _) => "embassy-rp",
+        (false, true) => "rp2040-hal",
+        (false, false) => "rp235x-hal",
+    }
+}
+
+/// Why an RP period would panic at boot, or `None` when it is fine.
+pub fn rp_wdt_problem(cfg: &RpWdtConfig, family: &str, is_async: bool) -> Option<String> {
+    let (lo, hi) = rp_range_us(family, is_async);
+    (!(lo..=hi).contains(&cfg.timeout_us)).then(|| {
+        format!(
+            "{} is outside the range {}..={} us that {} accepts on this runtime - it panics at boot",
+            cfg.timeout_us,
+            lo,
+            hi,
+            rp_driver(family, is_async)
+        )
+    })
+}
+
 /// The MWDT periods worth offering, in microseconds.
 ///
 /// One flat range for every part, and that is not a simplification: the tick
@@ -298,7 +372,7 @@ pub fn mwdt_range_us() -> (u32, u32) {
     (1, u32::MAX)
 }
 
-/// Both ESP watchdogs, plus the STM32 pair. Each `None` until switched on.
+/// The STM32 pair, the ESP three and the RP one. Each `None` until switched on.
 ///
 /// One struct for every family rather than an enum: the tab reaches for the
 /// two fields its family uses and the generator ignores the rest, so carrying
@@ -316,6 +390,9 @@ pub struct WatchdogSettings {
     /// ESP: timer group 1's watchdog — absent on the ESP32-C2.
     #[serde(default)]
     pub mwdt1: Option<EspWdtConfig>,
+    /// RP2040 / RP2350: the chip's one watchdog.
+    #[serde(default)]
+    pub rp: Option<RpWdtConfig>,
 }
 
 impl EspWdtConfig {
@@ -583,9 +660,54 @@ mod tests {
             assert!(is_esp(chip), "{chip}");
         }
         assert!(!is_esp("stm32f4"));
-        // Families whose backend generates no watchdog file.
-        assert!(!codegen_supported("rp2040"));
+        // Both RP keys, on both runtimes' backends. This used to assert the
+        // opposite too.
+        for fam in ["rp2040", "rp235x"] {
+            assert!(codegen_supported(fam), "{fam}");
+            assert!(is_rp(fam), "{fam}");
+        }
+        // The family whose backend still generates no watchdog file.
         assert!(!codegen_supported("nrf52833"));
+    }
+
+    /// The ceiling is the DRIVER's, and the RP2350 has two: rp235x-hal kept the
+    /// RP2040's halved check, embassy-rp did not. Each number is the one past
+    /// which that crate panics at boot.
+    #[test]
+    fn the_rp_ceiling_follows_the_driver_not_the_counter() {
+        assert_eq!(rp_range_us("rp2040", false), (1, 8_388_607));
+        assert_eq!(rp_range_us("rp235x", false), (1, 8_388_607));
+        assert_eq!(rp_range_us("rp2040", true), (1, 8_388_607));
+        assert_eq!(rp_range_us("rp235x", true), (1, 16_777_215));
+        assert_eq!(rp_driver("rp2040", false), "rp2040-hal");
+        assert_eq!(rp_driver("rp235x", false), "rp235x-hal");
+        assert_eq!(rp_driver("rp235x", true), "embassy-rp");
+    }
+
+    /// The default must survive a Runtime switch, and the longest Async period
+    /// on an RP2350 must not: that is the trap a longest-period default would
+    /// set.
+    #[test]
+    fn the_rp_default_holds_on_every_runtime_and_the_async_maximum_does_not() {
+        for fam in ["rp2040", "rp235x"] {
+            for is_async in [false, true] {
+                assert_eq!(
+                    rp_wdt_problem(&RpWdtConfig::default_for(), fam, is_async),
+                    None,
+                    "{fam} async={is_async}"
+                );
+            }
+        }
+        let long = RpWdtConfig {
+            timeout_us: 16_777_215,
+        };
+        assert_eq!(rp_wdt_problem(&long, "rp235x", true), None);
+        let msg = rp_wdt_problem(&long, "rp235x", false).expect("past rp235x-hal's check");
+        assert!(
+            msg.contains("rp235x-hal") && msg.contains("8388607"),
+            "{msg}"
+        );
+        assert!(rp_wdt_problem(&RpWdtConfig { timeout_us: 0 }, "rp2040", false).is_some());
     }
 
     /// The ESP32-C2 is the one part with a single timer group, so it is the

@@ -304,6 +304,10 @@ $ALL_CASES = @(
     # documentation, and the compiler has already caught two of them - `.freq()`
     # and `set_duty_cycle` both live on embedded-hal traits that have to be
     # imported, and neither failure is visible by reading.
+    #
+    # Each board also carries the watchdog at its driver's LAST accepted period,
+    # so the `const` assert in watchdog.rs is compiled at its boundary, and the
+    # 1 us tick main.rs starts is compiled at each HAL's width (u8 / u16).
     @{ n = "Raspberry Pi Pico x4";         t = "emit_rp_project";            e = @{};                       q = $true; fam = "rp" }
 
     # The micro:bit on nrf52833-hal, TWO projects: every peripheral wired on the
@@ -338,6 +342,11 @@ $ALL_CASES = @(
     # The count in the name is load-bearing. It read `x2` for a while after the
     # third project arrived, and a name that understates its own coverage is how
     # a gap hides in plain sight - the same way `23 of 23` hid six unrun cases.
+    #
+    # The watchdog rides here too, at embassy-rp's own ceiling - twice the
+    # Blocking one on the RP2350. It is the first config file this backend ever
+    # wrote, so the harness now writes what `config_files` returns instead of
+    # an empty `configs/mod.rs`.
     @{ n = "Raspberry Pi Pico async x3";   t = "emit_rp_async_project";      e = @{};                       q = $true; fam = "rp"; hk = $true }
 
 

@@ -495,7 +495,19 @@ fn section(mcu: &Mcu) -> String {
     }
     o.push_str("    clocks\n        .init_default(&xosc, &pll_sys, &pll_usb)\n");
     o.push_str("        .map_err(|_| false)\n        .unwrap();\n");
-    o.push_str("    let _ = &mut watchdog;\n\n");
+    // The HAL's own `init_clocks_and_plls` starts this tick; the manual
+    // bring-up above is the sequence its docs spell out, and that sequence
+    // starts it too. It was missing here, so the watchdog - and on the RP2040
+    // the timer - counted whatever the boot ROM had left in TICK.
+    o.push_str("    // The 1 us tick the watchdog and the timer count, divided down from the\n");
+    o.push_str("    // crystal. `init_clocks_and_plls` would start it; the manual bring-up\n");
+    o.push_str("    // above has to do it itself.\n");
+    o.push_str(&format!(
+        "    watchdog.enable_tick_generation((XTAL_FREQ_HZ / 1_000_000) as {});\n\n",
+        // rp2040-hal takes the cycle count as a u8, rp235x-hal as a u16.
+        if mcu.family == "rp2040" { "u8" } else { "u16" }
+    ));
+    o.push_str(&super::watchdog_gen::rp_init_lines(&mcu.watchdog, false));
 
     o.push_str("    // Every GPIO comes from one bank, taken once.\n");
     o.push_str(&format!("    let sio = {hal}::Sio::new(pac.SIO);\n"));
@@ -1017,6 +1029,14 @@ impl FamilyBackend for RpBackend {
                 }
             }
         }
+        // Last, and extended INTO this list rather than returned beside it:
+        // an empty list drops the whole `configs/` subtree, so a watchdog alone
+        // has to count as a config file like any bus.
+        out.extend(super::watchdog_gen::rp_config_files(
+            &mcu.watchdog,
+            &mcu.family,
+            false,
+        ));
         out
     }
 
@@ -1313,7 +1333,17 @@ mod emit_for_manual_compile {
                     c.set_duty_x100(2, 1_000);
                 }
             }
+            // The watchdog at the LAST period its driver accepts, so the
+            // generated `const` assert is compiled at its boundary - one
+            // microsecond more is rp2040-hal's / rp235x-hal's boot panic.
+            let (_, max) = crate::panels::mcu_module::watchdog::rp_range_us(&mcu.family, false);
+            mcu.watchdog.rp =
+                Some(crate::panels::mcu_module::watchdog::RpWdtConfig { timeout_us: max });
             let main_rs = mcu.fresh_main_rs();
+            assert!(
+                main_rs.contains("pins::configs::watchdog::init(&mut watchdog);"),
+                "{id}: no watchdog in main.rs:\n{main_rs}"
+            );
             let files = project_gen::build_project_files(&def.project, &def.toolchain, &main_rs);
             // `sync_pin_files` keeps `src/pins/mod.rs` in a real project, and the
             // generated header declares `pub mod pins;` — so the harness has to
@@ -2995,6 +3025,9 @@ fn async_section(mcu: &Mcu) -> String {
     o.push_str("    // embassy-rp brings up the clocks itself. On RP2040 it also supplies the\n");
     o.push_str("    // second-stage bootloader, which the blocking HAL makes you declare.\n");
     o.push_str("    let p = embassy_rp::init(Default::default());\n\n");
+    // First after init, like every other family's watchdog: one meant to catch
+    // a hang in start-up is worth having before the code that might hang.
+    o.push_str(&super::watchdog_gen::rp_init_lines(&mcu.watchdog, true));
     o.push_str(&gpio_body);
     o.push_str(&buses);
     o.push_str(GEN_END);
@@ -3035,6 +3068,13 @@ impl FamilyBackend for AsyncRpBackend {
     /// embassy-rp takes the pull in `Input::new`, which this backend chooses.
     fn gpio_modes(&self, _func: &PinFunction) -> &'static [GpioMode] {
         &[]
+    }
+
+    /// Only the watchdog: every bus on this runtime is built inline in
+    /// main.rs. Without this the file would never be written while main.rs
+    /// called `pins::configs::watchdog::init` all the same.
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        super::watchdog_gen::rp_config_files(&mcu.watchdog, &mcu.family, true)
     }
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
@@ -3665,7 +3705,17 @@ mod emit_async_for_manual_compile {
                     c.mode = mode;
                 }
             }
+            // The watchdog at embassy-rp's own ceiling for this chip - twice
+            // the Blocking one on the RP2350 - so its `const` assert is
+            // compiled at the boundary.
+            let (_, max) = crate::panels::mcu_module::watchdog::rp_range_us(&mcu.family, true);
+            mcu.watchdog.rp =
+                Some(crate::panels::mcu_module::watchdog::RpWdtConfig { timeout_us: max });
             let main_rs = mcu.fresh_main_rs();
+            assert!(
+                main_rs.contains("pins::configs::watchdog::init(p.WATCHDOG);"),
+                "{id}: no watchdog in main.rs:\n{main_rs}"
+            );
             // The chip names a DIFFERENT HAL crate on async; this is where that
             // choice becomes a Cargo.toml.
             // Through `build_cfg`, the SAME pairing the app uses. Calling
@@ -3673,10 +3723,26 @@ mod emit_async_for_manual_compile {
             // green while the application shipped a manifest with no embassy in it.
             let project = crate::panels::mcu_module::mcu_def::build_cfg(&def, Some(&mcu));
             let files = project_gen::build_project_files(&project, &def.toolchain, &main_rs);
-            let user: Vec<(String, String)> = vec![
+            // What the app writes: every config file `config_files` returns.
+            // This used to be an empty `configs/mod.rs` - true while this
+            // backend had no config files, and a project shape the app stopped
+            // producing the day the watchdog became one.
+            let configs = mcu.config_files();
+            let mut user: Vec<(String, String)> = vec![
                 ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
-                ("src/pins/configs/mod.rs".into(), String::new()),
+                (
+                    "src/pins/configs/mod.rs".into(),
+                    configs
+                        .iter()
+                        .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+                        .collect(),
+                ),
             ];
+            user.extend(
+                configs
+                    .into_iter()
+                    .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+            );
             let dir = std::env::temp_dir().join(dir_name);
             let _ = std::fs::remove_dir_all(&dir);
             project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
@@ -3749,5 +3815,117 @@ mod async_tail_rp {
         let code = pico(Runtime::Blocking).fresh_main_rs();
         assert!(!code.contains("IMPORTANT"), "{code}");
         assert!(code.contains("// Your main loop code here."), "{code}");
+    }
+}
+
+/// The watchdog on both RP runtimes: the file, the call, and - on Blocking -
+/// the tick it counts, without which neither means anything.
+#[cfg(test)]
+mod watchdog_rp {
+    use crate::panels::mcu_module::builtins;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::watchdog::RpWdtConfig;
+
+    fn board(id: &str, runtime: Runtime, wdg: bool) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu();
+        mcu.runtime = runtime;
+        if wdg {
+            mcu.watchdog.rp = Some(RpWdtConfig {
+                timeout_us: 500_000,
+            });
+        }
+        mcu
+    }
+
+    /// Started with or without a watchdog: the RP2040's timer counts the same
+    /// tick, and `init_clocks_and_plls` - the HAL's own version of this
+    /// bring-up - always starts it. Each HAL takes the count at its own width.
+    #[test]
+    fn blocking_starts_the_tick_at_each_hals_width() {
+        let rp2040 = board("rp2040_pico", Runtime::Blocking, false).fresh_main_rs();
+        assert!(
+            rp2040.contains("watchdog.enable_tick_generation((XTAL_FREQ_HZ / 1_000_000) as u8);"),
+            "{rp2040}"
+        );
+        assert!(!rp2040.contains("let _ = &mut watchdog;"), "{rp2040}");
+        let rp2350 = board("rp2350_pico2", Runtime::Blocking, false).fresh_main_rs();
+        assert!(
+            rp2350.contains("watchdog.enable_tick_generation((XTAL_FREQ_HZ / 1_000_000) as u16);"),
+            "{rp2350}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_generated_until_the_watchdog_is_switched_on() {
+        for rt in [Runtime::Blocking, Runtime::Async] {
+            let mcu = board("rp2040_pico", rt, false);
+            assert!(
+                !mcu.fresh_main_rs().contains("pins::configs::watchdog"),
+                "{rt:?}"
+            );
+            assert!(
+                mcu.config_files().iter().all(|(n, _)| n != "watchdog.rs"),
+                "{rt:?}"
+            );
+        }
+    }
+
+    /// Blocking configures the binding main.rs already owns for the clocks,
+    /// and only after the tick it counts has been started.
+    #[test]
+    fn blocking_configures_the_watchdog_main_already_owns() {
+        let mcu = board("rp2350_pico2", Runtime::Blocking, true);
+        let main = mcu.fresh_main_rs();
+        assert!(
+            main.contains("pins::configs::watchdog::init(&mut watchdog);"),
+            "{main}"
+        );
+        let tick = main.find("enable_tick_generation").expect("tick");
+        let init = main.find("pins::configs::watchdog::init").expect("init");
+        assert!(tick < init, "configured before its tick runs:\n{main}");
+
+        let files = mcu.config_files();
+        let (_, body) = files
+            .iter()
+            .find(|(n, _)| n == "watchdog.rs")
+            .expect("watchdog.rs");
+        assert!(body.contains("const TIMEOUT_US: u32 = 500000;"), "{body}");
+        assert!(body.contains("use rp235x_hal::Watchdog;"), "{body}");
+        // rp235x-hal's ceiling - the RP2040's, kept - not the counter's.
+        assert!(body.contains("TIMEOUT_US <= 8_388_607"), "{body}");
+        assert!(body.contains("rp235x-hal start() panics"), "{body}");
+        assert!(body.contains("pause_on_debug(true)"), "{body}");
+    }
+
+    /// Async takes the peripheral itself, and on an RP2350 gets embassy-rp's
+    /// whole-counter ceiling - twice what the same board has on Blocking.
+    #[test]
+    fn async_takes_the_peripheral_and_gets_embassys_ceiling() {
+        let mcu = board("rp2350_pico2", Runtime::Async, true);
+        let main = mcu.fresh_main_rs();
+        assert!(
+            main.contains("let mut watchdog = pins::configs::watchdog::init(p.WATCHDOG);"),
+            "{main}"
+        );
+        let files = mcu.config_files();
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["watchdog.rs"]);
+        let body = &files[0].1;
+        assert!(body.contains("TIMEOUT_US <= 16_777_215"), "{body}");
+        assert!(
+            body.contains("pub const PERIOD: Duration = Duration::from_micros(TIMEOUT_US);"),
+            "{body}"
+        );
+
+        let rp2040 = board("rp2040_pico", Runtime::Async, true).config_files();
+        assert!(
+            rp2040[0].1.contains("TIMEOUT_US <= 8_388_607"),
+            "{}",
+            rp2040[0].1
+        );
     }
 }

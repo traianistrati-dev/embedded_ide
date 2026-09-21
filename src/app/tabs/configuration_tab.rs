@@ -16,7 +16,8 @@
 use crate::app::AppIde;
 use crate::panels::mcu_module::comparator::{self, CompConfig, CompSettings};
 use crate::panels::mcu_module::watchdog::{
-    self as wdg, EspWatchdogLimits, EspWdtConfig, IwdgConfig, WatchdogLimits, WwdgConfig,
+    self as wdg, EspWatchdogLimits, EspWdtConfig, IwdgConfig, RpWdtConfig, WatchdogLimits,
+    WwdgConfig,
 };
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -128,9 +129,13 @@ impl AppIde {
             ui.add_space(12.0);
 
             let esp = wdg::is_esp(&family);
+            let rp = wdg::is_rp(&family);
             ui.label(dim(if esp {
                 "Watchdog values are durations - esp-hal works out the prescaler and \
                  counter from them at run time, against the clock as it then is."
+            } else if rp {
+                "Watchdog values are durations - the counter runs on a 1 us tick, so \
+                 what matters here is whether the HAL accepts the period you ask for."
             } else {
                 "Watchdog values are durations - the HAL derives the prescaler and \
                  counter from them, so what matters here is whether the chip can reach \
@@ -152,7 +157,9 @@ impl AppIde {
                 return;
             }
 
-            if esp {
+            if rp {
+                rp_wdt_card(ui, &mut mcu.watchdog.rp, &family, is_async);
+            } else if esp {
                 // A different chip's watchdogs entirely — different names,
                 // different clocks, different lifecycles. Sharing the IWDG card
                 // and relabelling it would have been the shorter change and a
@@ -230,9 +237,12 @@ fn iwdg_card(ui: &mut egui::Ui, cfg: &mut Option<IwdgConfig>, l: &WatchdogLimits
             "Configured but NOT started: the generated code calls unleash() nowhere, \
              so you choose when it starts biting.",
         ));
-        problem_and_reset(ui, wdg::iwdg_problem(c, l), || {
-            *c = IwdgConfig::default_for(l)
-        });
+        problem_and_reset(
+            ui,
+            wdg::iwdg_problem(c, l),
+            "Restore the longest period this chip can express",
+            || *c = IwdgConfig::default_for(l),
+        );
     });
 }
 
@@ -304,11 +314,16 @@ fn wwdg_card(
              resets the chip, exactly like petting too late - leave it at 0 unless you \
              mean it.",
         ));
-        problem_and_reset(ui, wdg::wwdg_problem(c, l, pclk1), || {
-            if let Some(d) = WwdgConfig::default_for(l, pclk1) {
-                *c = d;
-            }
-        });
+        problem_and_reset(
+            ui,
+            wdg::wwdg_problem(c, l, pclk1),
+            "Restore the longest period at this PCLK1, window disabled",
+            || {
+                if let Some(d) = WwdgConfig::default_for(l, pclk1) {
+                    *c = d;
+                }
+            },
+        );
     });
 }
 
@@ -346,9 +361,65 @@ fn esp_wdt_card(
              generated code only configures this one - it starts biting when you call \
              enable().",
         ));
-        problem_and_reset(ui, wdg::esp_wdt_problem(c, range, title), || {
-            *c = EspWdtConfig::default_for()
+        problem_and_reset(
+            ui,
+            wdg::esp_wdt_problem(c, range, title),
+            "Restore the default period, 1 s",
+            || *c = EspWdtConfig::default_for(),
+        );
+    });
+}
+
+/// The RP watchdog: one period, and the driver that decides its ceiling.
+///
+/// Closer to [`iwdg_card`] than to the ESP ones: one step past the range is a
+/// **panic at boot** in every RP driver. And unlike either, the ceiling moves
+/// with the RUNTIME - rp235x-hal kept the RP2040's halved limit, embassy-rp
+/// did not - so a period valid on Async can be out of range after a switch to
+/// Blocking. The problem line is recomputed every frame for exactly that.
+fn rp_wdt_card(ui: &mut egui::Ui, cfg: &mut Option<RpWdtConfig>, family: &str, is_async: bool) {
+    let (lo, hi) = wdg::rp_range_us(family, is_async);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        let mut on = cfg.is_some();
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut on, "").changed() {
+                *cfg = on.then(RpWdtConfig::default_for);
+            }
+            ui.label(egui::RichText::new(format!("{}  WATCHDOG", ph::SHIELD)).strong());
+            ui.label(dim("the chip's only watchdog"));
         });
+        ui.label(dim(format!(
+            "Counts a 1 us tick taken from the crystal, so its period does NOT move with \
+             the Clock tab. Range {} .. {} - the ceiling is {}'s, and one step past it \
+             panics at boot.",
+            human_us(lo),
+            human_us(hi),
+            wdg::rp_driver(family, is_async)
+        )));
+        // The one fact a user switching Runtime would not guess: the RP2350's
+        // ceiling halves on Blocking, where the counter could hold twice as much.
+        if family == "rp235x" {
+            ui.label(dim(if is_async {
+                "On Blocking this ceiling halves: rp235x-hal kept the RP2040's limit."
+            } else {
+                "On Async it doubles: embassy-rp lets the RP2350 use its whole counter."
+            }));
+        }
+        let Some(c) = cfg.as_mut() else { return };
+        ui.add_space(6.0);
+        duration_row(ui, "Period", &mut c.timeout_us, (lo, hi));
+        ui.add_space(4.0);
+        ui.label(dim(
+            "Configured but NOT started: it starts biting when you call start(). It \
+             pauses while a debugger halts the core, so a breakpoint does not reset the \
+             board.",
+        ));
+        problem_and_reset(
+            ui,
+            wdg::rp_wdt_problem(c, family, is_async),
+            "Restore the default period, 1 s - inside the range on both runtimes",
+            || *c = RpWdtConfig::default_for(),
+        );
     });
 }
 
@@ -398,12 +469,20 @@ fn esp_mwdt_card(
 /// The warning is not decoration. Every problem it reports is a **panic at
 /// boot**, not a compile error, so this line is the only place the mistake can
 /// be caught before a board resets in a loop.
-fn problem_and_reset(ui: &mut egui::Ui, problem: Option<String>, mut reset: impl FnMut()) {
+///
+/// `hint` says what Reset restores, because it is not the same thing on every
+/// card: the STM32 ones go to the longest period, the ESP and RP ones to 1 s.
+fn problem_and_reset(
+    ui: &mut egui::Ui,
+    problem: Option<String>,
+    hint: &str,
+    mut reset: impl FnMut(),
+) {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         if ui
             .button(format!("{} Reset", ph::ARROW_COUNTER_CLOCKWISE))
-            .on_hover_text("Restore the longest period this chip can express, window disabled")
+            .on_hover_text(hint)
             .clicked()
         {
             reset();
@@ -891,35 +970,58 @@ mod tests {
         use crate::panels::mcu_module::builtins::builtin_definitions;
         use crate::panels::mcu_module::codegen::family::is_esp;
 
+        use crate::panels::mcu_module::mcu::model::Runtime;
+
         for d in builtin_definitions() {
             let esp = is_esp(&d.family);
-            if !esp && d.family != "stm32f1" {
+            let rp = wdg::is_rp(&d.family);
+            if !esp && !rp && d.family != "stm32f1" {
                 continue; // no watchdog backend to speak of
             }
-            let mut mcu = d.build_mcu();
-            assert!(
-                mcu.config_files().is_empty(),
-                "{}: something is wired before the test wires anything",
-                d.id
-            );
-
-            if esp {
-                mcu.watchdog.rwdt = Some(wdg::EspWdtConfig {
-                    timeout_us: 2_000_000,
-                });
+            // The RP boards on BOTH runtimes: they are two backends, and the
+            // Async one had no config files at all before the watchdog.
+            let runtimes: &[Runtime] = if rp {
+                &[Runtime::Blocking, Runtime::Async]
             } else {
-                mcu.watchdog.iwdg = Some(wdg::IwdgConfig {
-                    timeout_us: 2_000_000,
-                });
-            }
+                &[Runtime::Blocking]
+            };
+            for &rt in runtimes {
+                let mut mcu = d.build_mcu();
+                mcu.runtime = rt;
+                assert!(
+                    mcu.config_files().is_empty(),
+                    "{} {rt:?}: something is wired before the test wires anything",
+                    d.id
+                );
 
-            let names: Vec<String> = mcu.config_files().into_iter().map(|(n, _)| n).collect();
-            assert_eq!(
-                names,
-                [if esp { "rwdt.rs" } else { "iwdg.rs" }],
-                "{}: the watchdog did not reach the config file list, so                  `sync_config_files` would drop the whole configs/ subtree",
-                d.id
-            );
+                if esp {
+                    mcu.watchdog.rwdt = Some(wdg::EspWdtConfig {
+                        timeout_us: 2_000_000,
+                    });
+                } else if rp {
+                    mcu.watchdog.rp = Some(RpWdtConfig::default_for());
+                } else {
+                    mcu.watchdog.iwdg = Some(wdg::IwdgConfig {
+                        timeout_us: 2_000_000,
+                    });
+                }
+
+                let names: Vec<String> = mcu.config_files().into_iter().map(|(n, _)| n).collect();
+                let want = if esp {
+                    "rwdt.rs"
+                } else if rp {
+                    "watchdog.rs"
+                } else {
+                    "iwdg.rs"
+                };
+                assert_eq!(
+                    names,
+                    [want],
+                    "{} {rt:?}: the watchdog did not reach the config file list, so \
+                     `sync_config_files` would drop the whole configs/ subtree",
+                    d.id
+                );
+            }
         }
     }
 

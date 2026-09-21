@@ -13,7 +13,7 @@
 //! Neither takes a pin, so unlike every other `pins/configs/*.rs` these are
 //! driven by a tab, not by the Pins canvas.
 
-use super::super::watchdog::{EspWdtConfig, WatchdogSettings};
+use super::super::watchdog::{self, EspWdtConfig, WatchdogSettings};
 
 /// `src/pins/configs/iwdg.rs` — the STM32F1, whose HAL is not embassy.
 ///
@@ -288,6 +288,194 @@ fn esp_init_lines(w: &WatchdogSettings, chip: &str) -> String {
             ));
         }
     }
+    s
+}
+
+/// `src/pins/configs/watchdog.rs` on a Blocking RP project (`rp2040-hal` /
+/// `rp235x-hal`).
+///
+/// # Why `init` borrows the HAL's `Watchdog` instead of taking the peripheral
+///
+/// main.rs already owns it: the manual clock bring-up needs it to start the
+/// 1 us tick that the watchdog itself, and the timer, count. So this file
+/// configures that binding rather than taking `WATCHDOG` a second time.
+///
+/// # Why the `const` assert
+///
+/// One microsecond past the driver's ceiling is not a compile error but a
+/// `panic!` inside `start()`, at boot. The assert moves it to the build, where
+/// the message can name the limit. It sits below the generated block, so a
+/// user who knows better can delete it.
+const RP_BLOCKING_TMPL: &str = r#"// <<< GENERATED>>>
+// Watchdog config (from the Configuration tab) - auto-updated; edit it there.
+const TIMEOUT_US: u32 = {TIMEOUT};
+// <<< GENERATED END >>>
+
+// Everything below is editable - your changes are preserved on regeneration.
+//
+// The watchdog counts the 1 us tick main.rs starts from the crystal, so its
+// period does not move with the Clock tab.
+//
+// {DRIVER}'s `start()` PANICS above {MAX} us. This turns that boot panic
+// into a build error:
+const _: () = assert!(
+    TIMEOUT_US >= 1 && TIMEOUT_US <= {MAX},
+    "watchdog period out of range: {DRIVER} start() panics above {MAX} us"
+);
+
+use {HAL}::Watchdog;
+use {HAL}::fugit::MicrosDurationU32;
+
+/// The configured period, as `start` takes it.
+pub fn period() -> MicrosDurationU32 {
+    MicrosDurationU32::from_ticks(TIMEOUT_US)
+}
+
+/// Configure the watchdog main.rs owns. It is NOT running yet - call
+/// `watchdog.start(pins::configs::watchdog::period())` when your start-up is
+/// far enough along to keep feeding it.
+pub fn init(watchdog: &mut Watchdog) {
+    // Hold the count while a debugger halts the core, so a breakpoint does
+    // not become a reset.
+    watchdog.pause_on_debug(true);
+}
+
+// -- Using the watchdog --
+//
+//     watchdog.start(pins::configs::watchdog::period());  // from here on it resets the chip
+//     loop {
+//         watchdog.feed();                                  // at least once every TIMEOUT_US
+//     }
+"#;
+
+/// `src/pins/configs/watchdog.rs` on an Async RP project (`embassy-rp`).
+///
+/// # Why `PERIOD` is a constant and not only a timeout
+///
+/// embassy-rp's `feed` takes a duration and reloads the counter with IT, not
+/// with the one `start` set. A `feed()` with no argument does not exist there,
+/// so every call site needs the period - one constant keeps them equal.
+const RP_ASYNC_TMPL: &str = r#"// <<< GENERATED>>>
+// Watchdog config (from the Configuration tab) - auto-updated; edit it there.
+const TIMEOUT_US: u64 = {TIMEOUT};
+// <<< GENERATED END >>>
+
+// Everything below is editable - your changes are preserved on regeneration.
+//
+// embassy_rp::init() starts the 1 us tick the watchdog counts, from the
+// crystal, so its period does not move with the Clock tab.
+//
+// embassy-rp's `feed()` - which `start()` calls - PANICS above {MAX} us on
+// this chip. This turns that boot panic into a build error:
+const _: () = assert!(
+    TIMEOUT_US >= 1 && TIMEOUT_US <= {MAX},
+    "watchdog period out of range: embassy-rp panics above {MAX} us"
+);
+
+use embassy_rp::Peri;
+use embassy_rp::peripherals::WATCHDOG;
+use embassy_rp::watchdog::Watchdog;
+use embassy_time::Duration;
+
+/// Handle type, so it can be stored in a struct or a task's state.
+pub type Handle = Watchdog;
+
+/// The period `start` AND every `feed` take: embassy-rp's `feed` reloads the
+/// counter with the duration it is given, not with the one `start` set.
+pub const PERIOD: Duration = Duration::from_micros(TIMEOUT_US);
+
+/// Configure the watchdog. It is NOT running yet - call
+/// `watchdog.start(pins::configs::watchdog::PERIOD)` when your start-up is far
+/// enough along to keep feeding it.
+pub fn init(watchdog: Peri<'static, WATCHDOG>) -> Handle {
+    let mut wdt = Watchdog::new(watchdog);
+    // Hold the count while a debugger halts the core, so a breakpoint does
+    // not become a reset.
+    wdt.pause_on_debug(true);
+    wdt
+}
+
+// -- Using the watchdog --
+//
+//     watchdog.start(pins::configs::watchdog::PERIOD);    // from here on it resets the chip
+//     loop {
+//         watchdog.feed(pins::configs::watchdog::PERIOD); // at least once every TIMEOUT_US
+//     }
+"#;
+
+/// `8388607` -> `8_388_607`, for a limit that is read in generated code.
+fn grouped(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('_');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// The `pins/configs/watchdog.rs` an RP project calls for, or none.
+///
+/// Apart from [`config_files`] because the file depends on the RUNTIME as well
+/// as the chip - two different HAL crates, two different ceilings - and only
+/// the RP backends, which are chosen BY runtime, know which one applies.
+pub fn rp_config_files(
+    w: &WatchdogSettings,
+    family: &str,
+    is_async: bool,
+) -> Vec<(String, String)> {
+    let Some(c) = w.rp else {
+        return Vec::new();
+    };
+    let (_, max) = watchdog::rp_range_us(family, is_async);
+    let tmpl = if is_async {
+        RP_ASYNC_TMPL
+    } else {
+        RP_BLOCKING_TMPL
+    };
+    let body = tmpl
+        .replace("{TIMEOUT}", &c.timeout_us.to_string())
+        .replace("{MAX}", &grouped(max))
+        .replace("{DRIVER}", watchdog::rp_driver(family, is_async))
+        .replace(
+            "{HAL}",
+            if family == "rp2040" {
+                "rp2040_hal"
+            } else {
+                "rp235x_hal"
+            },
+        );
+    vec![("watchdog.rs".to_owned(), body)]
+}
+
+/// The `main.rs` lines that call [`rp_config_files`]'s file, or "" when the
+/// watchdog is off.
+///
+/// Both runtimes bind it as `watchdog`, so the usage lines in the file read
+/// the same on either. On Blocking that binding already exists - main.rs
+/// needs it for the clock tick - and is only configured here.
+pub fn rp_init_lines(w: &WatchdogSettings, is_async: bool) -> String {
+    if w.rp.is_none() {
+        return String::new();
+    }
+    let mut s = String::from("    // ── Watchdog ──\n");
+    if is_async {
+        s.push_str(
+            "    // Configured, NOT started - call watchdog.start(pins::configs::watchdog::PERIOD)\n",
+        );
+        s.push_str("    // when ready, then feed it at least once per period.\n");
+        s.push_str("    #[allow(unused_mut, unused_variables)]\n");
+        s.push_str("    let mut watchdog = pins::configs::watchdog::init(p.WATCHDOG);\n");
+    } else {
+        s.push_str(
+            "    // Configured, NOT started - call watchdog.start(pins::configs::watchdog::period())\n",
+        );
+        s.push_str("    // when ready, then feed it at least once per period.\n");
+        s.push_str("    pins::configs::watchdog::init(&mut watchdog);\n");
+    }
+    s.push('\n');
     s
 }
 

@@ -114,6 +114,16 @@ pub fn watchdog_section(w: &crate::panels::mcu_module::watchdog::WatchdogSetting
             ));
         }
     }
+    // The RP one on its own key too, for the same reason: its range is the
+    // DRIVER's, and a period carried in from another family must not arrive
+    // in a Pico's firmware unseen.
+    if let Some(c) = w.rp {
+        body.push_str(&format!(
+            "rp_watchdog {}
+",
+            c.timeout_us
+        ));
+    }
     if body.is_empty() {
         String::new()
     } else {
@@ -129,7 +139,7 @@ pub fn watchdog_section(w: &crate::panels::mcu_module::watchdog::WatchdogSetting
 /// generated firmware, and silently substituting a number would do exactly that.
 pub fn parse_watchdog(text: &str) -> crate::panels::mcu_module::watchdog::WatchdogSettings {
     use crate::panels::mcu_module::watchdog::{
-        EspWdtConfig, IwdgConfig, WatchdogSettings, WwdgConfig,
+        EspWdtConfig, IwdgConfig, RpWdtConfig, WatchdogSettings, WwdgConfig,
     };
     let mut out = WatchdogSettings::default();
     let Some(body) = section_body(text, WATCHDOG_HEADER) else {
@@ -139,6 +149,7 @@ pub fn parse_watchdog(text: &str) -> crate::panels::mcu_module::watchdog::Watchd
         let mut it = line.split_whitespace();
         match (it.next(), it.next().and_then(|v| v.parse().ok())) {
             (Some("iwdg"), Some(timeout_us)) => out.iwdg = Some(IwdgConfig { timeout_us }),
+            (Some("rp_watchdog"), Some(timeout_us)) => out.rp = Some(RpWdtConfig { timeout_us }),
             (Some("rwdt"), Some(timeout_us)) => out.rwdt = Some(EspWdtConfig { timeout_us }),
             (Some("mwdt0"), Some(timeout_us)) => out.mwdt0 = Some(EspWdtConfig { timeout_us }),
             (Some("mwdt1"), Some(timeout_us)) => out.mwdt1 = Some(EspWdtConfig { timeout_us }),
@@ -1123,6 +1134,29 @@ mod watchdog_section_tests {
         let text = watchdog_section(&stm);
         assert!(!text.contains("wdt"), "{text}");
         assert_eq!(parse_watchdog(&text), stm);
+    }
+
+    /// The RP watchdog comes back on its own key, and is not read as any of
+    /// the others - nor any of them as it.
+    #[test]
+    fn the_rp_watchdog_round_trips_on_its_own_key() {
+        use crate::panels::mcu_module::watchdog::RpWdtConfig;
+        let w = WatchdogSettings {
+            rp: Some(RpWdtConfig {
+                timeout_us: 8_388_607,
+            }),
+            ..Default::default()
+        };
+        let text = watchdog_section(&w);
+        assert_eq!(parse_watchdog(&text), w, "{text}");
+        assert!(text.contains("rp_watchdog 8388607"), "{text}");
+        assert!(!text.contains("iwdg") && !text.contains("rwdt"), "{text}");
+
+        let esp = WatchdogSettings {
+            rwdt: Some(EspWdtConfig { timeout_us: 1_000 }),
+            ..Default::default()
+        };
+        assert_eq!(parse_watchdog(&watchdog_section(&esp)).rp, None);
     }
 
     #[test]
