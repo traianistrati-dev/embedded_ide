@@ -294,6 +294,33 @@ const STRICT_LINT_LIST: &str = "clippy::pedantic, clippy::nursery, \
      clippy::unchecked_time_subtraction, clippy::todo, clippy::string_slice, \
      clippy::panic_in_result_fn, clippy::panic, clippy::exit, clippy::as_conversions";
 
+/// Every entry attribute the backends emit, matched against a whole line.
+///
+/// `#[esp_rtos::main]` was missing, so an ESP project on the ASYNC runtime got
+/// no exemption at all and its generated init - the `take().unwrap()`s and `as`
+/// casts this exists for - was linted in full, inside a GENERATED block the
+/// user cannot edit. Blocking was fine, which is why it went unseen: the two
+/// ESP runtimes use different attributes.
+///
+/// The same again, two backends later: the micro:bit's Blocking block opens on
+/// `#[cortex_m_rt::entry]` and the Pico's on `#[rp2040_hal::entry]` /
+/// `#[rp235x_hal::entry]`, written out in full where the STM32 one imports
+/// `entry` and writes it bare. Async was fine on both, for the same reason as
+/// before.
+///
+/// Only what a backend emits today. A bare `#[main]` sat here from the first
+/// version and nothing has written it since; the test below holds the list to
+/// the generators in both directions, so a spelling cannot linger either.
+const ENTRY_ATTRIBUTES: [&str; 7] = [
+    "#[entry]",
+    "#[cortex_m_rt::entry]",
+    "#[rp2040_hal::entry]",
+    "#[rp235x_hal::entry]",
+    "#[embassy_executor::main]",
+    "#[esp_hal::main]",
+    "#[esp_rtos::main]",
+];
+
 /// When `strict`, put `#[allow(<strict lints>)]` on the generated entry fn so
 /// its init (`take().unwrap()`, `as` casts, …) doesn't flood clippy. Inserted
 /// just before `#[entry]` / `#[embassy_executor::main]` — inside the GEN block,
@@ -305,19 +332,7 @@ pub fn strict_main_exemption(code: String, strict: bool) -> String {
     if !strict {
         return code;
     }
-    // Every entry attribute the backends emit. `#[esp_rtos::main]` was missing,
-    // so an ESP project on the ASYNC runtime got no exemption at all and its
-    // generated init - the `take().unwrap()`s and `as` casts this exists for -
-    // was linted in full, inside a GENERATED block the user cannot edit.
-    // Blocking was fine, which is why it went unseen: the two ESP runtimes use
-    // different attributes.
-    for entry in [
-        "#[entry]",
-        "#[embassy_executor::main]",
-        "#[esp_hal::main]",
-        "#[esp_rtos::main]",
-        "#[main]",
-    ] {
+    for entry in ENTRY_ATTRIBUTES {
         let mut offset = 0;
         for line in code.split_inclusive('\n') {
             if line.trim() == entry {
@@ -1061,42 +1076,90 @@ mod tests {
     /// `#[esp_hal::main]`, only the latter was listed, and the generated init was
     /// then linted in full inside a block the user cannot edit.
     ///
-    /// Derived from the real `fresh_main_rs` of each definition rather than from
-    /// a second copy of the attribute list, so it follows the backends.
+    /// Derived from the real `fresh_main_rs` of each definition, and the entry
+    /// is found by SHAPE - the attribute directly above `fn main` - not by a
+    /// second copy of the attribute list. It was a second copy once, in spite
+    /// of the sentence above saying otherwise: a chip whose attribute was on
+    /// neither list had "no entry", was skipped, and passed. That is how the
+    /// micro:bit's `#[cortex_m_rt::entry]` and the Pico's `#[rp2040_hal::entry]`
+    /// / `#[rp235x_hal::entry]` went unexempted on Blocking with this test green.
     #[test]
     fn strict_lints_exempt_the_generated_entry_on_every_chip_and_runtime() {
         use crate::panels::mcu_module::builtins::builtin_definitions;
         use crate::panels::mcu_module::mcu::model::Runtime;
 
+        let mut seen = std::collections::BTreeSet::new();
         for d in builtin_definitions() {
             for rt in [Runtime::Blocking, Runtime::Async, Runtime::Native] {
                 let mut mcu = d.build_mcu();
                 mcu.runtime = rt;
                 let code = mcu.fresh_main_rs();
-                // Only where the backend actually emits an entry attribute -
-                // a runtime a family cannot build emits nothing to exempt.
-                let has_entry = [
-                    "#[entry]",
-                    "#[embassy_executor::main]",
-                    "#[esp_hal::main]",
-                    "#[esp_rtos::main]",
-                    "#[main]",
-                ]
-                .iter()
-                .any(|e| code.lines().any(|l| l.trim() == *e));
-                if !has_entry {
+                // A runtime a family cannot build emits no `main` to exempt.
+                let Some(attr) = entry_attribute_of(&code) else {
                     continue;
-                }
+                };
+                seen.insert(attr.to_owned());
                 let exempt = strict_main_exemption(code.clone(), true);
+                // Directly above the entry attribute, which is where it has to
+                // be to land on `main` and on nothing else.
+                let lines: Vec<&str> = exempt.lines().map(str::trim).collect();
+                let at = lines.iter().position(|l| *l == attr);
+                let above = at.and_then(|i| i.checked_sub(1)).map(|i| lines[i]);
                 assert!(
-                    exempt.contains("#[allow(clippy::"),
-                    "{} / {rt:?}: entry present but no exemption applied - its \
-                     attribute is missing from the list",
+                    above.is_some_and(|l| l.starts_with("#[allow(clippy::")),
+                    "{} / {rt:?}: `{attr}` is not on the list, so the generated init is \
+                     linted in full",
                     d.id
                 );
-                assert_ne!(exempt, code, "{} / {rt:?}: nothing was inserted", d.id);
             }
         }
+        // Both directions. Every spelling on the list came out of a generator
+        // just now - so the loop saw what it exists for, not a lucky subset,
+        // and the list carries nothing dead. The other direction, an emitted
+        // spelling that is not listed, is the assertion inside the loop.
+        for listed in ENTRY_ATTRIBUTES {
+            assert!(
+                seen.contains(listed),
+                "{listed} is listed but no built-in emits it: {seen:?}"
+            );
+        }
+    }
+
+    /// The entry attribute of `fn main` / `async fn main`, whatever it is
+    /// called - the test's own way of finding the entry.
+    ///
+    /// Out of the whole run of attributes above `main`, the one that is not an
+    /// `#[allow]`: the embassy STM32 Blocking template puts
+    /// `#[allow(unused_variables, unused_mut)]` between `#[entry]` and the
+    /// function, and "the line above" would have taken that for the entry.
+    fn entry_attribute_of(code: &str) -> Option<&str> {
+        let lines: Vec<&str> = code.lines().map(str::trim).collect();
+        let main = lines
+            .iter()
+            .position(|l| l.starts_with("fn main(") || l.starts_with("async fn main("))?;
+        lines[..main]
+            .iter()
+            .rev()
+            .take_while(|l| l.starts_with("#["))
+            .find(|l| !l.starts_with("#[allow("))
+            .copied()
+    }
+
+    /// The helper above, on the one shape no built-in produces.
+    #[test]
+    fn the_entry_is_found_past_an_allow_between_it_and_main() {
+        let embassy_blocking =
+            "use x;\n\n#[entry]\n#[allow(unused_variables, unused_mut)]\nfn main() -> ! {\n}\n";
+        assert_eq!(entry_attribute_of(embassy_blocking), Some("#[entry]"));
+        // And the exemption lands above the entry there too.
+        let out = strict_main_exemption(embassy_blocking.to_owned(), true);
+        assert!(
+            out.contains("clippy::as_conversions)]\n#[entry]\n"),
+            "{out}"
+        );
+        // No attribute at all is "no entry", not a panic or a stray line.
+        assert_eq!(entry_attribute_of("// note\nfn main() {}\n"), None);
+        assert_eq!(entry_attribute_of("fn other() {}\n"), None);
     }
 
     /// And the ESP async attribute specifically, named so a rename is loud.
