@@ -78,6 +78,9 @@ pub struct ChipView {
     pub devices: Vec<DeviceItem>,
     /// Why the frame has nothing to show (folder gone, not a project, …).
     pub problem: Option<String>,
+    /// `Some(I/O millivolts)` for an external part, which is described in
+    /// `system.config` rather than read from a project.
+    pub external_mv: Option<u32>,
 }
 
 impl ChipView {
@@ -90,6 +93,7 @@ impl ChipView {
             modules: Vec::new(),
             devices: Vec::new(),
             problem: Some(problem.into()),
+            external_mv: None,
         }
     }
 
@@ -179,11 +183,15 @@ impl ChipView {
             modules: items,
             devices,
             problem: None,
+            external_mv: None,
         }
     }
 
     /// The grey line under the chip name: `stm32_main · Blocking`.
     pub fn subtitle(&self) -> String {
+        if let Some(mv) = self.external_mv {
+            return format!("{} · external part · {}", self.dir, super::parts::volts(mv));
+        }
         match self.runtime {
             Some(r) => format!("{} · {}", self.dir, r.as_token()),
             None => self.dir.clone(),

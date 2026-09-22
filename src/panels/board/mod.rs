@@ -8,6 +8,7 @@
 //! - [`model`]: the `system.config` file.
 //! - [`snapshot`]: what a chip frame shows, read from a chip's files on disk
 //!   (or from the live chip, for the one that is open).
+//! - [`parts`]: external parts (an FPGA, a sensor) described by hand.
 //! - [`links`]: what a link between two modules means pin by pin, and what
 //!   does not match.
 //! - [`layout`]: the automatic arrangement inside a frame, and a link's path.
@@ -17,4 +18,5 @@ pub mod gui;
 pub mod layout;
 pub mod links;
 pub mod model;
+pub mod parts;
 pub mod snapshot;

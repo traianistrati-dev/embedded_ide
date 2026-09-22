@@ -26,6 +26,7 @@
 //!   checked where the module has them.
 
 use super::model::{Link, LinkEnd};
+use super::parts::{CHIP_IO_MV, volts};
 use super::snapshot::{ChipView, ModuleItem, SignalPin};
 use crate::panels::mcu_module::modules::{
     I2sDirection, I2sMode, ModuleConfig, ModuleKind, ModuleSignal, SpiRole, UsartDirection,
@@ -215,12 +216,37 @@ pub fn resolve(link: &Link, views: &[ChipView], all: &[Link]) -> Resolved {
         (Some(x), Some(y)) if x == y => match x {
             Bus::Uart => uart(&mut r, ma, mb, &na, &nb, link, all),
             Bus::Spi => spi(&mut r, ma, mb, &na, &nb),
-            Bus::I2c => i2c(&mut r, ma, mb, &na, &nb),
+            Bus::I2c => i2c(
+                &mut r,
+                ma,
+                mb,
+                &na,
+                &nb,
+                [
+                    views[a.0].external_mv.is_some(),
+                    views[b.0].external_mv.is_some(),
+                ],
+            ),
             Bus::Can => can(&mut r, ma, mb, &na, &nb),
             Bus::Gpio => gpio(&mut r, ma, mb, &na, &nb),
             Bus::Same(kind) => same(&mut r, kind, ma, mb, &na, &nb),
         },
         _ => r.broken = Some(format!("{} cannot be linked to {}", ma.name, mb.name)),
+    }
+    // I/O levels, where an external part says what its are. A chip project
+    // is taken as 3.3 V: every chip this IDE knows runs its pins there.
+    // Only where pins meet: a CAN link through transceivers shares no pin,
+    // and each side's level stops at its own transceiver.
+    let (va, vb) = (views[a.0].external_mv, views[b.0].external_mv);
+    if (va.is_some() || vb.is_some()) && !r.wires.is_empty() {
+        let (va, vb) = (va.unwrap_or(CHIP_IO_MV), vb.unwrap_or(CHIP_IO_MV));
+        if va != vb {
+            r.warnings.push(format!(
+                "I/O levels differ: {na} at {}, {nb} at {} - it needs a level shifter",
+                volts(va),
+                volts(vb)
+            ));
+        }
     }
     r
 }
@@ -445,7 +471,16 @@ fn spi(r: &mut Resolved, ma: &ModuleItem, mb: &ModuleItem, na: &str, nb: &str) {
     }
 }
 
-fn i2c(r: &mut Resolved, ma: &ModuleItem, mb: &ModuleItem, na: &str, nb: &str) {
+/// `external` says which ends are external parts - an I2C target each; a
+/// chip project's I2C module is always generated as a controller.
+fn i2c(
+    r: &mut Resolved,
+    ma: &ModuleItem,
+    mb: &ModuleItem,
+    na: &str,
+    nb: &str,
+    external: [bool; 2],
+) {
     use ModuleSignal::*;
     for (sig, name) in [(Scl, "SCL"), (Sda, "SDA")] {
         match (signal(ma, &[sig]), signal(mb, &[sig])) {
@@ -457,8 +492,10 @@ fn i2c(r: &mut Resolved, ma: &ModuleItem, mb: &ModuleItem, na: &str, nb: &str) {
             _ => r.warnings.push(format!("{name} is wired on one side only")),
         }
     }
+    // A target follows whatever clock the controller runs.
     if let (ModuleConfig::I2c(x), ModuleConfig::I2c(y)) = (&ma.config, &mb.config)
         && x.clock_hz != y.clock_hz
+        && external == [false, false]
     {
         r.warnings.push(format!(
             "I2C clock {} vs {}",
@@ -466,10 +503,17 @@ fn i2c(r: &mut Resolved, ma: &ModuleItem, mb: &ModuleItem, na: &str, nb: &str) {
             crate::panels::mcu_module::modules::model::hz_label(y.clock_hz)
         ));
     }
-    // Every I2C module the IDE generates is a controller.
-    r.warnings.push(format!(
-        "{na} and {nb} are both generated as I2C controllers - one side has to answer as a target (hand-written)"
-    ));
+    // Every I2C module the IDE generates is a controller; a part is a target.
+    if external == [true, true] {
+        r.warnings.push(format!(
+            "{na} and {nb} are both I2C targets - nothing drives SCL"
+        ));
+    }
+    if external == [false, false] {
+        r.warnings.push(format!(
+            "{na} and {nb} are both generated as I2C controllers - one side has to answer as a target (hand-written)"
+        ));
+    }
     r.notes
         .push("I2C needs one pull-up on SCL and one on SDA".to_owned());
 }
@@ -763,6 +807,7 @@ mod tests {
             modules,
             devices: vec![],
             problem: None,
+            external_mv: None,
         }
     }
 
@@ -1312,6 +1357,119 @@ mod tests {
         let r = resolve(&link, &views, &[]);
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         assert!(r.notes[0].contains("wired-AND"));
+    }
+
+    /// A chip's SPI master reaches an FPGA described as a part: the wires
+    /// run to the part's own pin names, the clock from the chip, and a 1.8 V
+    /// part on a 3.3 V chip is flagged.
+    #[test]
+    fn a_chip_links_to_an_external_part_like_to_a_chip() {
+        use crate::panels::board::parts::{Part, PartBus};
+        let mut fpga = Part::new("fpga");
+        fpga.io_mv = 1800;
+        fpga.add_interface(PartBus::SpiSlave);
+        for (pin, name) in fpga.interfaces[0]
+            .pins
+            .iter_mut()
+            .zip(["15", "17", "14", "16"])
+        {
+            pin.name = format!("pin {name}");
+        }
+        let views = [
+            chip("a", vec![spi_mod(1, SpiRole::Master, 0, true)]),
+            fpga.view(),
+        ];
+        let link = Link {
+            a: end("a", ModuleKind::GenericInterfaceSpi, 1),
+            b: end("fpga", ModuleKind::GenericInterfaceSpi, 0),
+        };
+        let r = resolve(&link, &views, &[]);
+        assert_eq!(r.broken, None);
+        let got: Vec<(String, Dir)> = r.wires.iter().map(|w| (w.b.label(), w.dir)).collect();
+        assert_eq!(
+            got,
+            [
+                ("SCK pin 15".into(), Dir::AtoB),
+                ("MOSI pin 17".into(), Dir::AtoB),
+                ("MISO pin 14".into(), Dir::BtoA),
+                ("NSS pin 16".into(), Dir::AtoB),
+            ]
+        );
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        assert!(r.warnings[0].contains("1.8 V"), "{:?}", r.warnings);
+        fpga.io_mv = 3300;
+        let views = [
+            chip("a", vec![spi_mod(1, SpiRole::Master, 0, true)]),
+            fpga.view(),
+        ];
+        assert!(resolve(&link, &views, &[]).warnings.is_empty());
+    }
+
+    /// An I2C part is a target: no "two controllers" warning, and no clock
+    /// comparison - a target follows the controller's clock.
+    #[test]
+    fn an_i2c_part_is_a_target() {
+        use crate::panels::board::parts::{Part, PartBus};
+        let mut sensor = Part::new("bme");
+        sensor.add_interface(PartBus::I2c);
+        let mut c = I2cModuleConfig::new(1);
+        c.clock_hz = 400_000;
+        let chip_i2c = module(
+            ModuleKind::GenericInterfaceI2c,
+            1,
+            ModuleConfig::I2c(c),
+            vec![
+                sp(ModuleSignal::Scl, 1, "PB6"),
+                sp(ModuleSignal::Sda, 2, "PB7"),
+            ],
+        );
+        let views = [chip("a", vec![chip_i2c]), sensor.view()];
+        let link = Link {
+            a: end("a", ModuleKind::GenericInterfaceI2c, 1),
+            b: end("bme", ModuleKind::GenericInterfaceI2c, 0),
+        };
+        let r = resolve(&link, &views, &[]);
+        assert_eq!(r.wires.len(), 2);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    /// Levels only matter where pins meet: CAN through transceivers to a 5 V
+    /// part is fine; two I2C targets have nobody driving the clock.
+    #[test]
+    fn part_checks_follow_the_wires() {
+        use crate::panels::board::parts::{Part, PartBus};
+        let mut node = Part::new("node");
+        node.io_mv = 5000;
+        node.add_interface(PartBus::Can);
+        let chip_can = module(
+            ModuleKind::GenericInterfaceCan,
+            1,
+            ModuleConfig::Can(CanModuleConfig::new(1)),
+            vec![
+                sp(ModuleSignal::CanTx, 1, "PB9"),
+                sp(ModuleSignal::CanRx, 2, "PB8"),
+            ],
+        );
+        let views = [chip("a", vec![chip_can]), node.view()];
+        let link = Link {
+            a: end("a", ModuleKind::GenericInterfaceCan, 1),
+            b: end("node", ModuleKind::GenericInterfaceCan, 0),
+        };
+        let r = resolve(&link, &views, &[]);
+        assert!(r.wires.is_empty());
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+
+        let mut s1 = Part::new("s1");
+        s1.add_interface(PartBus::I2c);
+        let mut s2 = Part::new("s2");
+        s2.add_interface(PartBus::I2c);
+        let views = [s1.view(), s2.view()];
+        let link = Link {
+            a: end("s1", ModuleKind::GenericInterfaceI2c, 0),
+            b: end("s2", ModuleKind::GenericInterfaceI2c, 0),
+        };
+        let w = resolve(&link, &views, &[]).warnings;
+        assert!(w.iter().any(|x| x.contains("both I2C targets")), "{w:?}");
     }
 
     #[test]

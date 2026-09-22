@@ -22,7 +22,8 @@
 //! ```
 //!
 //! ONE LINE PER LINK, like `@modulenotes` in `mcu.config`: a line that does not
-//! parse loses only itself. An end names a module by (kind, instance) - the one
+//! parse loses only itself. `@parts` holds the external parts (an FPGA, a
+//! sensor - see [`super::parts`]) the same way, one RON line each. An end names a module by (kind, instance) - the one
 //! identity a Virtual Module keeps across `reconcile_modules`, which re-mints
 //! module ids.
 //!
@@ -31,6 +32,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::parts::Part;
 use crate::panels::mcu_module::modules::ModuleKind;
 
 /// File name at the system root.
@@ -39,6 +41,7 @@ pub const FILE_NAME: &str = "system.config";
 const CHIPS_HEADER: &str = "@chips";
 const VIEW_HEADER: &str = "@view";
 const LINKS_HEADER: &str = "@links";
+const PARTS_HEADER: &str = "@parts";
 
 /// One end of a link: a Virtual Module on a chip of the system.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -108,6 +111,8 @@ pub struct SystemChip {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SystemConfig {
     pub chips: Vec<SystemChip>,
+    /// External parts: on the board, but no chip project.
+    pub parts: Vec<Part>,
     pub links: Vec<Link>,
     pub view: View,
     /// Every section this build does not read, header lines included, exactly
@@ -131,7 +136,7 @@ impl SystemConfig {
             let line = raw.trim();
             if line.starts_with('@') {
                 section = Some(line);
-                if ![CHIPS_HEADER, VIEW_HEADER, LINKS_HEADER].contains(&line) {
+                if ![CHIPS_HEADER, VIEW_HEADER, LINKS_HEADER, PARTS_HEADER].contains(&line) {
                     push_line(&mut cfg.unknown, raw);
                 }
                 continue;
@@ -153,6 +158,19 @@ impl SystemConfig {
                         cfg.links.push(link);
                     }
                 }
+                Some(PARTS_HEADER) => {
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    // A line that does not parse is dropped, alone; so is a
+                    // part whose name is taken already.
+                    if let Ok(part) = ron::from_str::<Part>(line)
+                        && listable(&part.id)
+                        && !cfg.has_id(&part.id)
+                    {
+                        cfg.parts.push(part);
+                    }
+                }
                 Some(CHIPS_HEADER) => {
                     if line.is_empty() || line.starts_with('#') {
                         continue;
@@ -161,7 +179,7 @@ impl SystemConfig {
                         Some((dir, pos)) => (dir.trim(), parse_pos(pos)),
                         None => (line, None),
                     };
-                    if !dir.is_empty() && !cfg.contains(dir) {
+                    if !dir.is_empty() && !cfg.has_id(dir) {
                         cfg.chips.push(SystemChip {
                             dir: dir.to_owned(),
                             pos,
@@ -199,6 +217,17 @@ impl SystemConfig {
             out.push_str(VIEW_HEADER);
             out.push_str("\ndetailed\n");
         }
+        if !self.parts.is_empty() {
+            out.push_str(PARTS_HEADER);
+            out.push('\n');
+            for part in &self.parts {
+                // One line, starting with `(`, as the links are.
+                if let Ok(text) = ron::to_string(part) {
+                    out.push_str(&text);
+                    out.push('\n');
+                }
+            }
+        }
         if !self.links.is_empty() {
             out.push_str(LINKS_HEADER);
             out.push('\n');
@@ -223,10 +252,82 @@ impl SystemConfig {
         self.chips.iter().any(|c| c.dir.eq_ignore_ascii_case(dir))
     }
 
+    /// Whether `id` names a chip or a part of this system - one namespace,
+    /// since a link end names either.
+    pub fn has_id(&self, id: &str) -> bool {
+        self.contains(id) || self.part(id).is_some()
+    }
+
+    /// The external part called `id`.
+    pub fn part(&self, id: &str) -> Option<&Part> {
+        self.parts.iter().find(|p| p.id.eq_ignore_ascii_case(id))
+    }
+
+    /// Every frame on the canvas, in drawing order: the chips, then the
+    /// parts - with where each sits.
+    pub fn frames(&self) -> Vec<(String, Option<(f32, f32)>)> {
+        self.chips
+            .iter()
+            .map(|c| (c.dir.clone(), c.pos))
+            .chain(self.parts.iter().map(|p| (p.id.clone(), p.pos)))
+            .collect()
+    }
+
+    /// Add or change an external part. `original` is the name it had (None
+    /// for a new one). A rename carries the links along; an interface taken
+    /// out takes its links with it; a GPIO interface renamed renames the
+    /// link ends that name it. The part keeps its spot on the canvas.
+    pub fn put_part(&mut self, original: Option<&str>, mut part: Part) -> Result<(), String> {
+        part.id = part.id.trim().to_owned();
+        if !listable(&part.id) {
+            return Err(
+                "Give the part a name - without `=`, and not starting with `#` or `@`.".to_owned(),
+            );
+        }
+        let same = |a: &str| original.is_some_and(|o| o.eq_ignore_ascii_case(a));
+        if (self.contains(&part.id) || self.part(&part.id).is_some()) && !same(&part.id) {
+            return Err(format!(
+                "{} is taken - chips and parts need different names.",
+                part.id
+            ));
+        }
+        let at =
+            original.and_then(|o| self.parts.iter().position(|p| p.id.eq_ignore_ascii_case(o)));
+        let Some(at) = at else {
+            self.parts.push(part);
+            return Ok(());
+        };
+        let old = std::mem::replace(&mut self.parts[at], part);
+        let part = &mut self.parts[at];
+        part.pos = old.pos;
+        let (new_id, interfaces) = (part.id.clone(), part.interfaces.clone());
+        self.links.retain_mut(|l| {
+            for end in [&mut l.a, &mut l.b] {
+                if !end.chip.eq_ignore_ascii_case(&old.id) {
+                    continue;
+                }
+                end.chip = new_id.clone();
+                match interfaces
+                    .iter()
+                    .find(|i| i.bus.kind() == end.kind && i.instance == end.instance)
+                {
+                    Some(i) => {
+                        if end.kind.is_custom() {
+                            end.name = i.display_name();
+                        }
+                    }
+                    None => return false,
+                }
+            }
+            true
+        });
+        Ok(())
+    }
+
     /// Add a chip. `false` when it is already there, or when its name is one
     /// the file cannot hold (see [`listable`]) - nothing changes then.
     pub fn add(&mut self, dir: &str, pos: Option<(f32, f32)>) -> bool {
-        if !listable(dir) || self.contains(dir) {
+        if !listable(dir) || self.has_id(dir) {
             return false;
         }
         self.chips.push(SystemChip {
@@ -236,13 +337,14 @@ impl SystemConfig {
         true
     }
 
-    /// Take a chip out of the system, with its links. Its folder is not
-    /// touched.
+    /// Take a chip or a part out of the system, with its links. A chip's
+    /// folder is not touched.
     pub fn remove(&mut self, dir: &str) -> bool {
-        let before = self.chips.len();
+        let before = self.chips.len() + self.parts.len();
         self.chips.retain(|c| !c.dir.eq_ignore_ascii_case(dir));
+        self.parts.retain(|p| !p.id.eq_ignore_ascii_case(dir));
         self.links.retain(|l| !l.touches(dir));
-        self.chips.len() != before
+        self.chips.len() + self.parts.len() != before
     }
 
     /// Add a link. `false` when that pair is already linked, or when both ends
@@ -264,15 +366,23 @@ impl SystemConfig {
         self.links.len() != before
     }
 
-    /// Move a chip's frame. `false` for a chip that is not in the system.
+    /// Move a chip's or a part's frame. `false` for one that is not in the
+    /// system.
     pub fn set_pos(&mut self, dir: &str, pos: (f32, f32)) -> bool {
-        match self
+        let slot = self
             .chips
             .iter_mut()
             .find(|c| c.dir.eq_ignore_ascii_case(dir))
-        {
-            Some(c) => {
-                c.pos = Some(pos);
+            .map(|c| &mut c.pos)
+            .or_else(|| {
+                self.parts
+                    .iter_mut()
+                    .find(|p| p.id.eq_ignore_ascii_case(dir))
+                    .map(|p| &mut p.pos)
+            });
+        match slot {
+            Some(slot) => {
+                *slot = Some(pos);
                 true
             }
             None => false,
@@ -296,16 +406,15 @@ pub fn carry_positions(
     moved: &std::collections::BTreeSet<String>,
 ) -> bool {
     let mut changed = false;
-    for c in &mine.chips {
-        let Some(pos) = c.pos else {
+    let on_disk = disk.frames();
+    for (id, pos) in mine.frames() {
+        let Some(pos) = pos else {
             continue;
         };
-        let unplaced_on_disk = disk
-            .chips
+        let unplaced_on_disk = on_disk
             .iter()
-            .any(|d| d.dir.eq_ignore_ascii_case(&c.dir) && d.pos.is_none());
-        if (moved.contains(&c.dir.to_ascii_lowercase()) || unplaced_on_disk)
-            && disk.set_pos(&c.dir, pos)
+            .any(|(d, p)| d.eq_ignore_ascii_case(&id) && p.is_none());
+        if (moved.contains(&id.to_ascii_lowercase()) || unplaced_on_disk) && disk.set_pos(&id, pos)
         {
             changed = true;
         }
@@ -405,6 +514,10 @@ pub fn save(root: &Path, cfg: &SystemConfig) -> Result<(), String> {
 /// A chip folder was renamed: follow it, in the chip list and in every link
 /// end. `false` when `old` is not a chip of the system.
 pub fn rename_chip(cfg: &mut SystemConfig, old: &str, new: &str) -> bool {
+    // A part has that name: the two would share every link end.
+    if cfg.part(new).is_some() {
+        return false;
+    }
     let Some(c) = cfg
         .chips
         .iter_mut()
@@ -426,6 +539,7 @@ pub fn rename_chip(cfg: &mut SystemConfig, old: &str, new: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panels::board::parts::PartBus;
 
     fn two_chips() -> SystemConfig {
         let mut c = SystemConfig::default();
@@ -450,12 +564,12 @@ mod tests {
     /// A newer build's sections survive a save by this one.
     #[test]
     fn unknown_sections_are_kept_verbatim() {
-        let text = "# header\n@chips\na=1,2\n@parts\nfpga = iCE40UP5K\n  indented\n";
+        let text = "# header\n@chips\na=1,2\n@notes\nfpga = iCE40UP5K\n  indented\n";
         let cfg = SystemConfig::parse(text);
         assert_eq!(cfg.chips.len(), 1);
         let out = cfg.serialize();
         assert!(
-            out.ends_with("@parts\nfpga = iCE40UP5K\n  indented\n"),
+            out.ends_with("@notes\nfpga = iCE40UP5K\n  indented\n"),
             "{out}"
         );
         assert_eq!(SystemConfig::parse(&out), cfg);
@@ -517,6 +631,110 @@ mod tests {
         assert_eq!(SystemConfig::parse(&text).links, cfg.links);
         assert!(cfg.remove_link(&flipped));
         assert!(cfg.links.is_empty());
+    }
+
+    fn fpga() -> Part {
+        let mut p = Part::new("fpga");
+        p.label = "iCE40UP5K".into();
+        p.add_interface(PartBus::SpiSlave);
+        p.add_interface(PartBus::Gpio);
+        p
+    }
+
+    /// Parts round-trip, one line each, and share one namespace with the
+    /// chips.
+    #[test]
+    fn parts_round_trip_and_share_the_chips_names() {
+        let mut cfg = two_chips();
+        cfg.put_part(None, fpga()).unwrap();
+        let text = cfg.serialize();
+        assert!(text.contains("\n@parts\n("), "{text}");
+        assert_eq!(SystemConfig::parse(&text), cfg);
+        assert!(
+            cfg.put_part(None, Part::new("Stm32_Main")).is_err(),
+            "a chip's name"
+        );
+        assert!(
+            cfg.put_part(None, Part::new("FPGA")).is_err(),
+            "another part's name"
+        );
+        assert!(cfg.put_part(None, Part::new("#x")).is_err());
+        assert!(!cfg.add("fpga", None), "a chip cannot take a part's name");
+        assert_eq!(
+            cfg.frames()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["stm32_main", "esp32_radio", "fpga"]
+        );
+        assert!(cfg.set_pos("FPGA", (5.0, 6.0)));
+        assert_eq!(cfg.parts[0].pos, Some((5.0, 6.0)));
+    }
+
+    /// Editing a part: a rename carries its links, an interface taken out takes
+    /// its links, a GPIO interface renamed renames the link ends, the spot
+    /// stays.
+    #[test]
+    fn editing_a_part_keeps_its_links_straight() {
+        let mut cfg = two_chips();
+        let mut p = fpga();
+        p.pos = Some((10.0, 20.0));
+        cfg.put_part(None, p).unwrap();
+        // One numbering for the whole part: the SPI slave took 0.
+        let mut gpio_end = end("fpga", ModuleKind::Custom, 1);
+        gpio_end.name = "gpio1".into();
+        cfg.add_link(Link {
+            a: end("stm32_main", ModuleKind::GenericInterfaceSpi, 1),
+            b: end("fpga", ModuleKind::GenericInterfaceSpi, 0),
+        });
+        cfg.add_link(Link {
+            a: end("esp32_radio", ModuleKind::Custom, 0),
+            b: gpio_end,
+        });
+        let mut edited = cfg.parts[0].clone();
+        edited.id = "ice40".into();
+        edited.pos = None;
+        edited.interfaces[1].name = "cdone".into();
+        cfg.put_part(Some("fpga"), edited.clone()).unwrap();
+        assert_eq!(cfg.parts[0].pos, Some((10.0, 20.0)));
+        assert!(cfg.links.iter().all(|l| l.b.chip == "ice40"));
+        assert_eq!(cfg.links[1].b.name, "cdone");
+        edited.interfaces.remove(0);
+        cfg.put_part(Some("ice40"), edited).unwrap();
+        assert_eq!(cfg.links.len(), 1, "the SPI link went with its interface");
+        assert!(cfg.remove("ICE40"));
+        assert!(cfg.parts.is_empty() && cfg.links.is_empty());
+    }
+
+    /// Remove an interface and add one of the same kind in one edit: the new
+    /// one gets a new number, so the removed one's link goes - it does not
+    /// quietly carry over to the new interface.
+    #[test]
+    fn a_replaced_interface_does_not_inherit_the_links() {
+        let mut cfg = two_chips();
+        let mut p = Part::new("fpga");
+        p.add_interface(PartBus::Uart);
+        cfg.put_part(None, p).unwrap();
+        cfg.add_link(Link {
+            a: end("stm32_main", ModuleKind::GenericInterfaceUsart, 1),
+            b: end("fpga", ModuleKind::GenericInterfaceUsart, 0),
+        });
+        let mut edited = cfg.parts[0].clone();
+        edited.interfaces.clear();
+        edited.add_interface(PartBus::Uart);
+        assert_eq!(edited.interfaces[0].instance, 1);
+        cfg.put_part(Some("fpga"), edited).unwrap();
+        assert!(cfg.links.is_empty(), "{:?}", cfg.links);
+    }
+
+    /// A chip folder renamed onto a part's name is refused: the two would
+    /// share every link end.
+    #[test]
+    fn a_chip_cannot_be_renamed_onto_a_part() {
+        let mut cfg = two_chips();
+        cfg.put_part(None, Part::new("fpga")).unwrap();
+        assert!(!rename_chip(&mut cfg, "stm32_main", "FPGA"));
+        assert_eq!(cfg.chips[0].dir, "stm32_main");
     }
 
     /// A renamed chip folder keeps its place and its links.

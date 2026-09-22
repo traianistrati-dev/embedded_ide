@@ -5387,7 +5387,16 @@ impl eframe::App for AppIde {
                                 .set_file_name(project_io::folder_name_for_chip(&chip))
                                 .pick_folder()
                         })
-                        .map(|parent| project_io::new_project_dir(&parent, &chip, |p| p.exists()))
+                        .map(|parent| {
+                            // Not a part's name either: in a system, chips and
+                            // parts share names.
+                            project_io::new_project_dir(&parent, &chip, |p| {
+                                p.exists()
+                                    || p.file_name()
+                                        .and_then(|n| n.to_str())
+                                        .is_some_and(|n| self.board.config.has_id(n))
+                            })
+                        })
                 }
             };
             // Create it up front: the save worker writes files, and a missing

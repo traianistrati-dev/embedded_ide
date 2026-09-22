@@ -21,6 +21,9 @@ pub struct Frame<'a> {
     pub pos: Pos2,
     /// The chip open in this window.
     pub active: bool,
+    /// An external part, not a chip project: drawn dashed, edited instead of
+    /// opened.
+    pub external: bool,
     pub layout: FrameLayout,
     /// While a link is being made: the module it starts from…
     pub armed: Option<usize>,
@@ -32,6 +35,7 @@ impl<'a> Frame<'a> {
     /// A frame with no links: every module on the right, nothing armed.
     pub fn plain(view: &'a ChipView, pos: Pos2, active: bool) -> Self {
         Self {
+            external: view.external_mv.is_some(),
             view,
             pos,
             active,
@@ -75,6 +79,8 @@ pub enum Event {
     Open(String),
     /// Open this chip in a window of its own.
     OpenNewWindow(String),
+    /// Open the window that edits this external part.
+    EditPart(String),
     /// Take this chip out of the system (its folder stays).
     Remove(String),
     /// A module was clicked - to start a link, or to finish one.
@@ -141,13 +147,32 @@ fn draw_frame(ui: &egui::Ui, f: &Frame<'_>, rect: Rect) {
     } else {
         (1.0_f32, FRAME_STROKE)
     };
-    painter.rect(
-        rect,
-        10.0,
-        FRAME_FILL,
-        Stroke::new(stroke_w, stroke_c),
-        egui::StrokeKind::Inside,
-    );
+    if f.external {
+        // Dashed: something on the board, but no project of this IDE.
+        painter.rect_filled(rect, 10.0, FRAME_FILL);
+        let r = rect.shrink(0.5);
+        let outline = [
+            r.left_top(),
+            r.right_top(),
+            r.right_bottom(),
+            r.left_bottom(),
+            r.left_top(),
+        ];
+        painter.extend(egui::Shape::dashed_line(
+            &outline,
+            Stroke::new(stroke_w, stroke_c),
+            6.0,
+            4.0,
+        ));
+    } else {
+        painter.rect(
+            rect,
+            10.0,
+            FRAME_FILL,
+            Stroke::new(stroke_w, stroke_c),
+            egui::StrokeKind::Inside,
+        );
+    }
 
     // Header: the chip, then folder and runtime.
     let title = if f.view.chip.is_empty() {
@@ -263,8 +288,12 @@ fn interact(ui: &egui::Ui, f: &Frame<'_>, rect: Rect, events: &mut Vec<Event>) {
     if resp.drag_stopped_by(egui::PointerButton::Primary) {
         events.push(Event::DragEnded);
     }
-    if resp.double_clicked() && !f.active {
-        events.push(Event::Open(dir.clone()));
+    if resp.double_clicked() {
+        if f.external {
+            events.push(Event::EditPart(dir.clone()));
+        } else if !f.active {
+            events.push(Event::Open(dir.clone()));
+        }
     }
     // egui shows one tooltip per layer: the frame's, over a module, would
     // hide the module's own hint.
@@ -276,6 +305,8 @@ fn interact(ui: &egui::Ui, f: &Frame<'_>, rect: Rect, events: &mut Vec<Event>) {
     });
     let resp = if over_module {
         resp
+    } else if f.external {
+        resp.on_hover_text("Double-click to edit this part. Drag to move.")
     } else if f.active {
         resp.on_hover_text("The chip open in this window. Drag to move.")
     } else {
@@ -287,6 +318,25 @@ fn interact(ui: &egui::Ui, f: &Frame<'_>, rect: Rect, events: &mut Vec<Event>) {
 /// The chip's right-click menu - on the frame, and on each of its modules.
 fn chip_menu(ui: &mut egui::Ui, f: &Frame<'_>, events: &mut Vec<Event>) {
     let dir = &f.view.dir;
+    if f.external {
+        if ui
+            .button(format!("{}  Edit part…", ph::PENCIL_SIMPLE))
+            .clicked()
+        {
+            events.push(Event::EditPart(dir.clone()));
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .button(format!("{}  Remove from system", ph::MINUS_CIRCLE))
+            .on_hover_text("The part and its links go")
+            .clicked()
+        {
+            events.push(Event::Remove(dir.clone()));
+            ui.close();
+        }
+        return;
+    }
     let open = ui.add_enabled(
         !f.active,
         egui::Button::new(format!("{}  Open in this window", ph::FOLDER_OPEN)),
@@ -340,7 +390,9 @@ fn modules_interact(ui: &egui::Ui, f: &Frame<'_>, events: &mut Vec<Event>) {
         if resp.double_clicked() {
             // Its two clicks armed a link and dropped it again; what was
             // meant was the frame's double-click.
-            if !f.active {
+            if f.external {
+                events.push(Event::EditPart(f.view.dir.clone()));
+            } else if !f.active {
                 events.push(Event::Open(f.view.dir.clone()));
             }
         } else if resp.clicked() && !dimmed {

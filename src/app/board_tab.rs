@@ -26,6 +26,7 @@ use egui_phosphor::regular as ph;
 use super::AppIde;
 use crate::panels::board::links::{self, Dir, Resolved};
 use crate::panels::board::model::{self, Link, LinkEnd, SystemConfig, View};
+use crate::panels::board::parts::{self, Part, PartBus, PartPin};
 use crate::panels::board::snapshot::{self, ChipView};
 use crate::panels::board::{gui, layout};
 use crate::panels::mcu_module::mcu::gui::modules::module_color;
@@ -70,6 +71,21 @@ pub(crate) struct BoardState {
     /// its folder only after it has started, and until then a second "Open
     /// in new window" would start a second window on the same chip.
     pub new_windows: Vec<(PathBuf, std::process::Child, std::time::Instant)>,
+    /// The external part being edited, when its window is open.
+    pub part_editor: Option<PartEditor>,
+}
+
+/// The External part window's state.
+pub(crate) struct PartEditor {
+    /// The name the part had when the window opened; `None` for a new part.
+    pub original: Option<String>,
+    /// The part as it was when the window opened - a Save is refused when the
+    /// file's copy has changed since (another window edited it), rather than
+    /// writing this older copy over that edit.
+    pub opened: Option<Part>,
+    pub part: Part,
+    /// Why Save was refused.
+    pub error: Option<String>,
 }
 
 impl Default for BoardState {
@@ -90,6 +106,7 @@ impl Default for BoardState {
             arming: None,
             selected_link: None,
             new_windows: Vec::new(),
+            part_editor: None,
         }
     }
 }
@@ -175,6 +192,7 @@ impl AppIde {
                 self.board.arming = None;
                 self.board.selected_link = None;
                 self.board.notice = None;
+                self.board.part_editor = None;
                 self.board_refresh();
             }
             Err(e) => self.board_notice(e, true),
@@ -210,18 +228,39 @@ impl AppIde {
     /// Give each frame without a spot the one it is drawn at - so it stays
     /// there while another frame is dragged.
     fn board_place_unplaced(&mut self) {
-        let spots: Vec<(Option<(f32, f32)>, egui::Vec2)> = self
-            .board
+        let frames = self.board.config.frames();
+        let spots: Vec<(Option<(f32, f32)>, egui::Vec2)> = frames
+            .iter()
+            .zip(plain_sizes(&self.board_frame_views()))
+            .map(|((_, pos), s)| (*pos, s))
+            .collect();
+        let at = layout::frame_positions(&spots);
+        for ((id, pos), p) in frames.iter().zip(at) {
+            if pos.is_none() {
+                self.board.config.set_pos(id, (p.x, p.y));
+            }
+        }
+    }
+
+    /// One view per frame, in `config.frames()` order: each chip as last read
+    /// from disk, then each external part from its description. Looked up by
+    /// name, so a chip list re-read before its views were cannot shift one
+    /// frame's picture onto another's spot.
+    fn board_frame_views(&self) -> Vec<ChipView> {
+        self.board
             .config
             .chips
             .iter()
-            .zip(plain_sizes(&self.board.views))
-            .map(|(c, s)| (c.pos, s))
-            .collect();
-        let at = layout::frame_positions(&spots);
-        for (c, p) in self.board.config.chips.iter_mut().zip(at) {
-            c.pos.get_or_insert((p.x, p.y));
-        }
+            .map(|c| {
+                self.board
+                    .views
+                    .iter()
+                    .find(|v| v.dir.eq_ignore_ascii_case(&c.dir))
+                    .cloned()
+                    .unwrap_or_else(|| ChipView::broken(&c.dir, "Not read yet - press refresh"))
+            })
+            .chain(self.board.config.parts.iter().map(Part::view))
+            .collect()
     }
 
     /// Re-read the system from disk (writing this window's moves first).
@@ -321,6 +360,16 @@ impl AppIde {
             return;
         }
         let (old, new) = (old.to_owned(), new.to_owned());
+        if self.board.config.part(&new).is_some() {
+            self.board_notice(
+                format!(
+                    "{new} is the name of a part of the system, so the system still lists the chip \
+                     as {old} - rename the part, then add the chip again."
+                ),
+                true,
+            );
+            return;
+        }
         if self.board_edit_config(|cfg| model::rename_chip(cfg, &old, &new)) == Some(true) {
             if self
                 .board
@@ -340,20 +389,19 @@ impl AppIde {
         if !model::listable(dir) {
             return Listed::BadName;
         }
-        let sizes: HashMap<String, egui::Vec2> = self
-            .board
-            .views
+        let views = self.board_frame_views();
+        let sizes: HashMap<String, egui::Vec2> = views
             .iter()
-            .zip(plain_sizes(&self.board.views))
+            .zip(plain_sizes(&views))
             .map(|(v, s)| (v.dir.to_ascii_lowercase(), s))
             .collect();
         let added = self.board_edit_config(|cfg| {
             let mut spots: Vec<(Option<(f32, f32)>, egui::Vec2)> = cfg
-                .chips
-                .iter()
-                .map(|c| {
-                    let size = sizes.get(&c.dir.to_ascii_lowercase()).copied();
-                    (c.pos, size.unwrap_or(egui::vec2(layout::FRAME_W, 0.0)))
+                .frames()
+                .into_iter()
+                .map(|(id, pos)| {
+                    let size = sizes.get(&id.to_ascii_lowercase()).copied();
+                    (pos, size.unwrap_or(egui::vec2(layout::FRAME_W, 0.0)))
                 })
                 .collect();
             spots.push((None, egui::vec2(layout::FRAME_W, 0.0)));
@@ -517,7 +565,13 @@ impl AppIde {
         }
         // A folder of our own making: `new_project_dir` sanitises the name
         // and never returns one that exists.
-        let dest = super::project_io::new_project_dir(&root, &name, |p| p.exists());
+        // Not a name a part already has: chips and parts share names.
+        let dest = super::project_io::new_project_dir(&root, &name, |p| {
+            p.exists()
+                || p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| self.board.config.has_id(n))
+        });
         match super::clone_project_dialog::copy_tree(&src, &dest) {
             Ok(n) => {
                 let dir = dest
@@ -547,6 +601,7 @@ impl AppIde {
     }
 
     fn board_remove(&mut self, dir: &str) {
+        let is_part = self.board.config.part(dir).is_some();
         if self.board_edit_config(|cfg| cfg.remove(dir)) == Some(true) {
             if self
                 .board
@@ -556,10 +611,23 @@ impl AppIde {
             {
                 self.board.arming = None;
             }
-            self.board_notice(
-                format!("Removed {dir} from the system. Its folder and files are still there."),
-                false,
-            );
+            if is_part {
+                self.board_notice(format!("Removed the part {dir} and its links."), false);
+                if self
+                    .board
+                    .part_editor
+                    .as_ref()
+                    .and_then(|e| e.original.as_deref())
+                    .is_some_and(|o| o.eq_ignore_ascii_case(dir))
+                {
+                    self.board.part_editor = None;
+                }
+            } else {
+                self.board_notice(
+                    format!("Removed {dir} from the system. Its folder and files are still there."),
+                    false,
+                );
+            }
         }
     }
 
@@ -838,6 +906,255 @@ impl AppIde {
         });
     }
 
+    /// Whether the open part window holds edits a Save has not written.
+    fn board_part_dirty(&self) -> bool {
+        self.board
+            .part_editor
+            .as_ref()
+            .is_some_and(|ed| match &ed.opened {
+                Some(opened) => *opened != ed.part,
+                None => true,
+            })
+    }
+
+    /// Start describing a new external part, under a name no chip or part
+    /// has yet.
+    fn board_new_part(&mut self) {
+        if self.board_part_dirty() {
+            self.board_notice("Save or cancel the part being edited first.", true);
+            return;
+        }
+        let id = (1..)
+            .map(|n| format!("part{n}"))
+            .find(|id| !self.board.config.has_id(id))
+            .unwrap_or_default();
+        self.board.part_editor = Some(PartEditor {
+            original: None,
+            opened: None,
+            part: Part::new(&id),
+            error: None,
+        });
+    }
+
+    /// Open the window on an existing part.
+    fn board_edit_part(&mut self, id: &str) {
+        // A double-click on one of its interfaces armed a link on the way.
+        self.board.arming = None;
+        if self
+            .board
+            .part_editor
+            .as_ref()
+            .and_then(|e| e.original.as_deref())
+            .is_some_and(|o| o.eq_ignore_ascii_case(id))
+        {
+            return;
+        }
+        if self.board_part_dirty() {
+            self.board_notice("Save or cancel the part being edited first.", true);
+            return;
+        }
+        if let Some(p) = self.board.config.part(id) {
+            self.board.part_editor = Some(PartEditor {
+                original: Some(p.id.clone()),
+                opened: Some(p.clone()),
+                part: p.clone(),
+                error: None,
+            });
+        }
+    }
+
+    /// The External part window: its name, what it is, its I/O voltage, and
+    /// its interfaces with their pins. Nothing is written until Save.
+    fn board_part_window(&mut self, ctx: &egui::Context) {
+        let Some(mut ed) = self.board.part_editor.take() else {
+            return;
+        };
+        let mut open = true;
+        let (mut save, mut cancel, mut delete) = (false, false, false);
+        let title = if ed.original.is_some() {
+            "External part"
+        } else {
+            "New external part"
+        };
+        egui::Window::new(title)
+            .id(egui::Id::new("board_part_editor"))
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::Grid::new("board_part_fields")
+                    .num_columns(2)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Name");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut ed.part.id)
+                                .desired_width(180.0)
+                                .hint_text("fpga"),
+                        )
+                        .on_hover_text("Its name in the system - the links use it");
+                        ui.end_row();
+                        ui.label("What it is");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut ed.part.label)
+                                .desired_width(180.0)
+                                .hint_text("iCE40UP5K"),
+                        );
+                        ui.end_row();
+                        ui.label("I/O voltage");
+                        egui::ComboBox::from_id_salt("board_part_io")
+                            .selected_text(parts::volts(ed.part.io_mv))
+                            .show_ui(ui, |ui| {
+                                for mv in parts::VOLTAGES {
+                                    ui.selectable_value(&mut ed.part.io_mv, mv, parts::volts(mv));
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Its pins' level. A chip project counts as 3.3 V; a link between \
+                                 two levels is flagged.",
+                            );
+                        ui.end_row();
+                    });
+                ui.separator();
+                ui.label(egui::RichText::new("Interfaces").strong());
+                if ed.part.interfaces.is_empty() {
+                    ui.label(
+                        egui::RichText::new("None yet - a chip links to a part through them.")
+                            .size(11.5)
+                            .color(egui::Color32::from_gray(130)),
+                    );
+                }
+                let mut remove_iface = None;
+                // Scrolls, so Save stays on screen however many there are.
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (k, iface) in ed.part.interfaces.iter_mut().enumerate() {
+                            ui.push_id(("board_part_iface", k), |ui| {
+                                interface_rows(ui, iface, || remove_iface = Some(k));
+                            });
+                        }
+                    });
+                if let Some(k) = remove_iface {
+                    ed.part.interfaces.remove(k);
+                }
+                ui.menu_button(format!("{}  Add interface", ph::PLUS), |ui| {
+                    for bus in PartBus::ALL {
+                        if ui.button(bus.label()).clicked() {
+                            ed.part.add_interface(bus);
+                            ui.close();
+                        }
+                    }
+                });
+                if let Some(e) = &ed.error {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{}  {e}", ph::WARNING))
+                                .color(egui::Color32::from_rgb(230, 120, 90)),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    save = ui.button("Save").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                    if ed.original.is_some() {
+                        delete = ui
+                            .button(format!("{}  Remove from system", ph::MINUS_CIRCLE))
+                            .on_hover_text("The part and its links go")
+                            .clicked();
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Removing an interface removes its links. Nothing is generated for a part.",
+                    )
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(120)),
+                );
+            });
+        if save {
+            let original = ed.original.clone();
+            let opened = ed.opened.clone();
+            let part = ed.part.clone();
+            let mut refused = None;
+            // A folder of the system by that name would be a chip the next
+            // time someone lists it: the two would share every link end.
+            if let Some(root) = &self.board.root
+                && root.join(part.id.trim()).exists()
+                && !original
+                    .as_deref()
+                    .is_some_and(|o| o.eq_ignore_ascii_case(part.id.trim()))
+            {
+                refused = Some(format!(
+                    "{} is the name of a folder in the system - pick another.",
+                    part.id.trim()
+                ));
+            }
+            // The file's copy must still be the one this window opened, or
+            // this older copy would be written over another window's edit.
+            let unchanged = |cfg: &SystemConfig| {
+                let without_pos = |p: &Part| Part {
+                    pos: None,
+                    ..p.clone()
+                };
+                match (&original, &opened) {
+                    (Some(o), Some(opened)) => cfg
+                        .part(o)
+                        .is_some_and(|now| without_pos(now) == without_pos(opened)),
+                    _ => true,
+                }
+            };
+            let saved = if refused.is_some() {
+                None
+            } else {
+                self.board_edit_config(|cfg| {
+                    if !unchanged(cfg) {
+                        refused = Some(
+                            "This part was changed or removed in another window since this one \
+                             opened - Cancel, then open it again."
+                                .to_owned(),
+                        );
+                        return false;
+                    }
+                    match cfg.put_part(original.as_deref(), part) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            refused = Some(e);
+                            false
+                        }
+                    }
+                })
+            };
+            match (saved, refused) {
+                (_, Some(e)) => {
+                    ed.error = Some(e);
+                    self.board.part_editor = Some(ed);
+                }
+                (Some(_), None) => {
+                    self.board.selected_link = None;
+                    self.board_notice(format!("Saved the part {}.", ed.part.id.trim()), false);
+                }
+                // Not written: the notice says why, the window stays.
+                (None, None) => self.board.part_editor = Some(ed),
+            }
+            return;
+        }
+        if delete {
+            if let Some(id) = ed.original.clone() {
+                self.board_remove(&id);
+            }
+            return;
+        }
+        if cancel || !open {
+            return;
+        }
+        self.board.part_editor = Some(ed);
+    }
+
     /// The Board tab.
     pub(super) fn show_board_tab(&mut self, ui: &mut egui::Ui) {
         // Hidden until now: read the system again - another window, a git
@@ -876,7 +1193,9 @@ impl AppIde {
             );
             return;
         };
-        if self.board.config.chips.is_empty() {
+        // Before the empty-system return: a part can be a system's first frame.
+        self.board_part_window(ui.ctx());
+        if self.board.config.chips.is_empty() && self.board.config.parts.is_empty() {
             empty_note(
                 ui,
                 "No chips yet",
@@ -919,6 +1238,16 @@ impl AppIde {
                     .clicked()
                 {
                     self.board_add_existing();
+                }
+                if ui
+                    .button(format!("{}  External part", ph::CPU))
+                    .on_hover_text(
+                        "Something on the board that is not a chip project - an FPGA, a sensor: \
+                         its interfaces and pins, to link the chips to",
+                    )
+                    .clicked()
+                {
+                    self.board_new_part();
                 }
                 if ui
                     .button(ph::ARROW_CLOCKWISE)
@@ -1024,8 +1353,7 @@ impl AppIde {
                     self.board.arming = None;
                 }
                 let name = self
-                    .board
-                    .views
+                    .board_frame_views()
                     .iter()
                     .find(|v| v.dir.eq_ignore_ascii_case(&from.chip))
                     .and_then(|v| {
@@ -1055,10 +1383,15 @@ impl AppIde {
     fn board_scene(&self) -> BoardScene {
         // The open chip shows what it is NOW, saved or not.
         let open = self.board_open_chip_dir();
-        let mut views = self.board.views.clone();
+        let mut views = self.board_frame_views();
         if let (Some(dir), Some(mcu)) = (&open, &self.mcu) {
             let chip = self.selected_label();
-            for v in views.iter_mut().filter(|v| v.dir.eq_ignore_ascii_case(dir)) {
+            // Never onto a part: a part can share a folder's name only on
+            // paper, and it is not the chip open here.
+            for v in views
+                .iter_mut()
+                .filter(|v| v.external_mv.is_none() && v.dir.eq_ignore_ascii_case(dir))
+            {
                 *v = ChipView::from_mcu(&v.dir, &chip, mcu);
             }
         }
@@ -1068,10 +1401,10 @@ impl AppIde {
         let spots: Vec<(Option<(f32, f32)>, egui::Vec2)> = self
             .board
             .config
-            .chips
-            .iter()
+            .frames()
+            .into_iter()
             .zip(&plain)
-            .map(|(c, s)| (c.pos, *s))
+            .map(|((_, pos), s)| (pos, *s))
             .collect();
         let positions = layout::frame_positions(&spots);
         let geometry: Vec<(egui::Pos2, egui::Vec2)> = positions
@@ -1270,7 +1603,7 @@ impl AppIde {
             .board
             .arming
             .take()
-            .filter(|e| self.board.config.contains(&e.chip));
+            .filter(|e| self.board.config.has_id(&e.chip));
         let from = match armed {
             Some(from) if !from.chip.eq_ignore_ascii_case(dir) => from,
             // The same module again: that was a cancel.
@@ -1323,6 +1656,7 @@ impl AppIde {
                     .as_ref()
                     .is_some_and(|e| e.chip.eq_ignore_ascii_case(&v.dir));
                 gui::Frame {
+                    external: v.external_mv.is_some(),
                     view: v,
                     pos: scene.positions[c],
                     active: scene
@@ -1430,6 +1764,7 @@ impl AppIde {
                 gui::Event::DragEnded => self.board_flush_positions(),
                 gui::Event::Open(dir) => self.board_open_chip(root, &dir, ui.ctx()),
                 gui::Event::OpenNewWindow(dir) => self.board_open_in_new_window(root, &dir),
+                gui::Event::EditPart(id) => self.board_edit_part(&id),
                 gui::Event::Remove(dir) => {
                     self.board_remove(&dir);
                     self.board.selected_link = None;
@@ -1567,6 +1902,99 @@ fn middle(points: &[egui::Pos2]) -> egui::Pos2 {
         .windows(2)
         .max_by(|x, y| (x[1] - x[0]).length().total_cmp(&(y[1] - y[0]).length()))
         .map_or(points[0], |w| w[0] + (w[1] - w[0]) / 2.0)
+}
+
+/// One interface in the part window: its bus, name and rate, then a row per
+/// pin (its name on the part, its role) and a button for another pin.
+fn interface_rows(ui: &mut egui::Ui, iface: &mut parts::Interface, mut remove: impl FnMut()) {
+    ui.horizontal(|ui| {
+        if ui
+            .small_button(ph::X)
+            .on_hover_text("Remove this interface, and its links")
+            .clicked()
+        {
+            remove();
+        }
+        ui.label(egui::RichText::new(iface.bus.label()).strong());
+        let hint = {
+            let mut probe = iface.clone();
+            probe.name.clear();
+            probe.display_name()
+        };
+        ui.add(
+            egui::TextEdit::singleline(&mut iface.name)
+                .desired_width(110.0)
+                .hint_text(hint),
+        );
+        match iface.bus {
+            PartBus::Uart | PartBus::Can => {
+                ui.label(if iface.bus == PartBus::Uart {
+                    "baud"
+                } else {
+                    "bit rate"
+                });
+                // Not clamped as it is drawn: a rate of 0 (none stated)
+                // would become 1 and be saved.
+                ui.add(
+                    egui::DragValue::new(&mut iface.rate)
+                        .range(0..=100_000_000)
+                        .clamp_existing_to_range(false),
+                );
+            }
+            PartBus::SpiSlave | PartBus::SpiMaster => {
+                ui.label("mode");
+                egui::ComboBox::from_id_salt("spi_mode")
+                    .width(40.0)
+                    .selected_text(iface.spi_mode.to_string())
+                    .show_ui(ui, |ui| {
+                        for m in 0..=3u8 {
+                            ui.selectable_value(&mut iface.spi_mode, m, m.to_string());
+                        }
+                    });
+            }
+            PartBus::I2c | PartBus::Gpio => {}
+        }
+    });
+    let roles = iface.bus.roles();
+    let mut remove_pin = None;
+    for (j, pin) in iface.pins.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.add_space(26.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut pin.name)
+                    .desired_width(110.0)
+                    .hint_text("pin name"),
+            );
+            egui::ComboBox::from_id_salt(("pin_role", j))
+                .width(110.0)
+                .selected_text(pin.role.label())
+                .show_ui(ui, |ui| {
+                    for r in roles {
+                        ui.selectable_value(&mut pin.role, *r, r.label());
+                    }
+                });
+            if ui
+                .small_button(ph::X)
+                .on_hover_text("Remove this pin")
+                .clicked()
+            {
+                remove_pin = Some(j);
+            }
+        });
+    }
+    if let Some(j) = remove_pin {
+        iface.pins.remove(j);
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(26.0);
+        if ui.small_button(format!("{}  pin", ph::PLUS)).clicked() {
+            iface.pins.push(PartPin {
+                name: String::new(),
+                role: roles[0],
+            });
+        }
+    });
+    ui.add_space(4.0);
 }
 
 /// The centred note an empty Board shows.

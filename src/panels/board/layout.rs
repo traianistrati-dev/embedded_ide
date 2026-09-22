@@ -478,6 +478,7 @@ mod tests {
                 })
                 .collect(),
             problem: None,
+            external_mv: None,
         }
     }
 
