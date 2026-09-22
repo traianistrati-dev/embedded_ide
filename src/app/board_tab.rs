@@ -66,6 +66,10 @@ pub(crate) struct BoardState {
     /// The link picked in the list or on the canvas - by identity, so an
     /// edit from another window cannot move the pick onto another link.
     pub selected_link: Option<Link>,
+    /// Windows started on a chip and maybe not up yet: a new window claims
+    /// its folder only after it has started, and until then a second "Open
+    /// in new window" would start a second window on the same chip.
+    pub new_windows: Vec<(PathBuf, std::process::Child, std::time::Instant)>,
 }
 
 impl Default for BoardState {
@@ -85,6 +89,7 @@ impl Default for BoardState {
             moved: BTreeSet::new(),
             arming: None,
             selected_link: None,
+            new_windows: Vec::new(),
         }
     }
 }
@@ -122,9 +127,30 @@ fn plain_sizes(views: &[ChipView]) -> Vec<egui::Vec2> {
         .collect()
 }
 
+/// Why a chip cannot be opened in a new window, or `None` when it can. The
+/// new window takes its folder from the command line, which asks for a
+/// `Cargo.toml`.
+fn new_window_refusal(path: &Path, dir: &str, open_here: bool) -> Option<String> {
+    if open_here {
+        Some(format!("{dir} is the chip open in this window."))
+    } else if !path.is_dir() {
+        Some(format!("{dir} is not there any more - moved or deleted?"))
+    } else if !path.join("Cargo.toml").is_file() {
+        Some(format!(
+            "{dir} has no Cargo.toml - a new window cannot open it."
+        ))
+    } else {
+        None
+    }
+}
+
 fn is_project(dir: &Path) -> bool {
     dir.join("Cargo.toml").is_file() || dir.join("src").join("main.rs").is_file()
 }
+
+/// How long a window just started is taken to be still starting: enough
+/// for a debug build to come up and claim its folder.
+const NEW_WINDOW_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 const BAD_NAME: &str = "system.config cannot list a folder whose name contains `=` or starts with \
                         `#` or `@` - rename the folder first.";
@@ -144,9 +170,11 @@ impl AppIde {
                 self.board.config = cfg;
                 self.board.moved.clear();
                 self.board.view_adjusted = false;
-                // A half-made link or a picked row belongs to the system left.
+                // A half-made link, a picked row, a notice: all about the
+                // system left.
                 self.board.arming = None;
                 self.board.selected_link = None;
+                self.board.notice = None;
                 self.board_refresh();
             }
             Err(e) => self.board_notice(e, true),
@@ -363,6 +391,8 @@ impl AppIde {
     pub(super) fn board_follow_project(&mut self, project_dir: &Path) {
         self.board.adding_chip = false;
         self.board.new_chip_intent = false;
+        // Whatever the last notice said was about the project just left.
+        self.board.notice = None;
         if let Some(root) = model::system_root_of(project_dir) {
             if self
                 .board
@@ -537,14 +567,16 @@ impl AppIde {
     /// Open Recent - unless its folder is gone or holds no project: opening
     /// that would keep the previous chip's pins under the missing folder's
     /// name, and the next Save would write them there.
-    fn board_open_chip(&mut self, root: &Path, dir: &str, ctx: &egui::Context) {
+    pub(super) fn board_open_chip(&mut self, root: &Path, dir: &str, ctx: &egui::Context) {
         let path = root.join(dir);
         if !path.is_dir() {
             self.board_notice(
                 format!("{dir} is not there any more - moved or deleted?"),
                 true,
             );
-            self.board_refresh();
+            // Renamed or taken out from another window, maybe: read the
+            // system again, not only the chips.
+            self.board_sync();
         } else if !is_project(&path) {
             self.board_notice(
                 format!("{dir} is not a chip project - it has no Cargo.toml or src/main.rs."),
@@ -556,6 +588,254 @@ impl AppIde {
             self.board.open_request = Some(path);
             ctx.request_repaint();
         }
+    }
+
+    /// Open a chip of the system in a window of its own: another instance of
+    /// the IDE, started on the chip's folder. Every window has its own build
+    /// workspace and rust-analyzer, so two chips are worked on side by side.
+    fn board_open_in_new_window(&mut self, root: &Path, dir: &str) {
+        let path = root.join(dir);
+        let open_here = self
+            .board_open_chip_dir()
+            .is_some_and(|d| d.eq_ignore_ascii_case(dir));
+        if let Some(why) = new_window_refusal(&path, dir, open_here) {
+            self.board_notice(why, true);
+            return;
+        }
+        // A window still starting has not claimed its folder yet, so the
+        // probe below cannot see it. Past the grace period (or once it has
+        // exited) it has, and the probe takes over.
+        self.board.new_windows.retain_mut(|(_, child, at)| {
+            at.elapsed() < NEW_WINDOW_GRACE && matches!(child.try_wait(), Ok(None))
+        });
+        if self
+            .board
+            .new_windows
+            .iter()
+            .any(|(p, _, _)| model::same_dir(p, &path))
+        {
+            self.board_notice(format!("{dir} is still opening in a new window…"), false);
+            return;
+        }
+        // Probing is claiming: the claim is dropped at once, the new window
+        // takes it. A window that grabs it in between gets the busy banner.
+        if matches!(
+            crate::workspace::claim_project(&path),
+            crate::workspace::ProjectClaim::Busy
+        ) {
+            self.board_notice(format!("{dir} is already open in another window."), true);
+            return;
+        }
+        let started = std::env::current_exe().and_then(|exe| {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("--project")
+                .arg(&path)
+                // Its own window, not this one's console (see
+                // `attach_parent_console`).
+                .env(crate::build::SPAWNED_WINDOW_ENV, "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const DETACHED_PROCESS: u32 = 0x0000_0008;
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+                cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+            }
+            cmd.spawn()
+        });
+        match started {
+            Ok(child) => {
+                self.board
+                    .new_windows
+                    .push((path, child, std::time::Instant::now()));
+                self.board_notice(format!("Opening {dir} in a new window…"), false);
+            }
+            Err(e) => self.board_notice(format!("Couldn't start a new window: {e}"), true),
+        }
+    }
+
+    /// The system's chips, as a row of buttons under the MCU tab's chip name:
+    /// the open one lit, a click on another opens it here (the unsaved-changes
+    /// prompt first, like any open), its menu opens it in a window of its own.
+    pub(super) fn show_system_chip_row(&mut self, ui: &mut egui::Ui) {
+        let Some(root) = self.board.root.clone() else {
+            return;
+        };
+        if self.board.config.chips.is_empty() {
+            return;
+        }
+        let open = self.board_open_chip_dir();
+        let name = root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("system")
+            .to_owned();
+        // The open chip says what it is NOW - the Board's disk copy of it is
+        // as old as the last read.
+        let live = self
+            .mcu
+            .as_ref()
+            .map(|m| format!("{} · {}", self.selected_label(), m.runtime.as_token()));
+        let chips: Vec<(String, String, bool)> = self
+            .board
+            .config
+            .chips
+            .iter()
+            .map(|c| {
+                let view = self
+                    .board
+                    .views
+                    .iter()
+                    .find(|v| v.dir.eq_ignore_ascii_case(&c.dir));
+                let is_open = open
+                    .as_deref()
+                    .is_some_and(|d| d.eq_ignore_ascii_case(&c.dir));
+                let hint = match (view, &live) {
+                    (_, Some(live)) if is_open => live.clone(),
+                    (Some(v), _) => match &v.problem {
+                        Some(p) => p.clone(),
+                        None if v.chip.is_empty() => "Unknown chip".to_owned(),
+                        None => format!("{} · {}", v.chip, v.runtime.map_or("", |r| r.as_token())),
+                    },
+                    (None, _) => String::new(),
+                };
+                // Drawn faded, not disabled: the folder may be back by now,
+                // and a click re-reads the system either way.
+                let gone = view.is_some_and(|v| {
+                    v.problem.as_deref() == Some("Folder not found")
+                        || v.problem
+                            .as_deref()
+                            .is_some_and(|p| p.starts_with("Not a project"))
+                });
+                (c.dir.clone(), hint, gone)
+            })
+            .collect();
+        // Like the Board's New chip: an open taken while a save runs would be
+        // dropped at the gate without a word.
+        let saving = self.save_in_progress.is_some();
+        let mut open_here: Option<String> = None;
+        let mut open_new: Option<String> = None;
+        let mut to_board = false;
+        let mut reread = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{}  {name}:", ph::CIRCUITRY))
+                    .size(12.0)
+                    .color(egui::Color32::from_gray(150)),
+            )
+            .on_hover_text(root.display().to_string());
+            for (dir, hint, gone) in &chips {
+                let active = open.as_deref().is_some_and(|d| d.eq_ignore_ascii_case(dir));
+                let mut text = egui::RichText::new(dir).size(12.0);
+                if active {
+                    text = text.strong();
+                }
+                if *gone {
+                    text = text.color(egui::Color32::from_rgb(200, 120, 100)).italics();
+                }
+                let resp = ui.add_enabled(!saving, egui::Button::selectable(active, text));
+                let resp = if saving {
+                    resp.on_disabled_hover_text("Saving - wait for it to finish")
+                } else if active {
+                    resp.on_hover_text(format!("{hint}\nThe chip open in this window"))
+                } else {
+                    resp.on_hover_text(format!(
+                        "{hint}\nClick to open it here - right-click for a new window"
+                    ))
+                };
+                if resp.clicked() && !active {
+                    open_here = Some(dir.clone());
+                }
+                resp.context_menu(|ui| {
+                    if ui
+                        .add_enabled(
+                            !active,
+                            egui::Button::new(format!("{}  Open in this window", ph::FOLDER_OPEN)),
+                        )
+                        .clicked()
+                    {
+                        open_here = Some(dir.clone());
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            !active,
+                            egui::Button::new(format!(
+                                "{}  Open in new window",
+                                ph::ARROW_SQUARE_OUT
+                            )),
+                        )
+                        .on_disabled_hover_text("It is the chip open here")
+                        .clicked()
+                    {
+                        open_new = Some(dir.clone());
+                        ui.close();
+                    }
+                });
+            }
+            if ui
+                .small_button(ph::ARROW_CLOCKWISE)
+                .on_hover_text("Read the system again - another window may have changed it")
+                .clicked()
+            {
+                reread = true;
+            }
+            if ui
+                .small_button(format!("{}  Board", ph::GRAPH))
+                .on_hover_text("Show how the chips are linked")
+                .clicked()
+            {
+                to_board = true;
+            }
+        });
+        if reread {
+            self.board_sync();
+        }
+        if let Some(dir) = open_here {
+            self.board_open_chip(&root, &dir, ui.ctx());
+        }
+        if let Some(dir) = open_new {
+            self.board_open_in_new_window(&root, &dir);
+        }
+        if to_board {
+            self.active_tab = super::McuTab::Board;
+        }
+        // What those did, where the user is looking - the Board's own notice
+        // line is on another tab.
+        self.board_notice_row(ui);
+    }
+
+    /// The last notice, with a button to dismiss it. The button comes FIRST
+    /// and the text wraps after it: a long line would otherwise push it off
+    /// the panel.
+    fn board_notice_row(&mut self, ui: &mut egui::Ui) {
+        let Some((text, error)) = self.board.notice.clone() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
+                .on_hover_text("Dismiss")
+                .clicked()
+            {
+                self.board.notice = None;
+            }
+            let (icon, color) = if error {
+                (ph::WARNING, egui::Color32::from_rgb(230, 120, 90))
+            } else {
+                (ph::INFO, egui::Color32::from_gray(170))
+            };
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{icon}  {text}"))
+                        .size(11.5)
+                        .color(color),
+                )
+                .wrap(),
+            );
+        });
     }
 
     /// The Board tab.
@@ -767,30 +1047,7 @@ impl AppIde {
                 );
             });
         }
-        if let Some((text, error)) = self.board.notice.clone() {
-            ui.horizontal(|ui| {
-                if ui
-                    .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
-                    .on_hover_text("Dismiss")
-                    .clicked()
-                {
-                    self.board.notice = None;
-                }
-                let (icon, color) = if error {
-                    (ph::WARNING, egui::Color32::from_rgb(230, 120, 90))
-                } else {
-                    (ph::INFO, egui::Color32::from_gray(170))
-                };
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!("{icon}  {text}"))
-                            .size(11.5)
-                            .color(color),
-                    )
-                    .wrap(),
-                );
-            });
-        }
+        self.board_notice_row(ui);
     }
 
     /// Everything the canvas and the link list are drawn from, worked out
@@ -1172,6 +1429,7 @@ impl AppIde {
                 }
                 gui::Event::DragEnded => self.board_flush_positions(),
                 gui::Event::Open(dir) => self.board_open_chip(root, &dir, ui.ctx()),
+                gui::Event::OpenNewWindow(dir) => self.board_open_in_new_window(root, &dir),
                 gui::Event::Remove(dir) => {
                     self.board_remove(&dir);
                     self.board.selected_link = None;
@@ -1338,6 +1596,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A new window opens a chip only when the command line would accept it,
+    /// and never the chip already open here.
+    #[test]
+    fn a_new_window_needs_a_project_that_is_not_open_here() {
+        let base = scratch("new_window");
+        let chip = base.join("radio");
+        std::fs::create_dir_all(&chip).unwrap();
+        assert!(
+            new_window_refusal(&base.join("gone"), "gone", false)
+                .unwrap()
+                .contains("not there")
+        );
+        assert!(
+            new_window_refusal(&chip, "radio", false)
+                .unwrap()
+                .contains("no Cargo.toml")
+        );
+        std::fs::write(chip.join("Cargo.toml"), "[package]").unwrap();
+        assert_eq!(new_window_refusal(&chip, "radio", false), None);
+        assert!(
+            new_window_refusal(&chip, "radio", true)
+                .unwrap()
+                .contains("open in this window")
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Only a chip project may become a chip, and never the folder holding

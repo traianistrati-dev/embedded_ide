@@ -183,7 +183,17 @@ fn write_crash_report(info: &std::panic::PanicHookInfo<'_>) {
 /// Known quirk, not a bug: `cmd.exe` does not wait for a GUI-subsystem program,
 /// so it prints its next prompt immediately and our output lands underneath it.
 /// Nothing in the process can prevent that.
+/// Set on a window the IDE starts itself - see [`attach_parent_console`].
+pub const SPAWNED_WINDOW_ENV: &str = "RUST_ON_CHIP_SPAWNED_WINDOW";
+
 pub fn attach_parent_console() {
+    // A window started by another IDE window (the Board's "Open in new
+    // window") must not take the console that one was launched from: Ctrl+C
+    // there, or closing that terminal, would end it without the
+    // unsaved-changes prompt.
+    if std::env::var_os(SPAWNED_WINDOW_ENV).is_some() {
+        return;
+    }
     #[cfg(windows)]
     {
         use std::ffi::c_void;

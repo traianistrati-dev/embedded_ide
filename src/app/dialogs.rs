@@ -1394,6 +1394,9 @@ impl AppIde {
                         self.selected_file = ProjectFileId::MainRs;
                         self.project_name = None;
                         self.project_dir = None;
+                        // Let go of the folder just left: held on, this window
+                        // would read as another one that has it open.
+                        self.claim_open_project();
                         self.renaming_file = None;
                         self.renaming_folder = None;
                         self.new_src_name = None;

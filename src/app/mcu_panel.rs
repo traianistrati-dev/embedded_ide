@@ -861,6 +861,9 @@ impl AppIde {
                         );
                     }
                 });
+                // In a system: every chip of it, one click from being the one
+                // this tab shows.
+                self.show_system_chip_row(ui);
             }
 
             ui.separator();

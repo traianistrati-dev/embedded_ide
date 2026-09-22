@@ -73,6 +73,8 @@ pub enum Event {
     DragEnded,
     /// Open this chip in this window.
     Open(String),
+    /// Open this chip in a window of its own.
+    OpenNewWindow(String),
     /// Take this chip out of the system (its folder stays).
     Remove(String),
     /// A module was clicked - to start a link, or to finish one.
@@ -291,6 +293,17 @@ fn chip_menu(ui: &mut egui::Ui, f: &Frame<'_>, events: &mut Vec<Event>) {
     );
     if open.on_disabled_hover_text("Already open").clicked() {
         events.push(Event::Open(dir.clone()));
+        ui.close();
+    }
+    let new_window = ui.add_enabled(
+        !f.active,
+        egui::Button::new(format!("{}  Open in new window", ph::ARROW_SQUARE_OUT)),
+    );
+    if new_window
+        .on_disabled_hover_text("It is the chip open here")
+        .clicked()
+    {
+        events.push(Event::OpenNewWindow(dir.clone()));
         ui.close();
     }
     ui.separator();
