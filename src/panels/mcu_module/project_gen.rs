@@ -2184,21 +2184,33 @@ fn memory_x(c: &ProjectDef) -> String {
 /// `build.rs` placed in the project root.
 /// Copies `memory.x` to `OUT_DIR` so the linker script (`link.x` for ARM,
 /// `linkall.x` for ESP32) can find it via the `rustc-link-search` path.
+///
+/// Returns a `Result` and uses `?`, with no `unwrap()` in it. Clippy lints a
+/// build script with the package's own `[lints]`, so under Strict lints the
+/// three `unwrap()`s this had were three denied errors on every ARM project -
+/// in a generated file, where the user can neither fix them nor be blamed for
+/// them. Written to need no exemption, rather than given an `#[allow]` like
+/// `main`: the file is the same whether the toggle is on or off, so toggling
+/// it has nothing to regenerate here. A failure still stops the build, with
+/// the error printed, which is all the `unwrap()`s were for.
 fn build_rs_embedded() -> String {
     let mut s = String::new();
     s.push_str("use std::env;\n");
+    s.push_str("use std::error::Error;\n");
     s.push_str("use std::fs::File;\n");
     s.push_str("use std::io::Write;\n");
     s.push_str("use std::path::PathBuf;\n");
     s.push_str("\n");
-    s.push_str("fn main() {\n");
-    s.push_str("    let out = PathBuf::from(env::var_os(\"OUT_DIR\").unwrap());\n");
-    s.push_str("    File::create(out.join(\"memory.x\"))\n");
-    s.push_str("        .unwrap()\n");
-    s.push_str("        .write_all(include_bytes!(\"memory.x\"))\n");
-    s.push_str("        .unwrap();\n");
+    s.push_str("fn main() -> Result<(), Box<dyn Error>> {\n");
+    s.push_str(
+        "    let out = PathBuf::from(env::var_os(\"OUT_DIR\").ok_or(\"OUT_DIR is not set\")?);\n",
+    );
+    s.push_str(
+        "    File::create(out.join(\"memory.x\"))?.write_all(include_bytes!(\"memory.x\"))?;\n",
+    );
     s.push_str("    println!(\"cargo:rustc-link-search={}\", out.display());\n");
     s.push_str("    println!(\"cargo:rerun-if-changed=memory.x\");\n");
+    s.push_str("    Ok(())\n");
     s.push_str("}\n");
     s
 }
@@ -2802,6 +2814,50 @@ mod tests {
             &ToolchainKind::RustEmbedded,
         );
         assert!(br.contains("// <<< GENERATED"), "rust line comment:\n{br}");
+    }
+
+    /// Clippy lints a build script under the package's `[lints]`, so with Strict
+    /// lints on, anything that profile denies is an error in a generated file.
+    /// The three `unwrap()`s were exactly that, on every ARM project.
+    ///
+    /// The body is pinned whole, because THIS text is what was run through
+    /// `cargo clippy` under the full Strict profile and came back clean; the
+    /// old one gave three `clippy::unwrap_used` errors in the same crate. A
+    /// test here cannot run clippy, so a change to the body has to be checked
+    /// that way again - which the exact comparison is there to force.
+    #[test]
+    fn build_rs_has_nothing_for_strict_lints_to_deny() {
+        let body = build_rs_embedded();
+        assert_eq!(
+            body,
+            "use std::env;\n\
+             use std::error::Error;\n\
+             use std::fs::File;\n\
+             use std::io::Write;\n\
+             use std::path::PathBuf;\n\
+             \n\
+             fn main() -> Result<(), Box<dyn Error>> {\n\
+             \x20   let out = PathBuf::from(env::var_os(\"OUT_DIR\").ok_or(\"OUT_DIR is not set\")?);\n\
+             \x20   File::create(out.join(\"memory.x\"))?.write_all(include_bytes!(\"memory.x\"))?;\n\
+             \x20   println!(\"cargo:rustc-link-search={}\", out.display());\n\
+             \x20   println!(\"cargo:rerun-if-changed=memory.x\");\n\
+             \x20   Ok(())\n\
+             }\n"
+        );
+        // And by name, so the reason survives someone updating the text above.
+        for denied in [
+            "unwrap(",
+            "expect(",
+            "panic!",
+            "unreachable!",
+            "todo!",
+            " as ",
+        ] {
+            assert!(
+                !body.contains(denied),
+                "`{denied}` is denied by Strict lints"
+            );
+        }
     }
 
     #[test]

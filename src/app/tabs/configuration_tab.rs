@@ -571,16 +571,16 @@ fn problem_and_reset(
 
 /// Why the DMA card is empty, in the words that fit THIS chip.
 ///
-/// Apart from the drawing because the four answers are a real decision and
-/// a `ui.label` is not: one of them used to tell Espressif users to
-/// "re-import it from the STM32Cube database", and nothing could have
-/// noticed.
+/// Apart from the drawing because the answers are a real decision and a
+/// `ui.label` is not: one of them used to tell Espressif users - and then
+/// the micro:bit and the Pico - to "re-import it from the STM32Cube
+/// database", and nothing could have noticed.
 fn dma_note(
     dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
     family: &str,
     on_dma_runtime: bool,
 ) -> String {
-    // FOUR different silences, and the difference is the whole point:
+    // Different silences, and the difference is the whole point:
     // "nothing asked for it" is not the same as "it could not be given".
     if crate::panels::mcu_module::codegen::family::is_esp(family) {
         // FIRST, because every branch below assumes a chip whose DMA
@@ -599,13 +599,45 @@ fn dma_note(
              blocking driver too. On {family} a channel is not split into TX and RX: one \
              channel drives both halves."
         )
+    } else if crate::panels::mcu_module::codegen::nrf::is_nrf(family) {
+        // Before the runtime is asked about, as for ESP: EasyDMA is inside
+        // each peripheral on either runtime, so there is no channel to take
+        // and no runtime to switch to. The micro:bit got the STM32Cube advice
+        // below - by the same `!= "stm32f1"` that had caught the ESP parts.
+        format!(
+            "This chip has no DMA channels to allocate. On {family} EasyDMA is built into \
+             each peripheral, so a bus uses it without taking anything here."
+        )
+    } else if crate::panels::mcu_module::codegen::rp::is_rp(family) {
+        // No vendor database behind a Pico either, and no channel to choose:
+        // the generator takes them itself, which is why the card counts them
+        // from `rp::dma_channels` and not from a `DmaDef`. A wired SPI always
+        // takes its pair. A UART does not by default - `UsartMode` starts on
+        // Buffered, which takes none - so the note names the setting, in the
+        // panel's own words, rather than promising channels for wiring one.
+        if on_dma_runtime {
+            "No bus has taken a DMA channel yet. Wire an SPI, or set a UART module's Async \
+             transport to DMA, and the channels the generator takes appear here."
+                .to_owned()
+        } else {
+            format!(
+                "No DMA on this runtime for {family}: the Blocking buses are polled. On the \
+                 Async runtime (System tab) an SPI takes its channels by itself, and so does \
+                 a UART whose Async transport is DMA."
+            )
+        }
     } else if !on_dma_runtime {
         format!(
             "No DMA on this runtime for {family}. Switch a bus to the Async runtime \
                  (System tab) - or, on the STM32F1, turn on the Blocking DMA transport \
                  in a USART or SPI module."
         )
-    } else if dma.is_none() && family != "stm32f1" {
+    } else if dma.is_none() && crate::app::dialogs::uses_dma_def(family) {
+        // `uses_dma_def`, not a family name: it is the one place that says
+        // which families allocate from a `DmaDef` at all, and the import
+        // dialog already asks it. A family excluded here BY NAME is how two
+        // vendors in a row were sent to a database that has never heard of
+        // them.
         "This chip carries no DMA channel data - re-import it from the STM32Cube \
              database so the IDE can allocate channels instead of leaving a TODO."
             .to_owned()
@@ -1214,6 +1246,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The same mistake, one vendor later: the ESP parts got a branch of their
+    /// own and the exclusion by name stayed, so the micro:bit and the Pico were
+    /// sent to CubeMX instead. Asked of `uses_dma_def` rather than of a list of
+    /// families, so the next one that does not allocate from a `DmaDef` is
+    /// covered the day it is added there.
+    #[test]
+    fn the_dma_note_sends_nobody_to_cubemx_who_has_no_channel_table() {
+        let mut seen_nrf = false;
+        let mut seen_rp = false;
+        for d in builtin_definitions() {
+            if crate::app::dialogs::uses_dma_def(&d.family) {
+                continue;
+            }
+            seen_nrf |= crate::panels::mcu_module::codegen::nrf::is_nrf(&d.family);
+            seen_rp |= crate::panels::mcu_module::codegen::rp::is_rp(&d.family);
+            for on_dma_runtime in [true, false] {
+                // `None` as well as the chip's own: a user copy can drop it.
+                for dma in [d.dma.as_ref(), None] {
+                    let note = dma_note(dma, &d.family, on_dma_runtime);
+                    assert!(!note.contains("STM32Cube"), "{}: {note}", d.id);
+                }
+            }
+        }
+        assert!(seen_nrf && seen_rp, "the loop walked neither family");
+    }
+
+    /// An nRF has nothing to switch to: EasyDMA is there on both runtimes, so
+    /// the answer does not change with it and never points at the System tab.
+    #[test]
+    fn an_nrf_is_told_there_is_nothing_to_allocate_on_either_runtime() {
+        let on = dma_note(None, "nrf52833", true);
+        let off = dma_note(None, "nrf52833", false);
+        assert_eq!(on, off);
+        assert!(on.contains("EasyDMA") && on.contains("nrf52833"), "{on}");
+        assert!(!on.contains("Async runtime"), "{on}");
+    }
+
+    /// The Pico's channels are taken by the generator, so there is no module
+    /// switch to send anyone to - and Blocking really has none.
+    #[test]
+    fn a_pico_is_told_what_takes_a_channel_and_where() {
+        let on = dma_note(None, "rp2040", true);
+        assert!(!on.contains("Turn it on"), "{on}");
+        // A UART starts on Buffered, which takes none: the setting is named.
+        assert!(on.contains("SPI") && on.contains("Async transport"), "{on}");
+        let off = dma_note(None, "rp235x", false);
+        assert!(
+            off.contains("rp235x") && off.contains("Async runtime"),
+            "{off}"
+        );
+        assert!(!off.contains("STM32F1"), "{off}");
+        assert!(off.contains("Async transport"), "{off}");
     }
 
     /// …while the families that DO carry channel data keep their advice.

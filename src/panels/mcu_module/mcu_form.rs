@@ -836,6 +836,9 @@ pub fn gpio_bank(prefix: &str, start_number: usize, count: usize) -> Vec<PinRow>
 pub const FUNCTION_TOKEN_HELP: &str = "in out · usart{n}_tx/rx/cts/rts/ck · \
     lpuart{n}_tx/rx/cts/rts · spi{n}_nss/sck/miso/mosi/rdy · i2c{n}_scl/sda · \
     adc{a}_{ch} · tim{t}_{ch} · swdio swclk · usb_dm usb_dp · can_rx can_tx · mco · \
+    ESP: rmt{n} · touch{n} · mcpwm{u}_op{o}a/b · pcnt{u}_edge{c}/ctrl{c} · \
+    lcd_d{n} lcd_dc/wr/cs/pclk/vsync/hsync/de · cam_d{n} cam_pclk/vsync/hsync/href/mclk · \
+    parl_d{n} parl_clk/valid · parl_rx_d{n} parl_rx_clk/valid · \
     af:{signal} for anything else (e.g. af:sai1_sd_a, af:fmc_a0)";
 
 /// Resolve `(token, gpio)` pairs into `(function, gpio)`.
@@ -875,6 +878,16 @@ pub fn unknown_function_tokens(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// A number inside an ESP token, in the one spelling the writer uses: ASCII
+/// digits, no sign, no leading zero. `u8::from_str` alone also takes `+3` and
+/// `007`, which would give one function several tokens - and let a typo save
+/// as something else. Only the ESP tokens go through it: the older ones have
+/// always read the lenient way, and files may rely on that.
+fn token_number(s: &str) -> Option<u8> {
+    let plain = s.bytes().all(|b| b.is_ascii_digit()) && (s == "0" || !s.starts_with('0'));
+    plain.then(|| s.parse().ok()).flatten()
+}
+
 /// One token → one [`PinFunction`]. Case-insensitive; the inverse of
 /// [`function_to_token`].
 fn token_to_function(tok: &str) -> Option<PinFunction> {
@@ -899,10 +912,56 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
         "can_tx" => Some(PinFunction::CanTx),
         "mco" => Some(PinFunction::Mco),
         "qspi_clk" => Some(PinFunction::QspiClk),
+        "lcd_dc" => Some(PinFunction::LcdCamDc),
+        "lcd_wr" => Some(PinFunction::LcdCamWr),
+        "lcd_cs" => Some(PinFunction::LcdCamCs),
+        "lcd_pclk" => Some(PinFunction::LcdCamPclk),
+        "lcd_vsync" => Some(PinFunction::LcdCamVsync),
+        "lcd_hsync" => Some(PinFunction::LcdCamHsync),
+        "lcd_de" => Some(PinFunction::LcdCamDe),
+        "cam_pclk" => Some(PinFunction::CamPclk),
+        "cam_vsync" => Some(PinFunction::CamVsync),
+        "cam_hsync" => Some(PinFunction::CamHsync),
+        "cam_href" => Some(PinFunction::CamHenable),
+        "cam_mclk" => Some(PinFunction::CamMclk),
+        "parl_clk" => Some(PinFunction::ParlClk),
+        "parl_valid" => Some(PinFunction::ParlValid),
+        "parl_rx_clk" => Some(PinFunction::ParlRxClk),
+        "parl_rx_valid" => Some(PinFunction::ParlRxValid),
         _ => None,
     };
     if simple.is_some() {
         return simple;
+    }
+    // The Espressif tokens `function_to_token` writes. None of them was read
+    // back, so Edit on any ESP part opened on several hundred "unknown function
+    // token" errors, one per function per pad - the GPIO matrix offers every
+    // one of these on every pad - and Save stayed disabled.
+    //
+    // `<word><n>` with no underscore at all, which the instance split further
+    // down requires: `rmt0`, `touch7`.
+    let numbered = |word: &str| token_number(t.strip_prefix(word)?);
+    if let Some(n) = numbered("rmt") {
+        return Some(PinFunction::RmtChannel(n));
+    }
+    if let Some(n) = numbered("touch") {
+        return Some(PinFunction::TouchPad(n));
+    }
+    // A data lane of a port the chip has one of: `lcd_d3`, `cam_d7`, `parl_d0`,
+    // `parl_rx_d15`. After the fixed names above, so `lcd_dc` and `lcd_de` are
+    // taken as themselves and not as a lane that fails to parse.
+    let lane_of = |prefix: &str| token_number(t.strip_prefix(prefix)?);
+    if let Some(lane) = lane_of("lcd_d") {
+        return Some(PinFunction::LcdCamData { lane });
+    }
+    if let Some(lane) = lane_of("cam_d") {
+        return Some(PinFunction::CamData { lane });
+    }
+    if let Some(lane) = lane_of("parl_rx_d") {
+        return Some(PinFunction::ParlRxData { lane });
+    }
+    if let Some(lane) = lane_of("parl_d") {
+        return Some(PinFunction::ParlData { lane });
     }
     // `xspi_p1_io12` → XSPI port 1 data line 12. Same shape as the OCTOSPI
     // tokens below, and lifted for the same reason.
@@ -1038,16 +1097,31 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             .strip_prefix("out")
             .and_then(|c| c.parse().ok())
             .map(|channel| PinFunction::DacOut { dac: n, channel }),
+        // `mcpwm0_op2b` → MCPWM0 operator 2, output B.
+        "mcpwm" => {
+            // By suffix, never by byte index: this is typed text, and the
+            // last byte of it need not be a whole character.
+            let op = tail.strip_prefix("op")?;
+            if let Some(operator) = op.strip_suffix('a').and_then(token_number) {
+                return Some(PinFunction::McpwmA { unit: n, operator });
+            }
+            op.strip_suffix('b')
+                .and_then(token_number)
+                .map(|operator| PinFunction::McpwmB { unit: n, operator })
+        }
+        // `pcnt1_edge0` / `pcnt1_ctrl0` → PCNT unit 1, channel 0.
+        "pcnt" => {
+            if let Some(channel) = tail.strip_prefix("edge").and_then(token_number) {
+                return Some(PinFunction::PcntEdge { unit: n, channel });
+            }
+            tail.strip_prefix("ctrl")
+                .and_then(token_number)
+                .map(|channel| PinFunction::PcntCtrl { unit: n, channel })
+        }
+        // `i2s0_rmt` and `i2s0_pcnt_edge` used to be read here. Nothing ever
+        // wrote them - the writer's spellings are `rmt0` and `pcnt0_edge0` -
+        // so they matched no file, and read a typo as a real function.
         "i2s" => match tail {
-            "rmt" => Some(PinFunction::RmtChannel(n)),
-            "pcnt_edge" => Some(PinFunction::PcntEdge {
-                unit: n,
-                channel: 0,
-            }),
-            "pcnt_ctrl" => Some(PinFunction::PcntCtrl {
-                unit: n,
-                channel: 0,
-            }),
             "ck" => Some(PinFunction::I2sCk(n)),
             "ws" => Some(PinFunction::I2sWs(n)),
             "sd" => Some(PinFunction::I2sSd(n)),
@@ -1352,32 +1426,206 @@ mod tests {
     /// so a board lost its chip square and its Async manifest named the
     /// blocking HAL.
     ///
-    /// Pin functions whose token does not read back (`rmt0` on the ESP parts)
-    /// are left out of BOTH sides: that is `token_to_function`'s own defect,
-    /// and it would hide this one behind it. Everything else about a pin is
-    /// still compared.
+    /// Whole definitions, pin functions included. They were left out of both
+    /// sides once, because the ESP tokens did not read back and that defect
+    /// would have hidden this one.
     #[test]
     fn every_builtin_survives_an_untouched_edit() {
-        let reads_back = |f: &PinFunction| {
-            function_to_token(f)
-                .and_then(|t| token_to_function(&t))
-                .as_ref()
-                == Some(f)
-        };
-        let comparable = |mut d: McuDefinition| {
-            let p = &mut d.pins;
-            for pin in [&mut p.top, &mut p.bottom, &mut p.left, &mut p.right]
-                .into_iter()
-                .flatten()
-            {
-                pin.functions.retain(reads_back);
-            }
-            d
-        };
         for def in crate::panels::mcu_module::builtins::builtin_definitions() {
             let rebuilt = McuForm::from_definition(&def).to_definition();
-            assert_eq!(comparable(rebuilt), comparable(def.clone()), "{}", def.id);
+            assert_eq!(rebuilt, def, "{}", def.id);
         }
+    }
+
+    /// Every function any bundled chip offers reads back from the token it is
+    /// written as, and a bundled chip opens in the form with no error at all.
+    /// The ESP ones did not: `rmt0`, `touch3`, `lcd_d0`, `cam_d0`, `parl_d0`,
+    /// `mcpwm0_op0a` and `pcnt0_edge0` were written and never read, so Edit on
+    /// an ESP32 listed several hundred errors and could not be saved.
+    #[test]
+    fn every_function_a_builtin_offers_reads_back_from_its_token() {
+        for def in crate::panels::mcu_module::builtins::builtin_definitions() {
+            let p = &def.pins;
+            for pin in [&p.top, &p.bottom, &p.left, &p.right].into_iter().flatten() {
+                for f in &pin.functions {
+                    let Some(tok) = function_to_token(f) else {
+                        continue;
+                    };
+                    assert_eq!(
+                        token_to_function(&tok).as_ref(),
+                        Some(f),
+                        "{}: {} writes '{tok}'",
+                        def.id,
+                        pin.name
+                    );
+                }
+            }
+            let errs = McuForm::from_definition(&def).errors();
+            assert!(errs.is_empty(), "{}: {errs:?}", def.id);
+        }
+    }
+
+    /// The ESP spellings one by one, since a bundled chip need not offer all
+    /// of them - and the near misses, which must stay typos.
+    #[test]
+    fn the_esp_tokens_read_back_and_their_near_misses_do_not() {
+        for f in [
+            PinFunction::RmtChannel(3),
+            PinFunction::TouchPad(14),
+            PinFunction::LcdCamData { lane: 15 },
+            PinFunction::LcdCamDc,
+            PinFunction::LcdCamDe,
+            PinFunction::CamData { lane: 7 },
+            PinFunction::CamHenable,
+            PinFunction::CamMclk,
+            PinFunction::ParlData { lane: 15 },
+            PinFunction::ParlClk,
+            PinFunction::ParlValid,
+            PinFunction::ParlRxData { lane: 15 },
+            PinFunction::ParlRxClk,
+            PinFunction::ParlRxValid,
+            PinFunction::McpwmA {
+                unit: 1,
+                operator: 2,
+            },
+            PinFunction::McpwmB {
+                unit: 0,
+                operator: 0,
+            },
+            PinFunction::PcntEdge {
+                unit: 3,
+                channel: 1,
+            },
+            PinFunction::PcntCtrl {
+                unit: 0,
+                channel: 0,
+            },
+        ] {
+            let tok = function_to_token(&f).unwrap();
+            assert_eq!(token_to_function(&tok), Some(f), "{tok}");
+        }
+        for typo in [
+            "rmt",
+            "rmtx",
+            "rmt_0",
+            "touch",
+            "lcd_d",
+            "lcd_dx",
+            "cam_d",
+            "parl_d",
+            "parl_rx_d",
+            "parl_rx",
+            "mcpwm0_op",
+            "mcpwm0_opa",
+            "mcpwm0_op0c",
+            "mcpwm_op0a",
+            "pcnt0_edge",
+            "pcnt0_edgex",
+            "pcnt_edge0",
+            "i2s0_rmt",
+            "i2s0_pcnt_edge",
+        ] {
+            assert_eq!(token_to_function(typo), None, "{typo}");
+        }
+    }
+
+    /// The box is free text, and `errors()` reads it on every frame: whatever
+    /// can be typed must come back as "unknown", never as a panic. Splitting
+    /// the last BYTE off `op0\u{e9}` lands inside the character.
+    #[test]
+    fn a_non_ascii_token_is_unknown_and_does_not_panic() {
+        for typed in [
+            "mcpwm0_op0\u{e9}",
+            "mcpwm0_op\u{e9}",
+            "rmt\u{e9}",
+            "touch\u{663}",
+            "lcd_d\u{e9}",
+            "pcnt0_edge\u{e9}",
+            "\u{e9}",
+        ] {
+            assert_eq!(token_to_function(typed), None, "{typed}");
+            assert_eq!(unknown_function_tokens(typed), vec![typed.to_owned()]);
+        }
+    }
+
+    /// The legend under the pin editor is where these spellings are learned,
+    /// so each ESP form it names is one the reader takes.
+    #[test]
+    fn the_legend_names_esp_tokens_that_read() {
+        let esp = FUNCTION_TOKEN_HELP
+            .split("ESP:")
+            .nth(1)
+            .expect("an ESP part");
+        for shown in [
+            "rmt{n}",
+            "touch{n}",
+            "mcpwm{u}_op{o}a/b",
+            "pcnt{u}_edge{c}/ctrl{c}",
+            "lcd_d{n}",
+            "cam_d{n}",
+            "cam_pclk/vsync/hsync/href/mclk",
+            "parl_d{n}",
+            "parl_rx_d{n}",
+        ] {
+            assert!(esp.contains(shown), "{shown}");
+        }
+        for token in [
+            "rmt0",
+            "touch1",
+            "mcpwm0_op1a",
+            "mcpwm0_op1b",
+            "pcnt0_edge1",
+            "pcnt0_ctrl1",
+            "lcd_d0",
+            "lcd_dc",
+            "lcd_wr",
+            "lcd_cs",
+            "lcd_pclk",
+            "lcd_vsync",
+            "lcd_hsync",
+            "lcd_de",
+            "cam_d0",
+            "cam_pclk",
+            "cam_vsync",
+            "cam_hsync",
+            "cam_href",
+            "cam_mclk",
+            "parl_d0",
+            "parl_clk",
+            "parl_valid",
+            "parl_rx_d0",
+            "parl_rx_clk",
+            "parl_rx_valid",
+        ] {
+            assert!(token_to_function(token).is_some(), "{token}");
+        }
+    }
+
+    /// A number in an ESP token is written one way, and only that way reads:
+    /// `u8::from_str` alone also takes `+3` and `007`, which would make two
+    /// spellings of one function - and a typo that saves as something else.
+    #[test]
+    fn an_esp_token_number_has_one_spelling() {
+        for typo in [
+            "rmt+3",
+            "rmt007",
+            "rmt256",
+            "touch+1",
+            "lcd_d+0",
+            "lcd_d00",
+            "parl_rx_d+1",
+            "mcpwm0_op+1a",
+            "mcpwm0_op01b",
+            "pcnt0_edge+0",
+            "pcnt0_ctrl00",
+        ] {
+            assert_eq!(token_to_function(typo), None, "{typo}");
+        }
+        assert_eq!(token_to_function("rmt0"), Some(PinFunction::RmtChannel(0)));
+        assert_eq!(
+            token_to_function("RMT10"),
+            Some(PinFunction::RmtChannel(10))
+        );
     }
 
     /// The async line REPLACES `hal_dep` in every Async project, so one left

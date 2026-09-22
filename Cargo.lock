@@ -2992,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "rust_on_chip"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "eframe",
  "egui",
