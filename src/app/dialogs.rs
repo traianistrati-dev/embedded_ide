@@ -258,6 +258,7 @@ impl AppIde {
             UnsavedChoice::Cancel => {
                 self.new_prompt = false;
                 self.new_after_save = false;
+                self.board.new_chip_intent = false;
             }
             UnsavedChoice::None => {}
         }
@@ -268,6 +269,10 @@ impl AppIde {
     pub(super) fn begin_new_project(&mut self) {
         self.confirm_new_project = true;
         self.pending_mcu_id = None;
+        // Reached now, however it was reached: a "Save and continue…" still
+        // armed from an earlier prompt must not reopen this dialog after the
+        // NEXT save - the Board's "New chip" saves as soon as a chip is picked.
+        self.new_after_save = false;
     }
 
     /// Open a project: the folder already chosen from "Open Recent", or the
@@ -278,6 +283,10 @@ impl AppIde {
     /// gets exactly the same protection as a picked one without duplicating
     /// that flow.
     pub(super) fn pick_and_open_project(&mut self, save_needed: &mut bool) {
+        // The open is happening now, however it was reached: a "Save and open…"
+        // still armed from an earlier prompt must not open a picker again
+        // after some later save.
+        self.open_after_save = false;
         let chosen = self.pending_open_dir.take().or_else(|| {
             rfd::FileDialog::new()
                 .set_title(format!(
@@ -1416,6 +1425,21 @@ impl AppIde {
                             // still runs (workspace rewrite, RA restart on a chip
                             // change, re-index, check) — same wait, same overlay.
                             self.begin_project_loading(super::loading_overlay::LoadKind::New);
+                            // A "New chip" becomes one HERE, with the old
+                            // project gone - not when the dialog opened, while
+                            // a Save would still have written the old one into
+                            // the system. It is saved straight into the
+                            // system, so it is on the Board as soon as picked.
+                            self.board.adding_chip =
+                                std::mem::take(&mut self.board.new_chip_intent);
+                            if self.board.adding_chip {
+                                self.request_save = true;
+                            }
+                        } else {
+                            // "— Empty —": nothing to save, so no chip for the
+                            // system either.
+                            self.board.adding_chip = false;
+                            self.board.new_chip_intent = false;
                         }
                     }
                     ui.add_space(8.0);
@@ -1423,6 +1447,7 @@ impl AppIde {
                         self.confirm_new_project = false;
                         self.pending_mcu_id = None;
                         self.mcu_import_status = None;
+                        self.board.new_chip_intent = false;
                     }
                 });
                 ui.add_space(4.0);

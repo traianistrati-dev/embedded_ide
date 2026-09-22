@@ -90,20 +90,12 @@ impl AppIde {
             .ok()
             .map(|s| s.replace("\r\n", "\n"));
 
-        let detected_id: Option<String> = main_rs_source
-            .as_deref()
-            .and_then(crate::panels::mcu_module::codegen::parse_mcu_id)
-            .filter(|id| self.mcu_registry.iter().any(|d| &d.id == id))
-            .or_else(|| {
-                let cargo = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-                self.mcu_registry
-                    .iter()
-                    .find(|d| {
-                        let crate_name = d.project.hal_dep.split_whitespace().next().unwrap_or("");
-                        !crate_name.is_empty() && cargo.contains(crate_name)
-                    })
-                    .map(|d| d.id.clone())
-            });
+        let cargo_source = std::fs::read_to_string(root.join("Cargo.toml")).ok();
+        let detected_id: Option<String> = crate::panels::mcu_module::registry::detect_chip_id(
+            &self.mcu_registry,
+            main_rs_source.as_deref(),
+            cargo_source.as_deref(),
+        );
 
         if let Some(id) = detected_id {
             if id != self.selected_mcu_id {
@@ -300,6 +292,9 @@ impl AppIde {
         // — a workspace member left in a bad state (e.g. an incompatible library
         // added by hand) would otherwise fail silently as a stuck "Checking…".
         self.recheck_workspace_health();
+
+        // A chip of a system brings its system to the Board tab.
+        self.board_follow_project(root);
     }
 
     // ── Project-folder claim ──────────────────────────────────────────────────

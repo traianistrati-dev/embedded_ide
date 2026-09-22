@@ -24,6 +24,7 @@ pub(crate) mod helpers;
 use helpers::apply_dark_theme;
 
 mod add_module_dialog;
+mod board_tab;
 mod chip_filter_ui;
 mod chip_search_ui;
 mod clock_import_dialog;
@@ -439,6 +440,22 @@ enum McuTab {
     /// A second project file, opened READ-ONLY beside the editor so it can be
     /// consulted while typing. Appears only while `reference_file` is set.
     Reference,
+    /// Every chip of the system the open project belongs to, as one diagram.
+    /// The only tab of the Board group.
+    Board,
+}
+
+/// The top-level entries of the tab bar that own a row of tabs.
+///
+/// `Reference` belongs to none of them: it is a top-level entry of its own.
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum TabGroup {
+    /// The chip's configuration: Pins / Peripherals / Configuration / Clock / System.
+    Mcu,
+    /// Chip-agnostic views of the code: Structure / Flow / Definition.
+    Project,
+    /// The system of chips.
+    Board,
 }
 
 impl McuTab {
@@ -453,6 +470,20 @@ impl McuTab {
             Self::Flow => "Flow",
             Self::Definition => "Definition",
             Self::Reference => "Reference",
+            Self::Board => "Board",
+        }
+    }
+
+    /// The group this tab is shown under, or `None` for `Reference`.
+    ///
+    /// Derived from the group lists, never written beside them - see
+    /// `project_group_tabs` for what drifting cost once.
+    fn group(self) -> Option<TabGroup> {
+        match self {
+            Self::Reference => None,
+            Self::Board => Some(TabGroup::Board),
+            t if t.is_project_group() => Some(TabGroup::Project),
+            _ => Some(TabGroup::Mcu),
         }
     }
 
@@ -541,6 +572,20 @@ mod tab_group_tests {
         assert!(!McuTab::project_group_tabs(false).contains(&McuTab::Definition));
         assert!(McuTab::project_group_tabs(true).contains(&McuTab::Definition));
         assert!(McuTab::Definition.is_project_group());
+    }
+
+    /// Board is its own group: a Board tab counted into MCU would bring the
+    /// chip header and Reset pins over a diagram of several chips, and one
+    /// counted into Project would be recorded as that group's last tab.
+    #[test]
+    fn the_board_is_a_group_of_its_own() {
+        use super::TabGroup;
+        assert_eq!(McuTab::Board.group(), Some(TabGroup::Board));
+        assert!(!McuTab::Board.is_project_group());
+        assert_eq!(McuTab::Reference.group(), None);
+        assert_eq!(McuTab::Flow.group(), Some(TabGroup::Project));
+        assert_eq!(McuTab::Pins.group(), Some(TabGroup::Mcu));
+        assert_eq!(McuTab::System.group(), Some(TabGroup::Mcu));
     }
 }
 
@@ -1320,6 +1365,11 @@ struct PersistedState {
     /// mean the ON behaviour, so older state keeps them shown.
     #[serde(default)]
     hide_inline_info: bool,
+    /// The system open on the Board tab. A pointer like `project_dir`: kept
+    /// only while the folder is still a system, and needed on its own because
+    /// a system can be open with no chip of it open - or with none at all yet.
+    #[serde(default)]
+    board_root: Option<String>,
 }
 
 impl PersistedState {
@@ -1876,6 +1926,8 @@ pub struct AppIde {
     /// the "MCU" / "Project" group header returns to that group's last tab.
     mcu_group_last: McuTab,
     project_group_last: McuTab,
+    /// The Board tab: the open system, and its canvas.
+    board: board_tab::BoardState,
     /// Which tab is active in the bottom diagnostics panel
     build_tab: BuildPanelTab,
     /// Index of the RA diagnostic row that is expanded
@@ -2226,6 +2278,7 @@ impl AppIde {
         // `drop_homeless_files`) — including state an older build wrote before
         // the rule existed. What's left is the folder to reopen, if any.
         let mut saved_project_dir = persisted.drop_homeless_files();
+        let saved_board_root = persisted.board_root.clone();
 
         // A project named on the command line wins over the remembered one. The
         // buffers restored above belong to THAT project, so they go too — the
@@ -2435,6 +2488,7 @@ impl AppIde {
             definition_return_tab: McuTab::Pins,
             mcu_group_last: McuTab::Pins,
             project_group_last: McuTab::Structure,
+            board: Default::default(),
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
@@ -2587,6 +2641,17 @@ impl AppIde {
                     ));
                 }
             }
+        }
+
+        // The Board's system, when the project just opened did not bring one
+        // (it belongs to none, or no project was opened) and the folder is
+        // still a system.
+        if app.board.root.is_none()
+            && let Some(root) = saved_board_root
+                .map(std::path::PathBuf::from)
+                .filter(|p| crate::panels::board::model::is_system_root(p))
+        {
+            app.board_open_system(root);
         }
 
         app
@@ -4592,6 +4657,12 @@ impl eframe::App for AppIde {
             hide_diff_line_bg: !self.diff_line_bg,
             hide_inline_info: !self.inline_info_enabled,
             esp_monitor_no_auto: !self.esp_monitor_auto,
+            board_root: self
+                .board
+                .root
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .map(String::from),
         };
         // Never write buffers that have no folder to be restored onto (see
         // `drop_homeless_files`). This is also what makes "Close without saving"
@@ -5181,8 +5252,20 @@ impl eframe::App for AppIde {
         // version reached the registry. Refused instead, like re-opening the
         // Publish window over a running one.
         let upload_blocks_switch = self.publish_uploading();
+        // The Board's "New chip" and "Open" were clicked while the canvas drew,
+        // which is after this point, so they arrive a frame late and go
+        // through exactly the gates the toolbar's New and Open do.
+        // Taken once, like `open_recent`: refused during an upload they are
+        // dropped with the notice below, not held - held, the notice would be
+        // re-armed every frame, and the open would fire on its own later.
+        let board_new_chip = std::mem::take(&mut self.board.new_chip_request);
+        let board_open = self.board.open_request.take();
+        let new_project_clicked = new_project_clicked || board_new_chip;
         if upload_blocks_switch
-            && (new_project_clicked || open_project_clicked || signals.open_recent.is_some())
+            && (new_project_clicked
+                || open_project_clicked
+                || signals.open_recent.is_some()
+                || board_open.is_some())
         {
             crate::project_tree::gui::set_tree_notice(
                 ui.ctx(),
@@ -5192,6 +5275,9 @@ impl eframe::App for AppIde {
         }
 
         if new_project_clicked && self.save_in_progress.is_none() && !upload_blocks_switch {
+            // Set on EVERY New Project, so the toolbar's clears a "New chip"
+            // that was abandoned at the unsaved-changes prompt.
+            self.board.new_chip_intent = board_new_chip;
             if self.unsaved_files().is_empty() {
                 self.begin_new_project();
             } else {
@@ -5206,6 +5292,15 @@ impl eframe::App for AppIde {
         // (see `pick_and_open_project`) but takes the SAME unsaved gate: it is
         // just as destructive as any other open.
         if let Some(dir) = signals.open_recent
+            && self.save_in_progress.is_none()
+            && !upload_blocks_switch
+        {
+            self.pending_open_dir = Some(dir);
+            open_project_clicked = true;
+        }
+        // A chip double-clicked on the Board: an Open of a known folder, like
+        // Open Recent, through the same gate.
+        if let Some(dir) = board_open
             && self.save_in_progress.is_none()
             && !upload_blocks_switch
         {
@@ -5278,15 +5373,20 @@ impl eframe::App for AppIde {
                 Some(dir) => Some(dir.clone()),
                 None => {
                     let chip = self.selected_label();
-                    rfd::FileDialog::new()
-                        .set_title(format!(
-                            "Choose where to create \"{}\" — a folder is made for it",
-                            project_io::folder_name_for_chip(&chip)
-                        ))
-                        // A hint for the dialogs that show it; the folder is
-                        // created from the parent either way.
-                        .set_file_name(project_io::folder_name_for_chip(&chip))
-                        .pick_folder()
+                    // A "New chip" from the Board: the parent is the system,
+                    // so there is nothing to ask.
+                    self.board_new_chip_parent()
+                        .or_else(|| {
+                            rfd::FileDialog::new()
+                                .set_title(format!(
+                                    "Choose where to create \"{}\" — a folder is made for it",
+                                    project_io::folder_name_for_chip(&chip)
+                                ))
+                                // A hint for the dialogs that show it; the folder
+                                // is created from the parent either way.
+                                .set_file_name(project_io::folder_name_for_chip(&chip))
+                                .pick_folder()
+                        })
                         .map(|parent| project_io::new_project_dir(&parent, &chip, |p| p.exists()))
                 }
             };
@@ -5442,6 +5542,8 @@ impl eframe::App for AppIde {
                         if let Some(dir) = self.project_dir.clone() {
                             crate::recent::record(&dir, Some(&self.selected_mcu_id));
                         }
+                        // …and where a "New chip" becomes a chip of its system.
+                        self.board_register_saved_chip();
                     }
                     // "Save and close": the files are on disk now, so finish
                     // the close the prompt put on hold.

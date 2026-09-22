@@ -54,7 +54,7 @@ fn default_clone_dest(project_dir: &Path) -> String {
 /// Recursively copy `src` into `dst`, skipping any `target/` or `.git/` dir
 /// (build artifacts + version history — the latter per the feature's scope).
 /// Creates `dst` + parents. Returns the number of files copied.
-fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<usize> {
+pub(super) fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<usize> {
     std::fs::create_dir_all(dst)?;
     let mut count = 0;
     for entry in std::fs::read_dir(src)? {

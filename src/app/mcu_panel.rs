@@ -5,7 +5,7 @@
 //! change, re-syncs the generated `pins/` files.
 
 use super::tabs::show_peripherals_tab;
-use super::{AppIde, McuTab, ProjectFileId};
+use super::{AppIde, McuTab, ProjectFileId, TabGroup};
 use crate::panels::mcu_module::mcu::gui::module_docs;
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -690,21 +690,28 @@ impl AppIde {
             // Track each group's last-used tab so group clicks restore it.
             // Reference belongs to NEITHER group — recording it would make a
             // later "MCU" click land on a file instead of the chip.
-            let reference_active = self.active_tab == McuTab::Reference;
-            if self.active_tab.is_project_group() {
-                self.project_group_last = self.active_tab;
-            } else if !reference_active {
-                self.mcu_group_last = self.active_tab;
+            let group = self.active_tab.group();
+            match group {
+                Some(TabGroup::Project) => self.project_group_last = self.active_tab,
+                Some(TabGroup::Mcu) => self.mcu_group_last = self.active_tab,
+                // Board has one tab; Reference belongs to no group.
+                Some(TabGroup::Board) | None => {}
             }
-            let project_active = self.active_tab.is_project_group();
+            let reference_active = group.is_none();
+            let project_active = group == Some(TabGroup::Project);
+            let board_active = group == Some(TabGroup::Board);
             // The chip-only chrome (Reset pins, the chip label) must not come
-            // back just because Reference left the Project group.
-            let mcu_active = !project_active && !reference_active;
+            // back just because Reference or Board left the Project group.
+            let mcu_active = group == Some(TabGroup::Mcu);
 
             // ── Level 1: group selector ────────────────────────────────────
             ui.horizontal(|ui| {
-                for (label, is_project) in [("MCU", false), ("Project", true)] {
-                    let active = project_active == is_project;
+                for (label, g) in [
+                    ("MCU", TabGroup::Mcu),
+                    ("Project", TabGroup::Project),
+                    ("Board", TabGroup::Board),
+                ] {
+                    let active = group == Some(g);
                     let text = egui::RichText::new(label).size(14.0).strong().color(
                         if active {
                             egui::Color32::WHITE
@@ -713,17 +720,17 @@ impl AppIde {
                         },
                     );
                     if ui.selectable_label(active, text).clicked() && !active {
-                        self.active_tab = if is_project {
+                        self.active_tab = match g {
                             // A remembered Definition tab needs its snippet.
-                            if self.project_group_last == McuTab::Definition
-                                && self.definition_view.is_none()
+                            TabGroup::Project
+                                if self.project_group_last == McuTab::Definition
+                                    && self.definition_view.is_none() =>
                             {
                                 McuTab::Structure
-                            } else {
-                                self.project_group_last
                             }
-                        } else {
-                            self.mcu_group_last
+                            TabGroup::Project => self.project_group_last,
+                            TabGroup::Mcu => self.mcu_group_last,
+                            TabGroup::Board => McuTab::Board,
                         };
                     }
                 }
@@ -862,7 +869,8 @@ impl AppIde {
             // Skipped entirely for Reference: it is a top-level entry with no
             // sub-tabs, and falling through to the `else` below would show the
             // MCU row (Pins/Clock/…) over a file that has nothing to do with it.
-            if !reference_active {
+            // Board too: its one tab draws its own toolbar there instead.
+            if !reference_active && !board_active {
             ui.horizontal(|ui| {
                 let mut tabs: Vec<McuTab> = if project_active {
                     McuTab::project_group_tabs(self.definition_view.is_some())
@@ -2785,6 +2793,9 @@ impl AppIde {
                         s.show_reference_tab(ui);
                     });
                 }
+                // Works with no chip open: a system can be empty, or open
+                // from a project that belongs to it not at all.
+                McuTab::Board => self.show_board_tab(ui),
             }
 
             if let Some(what) = no_mcu {
