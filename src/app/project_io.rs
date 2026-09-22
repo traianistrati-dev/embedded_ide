@@ -401,6 +401,9 @@ impl AppIde {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| new_name.trim().to_owned());
+        // A chip of a system: its folder name is its identity there, in the
+        // chip list and in every link, so the system follows the rename.
+        self.board_chip_renamed(&old_dir, &new_dir);
         self.project_dir = Some(new_dir);
         self.project_name = Some(name);
         // The claim is keyed by path — the old one now points at a folder that
@@ -1675,30 +1678,9 @@ pub(super) fn apply_fs_create(
     }
 }
 
-/// Where a project's pin functions come from on open.
-#[derive(Debug)]
-enum SavedPins {
-    /// The `@pins` section of `mcu.config`: the store for a family whose
-    /// generated block carries no label to read back (nRF).
-    ByNumber(Vec<(usize, PinFunction)>),
-    /// The `// label` on each binding in `src/main.rs`, the STM32 and ESP
-    /// shape `codegen::parse_main_rs` has always read.
-    ByName(Vec<(String, PinFunction)>),
-}
-
-/// The pins to restore, or `None` when neither store has any: a blank
-/// project, a hand-written main.rs, or a family the parser cannot read that
-/// was saved before `@pins` existed. The section wins when both are present -
-/// it is written from the diagram itself, where the parse is a recovery.
-fn saved_pins(cfg_text: Option<&str>, source: &str) -> Option<SavedPins> {
-    use crate::panels::mcu_module::{codegen, mcu_config};
-    let by_number = cfg_text.map(mcu_config::parse_pins).unwrap_or_default();
-    if !by_number.is_empty() {
-        return Some(SavedPins::ByNumber(by_number));
-    }
-    let by_name = codegen::parse_main_rs(source);
-    (!by_name.is_empty()).then_some(SavedPins::ByName(by_name))
-}
+// `SavedPins` / `saved_pins` live in `mcu_config` now: the Board tab reads the
+// pins of a chip it has not opened, and has to read them the way opening does.
+use crate::panels::mcu_module::mcu_config::{SavedPins, saved_pins};
 
 #[cfg(test)]
 mod saved_pins_tests {

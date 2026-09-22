@@ -13,15 +13,87 @@
 //! the top-left of its frame on the canvas. A line without a position is a chip
 //! not placed yet; the canvas finds it a spot.
 //!
+//! `@view` holds `detailed` when the Board shows every pin of a link (absent =
+//! abstract). `@links` holds one link per line, as RON:
+//!
+//! ```text
+//! @links
+//! (a:(chip:"stm32_main",kind:GenericInterfaceUsart,instance:1),b:(chip:"esp32_radio",kind:GenericInterfaceUsart,instance:0))
+//! ```
+//!
+//! ONE LINE PER LINK, like `@modulenotes` in `mcu.config`: a line that does not
+//! parse loses only itself. An end names a module by (kind, instance) - the one
+//! identity a Virtual Module keeps across `reconcile_modules`, which re-mints
+//! module ids.
+//!
 //! Sections this build does not know are kept verbatim, so a file written by a
-//! newer build (with links, say) survives being saved by this one.
+//! newer build survives being saved by this one.
 
 use std::path::{Path, PathBuf};
+
+use crate::panels::mcu_module::modules::ModuleKind;
 
 /// File name at the system root.
 pub const FILE_NAME: &str = "system.config";
 
 const CHIPS_HEADER: &str = "@chips";
+const VIEW_HEADER: &str = "@view";
+const LINKS_HEADER: &str = "@links";
+
+/// One end of a link: a Virtual Module on a chip of the system.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LinkEnd {
+    /// The chip's folder.
+    pub chip: String,
+    pub kind: ModuleKind,
+    pub instance: u8,
+    /// A custom module's name when the link was made. Its instance number is
+    /// handed out again after a remove, so the number alone could quietly
+    /// re-bind the link to a different module; with the name, a module that
+    /// is not the one linked shows the link broken instead. Empty for a
+    /// peripheral, whose (kind, instance) is the peripheral itself.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+}
+
+impl LinkEnd {
+    /// The same module, whatever the case of the folder name.
+    pub fn same_as(&self, other: &LinkEnd) -> bool {
+        self.chip.eq_ignore_ascii_case(&other.chip)
+            && self.kind == other.kind
+            && self.instance == other.instance
+    }
+}
+
+/// Two modules on two chips, wired together.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Link {
+    pub a: LinkEnd,
+    pub b: LinkEnd,
+}
+
+impl Link {
+    /// The same pair of modules, in either order.
+    pub fn same_as(&self, other: &Link) -> bool {
+        (self.a.same_as(&other.a) && self.b.same_as(&other.b))
+            || (self.a.same_as(&other.b) && self.b.same_as(&other.a))
+    }
+
+    /// Whether one of its ends is on chip `dir`.
+    pub fn touches(&self, dir: &str) -> bool {
+        self.a.chip.eq_ignore_ascii_case(dir) || self.b.chip.eq_ignore_ascii_case(dir)
+    }
+}
+
+/// How much of each link the Board draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum View {
+    /// One line per link, between the two modules.
+    #[default]
+    Abstract,
+    /// One wire per pin, with the pads named at the frame edges.
+    Detailed,
+}
 
 /// One chip project in the system.
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +108,8 @@ pub struct SystemChip {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SystemConfig {
     pub chips: Vec<SystemChip>,
+    pub links: Vec<Link>,
+    pub view: View,
     /// Every section this build does not read, header lines included, exactly
     /// as it was in the file.
     pub unknown: String,
@@ -57,12 +131,28 @@ impl SystemConfig {
             let line = raw.trim();
             if line.starts_with('@') {
                 section = Some(line);
-                if line != CHIPS_HEADER {
+                if ![CHIPS_HEADER, VIEW_HEADER, LINKS_HEADER].contains(&line) {
                     push_line(&mut cfg.unknown, raw);
                 }
                 continue;
             }
             match section {
+                Some(VIEW_HEADER) => {
+                    if line.eq_ignore_ascii_case("detailed") {
+                        cfg.view = View::Detailed;
+                    }
+                }
+                Some(LINKS_HEADER) => {
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    // A line that does not parse is dropped, alone.
+                    if let Ok(link) = ron::from_str::<Link>(line)
+                        && !cfg.links.iter().any(|l| l.same_as(&link))
+                    {
+                        cfg.links.push(link);
+                    }
+                }
                 Some(CHIPS_HEADER) => {
                     if line.is_empty() || line.starts_with('#') {
                         continue;
@@ -105,6 +195,22 @@ impl SystemConfig {
                 }
             }
         }
+        if self.view == View::Detailed {
+            out.push_str(VIEW_HEADER);
+            out.push_str("\ndetailed\n");
+        }
+        if !self.links.is_empty() {
+            out.push_str(LINKS_HEADER);
+            out.push('\n');
+            for l in &self.links {
+                // `ron` escapes every string, so the line is always one line and
+                // always starts with `(`: never a `@` section or a `#` comment.
+                if let Ok(text) = ron::to_string(l) {
+                    out.push_str(&text);
+                    out.push('\n');
+                }
+            }
+        }
         if !self.unknown.is_empty() {
             out.push_str(&self.unknown);
         }
@@ -130,11 +236,32 @@ impl SystemConfig {
         true
     }
 
-    /// Take a chip out of the system. Its folder is not touched.
+    /// Take a chip out of the system, with its links. Its folder is not
+    /// touched.
     pub fn remove(&mut self, dir: &str) -> bool {
         let before = self.chips.len();
         self.chips.retain(|c| !c.dir.eq_ignore_ascii_case(dir));
+        self.links.retain(|l| !l.touches(dir));
         self.chips.len() != before
+    }
+
+    /// Add a link. `false` when that pair is already linked, or when both ends
+    /// are on one chip - a link is between chips.
+    pub fn add_link(&mut self, link: Link) -> bool {
+        if link.a.chip.eq_ignore_ascii_case(&link.b.chip)
+            || self.links.iter().any(|l| l.same_as(&link))
+        {
+            return false;
+        }
+        self.links.push(link);
+        true
+    }
+
+    /// Remove a link (in either orientation).
+    pub fn remove_link(&mut self, link: &Link) -> bool {
+        let before = self.links.len();
+        self.links.retain(|l| !l.same_as(link));
+        self.links.len() != before
     }
 
     /// Move a chip's frame. `false` for a chip that is not in the system.
@@ -260,11 +387,40 @@ pub fn load(root: &Path) -> Result<SystemConfig, String> {
         .map_err(|e| format!("couldn't read {}: {e}", path.display()))
 }
 
-/// Write a system's config.
+/// Write a system's config - to a temporary file first, then renamed over the
+/// old one. A plain write truncates before it writes, and another window
+/// reading in between would take the empty file for the system and write
+/// it back without any chips.
 pub fn save(root: &Path, cfg: &SystemConfig) -> Result<(), String> {
     let path = root.join(FILE_NAME);
-    std::fs::write(&path, cfg.serialize())
-        .map_err(|e| format!("couldn't write {}: {e}", path.display()))
+    let tmp = root.join(format!("{FILE_NAME}.tmp"));
+    std::fs::write(&tmp, cfg.serialize())
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("couldn't write {}: {e}", path.display())
+        })
+}
+
+/// A chip folder was renamed: follow it, in the chip list and in every link
+/// end. `false` when `old` is not a chip of the system.
+pub fn rename_chip(cfg: &mut SystemConfig, old: &str, new: &str) -> bool {
+    let Some(c) = cfg
+        .chips
+        .iter_mut()
+        .find(|c| c.dir.eq_ignore_ascii_case(old))
+    else {
+        return false;
+    };
+    c.dir = new.to_owned();
+    for l in &mut cfg.links {
+        for end in [&mut l.a, &mut l.b] {
+            if end.chip.eq_ignore_ascii_case(old) {
+                end.chip = new.to_owned();
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -294,16 +450,129 @@ mod tests {
     /// A newer build's sections survive a save by this one.
     #[test]
     fn unknown_sections_are_kept_verbatim() {
-        let text =
-            "# header\n@chips\na=1,2\n@links\nstm32_main.USART1 = esp32_radio.UART0\n  indented\n";
+        let text = "# header\n@chips\na=1,2\n@parts\nfpga = iCE40UP5K\n  indented\n";
         let cfg = SystemConfig::parse(text);
         assert_eq!(cfg.chips.len(), 1);
         let out = cfg.serialize();
         assert!(
-            out.ends_with("@links\nstm32_main.USART1 = esp32_radio.UART0\n  indented\n"),
+            out.ends_with("@parts\nfpga = iCE40UP5K\n  indented\n"),
             "{out}"
         );
         assert_eq!(SystemConfig::parse(&out), cfg);
+    }
+
+    fn end(chip: &str, kind: ModuleKind, instance: u8) -> LinkEnd {
+        LinkEnd {
+            chip: chip.to_owned(),
+            kind,
+            instance,
+            name: String::new(),
+        }
+    }
+
+    fn uart_link() -> Link {
+        Link {
+            a: end("stm32_main", ModuleKind::GenericInterfaceUsart, 1),
+            b: end("esp32_radio", ModuleKind::GenericInterfaceUsart, 0),
+        }
+    }
+
+    /// Links and the view round-trip; each link is one line starting with `(`.
+    #[test]
+    fn links_and_the_view_round_trip() {
+        let mut cfg = two_chips();
+        assert!(cfg.add_link(uart_link()));
+        assert!(cfg.add_link(Link {
+            a: end("stm32_main", ModuleKind::Custom, 2),
+            b: end("esp32_radio", ModuleKind::Custom, 0),
+        }));
+        cfg.view = View::Detailed;
+        let text = cfg.serialize();
+        assert!(text.contains("\n@view\ndetailed\n@links\n("), "{text}");
+        let link_lines = text.lines().skip_while(|l| *l != "@links").skip(1);
+        assert!(link_lines.clone().all(|l| l.starts_with('(')));
+        assert_eq!(link_lines.count(), 2);
+        assert_eq!(SystemConfig::parse(&text), cfg);
+        // The default view writes nothing.
+        cfg.view = View::Abstract;
+        assert!(!cfg.serialize().contains("@view"));
+    }
+
+    /// A pair is one link whichever end comes first; a link inside one chip
+    /// is refused; a line that does not parse costs only itself.
+    #[test]
+    fn a_link_is_a_pair_of_modules_on_two_chips() {
+        let mut cfg = two_chips();
+        assert!(cfg.add_link(uart_link()));
+        let flipped = Link {
+            a: uart_link().b,
+            b: uart_link().a,
+        };
+        assert!(!cfg.add_link(flipped.clone()), "same pair, other order");
+        assert!(!cfg.add_link(Link {
+            a: end("STM32_MAIN", ModuleKind::GenericInterfaceSpi, 1),
+            b: end("stm32_main", ModuleKind::GenericInterfaceSpi, 2),
+        }));
+        let text = format!("{}garbage\n", cfg.serialize());
+        assert_eq!(SystemConfig::parse(&text).links, cfg.links);
+        assert!(cfg.remove_link(&flipped));
+        assert!(cfg.links.is_empty());
+    }
+
+    /// A renamed chip folder keeps its place and its links.
+    #[test]
+    fn a_renamed_chip_keeps_its_links() {
+        let mut cfg = two_chips();
+        cfg.add_link(uart_link());
+        assert!(rename_chip(&mut cfg, "ESP32_RADIO", "radio_c3"));
+        assert_eq!(cfg.chips[1].dir, "radio_c3");
+        assert_eq!(cfg.chips[1].pos, None);
+        assert_eq!(cfg.links[0].b.chip, "radio_c3");
+        assert_eq!(cfg.links[0].a.chip, "stm32_main");
+        assert!(!rename_chip(&mut cfg, "nope", "x"));
+    }
+
+    /// A custom module's name rides along; a peripheral's end writes none.
+    #[test]
+    fn only_a_custom_end_carries_a_name() {
+        let mut cfg = two_chips();
+        let mut custom = end("esp32_radio", ModuleKind::Custom, 2);
+        custom.name = "irq_out".into();
+        cfg.add_link(Link {
+            a: end("stm32_main", ModuleKind::Custom, 0),
+            b: custom,
+        });
+        let text = cfg.serialize();
+        assert_eq!(text.matches("name:").count(), 1, "{text}");
+        assert_eq!(SystemConfig::parse(&text), cfg);
+    }
+
+    /// The write goes through a temporary file and leaves none behind.
+    #[test]
+    fn a_save_leaves_no_temporary_file() {
+        let base = std::env::temp_dir().join(format!("roc_board_save_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        save(&base, &two_chips()).unwrap();
+        save(&base, &two_chips()).unwrap();
+        assert!(!base.join(format!("{FILE_NAME}.tmp")).exists());
+        assert_eq!(load(&base).unwrap(), two_chips());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Taking a chip out takes its links too - nothing is left pointing at it.
+    #[test]
+    fn removing_a_chip_removes_its_links() {
+        let mut cfg = two_chips();
+        cfg.add("pico", None);
+        cfg.add_link(uart_link());
+        cfg.add_link(Link {
+            a: end("pico", ModuleKind::GenericInterfaceI2c, 0),
+            b: end("stm32_main", ModuleKind::GenericInterfaceI2c, 1),
+        });
+        assert!(cfg.remove("Esp32_Radio"));
+        assert_eq!(cfg.links.len(), 1);
+        assert!(cfg.links[0].touches("pico"));
     }
 
     /// A position typo costs the position, never the chip.

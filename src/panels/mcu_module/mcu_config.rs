@@ -717,6 +717,33 @@ fn gpio_token(s: ApiStyle) -> &'static str {
 /// File name written at the project root.
 pub const FILE_NAME: &str = "mcu.config";
 
+/// Where a project's pin functions come from on open.
+#[derive(Debug)]
+pub enum SavedPins {
+    /// The `@pins` section of `mcu.config`: the store for a family whose
+    /// generated block carries no label to read back (nRF).
+    ByNumber(Vec<(usize, PinFunction)>),
+    /// The `// label` on each binding in `src/main.rs`, the STM32 and ESP
+    /// shape `codegen::parse_main_rs` has always read.
+    ByName(Vec<(String, PinFunction)>),
+}
+
+/// The pins to restore, or `None` when neither store has any: a blank
+/// project, a hand-written main.rs, or a family the parser cannot read that
+/// was saved before `@pins` existed. The section wins when both are present -
+/// it is written from the diagram itself, where the parse is a recovery.
+///
+/// ONE reader for both callers: opening a project, and the Board tab reading a
+/// chip it has not opened.
+pub fn saved_pins(cfg_text: Option<&str>, source: &str) -> Option<SavedPins> {
+    let by_number = cfg_text.map(parse_pins).unwrap_or_default();
+    if !by_number.is_empty() {
+        return Some(SavedPins::ByNumber(by_number));
+    }
+    let by_name = crate::panels::mcu_module::codegen::parse_main_rs(source);
+    (!by_name.is_empty()).then_some(SavedPins::ByName(by_name))
+}
+
 // The Structure tab's `@structure_layout` / `@structure_view` sections used to
 // live here too. They moved to `project_structure.config` (see
 // [`super::structure_config`]) because they change on every node drag, which

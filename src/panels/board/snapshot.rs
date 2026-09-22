@@ -1,22 +1,46 @@
 //! What a chip frame on the Board tab shows: the chip, its runtime, its Virtual
-//! Modules and its devices - by name only.
+//! Modules and its devices - and, for the links between chips, which pad each
+//! module signal sits on and what that pad does.
 //!
-//! Read from the chip's files WITHOUT opening it as a project: the chip id from
-//! `src/main.rs` (Cargo.toml for older projects), the modules, devices and
-//! runtime from `mcu.config`. Nothing else is needed, because `@modules` is
-//! written after `reconcile_modules` has made the modules match the pins, so it
-//! already says what the Pins tab would show. The chip that IS open is built
-//! from the live `Mcu` instead ([`ChipView::from_parts`]), so unsaved changes
-//! show on the Board as they are made.
+//! A chip that is not open is read from its files the way OPENING it would:
+//! the chip id from `src/main.rs` (Cargo.toml for older projects), a fresh
+//! `Mcu` from its definition, `mcu.config` applied, the pins restored from
+//! `@pins` or the generated block, then `reconcile_modules`. The same steps in
+//! the same order, so the Board never describes a chip differently from the
+//! Pins tab that opening it shows. The chip that IS open is built from the
+//! live `Mcu` instead ([`ChipView::from_mcu`]), so unsaved changes show on the
+//! Board as they are made.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::panels::mcu_module::mcu::Runtime;
 use crate::panels::mcu_module::mcu::gui::modules::{custom_var_name, module_base_name};
-use crate::panels::mcu_module::mcu_config::{self, PinGroup};
+use crate::panels::mcu_module::mcu::{Mcu, Runtime};
+use crate::panels::mcu_module::mcu_config::{self, PinGroup, SavedPins};
 use crate::panels::mcu_module::mcu_def::McuDefinition;
-use crate::panels::mcu_module::modules::{ModuleKind, VirtualModule};
+use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind, ModuleSignal, VirtualModule};
+use crate::panels::mcu_module::pins::logic::pin::GpioMode;
+use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+/// One module terminal and the pad it is wired to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignalPin {
+    pub signal: ModuleSignal,
+    /// Pin number on the chip.
+    pub pin: usize,
+    /// The pad's name (`PA9`, `GPIO20`); empty when the chip could not say.
+    pub pad: String,
+    /// What the pad is configured as - the direction of a custom module's
+    /// GPIO comes from here.
+    pub function: PinFunction,
+    /// An open-drain output: two of them on one line make a wired-AND, not a
+    /// fight.
+    pub open_drain: bool,
+}
+
+/// What a chip says about one of its pins: its name, its function, and
+/// whether it is open-drain.
+pub type PadInfo = (String, PinFunction, bool);
 
 /// One Virtual Module, as a frame shows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +51,10 @@ pub struct ModuleItem {
     pub instance: u8,
     /// The pads it is wired to - what ties a device to it.
     pub pins: BTreeSet<usize>,
+    /// Each terminal with its pad, in the module's own order.
+    pub signals: Vec<SignalPin>,
+    /// Its settings (baud rate, SPI mode, …), for the checks on a link.
+    pub config: ModuleConfig,
 }
 
 /// One device (a named group of pads on the Pins tab).
@@ -65,14 +93,36 @@ impl ChipView {
         }
     }
 
-    /// Build the frame from a chip's parts - shared by the disk reader and the
-    /// live chip, so the two can never describe the same project differently.
+    /// The frame of a chip held as an `Mcu` - the open one, or one just
+    /// rebuilt from its files.
+    pub fn from_mcu(dir: &str, chip: &str, mcu: &Mcu) -> Self {
+        Self::from_parts(
+            dir,
+            chip,
+            Some(mcu.runtime),
+            &mcu.modules,
+            &mcu.groups,
+            |n| {
+                mcu.find_pin(n).map(|p| {
+                    (
+                        p.name.clone(),
+                        p.selected_function.clone(),
+                        p.io_mode == Some(GpioMode::OpenDrain),
+                    )
+                })
+            },
+        )
+    }
+
+    /// Build the frame from a chip's parts. `pad` names pin `n` and says what
+    /// it is configured as, when the chip is known.
     pub fn from_parts(
         dir: &str,
         chip: &str,
         runtime: Option<Runtime>,
         modules: &[VirtualModule],
         groups: &[PinGroup],
+        pad: impl Fn(usize) -> Option<PadInfo>,
     ) -> Self {
         let mut items: Vec<ModuleItem> = modules
             .iter()
@@ -81,6 +131,21 @@ impl ChipView {
                 kind: m.kind,
                 instance: m.instance(),
                 pins: m.connections.iter().map(|c| c.mcu_pin).collect(),
+                signals: m
+                    .connections
+                    .iter()
+                    .map(|c| {
+                        let (pad, function, open_drain) = pad(c.mcu_pin).unwrap_or_default();
+                        SignalPin {
+                            signal: c.signal,
+                            pin: c.mcu_pin,
+                            pad,
+                            function,
+                            open_drain,
+                        }
+                    })
+                    .collect(),
+                config: m.config.clone(),
             })
             .collect();
         // Peripherals first, in kind-then-instance order, custom modules after
@@ -124,6 +189,13 @@ impl ChipView {
             None => self.dir.clone(),
         }
     }
+
+    /// The module with this identity - how a link end finds its module.
+    pub fn module(&self, kind: ModuleKind, instance: u8) -> Option<usize> {
+        self.modules
+            .iter()
+            .position(|m| m.kind == kind && m.instance == instance)
+    }
 }
 
 /// A module's name on the Board: the peripheral instance (`USART1`), or for a
@@ -143,52 +215,71 @@ pub fn read_chip(root: &Path, dir: &str, defs: &[McuDefinition]) -> ChipView {
         return ChipView::broken(dir, "Folder not found");
     }
     let read = |rel: &Path| std::fs::read_to_string(path.join(rel)).ok();
-    let main_rs = read(Path::new("src/main.rs"));
+    // LF-normalised, like every buffer the app reads (the markers are matched
+    // line by line).
+    let main_rs = read(Path::new("src/main.rs")).map(|s| s.replace("\r\n", "\n"));
     let cargo = read(Path::new("Cargo.toml"));
     if main_rs.is_none() && cargo.is_none() {
         return ChipView::broken(dir, "Not a project - no Cargo.toml or src/main.rs");
     }
-    let id = crate::panels::mcu_module::registry::detect_chip_id(
+    let cfg = read(Path::new(mcu_config::FILE_NAME));
+    let def = crate::panels::mcu_module::registry::detect_chip_id(
         defs,
         main_rs.as_deref(),
         cargo.as_deref(),
-    );
-    let chip = id
-        .as_deref()
-        .and_then(|id| defs.iter().find(|d| d.id == id))
-        .map(|d| d.display_name.clone())
-        .unwrap_or_default();
-    let cfg = read(Path::new(mcu_config::FILE_NAME));
-    let (modules, groups, runtime) = match &cfg {
-        Some(text) => (
-            mcu_config::parse(text).0,
-            mcu_config::parse_groups(text),
-            Some(mcu_config::parse_runtime(text)),
-        ),
-        // Saved before `mcu.config` existed: the modules were a comment
-        // marker in main.rs, and there were no devices yet.
-        None => (
-            main_rs
-                .as_deref()
-                .map(crate::panels::mcu_module::modules::persist::parse_from_source)
-                .unwrap_or_default(),
-            Vec::new(),
-            id.is_some().then_some(Runtime::Blocking),
-        ),
-    };
-    let mut view = ChipView::from_parts(dir, &chip, runtime, &modules, &groups);
-    if id.is_none() {
+    )
+    .and_then(|id| defs.iter().find(|d| d.id == id));
+    let Some(def) = def else {
+        // No chip to rebuild pins on: what `mcu.config` says, unwired.
+        let modules = cfg
+            .as_deref()
+            .map(|t| mcu_config::parse(t).0)
+            .unwrap_or_default();
+        let groups = cfg
+            .as_deref()
+            .map(mcu_config::parse_groups)
+            .unwrap_or_default();
+        let mut view = ChipView::from_parts(dir, "", None, &modules, &groups, |_| None);
         view.problem = Some("Unknown chip - no marker in main.rs and no known HAL".to_owned());
+        return view;
+    };
+    ChipView::from_mcu(
+        dir,
+        &def.display_name,
+        &rebuild(def, cfg.as_deref(), main_rs.as_deref()),
+    )
+}
+
+/// The chip as opening its project would leave it: `load_project_from_dir`'s
+/// restore, in its order, minus everything that is not the diagram. Like the
+/// open, it restores nothing without a `src/main.rs`.
+fn rebuild(def: &McuDefinition, cfg: Option<&str>, main_rs: Option<&str>) -> Mcu {
+    let mut mcu = def.build_mcu();
+    if let Some(src) = main_rs {
+        match cfg {
+            Some(text) => mcu.apply_mcu_config(text),
+            // Saved before `mcu.config` existed: the modules were a comment
+            // marker in main.rs.
+            None => {
+                mcu.modules = crate::panels::mcu_module::modules::persist::parse_from_source(src);
+            }
+        }
+        if let Some(saved) = mcu_config::saved_pins(cfg, src) {
+            match &saved {
+                SavedPins::ByNumber(pins) => mcu.apply_saved_pins_by_number(pins),
+                SavedPins::ByName(pins) => mcu.apply_saved_pins(pins),
+            }
+        }
     }
-    view
+    // What the Pins tab does before it draws: the modules follow the pins.
+    mcu.reconcile_modules();
+    mcu
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panels::mcu_module::modules::{
-        Connection, ModuleConfig, ModuleSignal, UsartModuleConfig,
-    };
+    use crate::panels::mcu_module::modules::{Connection, UsartModuleConfig};
 
     fn usart(instance: u8, tx: usize, rx: usize) -> VirtualModule {
         VirtualModule {
@@ -228,7 +319,7 @@ mod tests {
             group("Status LED", &[45]),
             group("  ", &[12]),
         ];
-        let v = ChipView::from_parts("stm32_main", "STM32F103C8", None, &mods, &groups);
+        let v = ChipView::from_parts("stm32_main", "STM32F103C8", None, &mods, &groups, |_| None);
         let names: Vec<&str> = v.modules.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(
             names,
@@ -248,11 +339,20 @@ mod tests {
                 ("Status LED", &[][..])
             ]
         );
+        assert_eq!(v.module(ModuleKind::GenericInterfaceUsart, 2), Some(1));
+        assert_eq!(v.module(ModuleKind::GenericInterfaceSpi, 1), None);
     }
 
     #[test]
     fn the_subtitle_names_the_folder_and_the_runtime() {
-        let v = ChipView::from_parts("esp32_radio", "ESP32-C3", Some(Runtime::Async), &[], &[]);
+        let v = ChipView::from_parts(
+            "esp32_radio",
+            "ESP32-C3",
+            Some(Runtime::Async),
+            &[],
+            &[],
+            |_| None,
+        );
         assert_eq!(v.subtitle(), "esp32_radio · Async");
         assert_eq!(ChipView::broken("x", "gone").subtitle(), "x");
     }
@@ -265,10 +365,22 @@ mod tests {
     }
 
     /// A chip read from disk says what opening it would: the marker's chip,
-    /// the modules and devices of `mcu.config`, its runtime.
+    /// its runtime, the modules its PINS make (with each pad named), and the
+    /// devices of `mcu.config`.
     #[test]
     fn a_chip_is_read_from_its_files() {
         let defs = crate::panels::mcu_module::builtin_definitions();
+        let esp = defs.iter().find(|d| d.id == "esp32c3").unwrap();
+        // Two free pads of the real chip, whatever they are called.
+        let probe = esp.build_mcu();
+        let free: Vec<(usize, String)> = probe
+            .iter_all_pins()
+            .filter(|p| !p.reserved)
+            .map(|p| (p.number, p.name.clone()))
+            .take(2)
+            .collect();
+        let (tx, rx) = (&free[0], &free[1]);
+
         let root = scratch("read");
         let chip = root.join("radio");
         std::fs::create_dir_all(chip.join("src")).unwrap();
@@ -277,22 +389,41 @@ mod tests {
             "// Auto-generated by RustOnChip\n// rust_on_chip:mcu=esp32c3\nfn main() {}\n",
         )
         .unwrap();
-        let mods = [usart(0, 20, 21)];
         let mut cfg = mcu_config::serialize(
-            &mods,
+            &[],
             None,
             Runtime::Async,
             crate::panels::mcu_module::modules::ApiStyle::Portable,
         );
-        cfg.push_str(&mcu_config::groups_section(&[group("Modem", &[20, 21])]));
+        cfg.push_str(&mcu_config::pins_section(
+            &[
+                (tx.0, PinFunction::UsartTx(0)),
+                (rx.0, PinFunction::UsartRx(0)),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+        cfg.push_str(&mcu_config::groups_section(&[group(
+            "Modem",
+            &[tx.0, rx.0],
+        )]));
         std::fs::write(chip.join(mcu_config::FILE_NAME), cfg).unwrap();
 
         let v = read_chip(&root, "radio", &defs);
-        let esp = defs.iter().find(|d| d.id == "esp32c3").unwrap();
         assert_eq!(v.chip, esp.display_name);
         assert_eq!(v.runtime, Some(Runtime::Async));
-        assert_eq!(v.modules.len(), 1);
-        assert_eq!(v.modules[0].name, "USART0");
+        assert_eq!(v.problem, None);
+        assert_eq!(v.modules.len(), 1, "{:?}", v.modules);
+        let m = &v.modules[0];
+        assert_eq!(m.kind, ModuleKind::GenericInterfaceUsart);
+        assert_eq!(m.instance, 0);
+        let tx_pad = m
+            .signals
+            .iter()
+            .find(|s| s.signal == ModuleSignal::Tx)
+            .unwrap();
+        assert_eq!((tx_pad.pin, tx_pad.pad.as_str()), (tx.0, tx.1.as_str()));
+        assert_eq!(tx_pad.function, PinFunction::UsartTx(0));
         assert_eq!(
             v.devices,
             [DeviceItem {
@@ -300,7 +431,6 @@ mod tests {
                 modules: vec![0]
             }]
         );
-        assert_eq!(v.problem, None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
