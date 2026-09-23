@@ -2166,20 +2166,118 @@ fn cargo_config_embedded(c: &ProjectDef) -> String {
 }
 
 fn memory_x(c: &ProjectDef) -> String {
-    format!(
+    let boot2 = boots_through_boot2(c);
+    let flash = if boot2 {
+        // The boot ROM's 256 bytes come first; the vector table follows them.
+        format!(
+            "BOOT2 : ORIGIN = {o}, LENGTH = 0x100\n\
+             FLASH : ORIGIN = {o} + 0x100, LENGTH = {s} - 0x100\n",
+            o = c.flash_origin,
+            s = c.flash_size,
+        )
+    } else {
+        format!(
+            "FLASH : ORIGIN = {}, LENGTH = {}\n",
+            c.flash_origin, c.flash_size
+        )
+    };
+    let mut out = format!(
         "/* {comment} */\n\
          MEMORY\n\
          {{\n\
-             FLASH : ORIGIN = {flash_o}, LENGTH = {flash_s}\n\
-             RAM   : ORIGIN = {ram_o},   LENGTH = {ram_s}\n\
+         {flash}\
+         RAM   : ORIGIN = {ram_o},   LENGTH = {ram_s}\n\
          }}\n",
         comment = c.memory_comment,
-        flash_o = c.flash_origin,
-        flash_s = c.flash_size,
         ram_o = c.ram_origin,
         ram_s = c.ram_size,
-    )
+    );
+    if boot2 {
+        out.push_str(RP2040_BOOT2_BLOCK);
+    }
+    if boots_from_image_def(c) {
+        out.push_str(RP2350_IMAGE_BLOCK);
+    }
+    out
 }
+
+/// Whether this chip's boot ROM runs a 256-byte second stage from the start of
+/// flash, which is the RP2040's and nobody else's here.
+///
+/// Read off the HAL line, because `ProjectDef` carries no family and the line
+/// is what decides who emits `.boot2`: `rp2040-hal` on Blocking (with the
+/// generated `BOOT2` static), `embassy-rp` with the `rp2040` feature on Async.
+fn boots_through_boot2(c: &ProjectDef) -> bool {
+    let hal = c.hal_dep.trim_start();
+    hal.starts_with("rp2040-hal") || (hal.starts_with("embassy-rp") && hal.contains("\"rp2040\""))
+}
+
+/// Whether this chip's boot ROM starts the image from an `IMAGE_DEF` block,
+/// which is the RP2350's and nobody else's here.
+///
+/// Read off the HAL line for the same reason as [`boots_through_boot2`]:
+/// `rp235x-hal` on Blocking, `embassy-rp` with an `rp235x…` feature on Async.
+fn boots_from_image_def(c: &ProjectDef) -> bool {
+    let hal = c.hal_dep.trim_start();
+    hal.starts_with("rp235x-hal") || (hal.starts_with("embassy-rp") && hal.contains("\"rp235x"))
+}
+
+/// Where the RP2040's second-stage bootloader has to sit, and a link that
+/// fails otherwise.
+///
+/// The boot ROM copies the FIRST 256 bytes of flash into RAM, checks their CRC
+/// and runs them. cortex-m-rt's `link.x` does not place `.boot2`, and with
+/// only `MEMORY` here the linker put it after `.rodata`: the ROM read the
+/// vector table instead, failed the CRC, and every generated Pico project fell
+/// back to USB boot mode. The layout is rp2040-hal's own template memory.x
+/// (embassy-rp ships the same SECTIONS as `link-rp.x`, which nothing here
+/// passes to the linker).
+const RP2040_BOOT2_BLOCK: &str = "
+/* The RP2040 boot ROM runs the FIRST 256 bytes of flash (boot2) after checking
+ * their CRC. Left to the linker, .boot2 lands after .rodata and the ROM finds
+ * the vector table there instead, so it is pinned to the BOOT2 region. */
+SECTIONS {
+    .boot2 ORIGIN(BOOT2) :
+    {
+        KEEP(*(.boot2));
+    } > BOOT2
+} INSERT BEFORE .text;
+
+ASSERT(ADDR(.boot2) == ORIGIN(BOOT2) && SIZEOF(.boot2) == 0x100,
+    \"boot2 is missing or misplaced - the RP2040 boot ROM will not start this image\");
+";
+
+/// Where the RP2350's `IMAGE_DEF` has to sit, and a link that fails otherwise.
+///
+/// The boot ROM searches only the FIRST 4 KiB of flash, and cortex-m-rt's
+/// `link.x` knows nothing of `.start_block`. With only `MEMORY` here the
+/// linker treats it as an orphan and puts it after `.rodata`, which works for
+/// a small program and stops booting, with no warning at all on Blocking, once
+/// code or embedded data grows past a few KiB. The layout is embassy's own
+/// `examples/rp235x/memory.x`; the two asserts turn "does not start" into a
+/// build error that says why.
+const RP2350_IMAGE_BLOCK: &str = "
+/* The RP2350 boot ROM looks for the IMAGE_DEF block in the FIRST 4 KiB of
+ * flash. Left to the linker it is an orphan placed after .rodata, out of the
+ * ROM's reach once the program grows, so it goes right after the vectors. */
+SECTIONS {
+    .start_block : ALIGN(4)
+    {
+        __start_block_addr = .;
+        KEEP(*(.start_block));
+        KEEP(*(.boot_info));
+    } > FLASH
+} INSERT AFTER .vector_table;
+
+/* Code starts after the block, 8-aligned: embassy-rp's vector table is 276
+ * bytes and the executor has input sections that ask for 8. */
+_stext = ALIGN(ADDR(.start_block) + SIZEOF(.start_block), 8);
+
+ASSERT(ADDR(.start_block) + SIZEOF(.start_block) <= ORIGIN(FLASH) + 4K,
+    \"IMAGE_DEF is not in the first 4 KiB of flash - the RP2350 boot ROM will not find it\");
+ASSERT(SIZEOF(.start_block) > 0,
+    \"no IMAGE_DEF - the RP2350 boot ROM will not start this image\");
+";
 
 /// `build.rs` placed in the project root.
 /// Copies `memory.x` to `OUT_DIR` so the linker script (`link.x` for ARM,
@@ -2882,6 +2980,113 @@ mod tests {
         // Re-splicing with the same chip is a no-op (no blank-line creep).
         let twice = splice_config(ConfigFile::CargoToml, &once, &stm32_def(), &tc);
         assert_eq!(once, twice, "splice must be idempotent");
+    }
+
+    fn builtin_project(id: &str, is_async: bool) -> ProjectDef {
+        crate::panels::mcu_module::builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .project
+            .for_async(is_async)
+            .into_owned()
+    }
+
+    /// The RP2350's IMAGE_DEF is placed right after the vectors on BOTH
+    /// runtimes (the HAL crate differs, the boot ROM does not).
+    #[test]
+    fn rp2350_memory_x_keeps_the_image_block_first() {
+        let tc = ToolchainKind::RustEmbedded;
+        for id in ["rp2350_pico2", "rp2350_pico2_w"] {
+            for is_async in [false, true] {
+                let m = gen_config(ConfigFile::MemoryX, &builtin_project(id, is_async), &tc);
+                let at = format!("{id}, async = {is_async}:\n{m}");
+                assert!(m.contains("KEEP(*(.start_block));"), "{at}");
+                assert!(m.contains("} INSERT AFTER .vector_table;"), "{at}");
+                assert!(m.contains("_stext = ALIGN("), "{at}");
+                assert_eq!(m.matches("ASSERT(").count(), 2, "{at}");
+                assert!(!m.contains("BOOT2"), "{at}");
+                // The Flash/RAM bar reads this same file: the new block must
+                // not be mistaken for a region.
+                let limits = crate::size::parse_memory_x(&m);
+                assert_eq!(limits.flash.map(|r| r.length), Some(4096 * 1024), "{at}");
+                assert_eq!(limits.ram.map(|r| r.length), Some(520 * 1024), "{at}");
+            }
+        }
+    }
+
+    /// The RP2040's boot2 gets the first 256 bytes of flash on BOTH runtimes,
+    /// and the vector table moves up behind it.
+    #[test]
+    fn rp2040_memory_x_puts_boot2_first() {
+        let tc = ToolchainKind::RustEmbedded;
+        for id in ["rp2040_pico", "rp2040_pico_w"] {
+            for is_async in [false, true] {
+                let m = gen_config(ConfigFile::MemoryX, &builtin_project(id, is_async), &tc);
+                let at = format!("{id}, async = {is_async}:\n{m}");
+                assert!(m.contains("BOOT2 : ORIGIN = 0x10000000, LENGTH = 0x100\n"), "{at}");
+                assert!(m.contains("FLASH : ORIGIN = 0x10000000 + 0x100, LENGTH = 2048K - 0x100\n"), "{at}");
+                assert!(m.contains(".boot2 ORIGIN(BOOT2) :"), "{at}");
+                assert!(m.contains("} INSERT BEFORE .text;"), "{at}");
+                assert_eq!(m.matches("ASSERT(").count(), 1, "{at}");
+                assert!(!m.contains(".start_block"), "{at}");
+                // The bar reads the whole chip: BOOT2 is not a region it knows,
+                // and FLASH's first token is still the chip's origin and size.
+                let limits = crate::size::parse_memory_x(&m);
+                assert_eq!(limits.flash.map(|r| r.origin), Some(0x1000_0000), "{at}");
+                assert_eq!(limits.flash.map(|r| r.length), Some(2048 * 1024), "{at}");
+            }
+        }
+    }
+
+    /// Every other chip's memory.x is byte-for-byte what it was: the RP blocks
+    /// are keyed on the HAL line and nothing else matches it.
+    #[test]
+    fn other_chips_memory_x_is_unchanged() {
+        let tc = ToolchainKind::RustEmbedded;
+        let f1 = builtin_project("stm32f103c8t6", false);
+        assert_eq!(
+            gen_config(ConfigFile::MemoryX, &f1, &tc),
+            initial_file(
+                Cmt::Block,
+                &format!(
+                    "/* {} */\nMEMORY\n{{\nFLASH : ORIGIN = {}, LENGTH = {}\n\
+                     RAM   : ORIGIN = {},   LENGTH = {}\n}}\n",
+                    f1.memory_comment, f1.flash_origin, f1.flash_size, f1.ram_origin, f1.ram_size
+                )
+            )
+        );
+        for is_async in [false, true] {
+            let m = gen_config(ConfigFile::MemoryX, &builtin_project("nrf52833_microbit_v2", is_async), &tc);
+            assert!(!m.contains("SECTIONS") && !m.contains("ASSERT"), "nRF, async = {is_async}:\n{m}");
+        }
+    }
+
+    /// A Pico 2 project generated before the fix gets the block on its next
+    /// regeneration, and keeps what the user wrote below the markers.
+    #[test]
+    fn an_existing_rp2350_memory_x_is_repaired_in_place() {
+        let tc = ToolchainKind::RustEmbedded;
+        let defs = crate::panels::mcu_module::builtins::builtin_definitions();
+        let pico2 = &defs
+            .iter()
+            .find(|d| d.id == "rp2350_pico2")
+            .expect("built-in rp2350_pico2")
+            .project;
+        let before_fix = initial_file(
+            Cmt::Block,
+            "MEMORY\n{\n    FLASH : ORIGIN = 0x10000000, LENGTH = 4096K\n    \
+             RAM   : ORIGIN = 0x20000000,   LENGTH = 520K\n}\n",
+        );
+        let edited = format!("{before_fix}/* my note */\n");
+        let spliced = splice_config(ConfigFile::MemoryX, &edited, pico2, &tc);
+        assert!(spliced.contains("INSERT AFTER .vector_table"), "{spliced}");
+        assert!(spliced.contains("/* my note */"), "user edit preserved:\n{spliced}");
+        assert_eq!(
+            splice_config(ConfigFile::MemoryX, &spliced, pico2, &tc),
+            spliced,
+            "splice must stay idempotent"
+        );
     }
 
     #[test]

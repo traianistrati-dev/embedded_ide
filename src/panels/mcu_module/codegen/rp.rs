@@ -2269,6 +2269,54 @@ mod pio_accounting {
     }
 }
 
+/// Exactly ONE IMAGE_DEF per RP2350 image, on either runtime.
+///
+/// Blocking's comes from the generated `boot_block`. On Async embassy-rp
+/// brings its own, so the generated code must not add a second: it did, and
+/// `.start_block` held two. Where the one that remains lands is memory.x's job.
+#[cfg(test)]
+mod image_def_count {
+    use crate::panels::mcu_module::builtins;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+
+    const IMAGE_SECTION: &str = "#[link_section = \".start_block\"]";
+
+    fn main_rs(id: &str, runtime: Runtime) -> String {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu();
+        mcu.runtime = runtime;
+        mcu.fresh_main_rs()
+    }
+
+    #[test]
+    fn one_image_block_per_rp2350_image() {
+        for id in ["rp2350_pico2", "rp2350_pico2_w"] {
+            let blocking = main_rs(id, Runtime::Blocking);
+            assert_eq!(blocking.matches(IMAGE_SECTION).count(), 1, "{id} Blocking:\n{blocking}");
+            let asynchronous = main_rs(id, Runtime::Async);
+            assert_eq!(asynchronous.matches(IMAGE_SECTION).count(), 0, "{id} Async:\n{asynchronous}");
+        }
+        // Which only holds while embassy-rp's own block is left switched on.
+        for d in builtins::builtin_definitions() {
+            if let Some(line) = &d.project.hal_dep_async {
+                assert!(!line.contains("imagedef-none"), "{}: {line}", d.id);
+            }
+        }
+    }
+
+    /// The RP2040 boots through `.boot2` and has no image block at all.
+    #[test]
+    fn the_rp2040_has_none() {
+        for runtime in [Runtime::Blocking, Runtime::Async] {
+            let code = main_rs("rp2040_pico", runtime);
+            assert!(!code.contains(".start_block"), "{code}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod radio_led {
     use crate::panels::mcu_module::mcu::model::Runtime;
@@ -3011,12 +3059,10 @@ fn async_section(mcu: &Mcu) -> String {
     let mut o = String::new();
     o.push_str(GEN_BEGIN);
     o.push('\n');
-    if mcu.family == "rp235x" {
-        o.push_str("/// The image block the RP2350 boot ROM looks for. embassy-rp supplies the\n");
-        o.push_str("/// contents; the section placement is ours.\n");
-        o.push_str("#[link_section = \".start_block\"]\n#[used]\n");
-        o.push_str("pub static IMAGE_DEF: embassy_rp::block::ImageDef = embassy_rp::block::ImageDef::secure_exe();\n\n");
-    }
+    // No IMAGE_DEF here on the RP2350, unlike Blocking's `boot_block`:
+    // embassy-rp emits its own secure_exe block unless `imagedef-none` is set,
+    // and a second copy made `.start_block` hold two. memory.x places the one
+    // that remains.
     o.push_str(&irq_binding);
     o.push_str(&radio_task);
     o.push_str(&gpio_tasks);

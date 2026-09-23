@@ -222,6 +222,14 @@ $CUBE_DB = if ($env:EIDE_CUBE_DB) { $env:EIDE_CUBE_DB }
 #
 # The env hash is the case: every key is a knob the emit test reads, and an
 # empty hash means "as wired by default".
+#
+# `lk` LINKS as well: `cargo build --release`, the profile the IDE's Build
+# uses, instead of `cargo check`. `cargo check` never runs the linker, so a
+# layout bug is invisible to it: every RP2350 project put its IMAGE_DEF past
+# the boot ROM's 4 KiB window and this matrix stayed green, because nothing it
+# ran ever placed a section. memory.x now asserts the placement, and only a
+# link evaluates the assert. It costs a codegen pass per project, so only the
+# rows whose risk IS the layout carry it.
 $ALL_CASES = @(
     @{ n = "F1 blocking, full wiring";     t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off" };  q = $true; fam = "f1"; hk = $true }
     @{ n = "F1 blocking, DMA tx";          t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "tx" };   q = $false; fam = "f1" }
@@ -308,7 +316,7 @@ $ALL_CASES = @(
     # Each board also carries the watchdog at its driver's LAST accepted period,
     # so the `const` assert in watchdog.rs is compiled at its boundary, and the
     # 1 us tick main.rs starts is compiled at each HAL's width (u8 / u16).
-    @{ n = "Raspberry Pi Pico x4";         t = "emit_rp_project";            e = @{};                       q = $true; fam = "rp" }
+    @{ n = "Raspberry Pi Pico x4";         t = "emit_rp_project";            e = @{};                       q = $true; fam = "rp"; lk = $true }
 
     # The micro:bit on nrf52833-hal, TWO projects: every peripheral wired on the
     # default branches, and a second on the other ones (crystal HFCLK,
@@ -347,14 +355,14 @@ $ALL_CASES = @(
     # Blocking one on the RP2350. It is the first config file this backend ever
     # wrote, so the harness now writes what `config_files` returns instead of
     # an empty `configs/mod.rs`.
-    @{ n = "Raspberry Pi Pico async x3";   t = "emit_rp_async_project";      e = @{};                       q = $true; fam = "rp"; hk = $true }
+    @{ n = "Raspberry Pi Pico async x3";   t = "emit_rp_async_project";      e = @{};                       q = $true; fam = "rp"; hk = $true; lk = $true }
 
 
     # The two W boards, whose on-board LED is not on the chip at all - it is
     # GPIO0 of the CYW43 radio, reached through a PIO-driven half-duplex SPI and
     # an async-only driver. The harness writes PLACEHOLDER firmware blobs: they
     # make `include_bytes!` resolve, which is all the codegen needs proving.
-    @{ n = "Raspberry Pi Pico W radio x2"; t = "emit_rp_radio_project";      e = @{};                       q = $true; fam = "rp" }
+    @{ n = "Raspberry Pi Pico W radio x2"; t = "emit_rp_radio_project";      e = @{};                       q = $true; fam = "rp"; lk = $true }
 
     # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired
@@ -523,7 +531,8 @@ foreach ($c in $cases) {
     $seen = 0
     foreach ($p in $projects) {
         Set-Location $p.Dir
-        $r = cargo check --target $p.Target 2>&1
+        $r = if ($c.lk) { cargo build --release --target $p.Target 2>&1 }
+             else { cargo check --target $p.Target 2>&1 }
         $errs = @($r | Select-String -Pattern "^error(\[|:)").Count
         # Cargo's future-incompatibility notice is about a DEPENDENCY, not about
         # the code being checked - `rp235x-hal` pulls in a proc-macro crate that
@@ -536,7 +545,11 @@ foreach ($c in $cases) {
         $seen += $w.Count
         if ($errs -gt 0) {
             $status = "$errs ERRORS"
-            $detail = ($r | Select-String -Pattern "^error(\[|:)" | Select-Object -First 1).Line.Trim()
+            # A failed link says only "linking with `rust-lld` failed"; the
+            # reason - a memory.x ASSERT, say - is on the linker's own line.
+            $why = $r | Select-String -Pattern "rust-lld: error" | Select-Object -First 1
+            if (-not $why) { $why = $r | Select-String -Pattern "^error(\[|:)" | Select-Object -First 1 }
+            $detail = $why.Line.Trim()
             break
         }
         if ($w.Count -gt 0 -and -not $detail) { $detail = $w[0].Line.Trim() }
