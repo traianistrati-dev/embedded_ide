@@ -680,11 +680,33 @@ fn same(r: &mut Resolved, kind: ModuleKind, ma: &ModuleItem, mb: &ModuleItem, na
     }
 }
 
+/// How a module's pad reads at the frame edge: `TX PA9`, `OUT PB0`.
+fn pad_label(m: &ModuleItem, s: &SignalPin) -> String {
+    let role = if m.kind.is_custom() {
+        match drives(&s.function) {
+            Some(true) => "OUT",
+            Some(false) => "IN",
+            None => "IO",
+        }
+    } else {
+        s.signal.label()
+    };
+    if s.pad.is_empty() {
+        role.to_owned()
+    } else {
+        format!("{role} {}", s.pad)
+    }
+}
+
 /// How each frame arranges its modules, from the links: a linked module faces
 /// the chip it links to, ranked by where on that chip its partner sits, so
 /// links run without crossing; a module with no link joins the side most of
-/// the linked ones are on (the right, when none are); in the Detailed view a
-/// linked module lists its pads.
+/// the linked ones are on (the right, when none are).
+///
+/// In the Detailed view EVERY module lists its pads, linked or not - that is
+/// what makes the view differ from Abstract on a chip that has no link yet.
+/// A pad a link uses takes the link's own name for it (`DATA` on a
+/// single-wire UART, `IN`/`OUT` on a GPIO line).
 ///
 /// `frames` is each chip's top-left and size on the canvas (the size may be a
 /// frame's plain one - only the centres matter here).
@@ -703,6 +725,17 @@ pub fn arrange(
         .map(|v| vec![Vec::new(); v.modules.len()])
         .collect();
     let mut out: Vec<Arrange> = views.iter().map(Arrange::plain).collect();
+    if detailed {
+        for (c, v) in views.iter().enumerate() {
+            for (m, item) in v.modules.iter().enumerate() {
+                out[c].pins[m] = item
+                    .signals
+                    .iter()
+                    .map(|s| (s.pin, pad_label(item, s)))
+                    .collect();
+            }
+        }
+    }
     for r in resolved.iter().filter(|r| r.broken.is_none()) {
         let (Some((ca, ma)), Some((cb, mb))) = (r.a, r.b) else {
             continue;
@@ -719,8 +752,9 @@ pub fn arrange(
             for w in &r.wires {
                 for ((c, m), end) in [((ca, ma), &w.a), ((cb, mb), &w.b)] {
                     let pins = &mut out[c].pins[m];
-                    if !pins.iter().any(|(n, _)| *n == end.pin) {
-                        pins.push((end.pin, end.label()));
+                    match pins.iter_mut().find(|(n, _)| *n == end.pin) {
+                        Some(row) => row.1 = end.label(),
+                        None => pins.push((end.pin, end.label())),
                     }
                 }
             }
@@ -1470,6 +1504,38 @@ mod tests {
         };
         let w = resolve(&link, &views, &[]).warnings;
         assert!(w.iter().any(|x| x.contains("both I2C targets")), "{w:?}");
+    }
+
+    /// Detailed lists every module's pads, with no link anywhere - a system
+    /// of one chip must not look the same in both views.
+    #[test]
+    fn detailed_lists_the_pads_of_every_module() {
+        let views = [chip(
+            "solo",
+            vec![
+                usart(1, 115_200, (30, "PA9"), (31, "PA10")),
+                spi_mod(2, SpiRole::Master, 0, false),
+            ],
+        )];
+        let frames = [(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(300.0, 200.0),
+        )];
+        let abstract_view = arrange(&views, &frames, &[], false);
+        assert!(abstract_view[0].pins.iter().all(Vec::is_empty));
+        let detailed = arrange(&views, &frames, &[], true);
+        let labels: Vec<Vec<&str>> = detailed[0]
+            .pins
+            .iter()
+            .map(|p| p.iter().map(|(_, l)| l.as_str()).collect())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                vec!["TX PA9", "RX PA10"],
+                vec!["SCK SCK", "MOSI MOSI", "MISO MISO"],
+            ]
+        );
     }
 
     #[test]
