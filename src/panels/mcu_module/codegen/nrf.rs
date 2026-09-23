@@ -1609,6 +1609,52 @@ pub fn needs_static_cell(mcu: &Mcu) -> bool {
     mcu.is_async() && is_nrf(&mcu.family) && async_bus_lines(mcu).static_cell
 }
 
+/// The module that shares `me`'s serial block, as its peripheral name.
+///
+/// SPIMn and TWIMn (n < 2) are ONE block on the nRF52 - `serial_block` names
+/// it `TWISPIn` - and the chip runs one of them at a time. `async_bus_lines`
+/// builds the SPIM and leaves the TWIM a comment; `bus_lines` builds both,
+/// and the TWIM's `init`, second in `main.rs`, writes the block's shared
+/// ENABLE register over the SPIM's. Either way one bus is silently lost, so
+/// the modules panel asks this per module and says so on both. `Some("TWIM0")`
+/// for the SPI of such a pair, `Some("SPIM0")` for the I2C, `None` on any
+/// other chip, instance or kind.
+///
+/// Read off the PADS, and only for a pair the generator would really build
+/// on `is_async`'s runtime: each loop skips a half-wired bus before its clash
+/// check, so with one half short the other has the block to itself, and the
+/// panel's sentence about which one loses would be false. The tests hold this
+/// to `fresh_main_rs` for both runtimes.
+pub fn shared_block_partner(
+    mcu: &Mcu,
+    me: &crate::panels::mcu_module::modules::VirtualModule,
+    is_async: bool,
+) -> Option<String> {
+    use crate::panels::mcu_module::modules::ModuleKind;
+    if !is_nrf(&mcu.family) {
+        return None;
+    }
+    let n = me.instance();
+    if n > 1 {
+        return None;
+    }
+    let name = match me.kind {
+        ModuleKind::GenericInterfaceSpi => format!("TWIM{n}"),
+        ModuleKind::GenericInterfaceI2c => format!("SPIM{n}"),
+        _ => return None,
+    };
+    // The same tests, in the same order, as the two SPIM loops: SCK first,
+    // then (Async only) a data line, since embassy-nrf has no clock-only
+    // constructor and nrf-hal takes MOSI and MISO as `Option`s.
+    let spi = spi_pins(mcu);
+    let spim = role_of(&spi, n, "sck").is_some()
+        && (!is_async || role_of(&spi, n, "mosi").is_some() || role_of(&spi, n, "miso").is_some());
+    // Both TWIM loops take the pair or nothing.
+    let i2c = i2c_pins(mcu);
+    let twim = role_of(&i2c, n, "scl").is_some() && role_of(&i2c, n, "sda").is_some();
+    (spim && twim).then_some(name)
+}
+
 fn async_section(mcu: &Mcu) -> String {
     let buses = async_bus_lines(mcu);
     let (tasks, gpio) = async_gpio_lines(mcu);
@@ -3441,5 +3487,161 @@ mod watchdog_nrf {
             body.contains("Timer::after_micros(pins::configs::watchdog::TIMEOUT_US / 2)"),
             "{body}"
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_block {
+    use super::blocking_codegen::microbit;
+    use super::shared_block_partner;
+    use crate::panels::mcu_module::mcu::{Mcu, Runtime};
+    use crate::panels::mcu_module::modules::{ModuleKind, VirtualModule};
+    use crate::panels::mcu_module::pins::PinFunction;
+
+    fn module(kind: ModuleKind, n: u8) -> VirtualModule {
+        VirtualModule {
+            id: format!("{kind:?}_{n}"),
+            kind,
+            name: String::new(),
+            pos: (0.0, 0.0),
+            config: kind.default_config(n),
+            connections: Vec::new(),
+        }
+    }
+
+    /// What the panel says about SPIM`n` and TWIM`n` on this wiring, asked
+    /// from both sides.
+    fn partners(mcu: &Mcu, n: u8, is_async: bool) -> (Option<String>, Option<String>) {
+        (
+            shared_block_partner(mcu, &module(ModuleKind::GenericInterfaceSpi, n), is_async),
+            shared_block_partner(mcu, &module(ModuleKind::GenericInterfaceI2c, n), is_async),
+        )
+    }
+
+    fn on(mut mcu: Mcu, is_async: bool) -> Mcu {
+        mcu.runtime = if is_async {
+            Runtime::Async
+        } else {
+            Runtime::Blocking
+        };
+        mcu
+    }
+
+    const SCK: PinFunction = PinFunction::SpiSck(0);
+    const MOSI: PinFunction = PinFunction::SpiMosi(0);
+    const SCL: PinFunction = PinFunction::I2cScl(0);
+    const SDA: PinFunction = PinFunction::I2cSda(0);
+
+    /// The panel names a pair exactly when `main.rs` loses a bus to it: the
+    /// clash comment on Async, both inits on Blocking. Run over the wirings
+    /// where the two runtimes' half-wired rules differ, so the sentence can
+    /// never point at a bus the generator actually built.
+    #[test]
+    fn a_pair_is_named_exactly_when_main_rs_loses_a_bus() {
+        let wirings: [&[(&str, PinFunction)]; 5] = [
+            // Both whole.
+            &[
+                ("P0.17", SCK),
+                ("P0.13", MOSI),
+                ("P0.08", SCL),
+                ("P0.16", SDA),
+            ],
+            // A clock-only SPIM: nrf-hal builds it, embassy-nrf does not.
+            &[("P0.17", SCK), ("P0.08", SCL), ("P0.16", SDA)],
+            // No SCK: no SPIM on either runtime.
+            &[("P0.13", MOSI), ("P0.08", SCL), ("P0.16", SDA)],
+            // Half a TWIM: no TWIM on either runtime.
+            &[("P0.17", SCK), ("P0.13", MOSI), ("P0.08", SCL)],
+            // Only one of the two buses at all.
+            &[("P0.17", SCK), ("P0.13", MOSI)],
+        ];
+        let expect = [
+            (true, true),
+            (false, true),
+            (false, false),
+            (false, false),
+            (false, false),
+        ];
+        for (wire, (want_async, want_blocking)) in wirings.iter().zip(expect) {
+            for (is_async, want) in [(true, want_async), (false, want_blocking)] {
+                let mcu = on(microbit(wire), is_async);
+                let main = mcu.fresh_main_rs();
+                let lost = if is_async {
+                    main.contains("// TWIM0 is not built: it is the same block as SPIM0")
+                } else {
+                    main.contains("pins::configs::spim0::init(")
+                        && main.contains("pins::configs::twim0::init(")
+                };
+                assert_eq!(lost, want, "generator, async={is_async}, {wire:?}:\n{main}");
+                let named = if want {
+                    (Some("TWIM0".to_owned()), Some("SPIM0".to_owned()))
+                } else {
+                    (None, None)
+                };
+                assert_eq!(
+                    partners(&mcu, 0, is_async),
+                    named,
+                    "async={is_async}, {wire:?}"
+                );
+            }
+        }
+    }
+
+    /// TWISPI1 is the same rule on the other shared id.
+    #[test]
+    fn the_second_shared_block_pairs_too() {
+        let mcu = microbit(&[
+            ("P0.17", PinFunction::SpiSck(1)),
+            ("P0.13", PinFunction::SpiMosi(1)),
+            ("P0.08", PinFunction::I2cScl(1)),
+            ("P0.16", PinFunction::I2cSda(1)),
+        ]);
+        for is_async in [true, false] {
+            assert_eq!(
+                partners(&mcu, 1, is_async),
+                (Some("TWIM1".to_owned()), Some("SPIM1".to_owned()))
+            );
+        }
+    }
+
+    /// Different ids share nothing, SPIM2 has no TWIM twin, a UART is its own
+    /// block, and no chip but the nRF gets the note.
+    #[test]
+    fn different_ids_other_kinds_and_other_chips_are_left_alone() {
+        let crossed = microbit(&[
+            ("P0.17", SCK),
+            ("P0.13", MOSI),
+            ("P0.08", PinFunction::I2cScl(1)),
+            ("P0.16", PinFunction::I2cSda(1)),
+        ]);
+        assert_eq!(partners(&crossed, 0, true), (None, None));
+        assert_eq!(partners(&crossed, 1, true), (None, None));
+
+        let spim2 = microbit(&[
+            ("P0.17", PinFunction::SpiSck(2)),
+            ("P0.13", PinFunction::SpiMosi(2)),
+            ("P0.08", PinFunction::I2cScl(2)),
+            ("P0.16", PinFunction::I2cSda(2)),
+        ]);
+        assert_eq!(partners(&spim2, 2, true), (None, None));
+
+        let full = microbit(&[
+            ("P0.17", SCK),
+            ("P0.13", MOSI),
+            ("P0.08", SCL),
+            ("P0.16", SDA),
+        ]);
+        let uart = module(ModuleKind::GenericInterfaceUsart, 0);
+        assert_eq!(shared_block_partner(&full, &uart, true), None);
+        for family in ["stm32f1", "stm32g0", "esp32c3", "rp2040"] {
+            let mut other = microbit(&[
+                ("P0.17", SCK),
+                ("P0.13", MOSI),
+                ("P0.08", SCL),
+                ("P0.16", SDA),
+            ]);
+            other.family = family.to_owned();
+            assert_eq!(partners(&other, 0, true), (None, None), "{family}");
+        }
     }
 }

@@ -313,6 +313,75 @@ fn rp_spi_init_locked(ui: &mut egui::Ui, out: &mut ConfigOut) {
     ui.end_row();
 }
 
+/// A SPIM and a TWIM on one nRF52 block: the row in the grid and the standing
+/// note, on whichever of the two is being drawn.
+///
+/// `partner` is the other module's peripheral (`TWIM0` under a SPI, `SPIM0`
+/// under an I2C), found by `nrf::shared_block_partner` in the caller: this
+/// panel sees one module, so the pair is a fact it has to be told, like
+/// `line_extras`. What `main.rs` does with the pair differs by runtime, and
+/// the sentence says which; both readings are the nRF backend's own
+/// (`async_bus_lines` skips the TWIM, `bus_lines` builds both).
+///
+/// The grid gets the SHORT line, with the full sentence on hover and in the
+/// details pane: nothing in this grid wraps, and the full sentence was
+/// clipped at the panel's edge before the part that says which bus loses.
+fn nrf_shared_block_row(
+    ui: &mut egui::Ui,
+    out: &mut ConfigOut,
+    me: &str,
+    partner: &str,
+    instance: u8,
+    is_async: bool,
+) {
+    let (short, full) = nrf_shared_block_text(me, partner, instance, is_async);
+    out.note(full.clone());
+    ui.label("");
+    ui.label(
+        egui::RichText::new(short)
+            .size(10.5)
+            .color(egui::Color32::from_rgb(220, 160, 70)),
+    )
+    .on_hover_text(full);
+    ui.end_row();
+}
+
+/// `(grid line, full sentence)` for [`nrf_shared_block_row`]. Apart from the
+/// drawing so the tests can hold the grid line to a width and to the runtime.
+fn nrf_shared_block_text(
+    me: &str,
+    partner: &str,
+    instance: u8,
+    is_async: bool,
+) -> (String, String) {
+    let (spim, twim) = if me.starts_with("SPIM") {
+        (me, partner)
+    } else {
+        (partner, me)
+    };
+    let lost = if is_async {
+        format!("{twim} is not built")
+    } else {
+        format!("{spim} is switched off")
+    };
+    let short = format!("Shares TWISPI{instance} with {partner}: {lost}");
+    let what = if is_async {
+        format!("main.rs builds {spim} and leaves {twim} a comment where its init would be")
+    } else {
+        format!(
+            "main.rs builds both, and {twim}'s init, which runs second, writes the block's \
+             ENABLE register and switches {spim} off"
+        )
+    };
+    let text = format!(
+        "{me} and {partner} are one hardware block on the nRF52 (embassy-nrf calls it \
+         TWISPI{instance}), and the chip runs one of them at a time. Both modules are on \
+         it: {what}. Move one bus to another instance on the Pins canvas; SPIM2 has no \
+         TWIM twin."
+    );
+    (short, text)
+}
+
 /// The left column of a Custom module's `label + field` row: bold, left-aligned,
 /// fixed width. `Name:` lives in the module list (`mcu_panel`) and `Struct` in
 /// the config grid here — two different containers, so only a shared width keeps
@@ -3140,6 +3209,10 @@ pub fn module_config_ui(
     // than derived here, because it is a fact about the CHIP and this function
     // only sees one module.
     line_extras: bool,
+    // On an nRF, the peripheral sharing this module's block with it (`TWIM0`
+    // under SPIM0, and the reverse), from `nrf::shared_block_partner`. A fact
+    // about the OTHER modules, so it comes from the caller like `line_extras`.
+    block_partner: Option<&str>,
     // Everything this module has to say that is NOT a control: the standing
     // remarks ("duty is taken in whole percent"), and what each row it draws
     // MEANS. Both are drawn by the details pane, not inside the config grid.
@@ -4744,6 +4817,10 @@ pub fn module_config_ui(
                     out.all_fields_documented();
                 }
                 ModuleConfig::Spi(cfg) => {
+                    if let Some(partner) = block_partner {
+                        let me = format!("SPIM{}", cfg.instance);
+                        nrf_shared_block_row(ui, out, &me, partner, cfg.instance, is_async);
+                    }
                     let roles = SpiRole::options(family);
                     if roles.len() == 1 {
                         out.skip("Role", docs::SKIP_SPI_ROLE);
@@ -6294,6 +6371,10 @@ pub fn module_config_ui(
                     out.all_fields_documented();
                 }
                 ModuleConfig::I2c(cfg) => {
+                    if let Some(partner) = block_partner {
+                        let me = format!("TWIM{}", cfg.instance);
+                        nrf_shared_block_row(ui, out, &me, partner, cfg.instance, is_async);
+                    }
                     out.field("Clock", docs::I2C_CLOCK);
                     ui.label("Clock");
                     egui::ComboBox::from_id_salt("i2cclk")
@@ -7112,6 +7193,19 @@ mod tests {
         is_native: bool,
         line_extras: bool,
     ) -> ConfigOut {
+        drive_beside(kind, config, family, is_async, is_native, line_extras, None)
+    }
+
+    /// `drive`, with the peripheral sharing this module's nRF block, if any.
+    fn drive_beside(
+        kind: ModuleKind,
+        config: crate::panels::mcu_module::modules::ModuleConfig,
+        family: &str,
+        is_async: bool,
+        is_native: bool,
+        line_extras: bool,
+        block_partner: Option<&str>,
+    ) -> ConfigOut {
         use crate::panels::mcu_module::modules::VirtualModule;
 
         let mut m = VirtualModule {
@@ -7143,6 +7237,7 @@ mod tests {
                 &mut pending,
                 None,
                 line_extras,
+                block_partner,
                 &mut out,
                 &crate::panels::mcu_module::uart_baud::Chip::bare(
                     family,
@@ -7710,6 +7805,95 @@ mod tests {
             assert!(!drawn.contains(&"Async init"), "{drawn:?}");
             assert!(skipped_of(&out).contains(&"Async init"));
             assert!(drawn.contains(&"Bit order"), "{drawn:?}");
+        }
+
+        /// A SPIM and a TWIM on one nRF block: each of the two says so, in the
+        /// runtime's own terms, and the sentence reaches the details pane as
+        /// a note. Without a partner there is nothing to say.
+        #[test]
+        fn a_shared_nrf_block_is_called_out_on_both_modules() {
+            // The grid line: short enough for the config column (about 70
+            // characters at this size before the panel's edge clips it), and
+            // naming the bus that loses on this runtime.
+            for (me, partner) in [("SPIM0", "TWIM0"), ("TWIM1", "SPIM1")] {
+                let n = &me[4..];
+                for is_async in [true, false] {
+                    let (short, full) = super::nrf_shared_block_text(
+                        me,
+                        partner,
+                        n.parse().expect("a digit"),
+                        is_async,
+                    );
+                    assert!(short.len() <= 60, "{} chars: {short}", short.len());
+                    assert!(
+                        short.starts_with(&format!("Shares TWISPI{n} with {partner}: ")),
+                        "{short}"
+                    );
+                    let lost = if is_async {
+                        format!("TWIM{n} is not built")
+                    } else {
+                        format!("SPIM{n} is switched off")
+                    };
+                    assert!(short.ends_with(&lost), "{short}");
+                    assert!(full.len() > short.len() && full.starts_with(me), "{full}");
+                }
+            }
+
+            let spi = drive_beside(
+                ModuleKind::GenericInterfaceSpi,
+                ModuleKind::GenericInterfaceSpi.default_config(0),
+                "nrf52833",
+                true,
+                false,
+                false,
+                Some("TWIM0"),
+            );
+            let note = spi
+                .notes()
+                .iter()
+                .find(|n| n.starts_with("SPIM0 and TWIM0 are one hardware block"))
+                .expect("the SPI names the block it shares");
+            assert!(note.contains("TWISPI0"), "{note}");
+            assert!(
+                note.contains("builds SPIM0 and leaves TWIM0 a comment"),
+                "{note}"
+            );
+
+            let i2c = drive_beside(
+                ModuleKind::GenericInterfaceI2c,
+                ModuleKind::GenericInterfaceI2c.default_config(1),
+                "nrf52833",
+                false,
+                false,
+                false,
+                Some("SPIM1"),
+            );
+            let note = i2c
+                .notes()
+                .iter()
+                .find(|n| n.starts_with("TWIM1 and SPIM1 are one hardware block"))
+                .expect("the I2C names the block it shares");
+            assert!(note.contains("TWISPI1"), "{note}");
+            assert!(
+                note.contains("TWIM1's init, which runs second")
+                    && note.contains("switches SPIM1 off"),
+                "{note}"
+            );
+
+            for kind in [
+                ModuleKind::GenericInterfaceSpi,
+                ModuleKind::GenericInterfaceI2c,
+            ] {
+                let alone = drive(kind, kind.default_config(0), "nrf52833", true, false, false);
+                assert!(
+                    alone
+                        .notes()
+                        .iter()
+                        .all(|n| !n.contains("one hardware block")),
+                    "{:?}",
+                    alone.notes()
+                );
+            }
         }
 
         /// Nine data bits is an STM32 word length. Neither the RP's PL011 nor

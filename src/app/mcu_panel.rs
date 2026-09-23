@@ -1607,6 +1607,21 @@ impl AppIde {
                                     crate::panels::mcu_module::stm32_pin_data::usart_has_swap_invert(
                                         mcu.usart_ip.as_deref(),
                                     );
+                                // Which nRF SPIM / TWIM modules share one
+                                // block, by module id, on the STAGED runtime
+                                // the rows below describe. Also read now: each
+                                // config panel sees one module, and the pair
+                                // is a fact about the pads of the others.
+                                let block_partner: std::collections::HashMap<String, String> =
+                                    mcu.modules
+                                        .iter()
+                                        .filter_map(|m| {
+                                            crate::panels::mcu_module::codegen::nrf::shared_block_partner(
+                                                mcu, m, is_async,
+                                            )
+                                            .map(|p| (m.id.clone(), p))
+                                        })
+                                        .collect();
                                 let mut local_pending: std::collections::BTreeMap<
                                     String,
                                     (ApiStyle, AsyncBusMode),
@@ -2034,8 +2049,9 @@ impl AppIde {
                                                         &pin_funcs_current, &pin_funcs,
                                                         &mut pin_fn_choice, is_async, is_native,
                                                         &family, pending, chip_dma.as_ref(),
-                                                        usart_line_extras, &mut my_out,
-                                                        &baud_chip,
+                                                        usart_line_extras,
+                                                        block_partner.get(&m.id).map(String::as_str),
+                                                        &mut my_out, &baud_chip,
                                                     );
                                                 });
                                                 if !my_out.is_empty() {
