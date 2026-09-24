@@ -26,8 +26,9 @@ pub const DEVICE: &str = "iCE40UP5K";
 pub const UP5K_IMAGE_LEN: usize = 104_090;
 
 /// FNV-1a-64 of tinyVision's `rgb_blink`, from the sync word to the wake-up
-/// command - the image the pico2-ice's FPGA flash ships with. Only the hash is
-/// kept: it is enough to recognise the file, and the IDE does not ship theirs.
+/// command - the image the pico2-ice's FPGA flash ships with. The IDE carries
+/// only the hash, which is enough to recognise the file; the file itself is a
+/// test fixture (`testdata/rgb_blink.bin`) that pins this value.
 const FACTORY_RGB_BLINK: u64 = 0x5d30_65cb_848f_e8ee;
 
 /// icepack's part table, keyed on the CRAM size it adds up over every bank:
@@ -200,11 +201,6 @@ impl fmt::Display for BitError {
 
 /// Check that `data` is an image the pico2-ice's FPGA will take.
 pub fn inspect(data: &[u8]) -> Result<BitInfo, BitError> {
-    inspect_with(data, FACTORY_RGB_BLINK)
-}
-
-/// [`inspect`], against a given factory-image hash so a test can inject one.
-fn inspect_with(data: &[u8], factory: u64) -> Result<BitInfo, BitError> {
     let Some(&first) = data.first() else {
         return Err(BitError::Empty);
     };
@@ -336,7 +332,7 @@ fn inspect_with(data: &[u8], factory: u64) -> Result<BitInfo, BitError> {
     Ok(BitInfo {
         len: data.len(),
         crc_checked,
-        factory_image: fnv1a64(&data[start..i]) == factory,
+        factory_image: fnv1a64(&data[start..i]) == FACTORY_RGB_BLINK,
     })
 }
 
@@ -581,13 +577,17 @@ mod tests {
     }
 
     /// What icepack writes when the .asc's `.comment` has lines: FF 00, the
-    /// text, 00 FF, then the image from its sync word on.
-    fn with_comment(body: usize) -> Vec<u8> {
+    /// text, 00 FF, then `image` from its sync word on.
+    fn commented(image: &[u8], body: usize) -> Vec<u8> {
         let mut d = vec![0xFF, 0x00];
         d.extend(std::iter::repeat_n(b'x', body));
         d.extend([0x00, 0xFF]);
-        d.extend(&shipped()[4..]);
+        d.extend(&image[4..]);
         d
+    }
+
+    fn with_comment(body: usize) -> Vec<u8> {
+        commented(shipped(), body)
     }
 
     #[test]
@@ -677,21 +677,53 @@ mod tests {
         assert_eq!(fnv1a64(b"foobar"), 0x8594_4171_f739_67e8);
     }
 
+    /// tinyVision's rgb_blink, the image the pico2-ice's FPGA flash ships with:
+    /// pico-ice-sdk's `examples/rp2_cram/rgb_blink.bin`, byte for byte.
+    /// Test-only - see `testdata/LICENSE-tinyvision-MIT.txt`.
+    const RGB_BLINK: &[u8] = include_bytes!("testdata/rgb_blink.bin");
+
+    #[test]
+    fn tinyvisions_rgb_blink_is_the_factory_image() {
+        let info = inspect(RGB_BLINK).expect("rgb_blink is a good UP5K image");
+        assert_eq!(info.len, UP5K_IMAGE_LEN);
+        assert!(info.crc_checked && info.factory_image, "{info:?}");
+        let warnings = info.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("rgb_blink"), "{warnings:?}");
+        assert!(info.notes().is_empty());
+    }
+
     #[test]
     fn the_factory_hash_runs_from_the_sync_word_to_the_wake_up() {
-        let d = shipped();
-        // The image proper: the sync word at 4, the wake-up ends one byte
-        // before the file does.
-        let hash = fnv1a64(&d[4..d.len() - 1]);
-        let info = inspect_with(d, hash).unwrap();
-        assert!(info.factory_image);
-        assert!(info.warnings()[0].contains("rgb_blink"));
-        // Another comment header, or other padding after the wake-up, is still
-        // the same image.
-        let mut c = with_comment(80);
-        assert!(inspect_with(&c, hash).unwrap().factory_image);
+        // The sync word at 4; the wake-up `01 06` ends one byte before the file.
+        let n = RGB_BLINK.len();
+        assert_eq!(&RGB_BLINK[n - 3..], &[0x01, 0x06, 0x00]);
+        assert_eq!(fnv1a64(&RGB_BLINK[4..n - 1]), FACTORY_RGB_BLINK);
+        // Another comment header (icepack copies the .asc's `.comment` lines),
+        // or more padding after the wake-up, is still the same image.
+        let mut c = commented(RGB_BLINK, 80);
+        assert!(inspect(&c).unwrap().factory_image);
         c.extend([0u8; 16]);
-        assert!(inspect_with(&c, hash).unwrap().factory_image);
+        assert!(inspect(&c).unwrap().factory_image);
+    }
+
+    #[test]
+    fn a_warning_never_blocks_a_build() {
+        // Loading rgb_blink is odd, not wrong: Build and Flash go ahead.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("fpga")).unwrap();
+        std::fs::write(dir.path().join(BITSTREAM_PATH), RGB_BLINK).unwrap();
+        let files = ProjectFiles {
+            main_rs: format!(
+                "static B: &[u8] = {};\n",
+                project_gen::FPGA_BITSTREAM_INCLUDE
+            ),
+            blob_source: Some(dir.path().to_path_buf()),
+            ..ProjectFiles::default()
+        };
+        assert_eq!(preflight(&files), Ok(()));
+        let verdict = check_project(Some(dir.path()));
+        assert!(verdict.result.unwrap().factory_image);
     }
 
     #[test]
