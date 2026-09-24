@@ -49,6 +49,9 @@ const LOOP_TOP: f32 = 20.0;
 const EMPTY_H: f32 = 28.0;
 /// Outer margin of the virtual canvas.
 pub const MARGIN: f32 = 20.0;
+/// A declaration card's width bounds.
+const CARD_MIN_W: f32 = 150.0;
+const CARD_MAX_W: f32 = 460.0;
 
 // ── Output ───────────────────────────────────────────────────────────────────
 
@@ -142,6 +145,12 @@ pub fn box_size(n: &FlowNode) -> (f32, f32) {
             DIAMOND_H,
         ),
         Shape::Terminal => ((text_w + 40.0).clamp(90.0, MAX_W), TERMINAL_H),
+        // A card reads like code, left-aligned, so it may run wider than a
+        // flow box - a field's type is often the longest thing in the file.
+        Shape::Decl => (
+            (text_w + 2.0 * PAD_X).clamp(CARD_MIN_W, CARD_MAX_W),
+            2.0 * PAD_Y + n.lines() as f32 * LINE_H,
+        ),
         other => {
             let extra = match other {
                 Shape::Io => SLANT,
@@ -678,6 +687,7 @@ fn terminal(text: &str, line: usize) -> FlowNode {
         try_exit: false,
         goto_line: None,
         goto_key: None,
+        decl: None,
     }
 }
 

@@ -97,6 +97,14 @@ pub(crate) struct EditorState {
     /// without the caret going anywhere.
     pub(crate) last_caret_idx: Option<usize>,
 
+    /// The primary caret as this view last drew it, in BUFFER space, WITH the
+    /// file it is in - for the tabs beside the editor that follow it (Flow).
+    /// `last_caret_idx` cannot say which file it belongs to: the editor draws
+    /// before the project tree, so for the frame of a click there the caret
+    /// is still the previous file's while `selected_file` is already the new
+    /// one. `None` while the file shown has no caret.
+    pub(crate) caret_at: Option<(ProjectFileId, usize)>,
+
     /// Pending "jump to this diagnostic": the target file and its 1-based line.
     /// Set when a row in the Cargo Check / rust-analyzer tab is clicked; applied
     /// once the editor is displaying that file (scrolls the line to row ~10).
@@ -303,6 +311,7 @@ impl EditorState {
             completion_filtered_items: editor_panel::completion::CompletionRows::default(),
             cargo_complete: editor_panel::cargo_complete::CargoCompleteState::default(),
             last_caret_idx: None,
+            caret_at: None,
             pending_scroll_to_line: None,
             highlighted_error_line: None,
             highlighted_def_line: None,

@@ -1569,6 +1569,13 @@ impl AppIde {
         // Jump to a clicked diagnostic's line (queued by the bottom
         // panel). Runs after caret-follow so its precise offset wins.
         self.apply_pending_scroll(ui, &editor_resp, &editor_id, displayed_file, &fold_map);
+        // Recorded every frame, so it is the caret of the file on screen or
+        // none - never one left over from the file shown before.
+        self.ed.caret_at = editor_resp
+            .state
+            .cursor
+            .char_range()
+            .map(|r| (displayed_file, fold_map.to_buffer(r.primary.index)));
 
         // The other half of the caret invariant (see the conversion before
         // the render): what the editor hands back is in projection space.

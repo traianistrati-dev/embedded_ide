@@ -44,6 +44,32 @@ pub enum Shape {
     /// The generated init block, collapsed to one dimmed box. Not the user's
     /// algorithm, so it must not spend forty rectangles of the reader's screen.
     Generated,
+    /// A declaration card on the whole-file canvas - a struct's fields, an
+    /// enum's variants, a `const`, a run of `use`s. Not flow: nothing enters or
+    /// leaves it. What it declares is in [`FlowNode::decl`].
+    Decl,
+}
+
+impl FlowNode {
+    /// A declaration card: `text` is its header, `rows` the lines under it.
+    pub fn card(text: String, rows: Vec<String>, hidden: usize, line: usize, tag: DeclTag) -> Self {
+        let mut n = Self::new(text, Shape::Decl, line);
+        n.detail = rows;
+        n.hidden = hidden;
+        n.decl = Some(tag);
+        n
+    }
+}
+
+/// What a [`Shape::Decl`] card declares - its colour, whether it is dimmed,
+/// and the element it stands for (whose full text its tooltip shows: the card
+/// itself is cut to fit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeclTag {
+    pub kind: ElementKind,
+    pub generated: bool,
+    /// Index into [`FileModel::elements`].
+    pub element: usize,
 }
 
 /// Where a non-structured edge goes.
@@ -82,6 +108,8 @@ pub struct FlowNode {
     /// opening it selects. The line alone cannot say WHICH of two same-named
     /// functions was meant.
     pub goto_key: Option<String>,
+    /// For [`Shape::Decl`] - what the card declares.
+    pub decl: Option<DeclTag>,
 }
 
 impl FlowNode {
@@ -96,6 +124,7 @@ impl FlowNode {
             try_exit: false,
             goto_line: None,
             goto_key: None,
+            decl: None,
         }
     }
 
@@ -305,8 +334,11 @@ pub struct Element {
     /// Unique in its file and stable across edits that do not touch it: the
     /// item's PATH, not its position. `main`, `Parser::feed`,
     /// `<Foo<T> as Debug>::fmt`, `app::init`, `struct Frame`, `const
-    /// app::LIMIT`. Only byte-identical paths (a function written twice under
-    /// two `#[cfg]`s) fall back to an occurrence suffix, `setup#2`.
+    /// app::LIMIT`. Only byte-identical paths fall back to an occurrence
+    /// suffix, `setup#2`: a function written twice under two `#[cfg]`s, and -
+    /// commonly - a type whose methods are split over two `impl Uart` blocks
+    /// (the picker tells those apart by line, `gui::pick_label`). Such a
+    /// suffix is positional, so a twin added ABOVE shifts it.
     ///
     /// Functions carry no kind prefix, so a function key is the chart name the
     /// tab saved before keys existed.
@@ -335,6 +367,31 @@ pub struct Element {
     pub test_code: bool,
     /// Index into [`FileModel::charts`] for an element that has a body.
     pub chart: Option<usize>,
+}
+
+impl Element {
+    /// Can be opened on its own: a function (its chart), a container (its
+    /// members), or a type (its card). A `const`, a `use` run or a macro call
+    /// is one line - it is read in the whole-file view, not opened.
+    pub fn openable(&self) -> bool {
+        self.chart.is_some()
+            || self.kind.is_container()
+            || matches!(
+                self.kind,
+                ElementKind::Struct | ElementKind::Enum | ElementKind::Union
+            )
+    }
+
+    /// How the element is named where it is picked: `impl Debug for Foo`,
+    /// `struct Frame`, `mod app` - and a function by its own name.
+    pub fn label(&self) -> String {
+        match self.kind {
+            ElementKind::Fn(_) => self.name.clone(),
+            ElementKind::Impl => format!("impl {}", self.name),
+            ElementKind::ForeignMod => self.name.clone(),
+            k => format!("{} {}", k.word(), self.name),
+        }
+    }
 }
 
 /// Everything the Flow tab reads from one file, from ONE `syn` pass.

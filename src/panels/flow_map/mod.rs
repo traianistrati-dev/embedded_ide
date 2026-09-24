@@ -15,30 +15,54 @@
 //! are `break`, `continue`, `return` and `?`, and those travel in lanes the
 //! measure pass reserves for them.
 
+pub mod compose;
 pub mod gui;
 pub mod layout;
 pub mod parse;
 
-/// Which chart to show, by key.
+/// What to show, by key: a function, a container or a type
+/// ([`parse::Element::openable`]).
 ///
-/// `current` while it still names a chart; else the one saved for this file
+/// `current` while it still names one; else the one saved for this file
 /// (`persisted`) - matched by key, or by the bare NAME a project saved before
 /// keys existed (`init` for RTIC's `app::init`); else the first ENTRY POINT,
 /// because `main` is what the reader wants first, not whichever helper happens
 /// to be at the top of the file; else the first chart.
-pub fn choose_chart(charts: &[parse::Chart], current: &str, persisted: Option<&str>) -> String {
-    let by_key = |k: &str| charts.iter().find(|c| c.key == k);
-    by_key(current)
-        .or_else(|| persisted.and_then(by_key))
-        .or_else(|| persisted.and_then(|p| charts.iter().find(|c| c.name == p)))
-        .or_else(|| charts.iter().find(|c| c.kind.is_entry()))
-        .or_else(|| charts.first())
-        .map(|c| c.key.clone())
+pub fn choose_selection(
+    model: &parse::FileModel,
+    current: &str,
+    persisted: Option<&str>,
+) -> String {
+    let open = |k: &str| {
+        model
+            .elements
+            .iter()
+            .find(|e| e.key == k && e.openable())
+            .map(|e| e.key.clone())
+    };
+    let charts = &model.charts;
+    open(current)
+        .or_else(|| persisted.and_then(open))
+        .or_else(|| {
+            persisted
+                .and_then(|p| charts.iter().find(|c| c.name == p))
+                .map(|c| c.key.clone())
+        })
+        .or_else(|| {
+            charts
+                .iter()
+                .find(|c| c.kind.is_entry())
+                .map(|c| c.key.clone())
+        })
+        .or_else(|| charts.first().map(|c| c.key.clone()))
         .unwrap_or_default()
 }
 
 /// The toolbar's short note - a syntax error, an empty file - or `""` when all
 /// is well.
+///
+/// `all`: the view shows ELEMENTS (the whole file, a container, a type)
+/// rather than one function's chart.
 pub fn status_line(
     model: &parse::FileModel,
     error: Option<&parse::SyntaxError>,
@@ -52,7 +76,7 @@ pub fn status_line(
     match error {
         Some(e) if nothing => format!("cannot parse this file — line {}: {}", e.line, e.message),
         Some(e) if all => format!(
-            "showing the last good outline — line {} does not parse",
+            "showing the last good version of this file — line {} does not parse",
             e.line
         ),
         Some(e) => format!(
@@ -69,34 +93,93 @@ pub fn status_line(
     }
 }
 
+/// The element that source line `line` (1-based) belongs to: the INNERMOST
+/// one whose lines hold it - a method rather than its `impl`, a function from
+/// its doc comment down to its closing brace. `None` between items.
+///
+/// Two items written on one line are told apart by column, which a line does
+/// not have: the first one wins.
+pub fn element_at_line(model: &parse::FileModel, line: usize) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (i, e) in model.elements.iter().enumerate() {
+        if (e.start_line..=e.end_line).contains(&line)
+            && best.is_none_or(|b| e.depth > model.elements[b].depth)
+        {
+            best = Some(i);
+        }
+    }
+    best
+}
+
+/// The 1-based line that char index `idx` of `text` is on - an index past the
+/// end is on the last line.
+pub fn line_of_char(text: &str, idx: usize) -> usize {
+    text.chars().take(idx).filter(|&c| c == '\n').count() + 1
+}
+
+/// Where the editor's caret went, when the tab should follow it: the caret's
+/// char index. `caret` is the editor's caret with the file it is in,
+/// `shown` the file the tab shows, `last` the caret followed last (updated
+/// here).
+///
+/// Only a caret that MOVED is followed - every frame would undo each scroll
+/// the reader makes in the tab - and only one in the file the tab shows: the
+/// editor draws before the project tree, so for the frame of a click in the
+/// tree its caret is still the previous file's.
+pub fn caret_to_follow<F: Copy + PartialEq>(
+    last: &mut Option<(F, usize)>,
+    caret: Option<(F, usize)>,
+    shown: F,
+) -> Option<usize> {
+    let (file, idx) = caret?;
+    if file != shown || *last == caret {
+        return None;
+    }
+    *last = caret;
+    Some(idx)
+}
+
 #[cfg(test)]
 mod selection {
-    use super::{choose_chart, parse, status_line};
+    use super::{choose_selection, parse, status_line};
 
-    const SRC: &str = "#[rtic::app(device = pac)]\nmod app {\n    #[init]\n    fn init(cx: init::Context) {}\n    fn helper() {}\n}\nfn free() {}\n";
+    const SRC: &str = "#[rtic::app(device = pac)]\nmod app {\n    #[init]\n    fn init(cx: init::Context) {}\n    fn helper() {}\n}\nfn free() {}\nstruct Frame { a: u8 }\nconst LIMIT: u32 = 3;\n";
 
-    fn charts() -> Vec<parse::Chart> {
-        parse::charts_of(SRC).unwrap()
+    fn model() -> parse::FileModel {
+        parse::parse_file(SRC).unwrap()
     }
 
     /// The current key wins while it still exists.
     #[test]
     fn the_current_chart_stays() {
         assert_eq!(
-            choose_chart(&charts(), "app::helper", Some("free")),
+            choose_selection(&model(), "app::helper", Some("free")),
             "app::helper"
         );
+    }
+
+    /// A container or a type is a selection of its own; a `const` is not -
+    /// it is read in the whole-file view, so the choice falls back.
+    #[test]
+    fn containers_and_types_can_be_selected_consts_cannot() {
+        let m = model();
+        assert_eq!(choose_selection(&m, "mod app", None), "mod app");
+        assert_eq!(choose_selection(&m, "struct Frame", None), "struct Frame");
+        assert_eq!(choose_selection(&m, "const LIMIT", None), "app::init");
     }
 
     /// A project saved before keys existed stored the bare NAME (`init` for
     /// RTIC's `app::init`); it still reopens on that function.
     #[test]
     fn an_old_saved_name_still_finds_its_chart() {
-        assert_eq!(choose_chart(&charts(), "", Some("init")), "app::init");
+        assert_eq!(choose_selection(&model(), "", Some("init")), "app::init");
         // Not the entry point, so the fallback cannot land on it by accident.
-        assert_eq!(choose_chart(&charts(), "", Some("helper")), "app::helper");
         assert_eq!(
-            choose_chart(&charts(), "", Some("app::helper")),
+            choose_selection(&model(), "", Some("helper")),
+            "app::helper"
+        );
+        assert_eq!(
+            choose_selection(&model(), "", Some("app::helper")),
             "app::helper"
         );
     }
@@ -105,9 +188,12 @@ mod selection {
     #[test]
     fn with_nothing_saved_the_entry_point_opens() {
         let src = "fn helper() {}\n#[entry]\nfn main() -> ! { loop {} }\n";
-        let charts = parse::charts_of(src).unwrap();
-        assert_eq!(choose_chart(&charts, "gone", None), "main");
-        assert_eq!(choose_chart(&[], "gone", None), "");
+        let m = parse::parse_file(src).unwrap();
+        assert_eq!(choose_selection(&m, "gone", None), "main");
+        assert_eq!(
+            choose_selection(&parse::FileModel::default(), "gone", None),
+            ""
+        );
     }
 
     /// The note under the toolbar, per mode.
@@ -129,11 +215,99 @@ mod selection {
         );
         assert_eq!(status_line(&decls, None, true), "");
         assert_eq!(status_line(&empty, None, true), "this file has no items");
-        assert!(status_line(&full, Some(&err), true).starts_with("showing the last good outline"));
+        assert!(
+            status_line(&full, Some(&err), true)
+                .starts_with("showing the last good version of this file")
+        );
         assert!(status_line(&full, Some(&err), false).starts_with("showing the last good chart"));
         assert!(
             status_line(&empty, Some(&err), true).starts_with("cannot parse this file — line 7")
         );
+    }
+}
+
+#[cfg(test)]
+mod caret {
+    use super::{caret_to_follow, element_at_line, line_of_char, parse};
+
+    const SRC: &str = "use a::b;\nuse c::d;\n\n/// Docs.\n#[inline]\nfn free() {\n    x();\n}\n\nimpl Uart {\n    fn send(&self) {\n        y();\n    }\n\n    fn recv(&self) {}\n}\nstruct A; struct B;\n";
+
+    fn at(line: usize) -> Option<String> {
+        let m = parse::parse_file(SRC).unwrap();
+        element_at_line(&m, line).map(|i| m.elements[i].key.clone())
+    }
+
+    /// A function owns its doc comment and attributes, and the lines down to
+    /// its closing brace.
+    #[test]
+    fn a_function_owns_its_docs_and_its_body() {
+        for line in 4..=8 {
+            assert_eq!(at(line).as_deref(), Some("free"), "line {line}");
+        }
+    }
+
+    /// Between two items, nothing.
+    #[test]
+    fn a_blank_line_between_items_is_nobody_s() {
+        assert_eq!(at(3), None);
+        assert_eq!(at(9), None);
+        assert_eq!(at(99), None);
+    }
+
+    /// Inside an `impl`, the method - the innermost - and the `impl` only
+    /// where no method is.
+    #[test]
+    fn a_method_line_is_the_method_not_its_impl() {
+        assert_eq!(at(12).as_deref(), Some("Uart::send"));
+        assert_eq!(at(15).as_deref(), Some("Uart::recv"));
+        let imp = at(10).unwrap();
+        assert!(imp.starts_with("impl"), "{imp}");
+        assert_eq!(at(14), Some(imp.clone()), "the blank line between methods");
+        assert_eq!(at(16), Some(imp), "its closing brace");
+    }
+
+    /// A run of `use`s is one element; two items on one line are the first.
+    #[test]
+    fn a_use_run_is_one_element_and_one_line_goes_to_its_first_item() {
+        assert_eq!(at(1), at(2));
+        assert!(at(1).is_some());
+        assert_eq!(at(17).as_deref(), Some("struct A"));
+    }
+
+    #[test]
+    fn a_char_index_maps_to_its_line() {
+        assert_eq!(line_of_char("ab\ncd\n", 0), 1);
+        assert_eq!(line_of_char("ab\ncd\n", 2), 1, "on the newline itself");
+        assert_eq!(line_of_char("ab\ncd\n", 3), 2);
+        assert_eq!(line_of_char("ab\ncd\n", 6), 3);
+        assert_eq!(line_of_char("ab\ncd\n", 600), 3, "past the end");
+        assert_eq!(line_of_char("é\nx", 2), 2, "chars, not bytes");
+    }
+
+    /// Followed once per move, in the tab's own file only.
+    #[test]
+    fn only_a_caret_that_moved_in_the_shown_file_is_followed() {
+        let mut last = None;
+        assert_eq!(caret_to_follow(&mut last, Some((1, 40)), 1), Some(40));
+        // The same caret the next frame: the reader may be scrolling.
+        assert_eq!(caret_to_follow(&mut last, Some((1, 40)), 1), None);
+        assert_eq!(caret_to_follow(&mut last, Some((1, 41)), 1), Some(41));
+        // No caret at all.
+        assert_eq!(caret_to_follow(&mut last, None, 1), None);
+        assert_eq!(last, Some((1, 41)));
+    }
+
+    /// The frame of a click in the project tree: the tab already shows file
+    /// 2, the editor's caret is still file 1's. Not followed, and not taken
+    /// as seen either - so file 2's caret, the next frame, is.
+    #[test]
+    fn a_caret_in_another_file_is_not_followed() {
+        let mut last = Some((1, 41));
+        assert_eq!(caret_to_follow(&mut last, Some((1, 90)), 2), None);
+        assert_eq!(last, Some((1, 41)));
+        assert_eq!(caret_to_follow(&mut last, Some((2, 90)), 2), Some(90));
+        // The same index in another file is a move.
+        assert_eq!(caret_to_follow(&mut last, Some((1, 90)), 1), Some(90));
     }
 }
 

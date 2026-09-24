@@ -1,6 +1,7 @@
 //! "Flow" tab driver — parses the file that is open in the editor, lays its
 //! selected function out as a flowchart (or lists every element of the file,
-//! "All — whole file"), and maps clicks back into the editor.
+//! "All — whole file"), maps clicks back into the editor, and scrolls to the
+//! editor's caret when it moves.
 //!
 //! Scope, phase 1: the file the CodeEditor is showing. That is one variable and
 //! not two — `AppIde::selected_file` is both "the file selected in the project
@@ -16,7 +17,7 @@
 //! toolbar says which line stopped the parser.
 
 use super::{AppIde, ProjectFileId};
-use crate::panels::flow_map::{gui, layout, parse};
+use crate::panels::flow_map::{compose, gui, layout, parse};
 use eframe::egui;
 
 /// One file's elements and charts at one content hash, plus the layout of
@@ -33,6 +34,15 @@ pub(super) struct FlowCache {
     /// `(chart key, its layout)` — laying out is cheap, but not free, and this
     /// runs every frame the tab is open.
     laid_out: Option<(String, layout::FlowLayout)>,
+    /// The whole file drawn as a page, and `(element key, canvas)` of the one
+    /// element drawn as a page (a container, a type, a function too tall to
+    /// fit). Two slots, so visiting a function does not throw away the
+    /// whole-file canvas - on a big file, the expensive one. Built the first
+    /// frame each is shown and kept for as long as `model` is: a syntax error
+    /// keeps the last good model, and with it these, so typing half a line
+    /// rebuilds nothing.
+    whole: Option<compose::Composed>,
+    scoped: Option<(String, compose::Composed)>,
 }
 
 impl AppIde {
@@ -76,6 +86,8 @@ impl AppIde {
                         model,
                         error: None,
                         laid_out: None,
+                        whole: None,
+                        scoped: None,
                     });
                 }
                 Err(e) => match (&mut self.flow_cache, switched) {
@@ -95,13 +107,14 @@ impl AppIde {
                             model: parse::FileModel::default(),
                             error: Some(e),
                             laid_out: None,
+                            whole: None,
+                            scoped: None,
                         });
                     }
                 },
             }
             if switched {
-                self.flow_view.zoom = 1.0;
-                self.flow_view.pan = egui::Vec2::ZERO;
+                self.flow_view.reset_file();
             }
         }
 
@@ -109,40 +122,89 @@ impl AppIde {
             return;
         };
 
-        // ── Choose the chart ──────────────────────────────────────────────
+        // ── Follow the editor's caret ─────────────────────────────────────
+        // Only while the model is this text's own: the last good version kept
+        // through a syntax error has lines that no longer match the ones
+        // being typed. A click in Flow jumps the editor without moving its
+        // caret, so following never feeds back into itself.
+        if let Some(idx) = crate::panels::flow_map::caret_to_follow(
+            &mut self.flow_caret,
+            self.ed.caret_at,
+            self.selected_file,
+        ) && cache.error.is_none()
+        {
+            self.flow_view.reveal_line = Some(crate::panels::flow_map::line_of_char(&source, idx));
+        }
+
+        // ── Choose what to show ───────────────────────────────────────────
         // Kept up to date in the whole-file view too: `selected` is what
         // leaving it goes back to. The persisted choice counts only for the
         // file it was made in.
-        let charts = &cache.model.charts;
-        if !charts.iter().any(|c| c.key == self.flow_view.selected) {
+        let model = &cache.model;
+        if !model
+            .elements
+            .iter()
+            .any(|e| e.key == self.flow_view.selected && e.openable())
+        {
             let persisted = (self.flow_selected.0 == rel).then_some(self.flow_selected.1.as_str());
-            self.flow_view.selected =
-                crate::panels::flow_map::choose_chart(charts, &self.flow_view.selected, persisted);
+            self.flow_view.selected = crate::panels::flow_map::choose_selection(
+                model,
+                &self.flow_view.selected,
+                persisted,
+            );
             cache.laid_out = None;
         }
+        let scope = gui::scope_of(model, &self.flow_view);
 
-        // The whole-file view is a list: nothing to lay out.
-        if !self.flow_view.all
+        // A function's chart, laid out once per selection.
+        if let gui::Scope::Chart(i) = scope
             && cache
                 .laid_out
                 .as_ref()
                 .is_none_or(|(key, _)| *key != self.flow_view.selected)
         {
-            cache.laid_out = charts
-                .iter()
-                .find(|c| c.key == self.flow_view.selected)
-                .map(|c| (c.key.clone(), layout::layout(c)));
+            cache.laid_out = model.elements[i].chart.map(|c| {
+                (
+                    model.charts[c].key.clone(),
+                    layout::layout(&model.charts[c]),
+                )
+            });
         }
 
         let status = crate::panels::flow_map::status_line(
             &cache.model,
             cache.error.as_ref(),
-            self.flow_view.all,
+            scope.shows_elements(),
         );
+
+        // The canvas of whatever is drawn as a page: the whole file or a
+        // container in Implementation, a type's card, and a function (for when
+        // it is too tall to read fitted whole - the driver cannot know that,
+        // it depends on the panel, and one chart's canvas is cheap).
+        let implementation = self.flow_view.implementation;
+        let canvas = match scope {
+            gui::Scope::Whole if implementation => {
+                if cache.whole.is_none() {
+                    cache.whole = Some(compose::compose(&cache.model));
+                }
+                cache.whole.as_ref()
+            }
+            gui::Scope::Container(i) | gui::Scope::Card(i) | gui::Scope::Chart(i)
+                if implementation || !matches!(scope, gui::Scope::Container(_)) =>
+            {
+                let key = &cache.model.elements[i].key;
+                if cache.scoped.as_ref().is_none_or(|(k, _)| k != key) {
+                    let canvas = compose::compose_scope(&cache.model, Some(i));
+                    cache.scoped = Some((key.clone(), canvas));
+                }
+                cache.scoped.as_ref().map(|(_, c)| c)
+            }
+            _ => None,
+        };
 
         let empty = layout::FlowLayout::default();
         let lay = cache.laid_out.as_ref().map(|(_, l)| l).unwrap_or(&empty);
-        let result = gui::show(ui, &cache.model, lay, &mut self.flow_view, &status);
+        let result = gui::show(ui, &cache.model, lay, canvas, &mut self.flow_view, &status);
 
         // Remember the choice for this file (written with the project).
         self.flow_selected = (rel, self.flow_view.selected.clone());

@@ -1580,6 +1580,10 @@ pub struct AppIde {
     flow_view: crate::panels::flow_map::gui::FlowView,
     /// Flow tab: parsed charts for one file at one content hash.
     flow_cache: Option<flow_tab::FlowCache>,
+    /// Flow tab: the editor caret it followed last. Its own, and not kept in
+    /// `flow_cache`, which is rebuilt on every edit: a rebuild must not read
+    /// as the caret having moved.
+    flow_caret: Option<(ProjectFileId, usize)>,
     /// Flow tab: `(file, function)` last charted — persisted in
     /// `project_structure.config`. The FILE is part of it on purpose: a bare
     /// function name would be restored onto whatever file happens to be open,
@@ -2374,6 +2378,7 @@ impl AppIde {
             active_tab: McuTab::Pins,
             flow_view: Default::default(),
             flow_cache: None,
+            flow_caret: None,
             flow_selected: (String::new(), String::new()),
             renaming_project: None,
             renaming_project_focus: false,
