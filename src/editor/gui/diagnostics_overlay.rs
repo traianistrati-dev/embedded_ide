@@ -279,6 +279,95 @@ pub(crate) fn fit_to_width(text: &str, avail: f32, char_w: f32) -> Option<String
     Some(out)
 }
 
+/// How long the tooltip's button reads "Copied!" after a click.
+const COPIED_FLASH_SECS: f64 = 1.5;
+
+/// The label of the tooltip's copy button: `shown` messages, and whether one
+/// was copied a moment ago.
+fn copy_button_label(shown: usize, copied: bool) -> String {
+    if copied {
+        format!("{} Copied!", ph::CHECK)
+    } else if shown > 1 {
+        format!("{} Copy all ({shown})", ph::COPY)
+    } else {
+        format!("{} Copy", ph::COPY)
+    }
+}
+
+/// The 1-based CHARACTER column of `d`, the one rustc prints.
+///
+/// `d.col` is rust-analyzer's, counted in UTF-16 units (the client negotiates
+/// no position encoding): one too many per emoji or other astral character
+/// earlier on the line.
+fn char_column(line_index: &LineIndex, d: &LspDiagnostic) -> u32 {
+    let at = line_index.pos_to_char_idx(d.line, d.col);
+    let start = line_index.pos_to_char_idx(d.line, 1);
+    (at.saturating_sub(start) + 1) as u32
+}
+
+/// Whether this frame's click landed in the inline-diagnostic tooltip drawn
+/// at `at` = `(cumulative_frame_nr, rect)`.
+///
+/// Last frame's tooltip counts as well as this one's: each editor view asks
+/// right after its own text box, and the tooltip may belong to the OTHER view,
+/// which draws it later in the frame.
+pub(crate) fn click_in_tooltip(
+    at: Option<(u64, egui::Rect)>,
+    frame: u64,
+    click: Option<egui::Pos2>,
+) -> bool {
+    at.is_some_and(|(drawn, rect)| drawn + 1 >= frame && click.is_some_and(|p| rect.contains(p)))
+}
+
+/// What the copy button puts on the clipboard: one diagnostic per entry, in
+/// the tooltip's order, each led by where it is —
+/// `src/main.rs:304:12: error[E0425]: cannot find value …` — so the paste
+/// says which file and line it is about. The first line is rustc's own
+/// `path:line:col` form, with `col_of` giving the character column (see
+/// [`char_column`]); any further lines of the message (rustc's `note:` and
+/// friends) follow indented, so every entry still starts at column 0.
+fn diagnostic_copy_text(
+    diags: &[LspDiagnostic],
+    shown: &[usize],
+    file: Option<&str>,
+    col_of: impl Fn(&LspDiagnostic) -> u32,
+) -> String {
+    shown
+        .iter()
+        .map(|&i| {
+            let d = &diags[i];
+            let place = match file {
+                Some(f) => format!("{f}:{}:{}", d.line, col_of(d)),
+                None => format!("{}:{}", d.line, col_of(d)),
+            };
+            let kind = match d.severity {
+                crate::lsp::DiagSeverity::Error => "error",
+                crate::lsp::DiagSeverity::Warning => "warning",
+                crate::lsp::DiagSeverity::Info => "info",
+                crate::lsp::DiagSeverity::Hint => "hint",
+            };
+            let kind = match &d.code {
+                Some(c) => format!("{kind}[{c}]"),
+                None => kind.to_owned(),
+            };
+            let mut out = format!("{place}: {kind}: {}", d.headline());
+            for line in d.message.lines().skip(1) {
+                let line = line.trim_end();
+                out.push('\n');
+                if !line.is_empty() {
+                    out.push_str("  ");
+                    out.push_str(line);
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Returns where the hover tooltip was drawn this frame, if it was: a click
+/// in it takes keyboard focus from the editor, and the editor pass gives it
+/// back (see [`click_in_tooltip`]).
 pub fn show_diagnostics_overlay(
     ui: &mut egui::Ui,
     galley_pos: egui::Pos2,
@@ -287,9 +376,8 @@ pub fn show_diagnostics_overlay(
     diags: &[LspDiagnostic],
     // Of `display_code`, the text every diagnostic position refers to.
     line_index: &LineIndex,
-    // `copy_requested`: true when Ctrl+C was pressed this frame — the hovered
-    // diagnostic copies its message to the clipboard.
-    copy_requested: bool,
+    // The file `diags` belong to (`src/main.rs`, …), named in the copied text.
+    file: Option<&str>,
     // `highlight`: (1-based line, band colour) of the diagnostic the user clicked
     // in the bottom panel — drawn as a translucent band (colour keyed by
     // severity: error red / warning yellow / info blue).
@@ -302,7 +390,7 @@ pub fn show_diagnostics_overlay(
     // pill the usages overlay painted earlier in this same frame. The inline
     // message steps around them; see [`inline_message_x`].
     pill_edges: &[(u32, f32)],
-) {
+) -> Option<egui::Rect> {
     let total_chars = line_index.total_chars();
     // Every position below is `galley.pos_from_cursor`, looked up by binary
     // search: one row table for the pass instead of a row walk per lookup.
@@ -345,7 +433,7 @@ pub fn show_diagnostics_overlay(
     }
 
     if diags.is_empty() {
-        return;
+        return None;
     }
 
     // Lines that already drew an inline message — a line can carry several
@@ -504,10 +592,11 @@ pub fn show_diagnostics_overlay(
 
     // ── Hover tooltip: ONE per group of overlapping spans ─────────────────
     // Grouped by geometry, never by where the pointer is. The tooltip is
-    // interactive — the user moves into it to click a docs link — and at that
-    // moment the pointer has left every span; a group chosen from the pointer
-    // would dissolve right then and close the tooltip under the click.
+    // interactive — the user moves into it to click Copy or a docs link — and
+    // at that moment the pointer has left every span; a group chosen from the
+    // pointer would dissolve right then and close the tooltip under the click.
     let rects: Vec<egui::Rect> = hover_spans.iter().map(|(_, r)| *r).collect();
+    let mut drawn: Option<egui::Rect> = None;
     for group in group_overlapping(&rects) {
         let members: Vec<usize> = group.iter().map(|&k| hover_spans[k].0).collect();
         let area = group
@@ -516,33 +605,35 @@ pub fn show_diagnostics_overlay(
             .reduce(|a, b| a.union(b))
             .unwrap_or(egui::Rect::NOTHING);
         // Keyed by the group's first diagnostic, so the id — and with it the
-        // open tooltip — holds steady while the set does not change.
+        // open tooltip — holds steady while the set does not change. And by
+        // the file: both editor views draw this overlay on the same layer, and
+        // two groups sharing an index shared one id — whose tooltip then
+        // opened in neither view.
         let hover = ui.interact(
             area,
-            egui::Id::new("inline_diag").with(members[0]),
+            egui::Id::new(("inline_diag", file)).with(members[0]),
             egui::Sense::hover(),
         );
         let shown = tooltip_order(diags, &members);
 
-        // Ctrl+C while hovering copies every message of the group with its code
-        // (overwrites any selection the editor copied earlier this frame, so
-        // the diagnostics win).
-        if hover.hovered() && copy_requested {
-            let text = shown
-                .iter()
-                .map(|&i| {
-                    let d = &diags[i];
-                    match &d.code {
-                        Some(c) => format!("{} [{c}]", d.message),
-                        None => d.message.clone(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            ui.ctx().copy_text(text);
-        }
+        // Copying is a button in the tooltip. It used to be Ctrl+C while the
+        // pointer rested on the span, which overwrote the clipboard with the
+        // error even when the user had just selected code to copy — the mouse
+        // parked on a squiggle was enough.
+        //
+        // The "Copied!" moment is kept in egui's temp data, keyed by this
+        // group, because the tooltip is rebuilt every frame.
+        let copied_id = hover.id.with("copied");
+        let now = ui.input(|i| i.time);
+        let since_copy = ui
+            .ctx()
+            .data(|d| d.get_temp::<f64>(copied_id))
+            .map(|t| now - t)
+            .filter(|dt| (0.0..COPIED_FLASH_SECS).contains(dt));
 
-        hover.on_hover_ui(|ui: &mut egui::Ui| {
+        // `Tooltip::show` is what `on_hover_ui` calls; used directly for the
+        // rect it reports, which the editor passes need (see the return).
+        let tip = egui::Tooltip::for_enabled(&hover).show(|ui: &mut egui::Ui| {
             ui.set_max_width(420.0);
             for (n, &i) in shown.iter().enumerate() {
                 if n > 0 {
@@ -550,17 +641,36 @@ pub fn show_diagnostics_overlay(
                 }
                 diagnostic_tooltip_entry(ui, &diags[i]);
             }
-            ui.label(
-                egui::RichText::new(if shown.len() > 1 {
-                    "Ctrl+C to copy all"
-                } else {
-                    "Ctrl+C to copy"
-                })
-                .size(9.0)
-                .color(egui::Color32::from_rgb(110, 120, 140)),
-            );
+            ui.add_space(2.0);
+            let label = copy_button_label(shown.len(), since_copy.is_some());
+            // The button also keeps EVERY tooltip open while the pointer
+            // travels into it — egui holds a tooltip only when it carries an
+            // interactive widget, which before was the docs link of an E-code
+            // alone — so it now stays over the lines below a little longer.
+            // Unavoidable: a button that closes as you reach it is no button.
+            if ui
+                .add(egui::Button::new(egui::RichText::new(label).size(10.5)).small())
+                .clicked()
+            {
+                let text =
+                    diagnostic_copy_text(diags, &shown, file, |d| char_column(line_index, d));
+                ui.ctx().copy_text(text);
+                ui.ctx().data_mut(|d| d.insert_temp(copied_id, now));
+                // Flip the label on the next frame; that frame asks for the
+                // one wake-up below that flips it back.
+                ui.ctx().request_repaint();
+            } else if let Some(dt) = since_copy {
+                // One wake-up when the flash ends — no repaint loop while idle.
+                ui.ctx()
+                    .request_repaint_after_secs((COPIED_FLASH_SECS - dt) as f32);
+            }
         });
+        if let Some(tip) = tip {
+            let r = tip.response.rect;
+            drawn = Some(drawn.map_or(r, |d| d.union(r)));
+        }
     }
+    drawn
 }
 
 /// One diagnostic inside the hover tooltip: icon + full message, then its code
@@ -771,6 +881,144 @@ pub fn show_inlay_hint(
             egui::Sense::hover(),
         )
         .on_hover_text(label);
+    }
+}
+
+#[cfg(test)]
+mod copy_button_tests {
+    use super::{char_column, click_in_tooltip, copy_button_label, diagnostic_copy_text};
+    use crate::editor::gui::text_pos::LineIndex;
+    use crate::lsp::{DiagSeverity, LspDiagnostic};
+    use eframe::egui::{Rect, pos2};
+
+    fn diag(
+        sev: DiagSeverity,
+        line: u32,
+        col: u32,
+        code: Option<&str>,
+        message: &str,
+    ) -> LspDiagnostic {
+        LspDiagnostic {
+            severity: sev,
+            message: message.to_owned(),
+            line,
+            col,
+            end_line: line,
+            end_col: col + 5,
+            code: code.map(str::to_owned),
+            source: "rustc".to_owned(),
+        }
+    }
+
+    /// The report's error: the paste names the file, line and column, the
+    /// severity and the code — rustc's own `path:line:col` form.
+    #[test]
+    fn one_error_is_copied_with_its_place_and_code() {
+        let diags = vec![diag(
+            DiagSeverity::Error,
+            304,
+            12,
+            Some("E0425"),
+            "cannot find value `selected_idex_out_of_vetical_visibility` in this scope",
+        )];
+        assert_eq!(
+            diagnostic_copy_text(&diags, &[0], Some("src/main.rs"), |d| d.col),
+            "src/main.rs:304:12: error[E0425]: cannot find value \
+             `selected_idex_out_of_vetical_visibility` in this scope"
+        );
+    }
+
+    /// rustc's extra lines stay, indented under their headline, so each entry
+    /// of a "Copy all" still starts at column 0; blank lines are not padded.
+    #[test]
+    fn further_message_lines_follow_indented() {
+        let diags = vec![diag(
+            DiagSeverity::Warning,
+            9,
+            5,
+            Some("unused_mut"),
+            "variable does not need to be mutable\n\n`#[warn(unused_mut)]` on by default  ",
+        )];
+        assert_eq!(
+            diagnostic_copy_text(&diags, &[0], Some("src/pins.rs"), |d| d.col),
+            "src/pins.rs:9:5: warning[unused_mut]: variable does not need to be mutable\n\
+             \n  `#[warn(unused_mut)]` on by default"
+        );
+    }
+
+    /// A group copies in the TOOLTIP's order (`shown`), not the list's, one
+    /// entry per line; no code means no brackets.
+    #[test]
+    fn a_group_copies_every_entry_in_tooltip_order() {
+        let diags = vec![
+            diag(DiagSeverity::Hint, 3, 1, None, "consider a shorter name"),
+            diag(DiagSeverity::Error, 3, 1, Some("E0308"), "mismatched types"),
+        ];
+        assert_eq!(
+            diagnostic_copy_text(&diags, &[1, 0], Some("src/main.rs"), |d| d.col),
+            "src/main.rs:3:1: error[E0308]: mismatched types\n\
+             src/main.rs:3:1: hint: consider a shorter name"
+        );
+    }
+
+    #[test]
+    fn without_a_file_the_place_is_line_and_column() {
+        let diags = vec![diag(DiagSeverity::Info, 7, 2, None, "note")];
+        assert_eq!(
+            diagnostic_copy_text(&diags, &[0], None, |d| d.col),
+            "7:2: info: note"
+        );
+    }
+
+    /// rust-analyzer counts columns in UTF-16 units, rustc in characters: an
+    /// emoji earlier on the line made the copied column one too high each.
+    #[test]
+    fn the_copied_column_counts_characters_not_utf16_units() {
+        let line = r#"fn main() { let _s = "😀😀"; let _x = nope; }"#;
+        let text = format!("// first line\n{line}\n");
+        let at = line.find("nope").unwrap();
+        let utf16_col = line[..at].encode_utf16().count() as u32 + 1;
+        let char_col = line[..at].chars().count() as u32 + 1;
+        assert_eq!(utf16_col, char_col + 2, "two astral chars before it");
+        let d = diag(DiagSeverity::Error, 2, utf16_col, Some("E0425"), "x");
+        assert_eq!(char_column(&LineIndex::new(&text), &d), char_col);
+    }
+
+    /// An ASCII line is the same either way; a line past the end is column 1
+    /// rather than a panic.
+    #[test]
+    fn the_copied_column_is_unchanged_on_ascii_and_safe_past_the_end() {
+        let index = LineIndex::new("let x = nope;\n");
+        let d = diag(DiagSeverity::Error, 1, 9, None, "x");
+        assert_eq!(char_column(&index, &d), 9);
+        let gone = diag(DiagSeverity::Error, 40, 9, None, "x");
+        assert_eq!(char_column(&index, &gone), 1);
+    }
+
+    /// A click in the tooltip drawn this frame or the last one counts — the
+    /// other view draws it later in the frame than this view asks; an older
+    /// tooltip, a click outside it, or no click at all does not.
+    #[test]
+    fn a_click_counts_only_in_a_current_tooltip() {
+        let tip = Some((
+            10,
+            Rect::from_min_max(pos2(100.0, 100.0), pos2(300.0, 160.0)),
+        ));
+        let inside = Some(pos2(150.0, 130.0));
+        assert!(click_in_tooltip(tip, 10, inside));
+        assert!(click_in_tooltip(tip, 11, inside));
+        assert!(!click_in_tooltip(tip, 12, inside), "a stale tooltip");
+        assert!(!click_in_tooltip(tip, 11, Some(pos2(50.0, 130.0))));
+        assert!(!click_in_tooltip(tip, 11, None), "no click this frame");
+        assert!(!click_in_tooltip(None, 11, inside));
+    }
+
+    #[test]
+    fn the_label_counts_a_group_and_confirms_a_copy() {
+        assert!(copy_button_label(1, false).ends_with(" Copy"));
+        assert!(copy_button_label(3, false).ends_with(" Copy all (3)"));
+        assert!(copy_button_label(1, true).ends_with(" Copied!"));
+        assert!(copy_button_label(3, true).ends_with(" Copied!"));
     }
 }
 

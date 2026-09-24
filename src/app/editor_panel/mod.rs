@@ -893,8 +893,10 @@ impl AppIde {
         let mut ctrl_down_pressed = editor_kbd_active
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowDown));
         // Ctrl+C state (peeked, not consumed — the editor still copies any
-        // selection). When the pointer is over a diagnostic, the overlay
-        // overwrites the clipboard with the error message instead.
+        // selection). A triple-click full-definition selection (header through
+        // closing brace) copies on it. It no longer copies a hovered
+        // diagnostic: that overwrote a selection the user meant to copy, and
+        // is now a button in the error tooltip.
         let copy_requested = editor_kbd_active
             && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
         // Ctrl+Shift+X → cut the whole line(s) at the cursor/selection;
@@ -1719,9 +1721,41 @@ impl AppIde {
         // flag is forced true when we restore, because `has_focus()` is
         // still false on this very frame — otherwise a second Escape in
         // a row would find it false and give up.
-        if escape_for_focus && self.ed.editor_was_focused {
+        //
+        // A click in the inline-error tooltip (its Copy button, its docs
+        // link) takes focus the same way — egui surrenders it on any click
+        // outside the focused widget, during the text box above — and is
+        // cured the same way. Without the forced flag the next frame's
+        // keyboard gate would read this editor as unfocused and close its
+        // completion and code-action lists. The tooltip may be the OTHER
+        // view's: see `click_in_tooltip`. Where the button was RELEASED, not
+        // `interact_pos`: a move later in the same event batch overwrites
+        // that, and a quick click-and-away would then miss the tooltip.
+        let tooltip_click = crate::editor::gui::diagnostics_overlay::click_in_tooltip(
+            self.diag_tooltip_at,
+            ui.ctx().cumulative_frame_nr(),
+            ui.input(|i| {
+                i.pointer
+                    .any_click()
+                    .then(|| {
+                        i.events.iter().find_map(|e| match e {
+                            egui::Event::PointerButton {
+                                pos,
+                                pressed: false,
+                                ..
+                            } => Some(*pos),
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+            }),
+        );
+        if (escape_for_focus || tooltip_click) && self.ed.editor_was_focused {
             editor_resp.response.request_focus();
             self.ed.editor_was_focused = true;
+            if !is_main {
+                self.reference_was_focused = true;
+            }
         } else {
             self.ed.editor_was_focused = editor_resp.response.has_focus();
             // The main panel runs BEFORE this view and needs last frame's
@@ -2292,7 +2326,6 @@ impl AppIde {
                 display_code,
                 lsp_accepted,
                 ctrl_space_pressed,
-                copy_requested,
                 ctrl_r_pressed,
                 f12_pressed,
                 ctrl_f12_pressed,

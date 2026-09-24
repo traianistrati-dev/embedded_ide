@@ -1806,6 +1806,12 @@ pub struct AppIde {
     /// popup the Reference editor owns — consuming the Escape the Reference
     /// pass needs in order to give its editor the focus back.
     reference_escape: bool,
+    /// Where the inline-error tooltip was last drawn: `(cumulative_frame_nr,
+    /// rect)`. A click in it — its Copy button, its docs link — takes keyboard
+    /// focus from the editor that had it, and each view's pass reads this to
+    /// hand it back. Shared rather than per view because the tooltip can
+    /// belong to the OTHER editor.
+    diag_tooltip_at: Option<(u64, egui::Rect)>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -2467,6 +2473,7 @@ impl AppIde {
             reference_drawn_frame: None,
             reference_ctrl_space: false,
             reference_escape: false,
+            diag_tooltip_at: None,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
             lsp_settle_recheck_done: true,

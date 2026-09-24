@@ -57,7 +57,6 @@ impl AppIde {
         mut display_code: String,
         lsp_accepted: Option<lsp::CompletionItem>,
         ctrl_space_pressed: bool,
-        copy_requested: bool,
         ctrl_r_pressed: bool,
         f12_pressed: bool,
         ctrl_f12_pressed: bool,
@@ -936,18 +935,23 @@ impl AppIde {
             // bottom edge is the top of the diagnostics panel), so it bounds the
             // overlay to what's actually visible.
             let visible_clip = editor_clip;
-            show_diagnostics_overlay(
+            let tooltip = show_diagnostics_overlay(
                 ui,
                 editor_resp.galley_pos,
                 visible_clip,
                 &editor_resp.galley,
                 &diags,
                 &line_index,
-                copy_requested,
+                current_rel_path.as_deref(),
                 highlight,
                 def_line,
                 pill_edges,
             );
+            // Remembered for the focus hand-back in `show_code_view`, which
+            // runs before this in BOTH views — see `click_in_tooltip`.
+            if let Some(rect) = tooltip {
+                self.diag_tooltip_at = Some((ui.ctx().cumulative_frame_nr(), rect));
+            }
         }
 
         // ── Floating error list, top-right of the editor ──────────────

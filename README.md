@@ -470,8 +470,11 @@ the chip's data.
 | `Ctrl+[` / `Ctrl+]` | Select the innermost `{ … }` block around the caret and copy it |
 | `Ctrl+Shift+Q` | Fold / unfold the whole file |
 | `Shift+Alt+F` | Format / re-indent the file |
-| `Ctrl+C` | Copy — over an inline error, copies the message **with its code** (e.g. `… [E0599]`) |
 | `Esc` | Drop the extra carets, close a popup, or restore focus to the editor |
+
+Hovering an inline error opens its tooltip; the **Copy** button there copies it
+with its place and code — `src/main.rs:304:12: error[E0425]: cannot find value …`
+— or every message when several share the span.
 
 ### Search and navigation
 
