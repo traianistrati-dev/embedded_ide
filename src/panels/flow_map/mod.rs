@@ -19,6 +19,124 @@ pub mod gui;
 pub mod layout;
 pub mod parse;
 
+/// Which chart to show, by key.
+///
+/// `current` while it still names a chart; else the one saved for this file
+/// (`persisted`) - matched by key, or by the bare NAME a project saved before
+/// keys existed (`init` for RTIC's `app::init`); else the first ENTRY POINT,
+/// because `main` is what the reader wants first, not whichever helper happens
+/// to be at the top of the file; else the first chart.
+pub fn choose_chart(charts: &[parse::Chart], current: &str, persisted: Option<&str>) -> String {
+    let by_key = |k: &str| charts.iter().find(|c| c.key == k);
+    by_key(current)
+        .or_else(|| persisted.and_then(by_key))
+        .or_else(|| persisted.and_then(|p| charts.iter().find(|c| c.name == p)))
+        .or_else(|| charts.iter().find(|c| c.kind.is_entry()))
+        .or_else(|| charts.first())
+        .map(|c| c.key.clone())
+        .unwrap_or_default()
+}
+
+/// The toolbar's short note - a syntax error, an empty file - or `""` when all
+/// is well.
+pub fn status_line(
+    model: &parse::FileModel,
+    error: Option<&parse::SyntaxError>,
+    all: bool,
+) -> String {
+    let nothing = if all {
+        model.elements.is_empty()
+    } else {
+        model.charts.is_empty()
+    };
+    match error {
+        Some(e) if nothing => format!("cannot parse this file — line {}: {}", e.line, e.message),
+        Some(e) if all => format!(
+            "showing the last good outline — line {} does not parse",
+            e.line
+        ),
+        Some(e) => format!(
+            "showing the last good chart — line {} does not parse",
+            e.line
+        ),
+        None if !all && model.charts.is_empty() && !model.elements.is_empty() => format!(
+            "no functions in this file — pick \"{}\" to see its {} elements",
+            gui::ALL_LABEL,
+            model.elements.len()
+        ),
+        None if nothing => "this file has no items".to_string(),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod selection {
+    use super::{choose_chart, parse, status_line};
+
+    const SRC: &str = "#[rtic::app(device = pac)]\nmod app {\n    #[init]\n    fn init(cx: init::Context) {}\n    fn helper() {}\n}\nfn free() {}\n";
+
+    fn charts() -> Vec<parse::Chart> {
+        parse::charts_of(SRC).unwrap()
+    }
+
+    /// The current key wins while it still exists.
+    #[test]
+    fn the_current_chart_stays() {
+        assert_eq!(
+            choose_chart(&charts(), "app::helper", Some("free")),
+            "app::helper"
+        );
+    }
+
+    /// A project saved before keys existed stored the bare NAME (`init` for
+    /// RTIC's `app::init`); it still reopens on that function.
+    #[test]
+    fn an_old_saved_name_still_finds_its_chart() {
+        assert_eq!(choose_chart(&charts(), "", Some("init")), "app::init");
+        // Not the entry point, so the fallback cannot land on it by accident.
+        assert_eq!(choose_chart(&charts(), "", Some("helper")), "app::helper");
+        assert_eq!(
+            choose_chart(&charts(), "", Some("app::helper")),
+            "app::helper"
+        );
+    }
+
+    /// Nothing saved: the entry point, not the first helper in the file.
+    #[test]
+    fn with_nothing_saved_the_entry_point_opens() {
+        let src = "fn helper() {}\n#[entry]\nfn main() -> ! { loop {} }\n";
+        let charts = parse::charts_of(src).unwrap();
+        assert_eq!(choose_chart(&charts, "gone", None), "main");
+        assert_eq!(choose_chart(&[], "gone", None), "");
+    }
+
+    /// The note under the toolbar, per mode.
+    #[test]
+    fn the_status_line_speaks_for_the_mode_in_view() {
+        let empty = parse::FileModel::default();
+        let decls = parse::parse_file("mod a;\nmod b;\n").unwrap();
+        let full = parse::parse_file(SRC).unwrap();
+        let err = parse::SyntaxError {
+            line: 7,
+            message: "expected `}`".to_string(),
+        };
+        assert_eq!(status_line(&full, None, false), "");
+        assert_eq!(status_line(&full, None, true), "");
+        // `pins/mod.rs`: nothing to chart, but a list to show.
+        assert_eq!(
+            status_line(&decls, None, false),
+            "no functions in this file — pick \"All — whole file\" to see its 2 elements"
+        );
+        assert_eq!(status_line(&decls, None, true), "");
+        assert_eq!(status_line(&empty, None, true), "this file has no items");
+        assert!(status_line(&full, Some(&err), true).starts_with("showing the last good outline"));
+        assert!(status_line(&full, Some(&err), false).starts_with("showing the last good chart"));
+        assert!(
+            status_line(&empty, Some(&err), true).starts_with("cannot parse this file — line 7")
+        );
+    }
+}
+
 /// The Flow tab against the code this IDE actually writes.
 ///
 /// The unit tests either side of this exercise hand-written snippets, which is

@@ -3219,7 +3219,10 @@ impl AppIde {
             ),
             &self.clock_ui.positions,
             &self.clock_ui.fields,
-            &self.flow_selected,
+            &crate::panels::mcu_module::structure_config::FlowPersist {
+                selected: self.flow_selected.clone(),
+                mode: self.flow_view.mode_bits(),
+            },
         )
     }
 

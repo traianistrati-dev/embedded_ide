@@ -677,6 +677,7 @@ fn terminal(text: &str, line: usize) -> FlowNode {
         awaits: false,
         try_exit: false,
         goto_line: None,
+        goto_key: None,
     }
 }
 

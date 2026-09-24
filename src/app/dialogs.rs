@@ -1411,6 +1411,11 @@ impl AppIde {
                         self.structure_overrides.clear();
                         self.structure_cache = None;
                         self.structure_view = Default::default();
+                        // Same for the Flow tab: a new project must not open
+                        // on the previous one's function or view mode.
+                        self.flow_view = Default::default();
+                        self.flow_selected = Default::default();
+                        self.flow_cache = None;
                         // New project = fresh deps → drop the stale workspace lock
                         // so the next check re-resolves (saves otherwise keep it).
                         self.reset_workspace_lock();

@@ -56,11 +56,29 @@ pub const CLOCK_VIEW_DEFAULT: ClockViewPersist = false;
 /// the file's own entry point.
 pub type FlowViewPersist = (String, String);
 
+/// Everything the Flow tab persists.
+///
+/// The reading position stays in `@flow_view` in its original `(file, key)`
+/// format, and the view mode gets a section of its own, `@flow_mode` - a bit
+/// set (see `flow_map::gui::FlowView::mode_bits`). Widening the `@flow_view`
+/// tuple instead would have made every project saved before it, and every older
+/// build reading a newer project, fail to parse the section and lose the saved
+/// function.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FlowPersist {
+    /// `(project-root-relative file, chart key)`. A key is the old function
+    /// name wherever the two can agree, so an older file restores unchanged.
+    pub selected: FlowViewPersist,
+    /// View-mode bits; `0` is the default and writes no section.
+    pub mode: u8,
+}
+
 pub(super) const LAYOUT_HEADER: &str = "@structure_layout";
 pub(super) const VIEW_HEADER: &str = "@structure_view";
 pub(super) const CLOCK_HEADER: &str = "@clock_layout";
 pub(super) const CLOCK_VIEW_HEADER: &str = "@clock_view";
 pub(super) const FLOW_HEADER: &str = "@flow_view";
+pub(super) const FLOW_MODE_HEADER: &str = "@flow_mode";
 
 /// Full file text. Empty when there is nothing to persist (no dragged positions
 /// in either diagram AND a default view), so the caller can skip writing (and
@@ -70,7 +88,7 @@ pub fn serialize(
     view: &StructureViewPersist,
     clock: &ClockPositions,
     clock_view: &ClockViewPersist,
-    flow: &FlowViewPersist,
+    flow: &FlowPersist,
 ) -> String {
     let mut out = String::new();
     let section = |out: &mut String, header: &str, body: String| {
@@ -103,12 +121,15 @@ pub fn serialize(
             ron::to_string(clock_view).unwrap_or_default(),
         );
     }
-    if !flow.0.is_empty() && !flow.1.is_empty() {
+    if !flow.selected.0.is_empty() && !flow.selected.1.is_empty() {
         section(
             &mut out,
             FLOW_HEADER,
-            ron::to_string(flow).unwrap_or_default(),
+            ron::to_string(&flow.selected).unwrap_or_default(),
         );
+    }
+    if flow.mode != 0 {
+        section(&mut out, FLOW_MODE_HEADER, flow.mode.to_string());
     }
     out
 }
@@ -154,6 +175,21 @@ pub fn parse_flow_view(text: &str) -> Option<FlowViewPersist> {
         .and_then(|body| ron::from_str::<FlowViewPersist>(body.trim()).ok())
 }
 
+/// Parse the `@flow_mode` section (absent/garbled -> `0`, the default).
+pub fn parse_flow_mode(text: &str) -> u8 {
+    mcu_config::section_body(text, FLOW_MODE_HEADER)
+        .and_then(|body| body.trim().parse::<u8>().ok())
+        .unwrap_or(0)
+}
+
+/// Parse the Flow tab's two sections together.
+pub fn parse_flow(text: &str) -> FlowPersist {
+    FlowPersist {
+        selected: parse_flow_view(text).unwrap_or_default(),
+        mode: parse_flow_mode(text),
+    }
+}
+
 /// Parse the `@clock_layout` section (absent/garbled → empty map).
 pub fn parse_clock(text: &str) -> ClockPositions {
     mcu_config::section_body(text, CLOCK_HEADER)
@@ -173,7 +209,7 @@ pub fn load(
     Option<StructureViewPersist>,
     ClockPositions,
     ClockViewPersist,
-    Option<FlowViewPersist>,
+    FlowPersist,
 ) {
     let text = match std::fs::read_to_string(root.join(FILE_NAME)) {
         Ok(t) => t,
@@ -184,7 +220,7 @@ pub fn load(
         parse_view(&text),
         parse_clock(&text),
         parse_clock_view(&text),
-        parse_flow_view(&text),
+        parse_flow(&text),
     )
 }
 
@@ -193,8 +229,8 @@ mod tests {
     use super::*;
 
     /// No Flow-tab reading position — what most of these cases care about.
-    fn no_flow() -> FlowViewPersist {
-        FlowViewPersist::default()
+    fn no_flow() -> FlowPersist {
+        FlowPersist::default()
     }
 
     fn positions() -> StructurePositions {
@@ -207,7 +243,10 @@ mod tests {
     #[test]
     fn round_trips_positions_and_view() {
         let view: StructureViewPersist = (true, Some(3), 1, true);
-        let flow: FlowViewPersist = ("src/mw_radar/parse.rs".into(), "HmmdFrame::feed".into());
+        let flow = FlowPersist {
+            selected: ("src/mw_radar/parse.rs".into(), "HmmdFrame::feed".into()),
+            mode: 1,
+        };
         let text = serialize(
             &positions(),
             &view,
@@ -217,7 +256,47 @@ mod tests {
         );
         assert_eq!(parse_layout(&text), positions());
         assert_eq!(parse_view(&text), Some(view));
-        assert_eq!(parse_flow_view(&text), Some(flow));
+        assert_eq!(parse_flow_view(&text), Some(flow.selected.clone()));
+        assert_eq!(parse_flow(&text), flow);
+    }
+
+    /// The Flow mode rides in its OWN section, so `@flow_view` keeps the exact
+    /// format older builds and older projects use - and a default mode writes
+    /// nothing at all.
+    #[test]
+    fn the_flow_mode_leaves_the_flow_view_format_alone() {
+        let selected: FlowViewPersist = ("src/main.rs".into(), "main".into());
+        let empty = StructurePositions::new();
+        let none = ClockPositions::new();
+        let with = |mode| {
+            serialize(
+                &empty,
+                &default_view(),
+                &none,
+                &CLOCK_VIEW_DEFAULT,
+                &FlowPersist {
+                    selected: selected.clone(),
+                    mode,
+                },
+            )
+        };
+
+        let default_mode = with(0);
+        assert!(!default_mode.contains(FLOW_MODE_HEADER), "{default_mode}");
+        let all = with(1);
+        assert!(all.contains(FLOW_MODE_HEADER), "{all}");
+        // Byte-for-byte the section an older build wrote and reads.
+        let old = format!("{FLOW_HEADER}\n(\"src/main.rs\",\"main\")\n");
+        assert!(all.starts_with(&old), "{all}");
+        assert_eq!(parse_flow_view(&all), Some(selected.clone()));
+
+        // An older project has no mode section: the default.
+        assert_eq!(parse_flow(&old).mode, 0);
+        assert_eq!(parse_flow(&old).selected, selected);
+        // A garbled one is the default too, not a lost reading position.
+        let garbled = format!("{old}\n{FLOW_MODE_HEADER}\nall\n");
+        assert_eq!(parse_flow(&garbled).mode, 0);
+        assert_eq!(parse_flow(&garbled).selected, selected);
     }
 
     /// A default project must not produce this file at all — otherwise the
@@ -230,7 +309,7 @@ mod tests {
                 &default_view(),
                 &ClockPositions::new(),
                 &CLOCK_VIEW_DEFAULT,
-                &FlowViewPersist::default()
+                &FlowPersist::default()
             ),
             "",
             "empty layout + default view must write nothing"

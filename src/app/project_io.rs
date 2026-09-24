@@ -143,8 +143,10 @@ impl AppIde {
             }
             // Flow-tab reading position - restored only onto its own file (see
             // `FlowViewPersist`); an absent section leaves it empty and the tab
-            // opens on the file's entry point.
-            self.flow_selected = flow.unwrap_or_default();
+            // opens on the file's entry point. The mode ("All — whole file")
+            // is per project too, and an absent section is the default.
+            self.flow_selected = flow.selected;
+            self.flow_view.set_mode_bits(flow.mode);
             // Force the next Structure-tab frame to rebuild + re-apply them
             // even when the content hash happens to match the cached graph.
             self.structure_cache = None;

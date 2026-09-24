@@ -1,5 +1,6 @@
 //! "Flow" tab driver — parses the file that is open in the editor, lays its
-//! selected function out as a flowchart, and maps clicks back into the editor.
+//! selected function out as a flowchart (or lists every element of the file,
+//! "All — whole file"), and maps clicks back into the editor.
 //!
 //! Scope, phase 1: the file the CodeEditor is showing. That is one variable and
 //! not two — `AppIde::selected_file` is both "the file selected in the project
@@ -18,18 +19,18 @@ use super::{AppIde, ProjectFileId};
 use crate::panels::flow_map::{gui, layout, parse};
 use eframe::egui;
 
-/// Parsed charts for one file at one content hash, plus the layout of whichever
-/// one is being shown.
+/// One file's elements and charts at one content hash, plus the layout of
+/// whichever chart is being shown.
 pub(super) struct FlowCache {
-    /// Hash of the text the charts were built from.
+    /// Hash of the text the model was built from.
     hash: u64,
-    /// The file they belong to — switching files must not show stale charts.
+    /// The file it belongs to — switching files must not show stale charts.
     file: ProjectFileId,
-    charts: Vec<parse::Chart>,
-    /// Set when the LAST parse attempt failed; `charts` then still holds the
-    /// last ones that worked.
+    model: parse::FileModel,
+    /// Set when the LAST parse attempt failed; `model` then still holds the
+    /// last one that worked.
     error: Option<parse::SyntaxError>,
-    /// `(chart name, its layout)` — laying out is cheap, but not free, and this
+    /// `(chart key, its layout)` — laying out is cheap, but not free, and this
     /// runs every frame the tab is open.
     laid_out: Option<(String, layout::FlowLayout)>,
 }
@@ -67,12 +68,12 @@ impl AppIde {
                 .flow_cache
                 .as_ref()
                 .is_none_or(|c| c.file != self.selected_file);
-            match parse::charts_of(&source) {
-                Ok(charts) => {
+            match parse::parse_file(&source) {
+                Ok(model) => {
                     self.flow_cache = Some(FlowCache {
                         hash,
                         file: self.selected_file,
-                        charts,
+                        model,
                         error: None,
                         laid_out: None,
                     });
@@ -91,7 +92,7 @@ impl AppIde {
                         self.flow_cache = Some(FlowCache {
                             hash,
                             file: self.selected_file,
-                            charts: Vec::new(),
+                            model: parse::FileModel::default(),
                             error: Some(e),
                             laid_out: None,
                         });
@@ -109,70 +110,48 @@ impl AppIde {
         };
 
         // ── Choose the chart ──────────────────────────────────────────────
-        // Restore the persisted choice only for the file it was made in, then
-        // fall back to the first ENTRY POINT — `main` is what the reader wants
-        // first, not whichever helper happens to be at the top of the file.
-        if !cache
-            .charts
-            .iter()
-            .any(|c| c.name == self.flow_view.selected)
-        {
-            let persisted = (self.flow_selected.0 == rel)
-                .then(|| {
-                    cache
-                        .charts
-                        .iter()
-                        .find(|c| c.name == self.flow_selected.1)
-                        .map(|c| c.name.clone())
-                })
-                .flatten();
-            self.flow_view.selected = persisted
-                .or_else(|| {
-                    cache
-                        .charts
-                        .iter()
-                        .find(|c| c.kind.is_entry())
-                        .map(|c| c.name.clone())
-                })
-                .or_else(|| cache.charts.first().map(|c| c.name.clone()))
-                .unwrap_or_default();
+        // Kept up to date in the whole-file view too: `selected` is what
+        // leaving it goes back to. The persisted choice counts only for the
+        // file it was made in.
+        let charts = &cache.model.charts;
+        if !charts.iter().any(|c| c.key == self.flow_view.selected) {
+            let persisted = (self.flow_selected.0 == rel).then_some(self.flow_selected.1.as_str());
+            self.flow_view.selected =
+                crate::panels::flow_map::choose_chart(charts, &self.flow_view.selected, persisted);
             cache.laid_out = None;
         }
 
-        if cache
-            .laid_out
-            .as_ref()
-            .is_none_or(|(name, _)| *name != self.flow_view.selected)
+        // The whole-file view is a list: nothing to lay out.
+        if !self.flow_view.all
+            && cache
+                .laid_out
+                .as_ref()
+                .is_none_or(|(key, _)| *key != self.flow_view.selected)
         {
-            cache.laid_out = cache
-                .charts
+            cache.laid_out = charts
                 .iter()
-                .find(|c| c.name == self.flow_view.selected)
-                .map(|c| (c.name.clone(), layout::layout(c)));
+                .find(|c| c.key == self.flow_view.selected)
+                .map(|c| (c.key.clone(), layout::layout(c)));
         }
 
-        let status = match (&cache.error, cache.charts.is_empty()) {
-            (Some(e), true) => format!("cannot parse this file — line {}: {}", e.line, e.message),
-            (Some(e), false) => format!(
-                "showing the last good chart — line {} does not parse",
-                e.line
-            ),
-            (None, true) => "no functions in this file".to_string(),
-            (None, false) => String::new(),
-        };
+        let status = crate::panels::flow_map::status_line(
+            &cache.model,
+            cache.error.as_ref(),
+            self.flow_view.all,
+        );
 
         let empty = layout::FlowLayout::default();
         let lay = cache.laid_out.as_ref().map(|(_, l)| l).unwrap_or(&empty);
-        let result = gui::show(ui, &cache.charts, lay, &mut self.flow_view, &status);
+        let result = gui::show(ui, &cache.model, lay, &mut self.flow_view, &status);
 
         // Remember the choice for this file (written with the project).
         self.flow_selected = (rel, self.flow_view.selected.clone());
 
         // ── Clicks ────────────────────────────────────────────────────────
-        if let Some(name) = result.open_chart {
-            self.flow_view.selected = name;
-            self.flow_view.zoom = 1.0;
-            self.flow_view.pan = egui::Vec2::ZERO;
+        // Opening a function - from a subroutine box, or a double click in the
+        // whole-file list - always lands on its chart.
+        if let Some(key) = result.open_chart {
+            self.flow_view.open(key);
         }
         if let Some(line) = result.goto_line {
             let id = self.selected_file;

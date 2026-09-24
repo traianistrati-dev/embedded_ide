@@ -6,9 +6,12 @@
 //! differently from the diagram beside it is a diagram the user fights: auto-fit
 //! as the base scale, mouse wheel and Ctrl+± on top, background drag to pan,
 //! Ctrl+0 to re-centre.
+//!
+//! "All — whole file" is the exception, and on purpose: it is a list, not a
+//! diagram, so there the wheel scrolls (see [`outline`]).
 
 use super::layout::{Edge, EdgeKind, FlowLayout, Placed};
-use super::parse::{Chart, Shape};
+use super::parse::{Element, ElementKind, EntryKind, FileModel, Shape};
 use eframe::egui;
 
 /// Session view state for the Flow tab.
@@ -19,9 +22,19 @@ pub struct FlowView {
     pub pan: egui::Vec2,
     /// The scale actually drawn last frame, so the toolbar can say so.
     pub last_scale: f32,
-    /// Which function is charted, BY NAME — an index would silently point at a
-    /// different function the moment the file is edited.
+    /// Which function is charted, by its [`Chart::key`] — an index would
+    /// silently point at a different function the moment the file is edited,
+    /// and a bare name cannot tell two same-named functions apart.
+    ///
+    /// Kept while [`Self::all`] is on, so leaving the whole-file view goes back
+    /// to the function that was open.
+    ///
+    /// [`Chart::key`]: super::parse::Chart::key
     pub selected: String,
+    /// "All — whole file": every element of the file instead of one chart.
+    /// Its own flag rather than a magic value of `selected`, which a function
+    /// named `All` would collide with.
+    pub all: bool,
 }
 
 impl Default for FlowView {
@@ -31,7 +44,34 @@ impl Default for FlowView {
             pan: egui::Vec2::ZERO,
             last_scale: 1.0,
             selected: String::new(),
+            all: false,
         }
+    }
+}
+
+/// `@flow_mode` bit: the whole-file view is on.
+const MODE_ALL: u8 = 1;
+
+impl FlowView {
+    /// The persisted mode, as a bit set. Bits this build does not know are
+    /// ignored on reading, so a file written by a newer build still opens here
+    /// with everything it DOES know.
+    pub fn mode_bits(&self) -> u8 {
+        if self.all { MODE_ALL } else { 0 }
+    }
+
+    pub fn set_mode_bits(&mut self, bits: u8) {
+        self.all = bits & MODE_ALL != 0;
+    }
+
+    /// Chart the function `key` - from the picker, a subroutine box, or a
+    /// double click in the whole-file list. Always leaves the whole-file view,
+    /// and starts the chart fitted and centred.
+    pub fn open(&mut self, key: String) {
+        self.all = false;
+        self.selected = key;
+        self.zoom = 1.0;
+        self.pan = egui::Vec2::ZERO;
     }
 }
 
@@ -40,8 +80,84 @@ impl Default for FlowView {
 pub struct ShowResult {
     /// Jump the editor to this 1-based line of the charted file.
     pub goto_line: Option<usize>,
-    /// A subroutine box was opened — chart this function instead.
+    /// Chart this function instead, by key — a subroutine box was opened, or a
+    /// function was double-clicked in the whole-file list.
     pub open_chart: Option<String>,
+}
+
+/// The first row of the element picker.
+pub const ALL_LABEL: &str = "All — whole file";
+
+/// One row of the element picker below [`ALL_LABEL`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickerRow {
+    pub depth: usize,
+    pub label: String,
+    /// The chart it opens; `None` for a container heading (`impl Parser`),
+    /// which is shown so its methods read as its members, not picked itself.
+    pub key: Option<String>,
+    /// An entry point - drawn bright, like before.
+    pub entry: bool,
+}
+
+/// The picker's rows: every function with a body, each indented under the
+/// containers that hold it.
+///
+/// Only functions are picked on their own: they are what has a chart. Structs,
+/// consts, `use`s and macro calls are seen through "All" - listing every one of
+/// them here would put a few hundred rows in a 200-pixel popup.
+pub fn picker_rows(model: &FileModel) -> Vec<PickerRow> {
+    let els = &model.elements;
+    let mut holds = vec![false; els.len()];
+    for e in els.iter().filter(|e| e.chart.is_some()) {
+        let mut p = e.parent;
+        while let Some(j) = p {
+            holds[j] = true;
+            p = els[j].parent;
+        }
+    }
+    els.iter()
+        .enumerate()
+        .filter_map(|(i, e)| match (e.chart, e.kind) {
+            (Some(_), ElementKind::Fn(k)) => Some(PickerRow {
+                depth: e.depth,
+                label: format!("{}  ·  {}", e.name, k.word()),
+                key: Some(e.key.clone()),
+                entry: k.is_entry(),
+            }),
+            _ if holds[i] => Some(PickerRow {
+                depth: e.depth,
+                label: format!("{} {}", e.kind.word(), e.name),
+                key: None,
+                entry: false,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The colour an element's kind word is drawn in. Function / struct / enum /
+/// trait match the Structure tab's glyphs, so the two Project tabs agree.
+pub fn kind_color(kind: ElementKind) -> egui::Color32 {
+    use egui::Color32 as C;
+    match kind {
+        ElementKind::Fn(EntryKind::Function) => C::from_rgb(130, 170, 240),
+        // An entry point starts on its own - the gold the rest of the app uses
+        // for "look here".
+        ElementKind::Fn(_) => C::from_rgb(240, 200, 110),
+        ElementKind::RequiredFn => C::from_rgb(105, 135, 190),
+        ElementKind::Struct | ElementKind::Union => C::from_rgb(230, 160, 80),
+        ElementKind::Enum => C::from_rgb(190, 130, 230),
+        ElementKind::Trait | ElementKind::TraitAlias => C::from_rgb(120, 200, 140),
+        ElementKind::Impl => C::from_rgb(110, 190, 200),
+        ElementKind::Const | ElementKind::Static => C::from_rgb(215, 175, 125),
+        ElementKind::TypeAlias => C::from_rgb(190, 190, 130),
+        ElementKind::Mod | ElementKind::ModDecl => C::from_rgb(170, 174, 184),
+        ElementKind::MacroRules | ElementKind::MacroCall => C::from_rgb(230, 130, 160),
+        ElementKind::Use => C::from_rgb(140, 146, 158),
+        ElementKind::ExternCrate | ElementKind::ForeignMod => C::from_rgb(160, 160, 205),
+        ElementKind::CrateAttrs | ElementKind::Other => C::from_rgb(150, 150, 160),
+    }
 }
 
 const BG: egui::Color32 = egui::Color32::from_rgb(24, 26, 32);
@@ -88,51 +204,81 @@ const LEGIBLE_SCALE: f32 = 0.45;
 /// (a syntax error, an empty file); an empty string means all is well.
 pub fn show(
     ui: &mut egui::Ui,
-    charts: &[Chart],
+    model: &FileModel,
     lay: &FlowLayout,
     view: &mut FlowView,
     status: &str,
 ) -> ShowResult {
+    let charts = &model.charts;
     let mut result = ShowResult::default();
 
     // ── Toolbar ───────────────────────────────────────────────────────────
     ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new("Function").size(11.0).color(DIM_TEXT));
-        let current = if view.selected.is_empty() {
-            "—".to_string()
+        ui.label(egui::RichText::new("Element").size(11.0).color(DIM_TEXT));
+        let current = if view.all {
+            ALL_LABEL.to_string()
         } else {
-            view.selected.clone()
+            charts
+                .iter()
+                .find(|c| c.key == view.selected)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "—".to_string())
         };
         egui::ComboBox::from_id_salt("flow_chart_pick")
             .selected_text(egui::RichText::new(current).size(11.5))
-            .width(240.0)
+            .width(260.0)
+            .height(420.0)
             .show_ui(ui, |ui| {
-                for c in charts {
-                    // Entry points lead with what starts them; an `#[interrupt]`
-                    // in the same list as a helper `fn` is the difference
-                    // between "hardware calls this" and "someone calls this".
-                    let text = egui::RichText::new(format!("{}  ·  {}", c.name, c.kind.word()))
-                        .size(11.5)
-                        .color(if c.kind.is_entry() { TEXT } else { DIM_TEXT });
-                    if ui.selectable_label(view.selected == c.name, text).clicked() {
-                        view.selected = c.name.clone();
-                        view.pan = egui::Vec2::ZERO;
-                        view.zoom = 1.0;
-                    }
+                if ui
+                    .selectable_label(
+                        view.all,
+                        egui::RichText::new(ALL_LABEL).size(11.5).color(TEXT),
+                    )
+                    .on_hover_text("Every element of the file, in source order")
+                    .clicked()
+                {
+                    view.all = true;
+                }
+                ui.separator();
+                for row in picker_rows(model) {
+                    ui.horizontal(|ui| {
+                        ui.add_space(row.depth as f32 * 14.0);
+                        match &row.key {
+                            None => {
+                                ui.label(
+                                    egui::RichText::new(&row.label).size(11.0).color(DIM_TEXT),
+                                );
+                            }
+                            Some(key) => {
+                                // Entry points lead with what starts them; an
+                                // `#[interrupt]` in the same list as a helper
+                                // `fn` is the difference between "hardware calls
+                                // this" and "someone calls this".
+                                let text = egui::RichText::new(&row.label)
+                                    .size(11.5)
+                                    .color(if row.entry { TEXT } else { DIM_TEXT });
+                                let on = !view.all && view.selected == *key;
+                                if ui.selectable_label(on, text).clicked() {
+                                    view.open(key.clone());
+                                }
+                            }
+                        }
+                    });
                 }
             });
 
         ui.add_space(10.0);
-        ui.label(
-            egui::RichText::new(format!(
-                "{} boxes · {} edges",
-                lay.boxes.len(),
-                lay.edges.len()
-            ))
-            .size(11.0)
-            .color(DIM_TEXT),
-        );
-        if view.last_scale < LEGIBLE_SCALE {
+        let counts = if view.all {
+            format!(
+                "{} · {}",
+                plural(model.elements.len(), "element"),
+                plural(charts.len(), "function")
+            )
+        } else {
+            format!("{} boxes · {} edges", lay.boxes.len(), lay.edges.len())
+        };
+        ui.label(egui::RichText::new(counts).size(11.0).color(DIM_TEXT));
+        if !view.all && view.last_scale < LEGIBLE_SCALE {
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new(format!(
@@ -152,6 +298,22 @@ pub fn show(
             );
         }
     });
+
+    // ── The whole file ────────────────────────────────────────────────────
+    if view.all {
+        ui.label(
+            egui::RichText::new(
+                "click a row = go to its line · double-click a function = open its flowchart",
+            )
+            .size(10.5)
+            .color(egui::Color32::from_rgb(120, 120, 130)),
+        );
+        ui.add_space(2.0);
+        let (goto, open) = outline(ui, model, &view.selected);
+        result.goto_line = goto;
+        result.open_chart = open;
+        return result;
+    }
 
     // ── Legend + hints ────────────────────────────────────────────────────
     ui.horizontal_wrapped(|ui| {
@@ -176,8 +338,7 @@ pub fn show(
     });
     ui.label(
         egui::RichText::new(
-            "Ctrl+± / mouse wheel zoom, Ctrl+0 reset · drag the background = pan · \
-             click a box = go to its line",
+            "Ctrl+± / mouse wheel zoom, Ctrl+0 reset · drag the background = pan · click a box = go to its line",
         )
         .size(10.5)
         .color(egui::Color32::from_rgb(120, 120, 130)),
@@ -275,12 +436,10 @@ pub fn show(
             // being looked at.
             result.goto_line = Some(b.node.line);
             if b.node.shape == Shape::Subroutine
-                && let Some(c) = b
-                    .node
-                    .goto_line
-                    .and_then(|target| charts.iter().find(|c| c.line == target))
+                && let Some(key) = &b.node.goto_key
+                && charts.iter().any(|c| c.key == *key)
             {
-                result.open_chart = Some(c.name.clone());
+                result.open_chart = Some(key.clone());
             }
         }
         // The box text may be elided at this scale; the tooltip never is.
@@ -309,6 +468,153 @@ pub fn show(
     }
 
     result
+}
+
+fn plural(n: usize, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// Height of one outline row.
+const ROW_H: f32 = 18.0;
+/// Indent per level of nesting (a method under its `impl`).
+const INDENT: f32 = 16.0;
+/// Width of the kind-word column.
+const KIND_W: f32 = 58.0;
+/// Width kept free on the right for the line number.
+const LINE_W: f32 = 44.0;
+
+/// "All — whole file": every element of the file, one row each, in source
+/// order, members indented under their container.
+///
+/// A LIST, not boxes on the zoomable canvas: it is an enumeration, and on the
+/// canvas it would inherit the auto-fit that shrinks a long file to unreadable
+/// and the wheel-zoom that fights reading down a page. Here the wheel scrolls,
+/// the text stays at its native size, and only the visible rows are drawn
+/// (`show_rows`), so a ten-thousand-line file costs what a screenful does.
+///
+/// Returns `(line to jump to, chart to open)`. A single click only jumps - the
+/// list stays, so it can be read top to bottom while the editor follows; a
+/// double click on a function opens its flowchart.
+fn outline(ui: &mut egui::Ui, model: &FileModel, current: &str) -> (Option<usize>, Option<String>) {
+    let mut goto = None;
+    let mut open = None;
+    if model.elements.is_empty() {
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("This file has no items.")
+                .size(12.0)
+                .color(DIM_TEXT),
+        );
+        return (goto, open);
+    }
+    let bg = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(bg, 0.0, BG);
+    egui::ScrollArea::vertical()
+        .id_salt("flow_outline")
+        .auto_shrink([false, false])
+        .show_rows(ui, ROW_H, model.elements.len(), |ui, range| {
+            for e in &model.elements[range] {
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), ROW_H),
+                    egui::Sense::click(),
+                );
+                let painter = ui.painter();
+                if resp.hovered() {
+                    painter.rect_filled(
+                        rect,
+                        2.0,
+                        egui::Color32::from_rgba_unmultiplied(120, 150, 210, 38),
+                    );
+                } else if e.chart.is_some() && e.key == current {
+                    // The function the chart view would go back to.
+                    painter.rect_filled(
+                        rect,
+                        2.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 214, 90, 22),
+                    );
+                }
+                let dim = |c: egui::Color32| {
+                    if e.generated {
+                        c.gamma_multiply(0.55)
+                    } else {
+                        c
+                    }
+                };
+                let x = rect.left() + 6.0 + e.depth as f32 * INDENT;
+                let mid = rect.center().y;
+                let kind = row_galley(
+                    ui,
+                    e.kind.word(),
+                    10.5,
+                    dim(kind_color(e.kind)),
+                    KIND_W - 6.0,
+                );
+                painter.galley(egui::pos2(x, mid - kind.size().y / 2.0), kind, TEXT);
+                let text_x = x + KIND_W;
+                let room = rect.right() - LINE_W - text_x;
+                let sig = row_galley(ui, &e.signature, 11.5, dim(TEXT), room);
+                painter.galley(egui::pos2(text_x, mid - sig.size().y / 2.0), sig, TEXT);
+                painter.text(
+                    egui::pos2(rect.right() - 6.0, mid),
+                    egui::Align2::RIGHT_CENTER,
+                    e.ident_line.to_string(),
+                    egui::FontId::monospace(10.0),
+                    DIM_TEXT,
+                );
+                let resp = resp.on_hover_text(outline_tip(e));
+                if resp.clicked() {
+                    goto = Some(e.ident_line);
+                }
+                if resp.double_clicked() && e.chart.is_some() {
+                    open = Some(e.key.clone());
+                }
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+            }
+        });
+    (goto, open)
+}
+
+/// One line of monospace text, cut with an ellipsis at `max_w` rather than
+/// wrapped - a row is one line high.
+fn row_galley(
+    ui: &egui::Ui,
+    text: &str,
+    size: f32,
+    color: egui::Color32,
+    max_w: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat::simple(egui::FontId::monospace(size), color),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w.max(8.0));
+    ui.painter().layout_job(job)
+}
+
+/// The hover text of an outline row: everything the row had no room for.
+pub fn outline_tip(e: &Element) -> String {
+    let mut lines: Vec<String> = match e.kind {
+        ElementKind::Use => e.detail.iter().map(|t| format!("use {t};")).collect(),
+        _ => e.detail.clone(),
+    };
+    lines.push(String::new());
+    lines.push(if e.start_line == e.end_line {
+        format!("line {}", e.start_line)
+    } else {
+        format!("lines {}–{}", e.start_line, e.end_line)
+    });
+    if e.generated {
+        lines.push("generated by the IDE".to_string());
+    }
+    if e.test_code {
+        lines.push("test code".to_string());
+    }
+    if e.chart.is_some() {
+        lines.push("double-click to open its flowchart".to_string());
+    }
+    lines.join("\n")
 }
 
 /// One panning axis, clamped so the chart can never be dragged out of sight.
@@ -569,6 +875,215 @@ mod tests {
                 assert_ne!(fill(*a), fill(*b), "{a:?} and {b:?} share a fill");
             }
         }
+    }
+
+    const FILE: &str = "use core::fmt;\n\
+                        const LIMIT: u32 = 10;\n\
+                        struct Frame { a: u8 }\n\
+                        impl Frame {\n    fn feed(&mut self) {}\n}\n\
+                        #[entry]\nfn main() -> ! { loop {} }\n\
+                        fn helper() {}\n";
+
+    fn model() -> FileModel {
+        crate::panels::flow_map::parse::parse_file(FILE).unwrap()
+    }
+
+    /// The picker lists functions, each under its container, and nothing that
+    /// has no chart to open.
+    #[test]
+    fn the_picker_lists_functions_under_their_containers() {
+        let rows = picker_rows(&model());
+        let got: Vec<(usize, &str, Option<&str>, bool)> = rows
+            .iter()
+            .map(|r| (r.depth, r.label.as_str(), r.key.as_deref(), r.entry))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, "impl Frame", None, false),
+                (1, "feed  ·  fn", Some("Frame::feed"), false),
+                (0, "main  ·  entry", Some("main"), true),
+                (0, "helper  ·  fn", Some("helper"), false),
+            ]
+        );
+    }
+
+    /// The mode survives a save as a bit, and bits a newer build added are
+    /// ignored rather than turning the view off.
+    #[test]
+    fn the_mode_bits_round_trip_and_ignore_what_they_do_not_know() {
+        let mut v = FlowView::default();
+        assert_eq!(v.mode_bits(), 0, "the default writes nothing");
+        v.all = true;
+        let bits = v.mode_bits();
+        let mut back = FlowView::default();
+        back.set_mode_bits(bits);
+        assert!(back.all);
+        back.set_mode_bits(bits | 0b1000_0000);
+        assert!(back.all, "an unknown bit leaves the known one alone");
+        back.set_mode_bits(0b1000_0000);
+        assert!(!back.all);
+    }
+
+    /// Opening a function always lands on its chart, fitted - including from
+    /// the whole-file view, which it leaves.
+    #[test]
+    fn opening_a_chart_leaves_the_whole_file_view() {
+        let mut v = FlowView {
+            all: true,
+            zoom: 3.0,
+            pan: egui::vec2(40.0, -12.0),
+            ..Default::default()
+        };
+        v.open("Frame::feed".to_string());
+        assert!(!v.all);
+        assert_eq!(v.selected, "Frame::feed");
+        assert_eq!((v.zoom, v.pan), (1.0, egui::Vec2::ZERO));
+    }
+
+    #[test]
+    fn a_use_row_tooltip_reads_as_code() {
+        let m = crate::panels::flow_map::parse::parse_file("use a::b;\nuse c::d;\n").unwrap();
+        let tip = outline_tip(&m.elements[0]);
+        assert!(tip.starts_with("use a::b;\nuse c::d;\n"), "{tip}");
+        assert!(tip.contains("lines 1–2"), "{tip}");
+    }
+
+    /// Every string one frame of the tab paints, plus what it reported.
+    fn frame(
+        ctx: &egui::Context,
+        m: &FileModel,
+        view: &mut FlowView,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) -> (Vec<String>, ShowResult) {
+        fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 800.0),
+            )),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let empty = FlowLayout::default();
+        let mut result = ShowResult::default();
+        let shapes = ctx
+            .run_ui(input, |ui| {
+                result = show(ui, m, &empty, view, "");
+            })
+            .shapes;
+        let mut out = Vec::new();
+        for s in &shapes {
+            walk(&s.shape, &mut out);
+        }
+        (out, result)
+    }
+
+    /// "All — whole file" paints one row per element - kind word and
+    /// declaration - and names itself in the picker.
+    #[test]
+    fn the_whole_file_view_lists_every_element() {
+        let m = model();
+        let mut view = FlowView {
+            all: true,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let (texts, _) = frame(&ctx, &m, &mut view, Vec::new(), 0.0);
+        assert!(texts.iter().any(|t| t == ALL_LABEL), "{texts:?}");
+        for e in &m.elements {
+            assert!(
+                texts.contains(&e.signature),
+                "row for {} missing: {texts:?}",
+                e.key
+            );
+            assert!(texts.iter().any(|t| t == e.kind.word()), "{texts:?}");
+        }
+        // It is a list: none of the chart view's legend.
+        assert!(!texts.iter().any(|t| t == "decision"), "{texts:?}");
+    }
+
+    /// A click on a row jumps the editor and keeps the list; a double click on
+    /// a function opens its chart.
+    #[test]
+    fn a_click_jumps_and_a_double_click_opens() {
+        let m = model();
+        let mut view = FlowView {
+            all: true,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let (_, first) = frame(&ctx, &m, &mut view, Vec::new(), 0.0);
+        assert!(first.goto_line.is_none());
+
+        // Where the `helper` row lands depends on the toolbar above the list,
+        // so find it the way a user would: click down the list until the
+        // click jumps to `helper`'s line.
+        let helper = m.elements.iter().position(|e| e.key == "helper").unwrap();
+        let mut hit = None;
+        for y in (60..600).step_by(3) {
+            let pos = egui::pos2(300.0, y as f32);
+            let (_, r) = frame(
+                &ctx,
+                &m,
+                &mut view,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                1.0 + y as f64,
+            );
+            if r.goto_line == Some(m.elements[helper].ident_line) {
+                hit = Some(pos);
+                break;
+            }
+        }
+        let pos = hit.expect("clicking the helper row jumps to its line");
+        assert!(view.all, "a single click keeps the list");
+
+        // Two clicks in quick succession on the same row: a double click.
+        let click = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let t = 5000.0;
+        frame(&ctx, &m, &mut view, vec![egui::Event::PointerMoved(pos)], t);
+        frame(
+            &ctx,
+            &m,
+            &mut view,
+            vec![click(true), click(false)],
+            t + 0.05,
+        );
+        let (_, r) = frame(
+            &ctx,
+            &m,
+            &mut view,
+            vec![click(true), click(false)],
+            t + 0.10,
+        );
+        assert_eq!(r.open_chart.as_deref(), Some("helper"));
     }
 
     #[test]
