@@ -166,6 +166,23 @@ impl AppIde {
         // and taken once per frame so no tab needs the mutex.
         let missing_tools: Vec<&'static str> = self.tools_state.lock().unwrap().unavailable();
         let can_flash = self.selected_build_cfg().is_some();
+        // A bitstream the FPGA would reject turns the Flash buttons red. Looked
+        // at only while the Flash tab shows, and only on a board that loads one.
+        let fpga_block = (self.build_tab == BuildPanelTab::Dfu
+            && !self.diag_collapsed
+            && self
+                .mcu
+                .as_ref()
+                .is_some_and(crate::panels::mcu_module::codegen::rp::fpga_loader))
+        .then(|| {
+            let verdict = self.fpga_watch.get(self.project_dir.as_deref());
+            verdict
+                .result
+                .as_ref()
+                .err()
+                .map(crate::panels::mcu_module::fpga_bitstream::blocking_reason)
+        })
+        .flatten();
         // Cargo-tab Build button (moved off the top toolbar on 2026-07-10).
         let mut build_go = false;
         // Cargo-tab Size button (Flash/RAM usage measurement).
@@ -376,6 +393,7 @@ impl AppIde {
                     &mut probe_flash_go,
                     &mut probe_flash_stop,
                     &missing_tools,
+                    fpga_block.as_deref(),
                 );
             });
         // Clicking a tab on the collapsed bar reopens the panel at 20% of the

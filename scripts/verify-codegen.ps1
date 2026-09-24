@@ -360,9 +360,17 @@ $ALL_CASES = @(
 
     # The two W boards, whose on-board LED is not on the chip at all - it is
     # GPIO0 of the CYW43 radio, reached through a PIO-driven half-duplex SPI and
-    # an async-only driver. The harness writes PLACEHOLDER firmware blobs: they
-    # make `include_bytes!` resolve, which is all the codegen needs proving.
+    # an async-only driver. `write_project` lays down the real firmware the IDE
+    # ships, and the harness checks the SIZES, so a stub cannot pass for it.
     @{ n = "Raspberry Pi Pico W radio x2"; t = "emit_rp_radio_project";      e = @{};                       q = $true; fam = "rp"; lk = $true }
+
+    # The pico2-ice, Blocking and Async: the only RP2350B board, so the only
+    # rows of the FUNCSEL table past GP29 (UART1 on GP36/37, SPI0 on 32/34/35,
+    # PWM slice 11) and the only project on embassy-rp's `rp235xb` feature.
+    # Both carry the FPGA loader and the 104 KB bitstream it includes, which is
+    # exactly the image size that pushed IMAGE_DEF out of the boot ROM's 4 KiB
+    # before memory.x placed it - so `lk` is what proves this row.
+    @{ n = "pico2-ice x2";                 t = "emit_pico2_ice_project";     e = @{};                       q = $true; fam = "rp"; lk = $true }
 
     # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired

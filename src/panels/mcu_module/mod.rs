@@ -11,6 +11,7 @@ pub mod datasheet_import;
 pub mod esp_clocks;
 pub mod esp_gen;
 pub mod esp_metadata;
+pub mod fpga_bitstream;
 pub mod mcu;
 pub mod mcu_catalog;
 pub mod mcu_config;

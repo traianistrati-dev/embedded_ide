@@ -2919,7 +2919,7 @@ fn rp_pwm_notes(
     // rejoined with its own indentation, and the details pane would draw the run
     // of spaces - the same trap `RP_DMA_NOTE` above is written around.
     let mut out = vec![
-        "On this chip the pad decides the channel - slice (GPIO / 2) mod 8, channel A for an even GPIO and B for an odd one - and both HALs make that a compile-time bound, so the channel is not selectable here."
+        "On this chip the pad decides the channel - slice (GPIO / 2) mod 8 for GP0..31 and 8 + ((GPIO - 32) / 2) mod 4 for GP32..47 on an RP2350B, channel A for an even GPIO and B for an odd one - and both HALs make that a compile-time bound, so the channel is not selectable here."
             .to_owned(),
     ];
     // Which pad each channel actually GETS. Two pads sixteen apart share every

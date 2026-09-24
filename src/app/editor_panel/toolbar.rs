@@ -12,7 +12,7 @@ use crate::build::{self, BuildState};
 use crate::dfu::{self, DfuState};
 use crate::espflash::{self, EspFlashState};
 use crate::openocd::{self, OpenOcdState};
-use crate::panels::mcu_module::project_gen;
+use crate::panels::mcu_module::{fpga_bitstream, project_gen};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::Arc;
@@ -130,10 +130,17 @@ impl AppIde {
             .unwrap_or_default();
         let interface_cfg = openocd::interface_cfg_for_kind(&kind).to_string();
         let adapter = openocd::adapter_select_cmd(&kind, &vid_pid);
+        let files = self.current_project_files();
+        if let Err(why) = fpga_bitstream::preflight(&files) {
+            *self.openocd_state.lock().unwrap() =
+                OpenOcdState::Error(fpga_bitstream::refusal(&why));
+            self.refuse_flash(why);
+            return;
+        }
         let build_dir = crate::workspace::dir();
         if project_gen::write_project(
             &build_dir,
-            &self.current_project_files(),
+            &files,
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
@@ -164,10 +171,17 @@ impl AppIde {
         let Some((project, _tc)) = self.selected_build_cfg() else {
             return;
         };
+        let files = self.current_project_files();
+        if let Err(why) = fpga_bitstream::preflight(&files) {
+            *self.probe_flash_state.lock().unwrap() =
+                crate::probe_flash::ProbeFlashState::Error(fpga_bitstream::refusal(&why));
+            self.refuse_flash(why);
+            return;
+        }
         let build_dir = crate::workspace::dir();
         if project_gen::write_project(
             &build_dir,
-            &self.current_project_files(),
+            &files,
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
@@ -187,6 +201,21 @@ impl AppIde {
                 std::sync::Arc::clone(&self.activity),
             );
         }
+    }
+
+    /// Say in the Flash tab why a flash did not start. The button is normally
+    /// red already (see `show_dfu_tab`); this catches a file that changed since
+    /// the tab last looked.
+    ///
+    /// A fresh log, as every real start begins with: the phase row reads the
+    /// log, and the last run's "Build OK" above this line would report a build
+    /// that never ran.
+    fn refuse_flash(&mut self, why: String) {
+        let mut log = self.dfu_log.lock().unwrap();
+        log.clear();
+        log.push(format!("[error] {why}"));
+        drop(log);
+        self.build_tab = BuildPanelTab::Dfu;
     }
 
     /// Stop a running `cargo flash` (the Flash button's second state).
@@ -346,10 +375,19 @@ impl AppIde {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
+        let files = self.current_project_files();
+        // Refused here too, not only at Flash: the firmware would build fine
+        // and the fault would surface on the bench, as an FPGA that never
+        // configures.
+        if let Err(why) = fpga_bitstream::preflight(&files) {
+            self.build_tab = BuildPanelTab::Cargo;
+            *self.build_state.lock().unwrap() = BuildState::Failed(fpga_bitstream::refusal(&why));
+            return;
+        }
         let build_dir = crate::workspace::dir();
         match project_gen::write_project(
             &build_dir,
-            &self.current_project_files(),
+            &files,
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
@@ -566,10 +604,25 @@ impl AppIde {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
+        let files = self.current_project_files();
+        // Run flashes the board; Attach only reads what already runs there.
+        if mode == crate::rtt::RttMode::Run {
+            if let Err(why) = fpga_bitstream::preflight(&files) {
+                self.build_tab = BuildPanelTab::Rtt;
+                self.rtt
+                    .state
+                    .lock()
+                    .unwrap()
+                    .push_plain(crate::terminal::LineKind::Notice, format!("[error] {why}"));
+                *self.rtt.phase.lock().unwrap() =
+                    crate::rtt::RttPhase::Error(fpga_bitstream::refusal(&why));
+                return;
+            }
+        }
         let build_dir = crate::workspace::dir();
         match project_gen::write_project(
             &build_dir,
-            &self.current_project_files(),
+            &files,
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
@@ -599,10 +652,22 @@ impl AppIde {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
+        let files = self.current_project_files();
+        if let Err(why) = fpga_bitstream::preflight(&files) {
+            self.build_tab = BuildPanelTab::Debug;
+            self.debugger
+                .console
+                .lock()
+                .unwrap()
+                .push_plain(crate::terminal::LineKind::Notice, format!("[error] {why}"));
+            self.debugger.state.lock().unwrap().phase =
+                crate::debugger::DebugPhase::Error(fpga_bitstream::refusal(&why));
+            return;
+        }
         let build_dir = crate::workspace::dir();
         match project_gen::write_project(
             &build_dir,
-            &self.current_project_files(),
+            &files,
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
@@ -1275,5 +1340,65 @@ mod tests {
             elide_path_left(&over, PATH_MAX_CHARS).chars().count(),
             PATH_MAX_CHARS
         );
+    }
+
+    /// Every action here that writes the build copy either checks the FPGA
+    /// bitstream first, or is on the list of those that never program a board
+    /// with one. A new flash path lands in neither, and fails this test.
+    #[test]
+    fn every_path_that_programs_the_board_checks_the_bitstream() {
+        const CHECKS: [&str; 5] = [
+            "flash_swd",
+            "flash_probe_rs",
+            "start_build",
+            "start_rtt",
+            "start_debug",
+        ];
+        // Measuring, profiling, sampling a running board, or an ESP (no FPGA).
+        const EXEMPT: [&str; 4] = [
+            "flash_esp",
+            "start_size_measure_inner",
+            "start_profile",
+            "start_flame",
+        ];
+        let src = include_str!("toolbar.rs");
+        let src = &src[..src.find("#[cfg(test)]").expect("test module")];
+        let mut seen = Vec::new();
+        for chunk in src.split("fn ").skip(1) {
+            let name: String = chunk
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            // The body runs to the next item at this indentation.
+            let body = &chunk[..chunk.find("\n    }\n").unwrap_or(chunk.len())];
+            let Some(write) = body.find("project_gen::write_project(") else {
+                continue;
+            };
+            if seen.contains(&name) {
+                continue;
+            }
+            if CHECKS.contains(&name.as_str()) {
+                let check = body
+                    .find("fpga_bitstream::preflight(")
+                    .unwrap_or_else(|| panic!("{name} writes the project without the check"));
+                assert!(
+                    check < write,
+                    "{name} checks only after writing the project"
+                );
+            } else {
+                assert!(
+                    EXEMPT.contains(&name.as_str()),
+                    "{name} writes the build copy: add it to CHECKS (it programs the \
+                     board) or to EXEMPT (it never does)"
+                );
+            }
+            seen.push(name);
+        }
+        for name in CHECKS.iter().chain(&EXEMPT) {
+            assert!(
+                seen.iter().any(|s| s == name),
+                "{name} is gone or no longer writes"
+            );
+        }
     }
 }

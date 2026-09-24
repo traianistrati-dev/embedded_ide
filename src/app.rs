@@ -1769,6 +1769,9 @@ pub struct AppIde {
     /// When the Flash tab last auto-scanned, so flipping between tabs doesn't
     /// spawn an enumeration per click.
     last_flash_autoscan: Option<std::time::Instant>,
+    /// The project's FPGA bitstream, checked for the Configuration card and
+    /// the Flash buttons - see `fpga_bitstream::BitstreamWatch`.
+    fpga_watch: crate::panels::mcu_module::fpga_bitstream::BitstreamWatch,
     /// Source breakpoints per workspace-relative path (1-based lines), toggled
     /// from the editor's line-number gutter. Session-only (not persisted).
     breakpoints: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>>,
@@ -2449,6 +2452,7 @@ impl AppIde {
             probe_scan_inbox: Arc::new(Mutex::new(None)),
             probe_scanning: false,
             last_flash_autoscan: None,
+            fpga_watch: Default::default(),
             breakpoints: std::collections::BTreeMap::new(),
             completion_owner: EditorSlot::Main,
             build_text_snapshot: HashMap::new(),
@@ -3107,6 +3111,7 @@ impl AppIde {
                 && cached.memory_x == self.memory_x
                 && cached.build_rs == self.build_rs
                 && cached.gitignore == self.gitignore
+                && cached.blob_source == self.project_dir
             {
                 return cached.clone();
             }
@@ -3126,6 +3131,10 @@ impl AppIde {
                 .selected_target()
                 .map(|t| project_gen::rust_toolchain_for(&t))
                 .unwrap_or_default(),
+            // Every workspace write goes through this struct, so this is the
+            // one place a replaced bitstream or radio firmware can reach the
+            // build copy from.
+            blob_source: self.project_dir.clone(),
         };
         files
     }

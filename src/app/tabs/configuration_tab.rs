@@ -102,6 +102,16 @@ impl AppIde {
             .collect();
         let comp_gen = comparator::Generation::of(&family);
 
+        // A board with an FPGA on it (the pico2-ice). Its bitstream is checked
+        // only while the firmware loads it: ICE_CRESET is the switch, and a
+        // file nothing loads is nothing to worry about.
+        let has_fpga = mcu
+            .iter_all_pins()
+            .any(|p| p.name.starts_with("ICE_CRESET"));
+        let fpga = crate::panels::mcu_module::codegen::rp::fpga_loader(mcu)
+            .then(|| self.fpga_watch.get(self.project_dir.as_deref()).clone());
+        let project_dir = self.project_dir.clone();
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
             ui.label(dim(
@@ -122,6 +132,11 @@ impl AppIde {
 
             if has_pio {
                 pio_card(ui, &pio, &family, is_async, has_radio_pad);
+                ui.add_space(12.0);
+            }
+
+            if has_fpga {
+                fpga_card(ui, fpga.as_ref(), project_dir.as_deref());
                 ui.add_space(12.0);
             }
 
@@ -735,6 +750,127 @@ fn pio_card(
         ui.label(dim(
             "A block's instruction memory is shared by its four state machines, so a second program there has to fit alongside the first.",
         ));
+    });
+}
+
+/// The FPGA card: which bitstream the firmware loads into the iCE40, and
+/// whether the FPGA will take it.
+///
+/// `verdict` is `None` while the loader is off. A bad file is refused by Build
+/// and Flash as well (`fpga_bitstream::preflight`); this is where the user sees
+/// why before pressing either.
+fn fpga_card(
+    ui: &mut egui::Ui,
+    verdict: Option<&crate::panels::mcu_module::fpga_bitstream::Verdict>,
+    project_dir: Option<&std::path::Path>,
+) {
+    use crate::panels::mcu_module::fpga_bitstream as fb;
+    const WARN: egui::Color32 = egui::Color32::from_rgb(235, 150, 90);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{}  FPGA", ph::CIRCUITRY))
+                    .size(13.0)
+                    .strong(),
+            );
+            // The same switch as the body below: with the loader off, nothing
+            // configures it.
+            ui.label(dim(if verdict.is_some() {
+                format!(
+                    "{} - configured over SPI by the firmware at every boot",
+                    fb::DEVICE
+                )
+            } else {
+                format!(
+                    "{} - held in reset, the firmware does not load it",
+                    fb::DEVICE
+                )
+            }));
+        });
+        ui.add_space(6.0);
+
+        let Some(v) = verdict else {
+            ui.label(dim(
+                "Not loaded: the FPGA stays in reset, held there by a pull-down. Set \
+                 ICE_CRESET (GP31) to GPIO Output on the Pins tab and the firmware loads \
+                 fpga/top.bin into it before anything else runs.",
+            ));
+            return;
+        };
+
+        ui.label(dim(match v.file {
+            Some(_) => format!("Loads {} from the project folder.", fb::BITSTREAM_PATH),
+            None => format!(
+                "Loads the IDE's default gateware: the project has no {} yet. Save \
+                 puts a copy there, with its Verilog source, for you to replace.",
+                fb::BITSTREAM_PATH
+            ),
+        }));
+        ui.add_space(4.0);
+        match &v.result {
+            Ok(info) => {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  {} B, {}, {}",
+                        ph::CHECK_CIRCLE,
+                        fb::thousands(info.len),
+                        fb::DEVICE,
+                        if info.crc_checked { "CRC ok" } else { "no CRC" }
+                    ))
+                    .size(11.5)
+                    .color(egui::Color32::from_rgb(120, 190, 120)),
+                );
+                for w in info.warnings() {
+                    ui.label(
+                        egui::RichText::new(format!("{}  {w}", ph::WARNING))
+                            .size(11.0)
+                            .color(WARN),
+                    );
+                }
+                for n in info.notes() {
+                    ui.label(dim(n));
+                }
+            }
+            Err(e) => {
+                ui.label(
+                    egui::RichText::new(format!("{}  {e}", ph::X_CIRCLE))
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(235, 85, 75)),
+                );
+                ui.label(dim(if matches!(e, fb::BitError::Unreadable(_)) {
+                    "Build and Flash wait until it can be read: close the program that \
+                     has it open, or check its permissions."
+                } else {
+                    "Build and Flash refuse this file. Replace it, or delete it to go \
+                     back to the IDE's default."
+                }));
+            }
+        }
+
+        if let Some(dir) = project_dir {
+            ui.add_space(4.0);
+            let err_id = egui::Id::new("fpga_card_open_error");
+            if ui
+                .button(format!("{} Open fpga/ folder", ph::FOLDER_OPEN))
+                .on_hover_text(
+                    "Where the bitstream, its Verilog source, the pin file and the \
+                     README with the build commands live.",
+                )
+                .clicked()
+            {
+                match crate::reveal::open(&dir.join("fpga")) {
+                    Ok(()) => ui.data_mut(|d| {
+                        d.remove::<String>(err_id);
+                    }),
+                    Err(e) => ui.data_mut(|d| {
+                        d.insert_temp(err_id, e);
+                    }),
+                }
+            }
+            if let Some(e) = ui.data(|d| d.get_temp::<String>(err_id)) {
+                ui.label(egui::RichText::new(e).size(11.0).color(WARN));
+            }
+        }
     });
 }
 

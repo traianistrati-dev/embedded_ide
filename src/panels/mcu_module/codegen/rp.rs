@@ -369,7 +369,7 @@ fn pwm_adc_lines(mcu: &Mcu, hal: &str) -> String {
 
     if !pwm.is_empty() {
         o.push_str(
-            "    // All eight slices come from one PWM peripheral, so main.rs owns
+            "    // Every slice comes from one PWM peripheral, so main.rs owns
 ",
         );
         o.push_str(
@@ -455,6 +455,10 @@ fn section(mcu: &Mcu) -> String {
         o.push_str("};\n\n");
     }
 
+    let fpga = fpga_loader(mcu);
+    if fpga {
+        o.push_str(&fpga_items());
+    }
     o.push_str(&format!("#[{hal}::entry]\n"));
     o.push_str("fn main() -> ! {\n");
     o.push_str(&format!(
@@ -514,6 +518,11 @@ fn section(mcu: &Mcu) -> String {
     o.push_str("    #[allow(unused_variables)]\n");
     o.push_str(&format!("    let pins = {hal}::gpio::Pins::new(\n"));
     o.push_str("        pac.IO_BANK0,\n        pac.PADS_BANK0,\n        sio.gpio_bank0,\n        &mut pac.RESETS,\n    );\n\n");
+    // The FPGA before any other pin: see `FPGA_BODY_HEAD`.
+    if fpga {
+        o.push_str(FPGA_BODY_HEAD);
+        o.push_str(&blocking_fpga_body(hal, usb.vco_mhz / usb.pd1 / usb.pd2));
+    }
     o.push_str(&gpio_lines(mcu));
     o.push_str(&bus_lines(mcu, hal));
     if radio_led(mcu) {
@@ -582,7 +591,7 @@ fn header(mcu: &Mcu) -> String {
 
 /// `src/pins/configs/uart{n}.rs`, `spi{n}.rs`, `i2c{n}.rs`.
 ///
-/// Each owns its peripheral outright — unlike PWM, where all eight slices come
+/// Each owns its peripheral outright — unlike PWM, where every slice comes
 /// from one block — so `init` takes it by value and hands back a `Handle` the
 /// caller keeps.
 /// The speed this bus runs at, as the Virtual Module has it.
@@ -816,7 +825,7 @@ fn bus_config_file(
 /// of each channel it drives.
 ///
 /// The slice itself is NOT taken by value: on this chip `Slices::new` hands out
-/// all eight at once from one `PWM` peripheral, so `main.rs` owns the set and
+/// every slice at once from one `PWM` peripheral, so `main.rs` owns the set and
 /// lends one out. That is the opposite of STM32, where each timer is its own
 /// peripheral and the config file can own it outright.
 fn pwm_config_file(mcu: &Mcu, slice: u8, chans: &[(u8, u8)]) -> String {
@@ -848,7 +857,7 @@ fn pwm_config_file(mcu: &Mcu, slice: u8, chans: &[(u8, u8)]) -> String {
     o.push_str("use embedded_hal::pwm::SetDutyCycle;\n\n");
 
     o.push_str(&format!(
-        "/// The slice this module drives. `main.rs` owns the whole set and lends\n/// this one out, because all eight come from one `PWM` peripheral.\npub type Handle = Slice<Pwm{slice}, FreeRunning>;\n\n"
+        "/// The slice this module drives. `main.rs` owns the whole set and lends\n/// this one out, because every slice comes from one `PWM` peripheral.\npub type Handle = Slice<Pwm{slice}, FreeRunning>;\n\n"
     ));
 
     // init
@@ -2295,9 +2304,17 @@ mod image_def_count {
     fn one_image_block_per_rp2350_image() {
         for id in ["rp2350_pico2", "rp2350_pico2_w"] {
             let blocking = main_rs(id, Runtime::Blocking);
-            assert_eq!(blocking.matches(IMAGE_SECTION).count(), 1, "{id} Blocking:\n{blocking}");
+            assert_eq!(
+                blocking.matches(IMAGE_SECTION).count(),
+                1,
+                "{id} Blocking:\n{blocking}"
+            );
             let asynchronous = main_rs(id, Runtime::Async);
-            assert_eq!(asynchronous.matches(IMAGE_SECTION).count(), 0, "{id} Async:\n{asynchronous}");
+            assert_eq!(
+                asynchronous.matches(IMAGE_SECTION).count(),
+                0,
+                "{id} Async:\n{asynchronous}"
+            );
         }
         // Which only holds while embassy-rp's own block is left switched on.
         for d in builtins::builtin_definitions() {
@@ -2314,6 +2331,919 @@ mod image_def_count {
             let code = main_rs("rp2040_pico", runtime);
             assert!(!code.contains(".start_block"), "{code}");
         }
+    }
+}
+
+/// The tinyVision pico2-ice (RP2350B + iCE40UP5K), pad by pad.
+///
+/// Taken from the Rev2 fabrication netlist (IPC-D-356), NOT from the vendor's
+/// `pico2_ice.h`, which is wrong three times over: it names GP22 as the FPGA
+/// clock (GP22 is a clock INPUT; the clock is GP21 = GPOUT0), puts I2C on
+/// GP12/13 (HSTX lanes that only reach the FFC) and calls GP32..35 SPI1 (the
+/// FUNCSEL table says SPI0).
+///
+/// The table is the single source: `emit_pico2_ice_definition` writes
+/// `assets/mcus/rp2350_pico2_ice.ron` from it, and the committed file is
+/// checked against it. Everything but the pins - the clock tree, the memory
+/// map, the probe - is the Pico 2's, because it is the same die.
+///
+/// Numbering: J2 is pads 1..40 and J3 is 41..80, each in header order (pin 1
+/// is the end away from the USB-C connector); the pads that are on the board
+/// but on no 0.1" header number from 81.
+#[cfg(test)]
+pub(super) mod pico2_ice_board {
+    use crate::panels::mcu_module::builtins;
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::mcu_def::{McuDefinition, PinDef, PinLayout};
+    use crate::panels::mcu_module::pins::PinFunction;
+
+    /// What a position carries: a GPIO the user may take, a GPIO that only
+    /// lights an LED, or something the board has spoken for.
+    #[derive(Clone, Copy)]
+    enum Pad {
+        /// `Gp(n, note)`: GPIO n with its whole FUNCSEL row, named `GPn (note)`.
+        Gp(u8, &'static str),
+        /// A GPIO wired only to an on-board LED: an output, or PWM to dim it.
+        Led(u8, &'static str),
+        /// A line the board owns that the user may switch ON as GPIO Output -
+        /// the FPGA's CRESET, which turns the loader on. Named without a `GP`
+        /// prefix, so `gpio_index` never binds it as an ordinary pin.
+        Switch(&'static str),
+        /// Reserved, explained by `colors::reserved_role`.
+        Fixed(&'static str),
+    }
+    use Pad::{Fixed, Gp, Led, Switch};
+
+    /// J2, pins 1..40. Most of it is the FPGA's own I/O: an `ICEn` pad has no
+    /// wire to the RP2350 at all.
+    const J2: [Pad; 40] = [
+        Fixed("ICE12 (flash IO2)"),  // 1
+        Switch("ICE_CRESET (GP31)"), // 2: GPIO Output = load the FPGA
+        Fixed("ICE13 (flash IO3)"),  // 3
+        Fixed("GND"),                // 4
+        Fixed("3V3_FPGA"),           // 5
+        Fixed("3V3_FPGA"),           // 6
+        Fixed("GND"),                // 7
+        Fixed("GND"),                // 8
+        Fixed("ICE28"),              // 9
+        Fixed("ICE31"),              // 10
+        Fixed("ICE32"),              // 11
+        Fixed("ICE34"),              // 12
+        Fixed("ICE36"),              // 13
+        Fixed("ICE38"),              // 14
+        Fixed("ICE42"),              // 15
+        Fixed("ICE43"),              // 16
+        Fixed("ICE37"),              // 17
+        Fixed("ICE_CLK (GP21)"),     // 18: GP21 through R6, 27 R
+        Gp(29, "ICE11"),             // 19
+        Fixed("ICE6"),               // 20
+        Fixed("ICE10 (SW2)"),        // 21
+        Gp(28, "ICE9"),              // 22
+        Fixed("VIO_BANK2"),          // 23
+        Fixed("VIO_BANK2"),          // 24
+        Fixed("GND"),                // 25
+        Fixed("GND"),                // 26
+        Fixed("ICE48"),              // 27
+        Fixed("ICE47"),              // 28
+        Fixed("ICE46"),              // 29
+        Fixed("ICE45"),              // 30
+        Fixed("ICE44 (G6)"),         // 31
+        Fixed("ICE2"),               // 32
+        Fixed("ICE3"),               // 33
+        Fixed("ICE4"),               // 34
+        Gp(2, "SDA"),                // 35: 10k pull-up
+        Fixed("RUN"),                // 36
+        Gp(3, "SCL"),                // 37: 10k pull-up
+        Fixed("BOOTSEL"),            // 38
+        Fixed("ADC7 (GP47)"),        // 39: through a 2.2k / 10k divider
+        Fixed("GND"),                // 40
+    ];
+
+    /// J3, pins 1..40: the FPGA's configuration port, the shared RP-ICE PMOD
+    /// (5..12), the FPGA's RGB LED, and the RP-only PMOD (23..30).
+    const J3: [Pad; 40] = [
+        Fixed("ICE_SS (GP5)"),     // 1
+        Fixed("ICE_SO (GP7)"),     // 2
+        Fixed("ICE_SI (GP4)"),     // 3
+        Fixed("ICE_SCK (GP6)"),    // 4: GP6 through R9, 27 R
+        Gp(30, "ICE25"),           // 5
+        Gp(25, "ICE23"),           // 6
+        Gp(23, "ICE19"),           // 7
+        Gp(27, "ICE18"),           // 8
+        Gp(20, "ICE27"),           // 9
+        Gp(24, "ICE26"),           // 10
+        Gp(26, "ICE21"),           // 11
+        Gp(22, "ICE20"),           // 12: through R34, 27 R
+        Fixed("GND"),              // 13
+        Fixed("GND"),              // 14
+        Fixed("3V3_FPGA"),         // 15
+        Fixed("3V3_FPGA"),         // 16
+        Fixed("ICE_DONE (GP40)"),  // 17
+        Fixed("ICE_LED_R"),        // 18
+        Gp(41, "ADC1"),            // 19
+        Fixed("ICE_LED_G"),        // 20
+        Gp(42, "ADC2/SW1"),        // 21: also reads SW1 through 5.1k
+        Fixed("ICE_LED_B"),        // 22
+        Gp(33, ""),                // 23
+        Gp(37, ""),                // 24
+        Gp(35, ""),                // 25
+        Gp(39, ""),                // 26
+        Gp(32, ""),                // 27
+        Gp(36, ""),                // 28
+        Gp(34, ""),                // 29
+        Gp(38, ""),                // 30
+        Fixed("GND"),              // 31
+        Fixed("GND"),              // 32
+        Fixed("3V3"),              // 33
+        Fixed("3V3"),              // 34
+        Fixed("VBUS"),             // 35
+        Fixed("VIN"),              // 36
+        Gp(43, "ADC3"),            // 37
+        Gp(44, "ADC4"),            // 38
+        Fixed("ADC5/VREF (GP45)"), // 39: R30 ties it to the TL431 shunt
+        Gp(46, "ADC6/VREF_EN"),    // 40: powers the TL431 through 1k
+    ];
+
+    /// On the board, on no 0.1" header: the RP's own RGB LED and the PSRAM
+    /// select, drawn along the top. The LED is common-anode, so LOW lights it -
+    /// the reverse of the Pico 2's GP25 - and the name has to say so, because
+    /// a non-reserved pad shows nothing else.
+    const TOP: [Pad; 4] = [
+        Led(0, "LED G, active LOW"),
+        Led(1, "LED R, active LOW"),
+        Led(9, "LED B, active LOW"),
+        Fixed("PSRAM_CS (GP8)"),
+    ];
+
+    /// GP10..19 reach only the 22-pin FFC (J6), the HSTX connector.
+    const BOTTOM: [Pad; 10] = [
+        Gp(10, "FFC"),
+        Gp(11, "FFC"),
+        Gp(12, "FFC"),
+        Gp(13, "FFC"),
+        Gp(14, "FFC"),
+        Gp(15, "FFC"),
+        Gp(16, "FFC"),
+        Gp(17, "FFC"),
+        Gp(18, "FFC"),
+        Gp(19, "FFC"),
+    ];
+
+    /// GPIO n's row of the RP2350 FUNCSEL table, in the order every Pico
+    /// definition lists it. The same formulas the Pico boards were generated
+    /// from, extended past GP29: PWM slices 8..11 serve GP32..47, and there is
+    /// no `AdcChannel` because the ADC inputs of a B part are GP40..47, which
+    /// rp235x-hal 0.4 does not offer.
+    fn gp_functions(n: u8) -> Vec<PinFunction> {
+        use PinFunction::*;
+        let spi = (n / 8) % 2;
+        let uart = ((n / 4 + 1) / 2) % 2;
+        let i2c = (n / 2) % 2;
+        let slice = if n < 32 {
+            (n / 2) % 8
+        } else {
+            8 + ((n - 32) / 2) % 4
+        };
+        vec![
+            GpioInput,
+            GpioOutput,
+            match n % 4 {
+                0 => SpiMiso(spi),
+                1 => SpiNss(spi),
+                2 => SpiSck(spi),
+                _ => SpiMosi(spi),
+            },
+            match n % 4 {
+                0 => UsartTx(uart),
+                1 => UsartRx(uart),
+                2 => UsartCts(uart),
+                _ => UsartRts(uart),
+            },
+            if n % 2 == 0 { I2cSda(i2c) } else { I2cScl(i2c) },
+            TimerPwm {
+                timer: slice,
+                channel: 1 + n % 2,
+            },
+        ]
+    }
+
+    fn pin_def(number: usize, pad: Pad) -> PinDef {
+        let (name, reserved, functions) = match pad {
+            Gp(n, "") => (format!("GP{n}"), false, gp_functions(n)),
+            Gp(n, note) => (format!("GP{n} ({note})"), false, gp_functions(n)),
+            Led(n, note) => (
+                format!("GP{n} ({note})"),
+                false,
+                gp_functions(n)
+                    .into_iter()
+                    .filter(|f| matches!(f, PinFunction::GpioOutput | PinFunction::TimerPwm { .. }))
+                    .collect(),
+            ),
+            Switch(name) => (name.to_owned(), false, vec![PinFunction::GpioOutput]),
+            Fixed(name) => (name.to_owned(), true, Vec::new()),
+        };
+        PinDef {
+            number,
+            name,
+            reserved,
+            functions,
+            af: Vec::new(),
+            fn_owner: Vec::new(),
+        }
+    }
+
+    /// The whole definition: the Pico 2's, with this board's identity and pins.
+    pub(in crate::panels::mcu_module::codegen) fn definition() -> McuDefinition {
+        let mut d = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2350_pico2")
+            .expect("built-in rp2350_pico2");
+        d.id = "rp2350_pico2_ice".into();
+        d.display_name = "tinyVision pico2-ice (RP2350B + iCE40UP5K)".into();
+        d.package = "2x 2x20 headers".into();
+        d.board_chip = Some("RP2350B".into());
+        d.project.pkg_name = "rp2350_pico2_ice".into();
+        // The one HAL difference: the B package's 48 GPIOs. On `rp235xa`
+        // embassy-rp has no `PIN_30`..`PIN_47` at all.
+        d.project.hal_dep_async = d
+            .project
+            .hal_dep_async
+            .map(|l| l.replace("\"rp235xa\"", "\"rp235xb\""));
+        d.project.memory_comment =
+            "tinyVision pico2-ice (RP2350B)  -  4 MiB Flash / 520 KiB RAM".into();
+        let row = |pads: &[Pad], first: usize| -> Vec<PinDef> {
+            pads.iter()
+                .enumerate()
+                .map(|(i, p)| pin_def(first + i, *p))
+                .collect()
+        };
+        d.pins = PinLayout {
+            left: row(&J2, 1),
+            right: row(&J3, 41),
+            top: row(&TOP, 81),
+            bottom: row(&BOTTOM, 81 + TOP.len()),
+            grid: None,
+        };
+        d
+    }
+
+    /// Writes the definition for `assets/mcus/`.
+    ///
+    /// ```text
+    /// cargo test --bin rust_on_chip emit_pico2_ice_definition -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "authoring tool: writes rp2350_pico2_ice.ron to the temp dir"]
+    fn emit_pico2_ice_definition() {
+        let text = ron::ser::to_string_pretty(
+            &definition(),
+            ron::ser::PrettyConfig::default().struct_names(true),
+        )
+        .expect("serialise");
+        let path = std::env::temp_dir().join("rp2350_pico2_ice.ron");
+        std::fs::write(&path, text).expect("write");
+        println!("wrote {}", path.display());
+    }
+
+    fn board() -> McuDefinition {
+        builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2350_pico2_ice")
+            .expect("built-in rp2350_pico2_ice")
+    }
+
+    /// The committed file is exactly what the table says - pins, identity and
+    /// the Pico 2's clock tree alike. A hand edit to the .ron, or a change to
+    /// the Pico 2 it borrows from, fails here until the file is regenerated.
+    #[test]
+    fn the_committed_definition_is_the_netlist() {
+        assert!(
+            board() == definition(),
+            "assets/mcus/rp2350_pico2_ice.ron is stale: run emit_pico2_ice_definition"
+        );
+    }
+
+    /// The formulas past GP29 are new, so check them where they are not: on
+    /// every GPIO the two boards share, the pico2-ice offers exactly what the
+    /// hand-checked Pico 2 does - minus the ADC, which an RP2350B has on
+    /// GP40..47 instead of GP26..29.
+    #[test]
+    fn below_gp30_the_functions_are_the_pico2s() {
+        let pico2 = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2350_pico2")
+            .expect("built-in rp2350_pico2")
+            .build_mcu();
+        let ice = board().build_mcu();
+        let mut compared = 0;
+        for p in ice.iter_all_pins().filter(|p| !p.reserved) {
+            let Some(n) = super::gpio_index(&p.name) else {
+                continue;
+            };
+            let Some(q) = pico2
+                .iter_all_pins()
+                .find(|q| super::gpio_index(&q.name) == Some(n) && q.available_functions.len() > 2)
+            else {
+                continue;
+            };
+            let theirs: Vec<_> = q
+                .available_functions
+                .iter()
+                .filter(|f| !matches!(f, PinFunction::AdcChannel { .. }))
+                .cloned()
+                .collect();
+            if p.name.contains("(LED") {
+                // An LED pad offers a subset - output and PWM - of the same row.
+                for f in &p.available_functions {
+                    assert!(theirs.contains(f), "GP{n} offers {f:?}");
+                }
+                assert!(p.available_functions.contains(&PinFunction::GpioOutput));
+                continue;
+            }
+            assert_eq!(p.available_functions, theirs, "GP{n}");
+            compared += 1;
+        }
+        assert!(compared >= 20, "only {compared} pads compared");
+    }
+
+    /// The FPGA's configuration lines are the board's, and none of them can be
+    /// bound as a GPIO: reserved, and named so `gpio_index` never parses them.
+    /// CRESET is the one the user may touch - GPIO Output, and nothing else,
+    /// is the loader's switch - and it is not a GPIO either.
+    #[test]
+    fn the_fpga_lines_are_reserved_and_never_bound() {
+        let mcu = board().build_mcu();
+        let creset = mcu.iter_all_pins().find(|p| p.number == 2).expect("pad 2");
+        assert_eq!(creset.name, "ICE_CRESET (GP31)");
+        assert!(!creset.reserved);
+        assert_eq!(creset.available_functions, [PinFunction::GpioOutput]);
+        assert_eq!(super::gpio_index(&creset.name), None);
+        for (number, name) in [
+            (18, "ICE_CLK (GP21)"),
+            (41, "ICE_SS (GP5)"),
+            (42, "ICE_SO (GP7)"),
+            (43, "ICE_SI (GP4)"),
+            (44, "ICE_SCK (GP6)"),
+            (57, "ICE_DONE (GP40)"),
+        ] {
+            let p = mcu
+                .iter_all_pins()
+                .find(|p| p.number == number)
+                .unwrap_or_else(|| panic!("pad {number}"));
+            assert_eq!(p.name, name);
+            assert!(p.reserved, "{name}");
+            assert_eq!(super::gpio_index(&p.name), None, "{name}");
+        }
+        // And GP22 is an ordinary pad: it is the vendor header's wrong clock.
+        let gp22 = mcu
+            .iter_all_pins()
+            .find(|p| p.name == "GP22 (ICE20)")
+            .expect("GP22");
+        assert!(!gp22.reserved);
+    }
+
+    /// Each GPIO appears on exactly one pad, and GPIO 0..47 are all accounted
+    /// for - as a pad of their own or inside a reserved pad's name.
+    #[test]
+    fn every_gpio_is_on_exactly_one_pad() {
+        let mcu = board().build_mcu();
+        let mut seen = [0u8; 48];
+        for p in mcu.iter_all_pins() {
+            let n = super::gpio_index(&p.name).or_else(|| {
+                let (_, rest) = p.name.split_once("(GP")?;
+                rest.trim_end_matches(')').parse().ok()
+            });
+            if let Some(n) = n {
+                seen[n as usize] += 1;
+            }
+        }
+        for (n, count) in seen.iter().enumerate() {
+            assert_eq!(*count, 1, "GP{n} is on {count} pads");
+        }
+    }
+
+    /// An untouched board names no FPGA line in its generated code, on either
+    /// runtime: nothing takes GP4..7, 21, 31 or 40 until the loader does.
+    #[test]
+    fn an_untouched_board_leaves_the_fpga_alone() {
+        for runtime in [Runtime::Blocking, Runtime::Async] {
+            let mut mcu = board().build_mcu();
+            mcu.runtime = runtime;
+            let code = mcu.fresh_main_rs();
+            for n in [4, 5, 6, 7, 21, 31, 40] {
+                for name in [format!("gpio{n}"), format!("PIN_{n},"), format!("PIN_{n})")] {
+                    assert!(!code.contains(&name), "{runtime:?} names {name}:\n{code}");
+                }
+            }
+        }
+    }
+}
+
+/// What the FPGA loader puts in main.rs, on both runtimes.
+#[cfg(test)]
+mod fpga_loader_codegen {
+    use super::{dma_uses, fpga_loader, pio_uses};
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::pins::logic::pin::model::Edge;
+    use crate::panels::mcu_module::project_gen::FPGA_BITSTREAM_INCLUDE;
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    /// The pico2-ice, with the loader switched on or not, plus a UART and an
+    /// armed input - things that must come AFTER the load.
+    fn ice(runtime: Runtime, loader: bool) -> super::Mcu {
+        let mut mcu = builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2350_pico2_ice")
+            .expect("built-in rp2350_pico2_ice")
+            .build_mcu();
+        mcu.runtime = runtime;
+        for p in mcu.iter_all_pins_mut() {
+            match super::gpio_index(&p.name) {
+                Some(36) => p.selected_function = PinFunction::UsartTx(1),
+                Some(37) => p.selected_function = PinFunction::UsartRx(1),
+                Some(41) => {
+                    p.selected_function = PinFunction::GpioInput;
+                    p.irq = Some(Edge::Rising);
+                }
+                _ if loader && p.name.starts_with("ICE_CRESET") => {
+                    p.selected_function = PinFunction::GpioOutput
+                }
+                _ => {}
+            }
+        }
+        mcu.reconcile_modules();
+        mcu
+    }
+
+    #[test]
+    fn an_untouched_creset_emits_nothing() {
+        for runtime in [Runtime::Blocking, Runtime::Async] {
+            let mcu = ice(runtime, false);
+            assert!(!fpga_loader(&mcu));
+            let code = mcu.fresh_main_rs();
+            assert!(!code.contains("Ice40Cram"), "{runtime:?}:\n{code}");
+            assert!(!code.contains("FPGA_BITSTREAM"), "{runtime:?}:\n{code}");
+        }
+    }
+
+    #[test]
+    fn the_loader_is_emitted_on_both_runtimes() {
+        for runtime in [Runtime::Blocking, Runtime::Async] {
+            let mcu = ice(runtime, true);
+            assert!(fpga_loader(&mcu));
+            let code = mcu.fresh_main_rs();
+            for needle in [
+                FPGA_BITSTREAM_INCLUDE,
+                "struct Ice40Cram",
+                "let fpga_ok = fpga_cram.ice40_load(",
+                "fpga_cram.ice40_release();",
+                // GP7 is driven for the flash's sleep command only.
+                "fpga_cram.ice40_sleep_flash(&mut fpga_so",
+            ] {
+                assert!(code.contains(needle), "{runtime:?} lacks {needle}:\n{code}");
+            }
+            // GP31 is the loader's, never an ordinary output binding.
+            assert!(!code.contains("let mut gp31"), "{runtime:?}:\n{code}");
+        }
+    }
+
+    /// The load blocks, and the executor does not poll while it runs - so on
+    /// Async it has to come before every spawn, every bus and every pin.
+    #[test]
+    fn async_loads_before_anything_else_runs() {
+        let code = ice(Runtime::Async, true).fresh_main_rs();
+        let at = |needle: &str| {
+            code.find(needle)
+                .unwrap_or_else(|| panic!("no {needle}:\n{code}"))
+        };
+        let load = at("p.PIN_31");
+        assert!(at("embassy_rp::init(") < load);
+        assert!(load < at("spawner.spawn"), "{code}");
+        assert!(load < at("p.UART1"), "{code}");
+        assert!(load < at("p.PIN_41"), "{code}");
+    }
+
+    /// A Gpout stops its clock when dropped, so the binding must be a NAMED one
+    /// that lives on - `let _ =` would stop the FPGA's clock on the same line.
+    #[test]
+    fn async_keeps_the_clock_running() {
+        let code = ice(Runtime::Async, true).fresh_main_rs();
+        assert!(code.contains("let fpga_clk = embassy_rp::clocks::Gpout::new(p.PIN_21);"));
+        assert!(code.contains("GpoutSrc::PllUsb"));
+        assert!(!code.contains("let _ = embassy_rp::clocks::Gpout"));
+        // GP22 is the vendor header's clock pin, and it cannot output one.
+        assert!(!code.contains("PIN_22"), "{code}");
+    }
+
+    /// Blocking: the pins come out of the bank before any other, and GP21 is
+    /// fed from PLL_USB at the frequency the Clock tab gives it.
+    #[test]
+    fn blocking_takes_the_fpga_pins_first() {
+        let code = ice(Runtime::Blocking, true).fresh_main_rs();
+        let at = |needle: &str| {
+            code.find(needle)
+                .unwrap_or_else(|| panic!("no {needle}:\n{code}"))
+        };
+        assert!(at("let pins = ") < at("pins.gpio31"));
+        assert!(at("pins.gpio31") < at("pins.gpio36"), "{code}");
+        assert!(code.contains("pins.gpio21.into_function::<rp235x_hal::gpio::FunctionClock>()"));
+        assert!(code.contains("// 48 MHz on GP21 (GPOUT0)"), "{code}");
+        assert!(!code.contains("gpio22"), "{code}");
+        // Released as inputs: `into_floating_disabled` sets the pad's isolation
+        // latch while the output is still on, and may keep the RP driving the
+        // FPGA's now-user pins.
+        assert!(!code.contains("into_floating_disabled"), "{code}");
+        assert!(code.contains("fpga_si.into_floating_input()"), "{code}");
+    }
+
+    /// `cortex_m::asm::delay` counts loop TURNS, three cycles each on the M33;
+    /// passed cycles straight through, every wait was three times too long and
+    /// the configuration clock fell to about 1 MHz.
+    #[test]
+    fn the_wait_counts_turns_not_cycles() {
+        for runtime in [Runtime::Blocking, Runtime::Async] {
+            let code = ice(runtime, true).fresh_main_rs();
+            assert!(
+                code.contains("cortex_m::asm::delay(cycles / 3)"),
+                "{runtime:?}:\n{code}"
+            );
+        }
+    }
+
+    /// No PIO, no DMA: the loader is plain pin writes, so it takes nothing the
+    /// Configuration tab's cards count.
+    #[test]
+    fn the_loader_takes_no_pio_and_no_dma() {
+        for runtime in [Runtime::Blocking, Runtime::Async] {
+            let with = ice(runtime, true);
+            let without = ice(runtime, false);
+            assert!(pio_uses(&with).is_empty(), "{runtime:?}");
+            assert_eq!(dma_uses(&with), dma_uses(&without), "{runtime:?}");
+        }
+    }
+
+    /// Only a board with a CRESET pad can switch the loader on.
+    #[test]
+    fn other_boards_never_emit_it() {
+        for id in ["rp2040_pico", "rp2350_pico2", "rp2350_pico2_w"] {
+            let mut mcu = builtins::builtin_definitions()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("built-in {id}"))
+                .build_mcu();
+            for p in mcu.iter_all_pins_mut() {
+                if p.available_functions.contains(&PinFunction::GpioOutput) {
+                    p.selected_function = PinFunction::GpioOutput;
+                }
+            }
+            assert!(!fpga_loader(&mcu), "{id}");
+            assert!(!mcu.fresh_main_rs().contains("Ice40Cram"), "{id}");
+        }
+    }
+}
+
+/// An RP project comes back from disk as it was saved.
+///
+/// The RP backend writes no `// label` on a binding, so `parse_main_rs` reads
+/// nothing back and the diagram used to open empty - and the next regeneration
+/// wrote a main.rs without the user's pins. On the pico2-ice that silently
+/// dropped the FPGA loader, which is a pad function like any other. The store
+/// is `@pins` in `mcu.config`, as on nRF; this walks the open path in
+/// `project_io`'s order on both runtimes.
+#[cfg(test)]
+mod pin_restore_rp {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    use crate::panels::mcu_module::mcu_config;
+    use crate::panels::mcu_module::{builtins, pins::PinFunction};
+
+    fn board(id: &str) -> super::Mcu {
+        builtins::builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+            .build_mcu()
+    }
+
+    #[test]
+    fn a_wired_pico2_ice_comes_back_identical_on_reopen() {
+        for runtime in [Runtime::Blocking, Runtime::Async] {
+            let mut mcu = board("rp2350_pico2_ice");
+            mcu.runtime = runtime;
+            for p in mcu.iter_all_pins_mut() {
+                match super::gpio_index(&p.name) {
+                    Some(36) => p.selected_function = PinFunction::UsartTx(1),
+                    Some(37) => p.selected_function = PinFunction::UsartRx(1),
+                    Some(30) => {
+                        p.selected_function = PinFunction::GpioOutput;
+                        p.custom_label = "Heartbeat".into();
+                    }
+                    None if p.name.starts_with("ICE_CRESET") => {
+                        p.selected_function = PinFunction::GpioOutput
+                    }
+                    _ => {}
+                }
+            }
+            mcu.reconcile_modules();
+            let code = mcu.fresh_main_rs();
+            let cfg = mcu.mcu_config_text();
+            assert!(cfg.contains("@pins\n"), "{runtime:?}: written\n{cfg}");
+
+            let mut reopened = board("rp2350_pico2_ice");
+            reopened.apply_mcu_config(&cfg);
+            reopened.apply_saved_pins_by_number(&mcu_config::parse_pins(&cfg));
+            reopened.apply_config_pin_labels(&cfg);
+
+            assert!(
+                super::fpga_loader(&reopened),
+                "{runtime:?}: the loader survives"
+            );
+            assert_eq!(
+                reopened.fresh_main_rs(),
+                code,
+                "{runtime:?}: reload changed the generated file"
+            );
+        }
+    }
+
+    /// And on a plain Pico, where the same hole emptied every diagram.
+    #[test]
+    fn a_wired_pico_comes_back_identical_on_reopen() {
+        let mut mcu = board("rp2040_pico");
+        for p in mcu.iter_all_pins_mut() {
+            match p.name.as_str() {
+                "GP0" => p.selected_function = PinFunction::UsartTx(0),
+                "GP1" => p.selected_function = PinFunction::UsartRx(0),
+                n if n.starts_with("GP25") => p.selected_function = PinFunction::GpioOutput,
+                _ => {}
+            }
+        }
+        mcu.reconcile_modules();
+        let code = mcu.fresh_main_rs();
+        let cfg = mcu.mcu_config_text();
+        let mut reopened = board("rp2040_pico");
+        reopened.apply_mcu_config(&cfg);
+        reopened.apply_saved_pins_by_number(&mcu_config::parse_pins(&cfg));
+        assert_eq!(reopened.fresh_main_rs(), code);
+    }
+}
+
+/// The loader's waveform, replayed against mock pins on a virtual clock - the
+/// strongest check there is without a board. `include!` compiles the very text
+/// the generator emits, so this tests what users get.
+#[cfg(test)]
+mod fpga_load_waveform {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// embedded-hal 1.0's two pin traits - the part the loader calls. The IDE
+    /// does not depend on the crate; the generated projects compile against
+    /// the real one in the verify matrix.
+    mod embedded_hal {
+        pub mod digital {
+            pub trait ErrorType {
+                type Error;
+            }
+            pub trait OutputPin: ErrorType {
+                fn set_low(&mut self) -> Result<(), Self::Error>;
+                fn set_high(&mut self) -> Result<(), Self::Error>;
+            }
+            pub trait InputPin: ErrorType {
+                fn is_high(&mut self) -> Result<bool, Self::Error>;
+            }
+        }
+    }
+    use embedded_hal::digital::{ErrorType, InputPin, OutputPin};
+
+    include!("rp_fpga_load.rs");
+
+    /// The CPU clock the replay runs at: the RP2350's default.
+    const MHZ: u32 = 150;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Line {
+        Creset,
+        Ss,
+        Sck,
+        Si,
+        So,
+    }
+
+    /// Every level change on every line, stamped in CPU cycles.
+    #[derive(Default)]
+    struct Bus {
+        now: u64,
+        level: [bool; 5],
+        events: Vec<(u64, Line, bool)>,
+        /// Rising SCK edges after SS goes high before CDONE rises, or never.
+        cdone_after: Option<usize>,
+    }
+
+    impl Bus {
+        fn level_at(&self, line: Line, t: u64) -> bool {
+            self.events
+                .iter()
+                .filter(|(at, l, _)| *at <= t && *l == line)
+                .last()
+                .is_some_and(|(_, _, v)| *v)
+        }
+        fn rises(&self, line: Line) -> impl Iterator<Item = u64> + '_ {
+            self.events
+                .iter()
+                .filter(move |(_, l, v)| *l == line && *v)
+                .map(|(t, _, _)| *t)
+        }
+    }
+
+    struct Pin(Rc<RefCell<Bus>>, Line);
+    struct Done(Rc<RefCell<Bus>>);
+
+    impl ErrorType for Pin {
+        type Error = core::convert::Infallible;
+    }
+    impl ErrorType for Done {
+        type Error = core::convert::Infallible;
+    }
+    impl Pin {
+        fn drive(&mut self, v: bool) {
+            let mut bus = self.0.borrow_mut();
+            bus.now += 1; // a register write is not free
+            if bus.level[self.1 as usize] != v {
+                bus.level[self.1 as usize] = v;
+                let now = bus.now;
+                bus.events.push((now, self.1, v));
+            }
+        }
+    }
+    impl OutputPin for Pin {
+        fn set_low(&mut self) -> Result<(), Self::Error> {
+            self.drive(false);
+            Ok(())
+        }
+        fn set_high(&mut self) -> Result<(), Self::Error> {
+            self.drive(true);
+            Ok(())
+        }
+    }
+    impl InputPin for Done {
+        fn is_high(&mut self) -> Result<bool, Self::Error> {
+            let bus = self.0.borrow();
+            let Some(after) = bus.cdone_after else {
+                return Ok(false);
+            };
+            let ss_up = bus.rises(Line::Ss).last().unwrap_or(0);
+            Ok(bus.rises(Line::Sck).filter(|t| *t > ss_up).count() >= after)
+        }
+    }
+
+    /// Runs the loader exactly as the generated code calls it.
+    fn replay(image: &[u8], cdone_after: Option<usize>) -> (bool, Bus) {
+        let bus = Rc::new(RefCell::new(Bus {
+            cdone_after,
+            ..Default::default()
+        }));
+        let pin = |line| Pin(bus.clone(), line);
+        let mut cram = Ice40Cram {
+            creset: pin(Line::Creset),
+            ss: pin(Line::Ss),
+            sck: pin(Line::Sck),
+            si: pin(Line::Si),
+            cdone: Done(bus.clone()),
+        };
+        let mut so = pin(Line::So);
+        let sys_hz = MHZ * 1_000_000;
+        let (mhz, half) = (sys_hz / 1_000_000, (sys_hz / (2 * 4_000_000)).max(1));
+        let clock = bus.clone();
+        let mut wait = |cycles: u32| clock.borrow_mut().now += u64::from(cycles);
+        cram.ice40_sleep_flash(&mut so, mhz, half, &mut wait);
+        // The generated code releases GP7 here: from now on nothing drives it.
+        drop(so);
+        let ok = cram.ice40_load(mhz, half, &mut wait, image);
+        let _ = cram.ice40_release();
+        drop(clock);
+        let bus = Rc::try_unwrap(bus).ok().expect("sole owner").into_inner();
+        (ok, bus)
+    }
+
+    /// What the rising SCK edges carried on `data` while SS was low, in
+    /// `[from, to)`, packed MSB first.
+    fn shifted(bus: &Bus, data: Line, from: u64, to: u64) -> Vec<u8> {
+        let bits: Vec<bool> = bus
+            .rises(Line::Sck)
+            .filter(|t| *t >= from && *t < to && !bus.level_at(Line::Ss, *t))
+            .map(|t| bus.level_at(data, t))
+            .collect();
+        bits.chunks(8)
+            .map(|b| b.iter().fold(0u8, |acc, bit| (acc << 1) | u8::from(*bit)))
+            .collect()
+    }
+
+    const IMAGE: [u8; 12] = [
+        0xFF, 0x00, 0x00, 0xFF, 0x7E, 0xAA, 0x99, 0x7E, 0x01, 0x80, 0x5A, 0xC3,
+    ];
+
+    fn creset_rise(bus: &Bus) -> u64 {
+        bus.rises(Line::Creset).next().expect("CRESET rises")
+    }
+
+    #[test]
+    fn slave_mode_is_selected() {
+        let (ok, bus) = replay(&IMAGE, Some(20));
+        assert!(ok);
+        // SS low while CRESET rises is what selects slave mode.
+        assert!(!bus.level_at(Line::Ss, creset_rise(&bus)));
+        assert_eq!(bus.rises(Line::Creset).count(), 1);
+    }
+
+    /// 0xB9 to the FPGA flash on its DI (SO) before the FPGA wakes, and SO
+    /// never moves after that.
+    #[test]
+    fn the_flash_is_put_to_sleep_first() {
+        let (_, bus) = replay(&IMAGE, Some(20));
+        let rise = creset_rise(&bus);
+        assert_eq!(shifted(&bus, Line::So, 0, rise), [0xB9]);
+        assert!(
+            !bus.events
+                .iter()
+                .any(|(t, l, _)| *l == Line::So && *t > rise),
+            "SO moved while the FPGA loaded"
+        );
+    }
+
+    /// The FPGA clears its memory for at least 1200 us after CRESET rises;
+    /// no clock may reach it before that.
+    #[test]
+    fn the_fpga_gets_its_clear_time() {
+        let (_, bus) = replay(&IMAGE, Some(20));
+        let rise = creset_rise(&bus);
+        let first = bus.rises(Line::Sck).find(|t| *t > rise).expect("a clock");
+        assert!(
+            first - rise >= 1200 * u64::from(MHZ),
+            "{} cycles",
+            first - rise
+        );
+    }
+
+    /// Mode 3, MSB first: the rising edges with SS low carry exactly the image
+    /// - no dummy byte, no trailing byte, which both go out with SS high.
+    #[test]
+    fn the_image_arrives_whole_and_in_order() {
+        let (_, bus) = replay(&IMAGE, Some(20));
+        let rise = creset_rise(&bus);
+        assert_eq!(shifted(&bus, Line::Si, rise, u64::MAX), IMAGE);
+        // Data only ever changes while SCK is low.
+        for (t, l, _) in &bus.events {
+            if *l == Line::Si {
+                assert!(
+                    !bus.level_at(Line::Sck, *t),
+                    "SI moved with SCK high at {t}"
+                );
+            }
+        }
+    }
+
+    /// Clocks after the image, with SS high: until CDONE rises, then at least
+    /// 49 more before the FPGA's pins are its design's.
+    #[test]
+    fn cdone_gets_its_trailing_clocks() {
+        for after in [1, 20, 100] {
+            let (ok, bus) = replay(&IMAGE, Some(after));
+            assert!(ok, "CDONE after {after}");
+            let ss_up = bus.rises(Line::Ss).last().unwrap();
+            let trailing = bus.rises(Line::Sck).filter(|t| *t > ss_up).count();
+            assert!(
+                trailing >= after + 49,
+                "{trailing} clocks for CDONE at {after}"
+            );
+            assert!(bus.level[Line::Creset as usize], "CRESET stays high");
+        }
+    }
+
+    /// No CDONE: the loader gives up after 104 clocks, says so, and puts the
+    /// FPGA back into reset - never releasing it to boot its flash image.
+    #[test]
+    fn a_failed_load_holds_the_fpga_in_reset() {
+        for cdone in [None, Some(105)] {
+            let (ok, bus) = replay(&IMAGE, cdone);
+            assert!(!ok, "{cdone:?}");
+            assert!(!bus.level[Line::Creset as usize], "CRESET left high");
+            let ss_up = bus.rises(Line::Ss).last().unwrap();
+            assert_eq!(bus.rises(Line::Sck).filter(|t| *t > ss_up).count(), 104);
+        }
+    }
+
+    /// The FPGA's slave SPI takes up to 25 MHz: 20 ns per half period, which is
+    /// 3 cycles at 150 MHz. The loader must never be that fast.
+    #[test]
+    fn sck_never_outruns_the_fpga() {
+        let (_, bus) = replay(&IMAGE, Some(20));
+        let edges: Vec<u64> = bus
+            .events
+            .iter()
+            .filter(|(_, l, _)| *l == Line::Sck)
+            .map(|(t, _, _)| *t)
+            .collect();
+        let tightest = edges.windows(2).map(|w| w[1] - w[0]).min().unwrap();
+        assert!(tightest >= 3, "{tightest} cycles between SCK edges");
     }
 }
 
@@ -2412,6 +3342,7 @@ mod async_hal_line {
             ("rp2040_pico_w", "rp2040"),
             ("rp2350_pico2", "rp235xa"),
             ("rp2350_pico2_w", "rp235xa"),
+            ("rp2350_pico2_ice", "rp235xb"),
         ] {
             let def = builtins::builtin_definitions()
                 .into_iter()
@@ -3001,7 +3932,8 @@ async fn cyw43_task(
         "    // The radio's firmware, written into `firmware/` with this project. They
     // are Infineon binaries under the Permissive Binary License, which is what
     // lets them ship; the licence text sits beside them. Replacing one with
-    // your own build is safe - the IDE never overwrites a file already there.
+    // your own build is safe - the IDE never overwrites a file already there,
+    // and builds with the one in your project folder.
     //
     // `nvram_rp2040.bin` is right on a Pico 2 W too: the name is the board it
     // was measured on, not the chip it runs on.
@@ -3047,6 +3979,168 @@ async fn cyw43_task(
     (irqs, task, body)
 }
 
+// ── The pico2-ice's FPGA loader ───────────────────────────────────────────────
+
+/// The loader itself, the same on both runtimes: plain generic Rust over
+/// embedded-hal's pin traits. It lives in a file of its own - NOT a module of
+/// this crate - because two things read it: the generator copies it into
+/// main.rs, and `fpga_load_waveform` compiles the very same text against mock
+/// pins and checks the waveform it draws.
+const FPGA_LOADER: &str = include_str!("rp_fpga_load.rs");
+
+/// Is the FPGA loader switched on?
+///
+/// The switch is the board's own CRESET pad set to GPIO Output - the line the
+/// loader drives. Left alone, the board's pull-down holds the FPGA in reset,
+/// which is exactly what "no loader" should mean. `pub` so everything else that
+/// needs to know - the harness, the tests - asks the question the emitter does.
+pub fn fpga_loader(mcu: &Mcu) -> bool {
+    mcu.iter_all_pins()
+        .any(|p| p.name.starts_with("ICE_CRESET") && p.selected_function == PinFunction::GpioOutput)
+}
+
+/// The loader's top-level items: the bitstream, the clock ceiling, the loader.
+fn fpga_items() -> String {
+    let mut o = String::new();
+    o.push_str("/// The FPGA's bitstream: `fpga/top.bin` in the project folder. The IDE put\n");
+    o.push_str("/// its own default design there once; replace the file with yours.\n");
+    o.push_str(&format!(
+        "static FPGA_BITSTREAM: &[u8] = {};\n\n",
+        crate::panels::mcu_module::project_gen::FPGA_BITSTREAM_INCLUDE
+    ));
+    o.push_str("/// Upper bound for the bit-banged configuration clock. The FPGA takes up to\n");
+    o.push_str("/// 25 MHz; the pin writes between edges keep the real clock below this.\n");
+    o.push_str("const FPGA_SPI_HZ: u32 = 4_000_000;\n\n");
+    o.push_str(FPGA_LOADER);
+    o.push('\n');
+    o
+}
+
+/// The part every runtime shares: why the load comes first.
+const FPGA_BODY_HEAD: &str = "    // ── FPGA (iCE40UP5K) ──
+    // Before anything else can touch GP4..7: they are the FPGA's configuration
+    // port AND its flash's bus. CRESET low holds the FPGA off them until the
+    // load (the board pulls it low too).
+";
+
+/// The loader's lines in an Async `main`, right after init and the watchdog.
+///
+/// It blocks for about half a second at 150 MHz, which is why it runs before
+/// anything is spawned: the executor does not poll while it runs.
+const ASYNC_FPGA_BODY: &str =
+    "    let fpga_creset = embassy_rp::gpio::Output::new(p.PIN_31, embassy_rp::gpio::Level::Low);
+    // 48 MHz on GP21 (GPOUT0) into FPGA pin 35: PLL_USB, which embassy-rp
+    // starts at 48 MHz, divided by 1. Keep the binding - dropping a Gpout
+    // stops the clock.
+    let fpga_clk = embassy_rp::clocks::Gpout::new(p.PIN_21);
+    fpga_clk.set_src(embassy_rp::clocks::GpoutSrc::PllUsb);
+    fpga_clk.set_div(1, 0);
+    fpga_clk.enable();
+    let mut fpga_cram = Ice40Cram {
+        creset: fpga_creset,
+        ss: {
+            let mut ss = embassy_rp::gpio::Flex::new(p.PIN_5);
+            ss.set_high();
+            ss.set_as_output();
+            ss
+        },
+        sck: embassy_rp::gpio::Output::new(p.PIN_6, embassy_rp::gpio::Level::High),
+        si: embassy_rp::gpio::Output::new(p.PIN_4, embassy_rp::gpio::Level::Low),
+        // No pull: the board has its own 2.2k pull-up on CDONE.
+        cdone: embassy_rp::gpio::Input::new(p.PIN_40, embassy_rp::gpio::Pull::None),
+    };
+    let fpga_sys_hz = embassy_rp::clocks::clk_sys_freq();
+    let fpga_mhz = fpga_sys_hz / 1_000_000;
+    let fpga_half = (fpga_sys_hz / (2 * FPGA_SPI_HZ)).max(1);
+    // `delay` spins three cycles per turn on the M33, so a count of cycles is
+    // a third as many turns.
+    let mut fpga_wait = |cycles: u32| cortex_m::asm::delay(cycles / 3);
+    // The FPGA's flash first: asleep, it ignores the load. GP7, its data in,
+    // then stops being driven - it is the FPGA's own SPI_SO from here on.
+    let mut fpga_so = embassy_rp::gpio::Flex::new(p.PIN_7);
+    fpga_so.set_low();
+    fpga_so.set_as_output();
+    fpga_cram.ice40_sleep_flash(&mut fpga_so, fpga_mhz, fpga_half, &mut fpga_wait);
+    fpga_so.set_as_input();
+    fpga_so.set_pull(embassy_rp::gpio::Pull::Down);
+    // Whether the FPGA took the image (CDONE high). On failure CRESET is
+    // already back LOW, holding the FPGA in reset.
+    #[allow(unused_variables)]
+    let fpga_ok = fpga_cram.ice40_load(fpga_mhz, fpga_half, &mut fpga_wait, FPGA_BITSTREAM);
+    // SCK, SI and SO go back to no function. SS becomes a pulled-up input, so
+    // the flash stays deselected. `fpga_reset` driven LOW stops the FPGA.
+    #[allow(unused_variables)]
+    let (fpga_reset, mut fpga_ss, fpga_sck, fpga_si, fpga_done) = fpga_cram.ice40_release();
+    drop((fpga_sck, fpga_si, fpga_so));
+    fpga_ss.set_as_input();
+    fpga_ss.set_pull(embassy_rp::gpio::Pull::Up);
+
+";
+
+/// The loader's lines in a Blocking `main`, right after the GPIO bank is
+/// taken. `usb_mhz` is what PLL_USB runs at, which is what reaches the FPGA.
+fn blocking_fpga_body(hal: &str, usb_mhz: u32) -> String {
+    let mut o = String::new();
+    o.push_str(&format!(
+        "    let fpga_creset = pins.gpio31.into_push_pull_output_in_state({hal}::gpio::PinState::Low);\n"
+    ));
+    o.push_str(&format!(
+        "    // {usb_mhz} MHz on GP21 (GPOUT0) into FPGA pin 35: PLL_USB as the Clock tab\n"
+    ));
+    o.push_str("    // sets it, divided by 1.\n");
+    o.push_str("    #[allow(unused_variables)]\n");
+    o.push_str(&format!(
+        "    let fpga_clk = pins.gpio21.into_function::<{hal}::gpio::FunctionClock>();\n"
+    ));
+    o.push_str("    clocks\n        .gpio_output0_clock\n");
+    o.push_str("        .configure_clock(&pll_usb, pll_usb.operating_frequency())\n");
+    o.push_str("        .map_err(|_| false)\n        .unwrap();\n");
+    o.push_str("    let mut fpga_cram = Ice40Cram {\n");
+    o.push_str("        creset: fpga_creset,\n");
+    for (field, gpio, level) in [("ss", 5, "High"), ("sck", 6, "High"), ("si", 4, "Low")] {
+        o.push_str(&format!(
+            "        {field}: pins.gpio{gpio}.into_push_pull_output_in_state({hal}::gpio::PinState::{level}),\n"
+        ));
+    }
+    o.push_str("        // Floating: the board has its own 2.2k pull-up on CDONE.\n");
+    o.push_str("        cdone: pins.gpio40.into_floating_input(),\n");
+    o.push_str("    };\n");
+    o.push_str("    let fpga_sys_hz = clocks.system_clock.freq().to_Hz();\n");
+    o.push_str("    let fpga_mhz = fpga_sys_hz / 1_000_000;\n");
+    o.push_str("    let fpga_half = (fpga_sys_hz / (2 * FPGA_SPI_HZ)).max(1);\n");
+    o.push_str("    // `delay` spins three cycles per turn on the M33, so a count of cycles is\n");
+    o.push_str("    // a third as many turns.\n");
+    o.push_str("    let mut fpga_wait = |cycles: u32| cortex_m::asm::delay(cycles / 3);\n");
+    o.push_str("    // The FPGA's flash first: asleep, it ignores the load. GP7, its data in,\n");
+    o.push_str("    // then stops being driven - it is the FPGA's own SPI_SO from here on.\n");
+    o.push_str(&format!(
+        "    let mut fpga_so = pins.gpio7.into_push_pull_output_in_state({hal}::gpio::PinState::Low);\n"
+    ));
+    o.push_str(
+        "    fpga_cram.ice40_sleep_flash(&mut fpga_so, fpga_mhz, fpga_half, &mut fpga_wait);\n",
+    );
+    o.push_str("    let fpga_so = fpga_so.into_pull_down_input();\n");
+    o.push_str("    // Whether the FPGA took the image (CDONE high). On failure CRESET is\n");
+    o.push_str("    // already back LOW, holding the FPGA in reset.\n");
+    o.push_str("    #[allow(unused_variables)]\n");
+    o.push_str(
+        "    let fpga_ok = fpga_cram.ice40_load(fpga_mhz, fpga_half, &mut fpga_wait, FPGA_BITSTREAM);\n",
+    );
+    o.push_str("    // SCK, SI and SO become plain inputs, so the RP no longer drives them. SS\n");
+    o.push_str("    // is pulled up, so the flash stays deselected. `fpga_reset` driven LOW\n");
+    o.push_str("    // stops the FPGA.\n");
+    o.push_str("    #[allow(unused_variables)]\n");
+    o.push_str("    let (fpga_reset, fpga_ss, fpga_sck, fpga_si, fpga_done) = fpga_cram.ice40_release();\n");
+    o.push_str("    let _ = (\n");
+    o.push_str("        fpga_sck.into_floating_input(),\n");
+    o.push_str("        fpga_si.into_floating_input(),\n");
+    o.push_str("        fpga_so.into_floating_input(),\n");
+    o.push_str("    );\n");
+    o.push_str("    #[allow(unused_variables)]\n");
+    o.push_str("    let fpga_ss = fpga_ss.into_pull_up_input();\n\n");
+    o
+}
+
 fn async_section(mcu: &Mcu) -> String {
     let (irq_binding, buses, radio_task, _) = async_bus_lines(mcu);
     let (gpio_tasks, gpio_body) = async_gpio_lines(mcu);
@@ -3066,6 +4160,10 @@ fn async_section(mcu: &Mcu) -> String {
     o.push_str(&irq_binding);
     o.push_str(&radio_task);
     o.push_str(&gpio_tasks);
+    let fpga = fpga_loader(mcu);
+    if fpga {
+        o.push_str(&fpga_items());
+    }
     o.push_str("#[embassy_executor::main]\n");
     o.push_str(&format!("async fn main({spawner}: Spawner) {{\n"));
     o.push_str("    // embassy-rp brings up the clocks itself. On RP2040 it also supplies the\n");
@@ -3074,6 +4172,12 @@ fn async_section(mcu: &Mcu) -> String {
     // First after init, like every other family's watchdog: one meant to catch
     // a hang in start-up is worth having before the code that might hang.
     o.push_str(&super::watchdog_gen::rp_init_lines(&mcu.watchdog, true));
+    // Then the FPGA, before any pin, bus or task: it blocks while it loads, and
+    // it must own GP4..7 before anything else could drive them.
+    if fpga {
+        o.push_str(FPGA_BODY_HEAD);
+        o.push_str(ASYNC_FPGA_BODY);
+    }
     o.push_str(&gpio_body);
     o.push_str(&buses);
     o.push_str(GEN_END);
@@ -3824,6 +4928,133 @@ mod emit_async_for_manual_compile {
                 !dir.join("firmware").exists(),
                 "no radio wired, no firmware shipped"
             );
+            println!("wrote {}", dir.display());
+            println!("target: {}", def.project.target);
+        }
+    }
+
+    /// The pico2-ice on BOTH runtimes: the first RP2350B board, so the first
+    /// project that names GPIO 30..47 and the first on embassy-rp's `rp235xb`
+    /// feature, where the wrong one is `no field PIN_36 on Peripherals`.
+    ///
+    /// Every bus sits on a pad past GP29 where it can (UART1 on GP36/37, SPI0
+    /// on GP32/34/35, PWM slice 11 on GP38), because those rows of the FUNCSEL
+    /// table are the ones no other board exercises.
+    ///
+    /// %TEMP%\eide_pico2ice_blocking_check + eide_pico2ice_async_check
+    #[test]
+    #[ignore = "writes projects to disk for a manual cross-compile"]
+    fn emit_pico2_ice_project() {
+        for (runtime, dir_name) in [
+            (Runtime::Blocking, "eide_pico2ice_blocking_check"),
+            (Runtime::Async, "eide_pico2ice_async_check"),
+        ] {
+            let def = builtins::builtin_definitions()
+                .into_iter()
+                .find(|d| d.id == "rp2350_pico2_ice")
+                .expect("built-in rp2350_pico2_ice");
+            let mut mcu = def.build_mcu();
+            mcu.runtime = runtime;
+            for p in mcu.iter_all_pins_mut() {
+                let f = match super::gpio_index(&p.name) {
+                    Some(36) => PinFunction::UsartTx(1),
+                    Some(37) => PinFunction::UsartRx(1),
+                    Some(32) => PinFunction::SpiMiso(0),
+                    Some(34) => PinFunction::SpiSck(0),
+                    Some(35) => PinFunction::SpiMosi(0),
+                    Some(2) => PinFunction::I2cSda(1),
+                    Some(3) => PinFunction::I2cScl(1),
+                    Some(38) => PinFunction::TimerPwm {
+                        timer: 11,
+                        channel: 1,
+                    },
+                    Some(20) => PinFunction::TimerPwm {
+                        timer: 2,
+                        channel: 1,
+                    },
+                    // A header GPIO shared with the FPGA, the RP's red LED
+                    // (output is all that pad offers) and a plain input.
+                    Some(30) | Some(1) => PinFunction::GpioOutput,
+                    Some(41) => PinFunction::GpioInput,
+                    // CRESET switches the FPGA loader on.
+                    None if p.name.starts_with("ICE_CRESET") => PinFunction::GpioOutput,
+                    _ => continue,
+                };
+                assert!(
+                    p.available_functions.contains(&f),
+                    "{} does not offer {f:?}",
+                    p.name
+                );
+                p.selected_function = f;
+            }
+            mcu.reconcile_modules();
+            for m in &mut mcu.modules {
+                if let crate::panels::mcu_module::modules::ModuleConfig::Timer(c) = &mut m.config {
+                    c.freq_hz = 20_000;
+                    c.set_duty_x100(1, 750);
+                }
+            }
+            let main_rs = mcu.fresh_main_rs();
+            let (uart, slice) = match runtime {
+                Runtime::Async => ("p.PIN_36", "PWM_SLICE11"),
+                _ => ("gpio36", "pwm11"),
+            };
+            assert!(
+                main_rs.contains(uart),
+                "{runtime:?}: UART1 on GP36:\n{main_rs}"
+            );
+            assert!(
+                main_rs.contains(slice),
+                "{runtime:?}: PWM slice 11:\n{main_rs}"
+            );
+            assert!(super::fpga_loader(&mcu), "the loader is switched on");
+
+            // Through `build_cfg`, the SAME pairing the app uses.
+            let project = crate::panels::mcu_module::mcu_def::build_cfg(&def, Some(&mcu));
+            let files = project_gen::build_project_files(&project, &def.toolchain, &main_rs);
+            let configs = mcu.config_files();
+            let mut user: Vec<(String, String)> = vec![
+                ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
+                (
+                    "src/pins/configs/mod.rs".into(),
+                    configs
+                        .iter()
+                        .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+                        .collect(),
+                ),
+            ];
+            user.extend(
+                configs
+                    .into_iter()
+                    .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+            );
+            let dir = std::env::temp_dir().join(dir_name);
+            let _ = std::fs::remove_dir_all(&dir);
+            project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+                .expect("write pico2-ice project");
+            if matches!(runtime, Runtime::Async) {
+                let toml_path = dir.join("Cargo.toml");
+                let toml = std::fs::read_to_string(&toml_path).expect("read Cargo.toml");
+                let toml = project_gen::ensure_async_deps(
+                    &toml,
+                    true,
+                    project_gen::async_flavor_for(&mcu.family, ""),
+                    super::needs_async_usart(&mcu),
+                    false,
+                    false,
+                    &[],
+                );
+                let toml = project_gen::ensure_m0_atomics(&toml, true, &project.target, &[]);
+                std::fs::write(&toml_path, toml).expect("write Cargo.toml");
+            }
+            // The gateware `include_bytes!` reaches for: the IDE's own, whole,
+            // and an image the FPGA takes. Existence alone proves nothing - a
+            // stub compiles just as happily.
+            let bin = std::fs::read(dir.join("fpga").join("top.bin")).expect("fpga/top.bin");
+            assert_eq!(bin.len(), 104_090, "fpga/top.bin shipped whole");
+            let info = crate::panels::mcu_module::fpga_bitstream::inspect(&bin)
+                .expect("fpga/top.bin is a UP5K image");
+            assert!(info.crc_checked, "its CRC was checked");
             println!("wrote {}", dir.display());
             println!("target: {}", def.project.target);
         }

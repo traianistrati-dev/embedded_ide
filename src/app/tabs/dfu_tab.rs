@@ -87,6 +87,9 @@ pub fn show_dfu_tab(
     // and it is why `probe-rs list` can come back empty on a board that is
     // plugged in and working. See `tabs::no_probe_message`.
     holder: Option<(&str, &str)>,
+    // Why the FPGA bitstream the firmware embeds must not be flashed, if it
+    // must not. ESP has no FPGA, so only the SWD and probe-rs buttons read it.
+    fpga_block: Option<&str>,
 ) {
     let state = dfu_state.lock().unwrap().clone();
     let ocd_state = openocd_state.lock().unwrap().clone();
@@ -157,16 +160,17 @@ pub fn show_dfu_tab(
             .then(|| "no buildable chip configuration yet — set the MCU up first".to_owned())
     };
     let busy_note = || any_busy.then(|| "another flash is already running".to_owned());
-    let swd_reason: Option<String> =
-        held("OpenOCD")
-            .or_else(no_cfg)
-            .or_else(busy_note)
-            .or_else(|| {
-                (!is_swd).then(|| {
+    let bad_bitstream = || fpga_block.map(str::to_owned);
+    let swd_reason: Option<String> = held("OpenOCD")
+        .or_else(no_cfg)
+        .or_else(bad_bitstream)
+        .or_else(busy_note)
+        .or_else(|| {
+            (!is_swd).then(|| {
                 "pick an ST-Link / J-Link / CMSIS-DAP in the Programmer list (Scan USB finds them)"
                     .to_owned()
             })
-            });
+        });
     let esp_reason: Option<String> = super::tool_missing(missing_tools, "espflash")
         .then(|| super::needs_tool_hint("espflash"))
         .or_else(no_cfg)
@@ -175,6 +179,7 @@ pub fn show_dfu_tab(
         .then(|| super::needs_tool_hint("probe-rs"))
         .or_else(|| held("cargo flash"))
         .or_else(no_cfg)
+        .or_else(bad_bitstream)
         // No auto-select on this path: `cargo flash` with an ambiguous probe
         // doesn't error, it waits — so the choice is made here, up front.
         .or_else(|| {

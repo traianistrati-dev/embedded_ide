@@ -323,6 +323,8 @@ mod board_layout {
             ("rp2040_pico_w", "RP2040"),
             ("rp2350_pico2", "RP2350"),
             ("rp2350_pico2_w", "RP2350"),
+            // The B package: 48 GPIOs, and a different embassy-rp feature.
+            ("rp2350_pico2_ice", "RP2350B"),
         ] {
             assert_eq!(board(id).board_chip.as_deref(), Some(part), "{id}");
         }

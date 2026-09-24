@@ -21,6 +21,7 @@
 use crate::panels::mcu_module::Mcu;
 use crate::panels::mcu_module::Pin;
 use crate::panels::mcu_module::PinFunction;
+use crate::panels::mcu_module::pins::logic::pin::colors::switch_role;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::collections::{BTreeMap, BTreeSet};
@@ -914,8 +915,10 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
                 }
             }
             // Cheapest pins first: the ones you can spend without losing a
-            // peripheral. Pin number breaks ties, so the order is stable.
-            pin_entries.sort_by_key(|p| (p.cost, p.pin_num));
+            // peripheral. Pin number breaks ties, so the order is stable. A
+            // board pad that switches something on goes LAST: it costs no
+            // peripheral, but it is not a spare output either.
+            pin_entries.sort_by_key(|p| (switch_role(&p.pin_name).is_some(), p.cost, p.pin_num));
 
             if pin_entries.is_empty() {
                 None
@@ -1024,9 +1027,18 @@ fn pin_chip(
     // matters when soldering, so it lives in the tooltip. That keeps the chip
     // narrow enough for two per row inside a half-width column.
     let base = pe.pin_name.clone();
+    // A board pad whose function switches something on is not a free pin,
+    // whatever it costs in peripherals: no green outline, and its tooltip says
+    // what it switches instead of how cheap it is.
+    let switch = switch_role(&pe.pin_name);
 
     let text_col = chip_text(pe.cost, assigned.is_some());
-    let stroke = chip_stroke(pe.cost, assigned.is_some());
+    let stroke = if switch.is_some() {
+        egui::Stroke::NONE
+    } else {
+        chip_stroke(pe.cost, assigned.is_some())
+    };
+    let note = switch.map_or_else(|| cost_note(pe.cost), str::to_owned);
 
     if pe.options.len() == 1 {
         // Single role — direct toggle, with the signal shown inline.
@@ -1040,7 +1052,7 @@ fn pin_chip(
             pe.pin_name,
             pe.pin_num,
             opt.label,
-            cost_note(pe.cost),
+            note,
             if opt.assigned { "unassign" } else { "assign" }
         ));
         if resp.clicked() {
@@ -1089,9 +1101,7 @@ fn pin_chip(
     });
     resp.on_hover_text(format!(
         "{} (pin {})\n{}\npick a signal",
-        pe.pin_name,
-        pe.pin_num,
-        cost_note(pe.cost)
+        pe.pin_name, pe.pin_num, note
     ));
 }
 
@@ -1168,17 +1178,40 @@ mod tests {
         // The micro:bit joins the F103 and the W boards: its on-board nets
         // (MIC_RUN, LOGO, SENSOR_INT) are GPIO-only while every edge pad also
         // serves two UARTEs and sixteen PWM channels, so the spread is real
-        // and the tiering says something.
+        // and the tiering says something. The pico2-ice joins for the same
+        // reason as the W boards: its RGB LED pads (GP0/1/9) are output-only.
         assert_eq!(
             informative,
             [
                 "nrf52833_microbit_v2",
                 "rp2040_pico_w",
+                "rp2350_pico2_ice",
                 "rp2350_pico2_w",
                 "stm32f103c8t6"
             ],
             "which chips have a pin below the scarcity line changed - if a chip              joined or left, the legend it shows changed with it"
         );
+    }
+
+    /// The pico2-ice's CRESET pad costs no peripheral, so by cost alone it
+    /// would head the GPIO Output list as the cheapest spare pin - and one click
+    /// there switches the FPGA loader on. It goes last, and says what it does.
+    #[test]
+    fn a_switch_pad_is_offered_last() {
+        use crate::panels::mcu_module::builtins::builtin_definitions;
+        let mcu = builtin_definitions()
+            .into_iter()
+            .find(|d| d.id == "rp2350_pico2_ice")
+            .expect("built-in rp2350_pico2_ice")
+            .build_mcu();
+        let cats = build_categories(&mcu);
+        let holder = cats
+            .iter()
+            .find(|c| c.pins.iter().any(|p| p.pin_name.starts_with("ICE_CRESET")))
+            .expect("a category offers ICE_CRESET");
+        let last = holder.pins.last().expect("pins");
+        assert!(last.pin_name.starts_with("ICE_CRESET"), "{}", last.pin_name);
+        assert!(super::switch_role(&last.pin_name).is_some_and(|r| r.contains("FPGA loader")));
     }
 
     /// The Peripherals tab, for every chip that can open it.

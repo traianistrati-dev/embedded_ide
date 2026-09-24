@@ -197,9 +197,31 @@ pub fn draw_pin_functions(
         .or_else(|| modes.first().copied());
     let mode_row_h = if modes.is_empty() { 0.0 } else { MODE_H + 6.0 };
 
+    // ── A board pad whose function switches something on ────────────────────
+    // Its list reads "GPIO Output" and nothing else, which says nothing about
+    // what picking it DOES on this board - so the panel says it first.
+    let mut note_h = 0.0;
+    if let Some(note) = mcu
+        .find_pin(num)
+        .and_then(|p| crate::panels::mcu_module::pins::logic::pin::colors::switch_role(&p.name))
+    {
+        let galley = painter.layout(
+            note.to_owned(),
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgb(230, 205, 130),
+            content_rect.width() - 24.0,
+        );
+        painter.galley(
+            egui::pos2(content_rect.left() + 12.0, sep_y + 10.0),
+            galley.clone(),
+            egui::Color32::WHITE,
+        );
+        note_h = galley.size().y + 10.0;
+    }
+
     // ── Geometry ─────────────────────────────────────────────────────────────
     let btn_x = content_rect.left() + 12.0;
-    let content_top = sep_y + 12.0;
+    let content_top = sep_y + 12.0 + note_h;
     let content_bottom = content_rect.bottom() - 8.0;
     let available_h = (content_bottom - content_top).max(0.0);
     let total_h = funcs.len() as f32 * ITEM_H + mode_row_h;

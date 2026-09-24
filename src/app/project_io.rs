@@ -233,12 +233,11 @@ impl AppIde {
                     self.generated_code = mcu.update_main_rs(&source);
                 }
             } else {
-                // No saved pins: a blank project, a hand-written main.rs, an
-                // nRF project saved before `@pins` existed, or an RP project
-                // (its shape is one `parse_main_rs` cannot read either, and it
-                // has no section yet).  Always reset the MCU diagram so pins
-                // configured in the previously-open project do not bleed into
-                // this one.
+                // No saved pins: a blank project, a hand-written main.rs, or an
+                // nRF or RP project saved before either wrote `@pins` (their
+                // shape is one `parse_main_rs` cannot read).  Always reset the
+                // MCU diagram so pins configured in the previously-open project
+                // do not bleed into this one.
                 if let Some(mcu) = &mut self.mcu {
                     mcu.reset_all_pins();
                 }
@@ -2167,6 +2166,7 @@ mod git_snapshot_tests {
             memory_x: String::new(),
             build_rs: String::new(),
             rust_toolchain: "[toolchain]\nchannel = \"esp\"\n".into(),
+            blob_source: None,
         }
     }
 
@@ -2205,6 +2205,7 @@ mod git_snapshot_tests {
                     memory_x: String::new(),
                     build_rs: String::new(),
                     rust_toolchain: pin.clone(),
+                    blob_source: None,
                 });
             let mut blind: Vec<String> = files
                 .into_iter()

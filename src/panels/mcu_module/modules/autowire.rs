@@ -101,20 +101,35 @@ fn instance_space(required: &[ModuleSignal]) -> Vec<u8> {
 /// 2. `ports` — signals spread over two GPIO ports usually means mixing a
 ///    peripheral's default pins with its remap pins, which on STM32F1 is not a
 ///    legal combination at all.
-/// 3. `sides` — pins on opposite edges of the chip mean wires across the body.
-/// 4. `spread` — how far apart the pins sit, so a compact block wins.
-/// 5. `board_use` — a pad the board already spends on something else (its own
+/// 3. `off_header` — pads a board brings out only on a connector, not on a
+///    header you can put a jumper wire on (see [`is_off_header`]).
+/// 4. `sides` — pins on opposite edges of the chip mean wires across the body.
+/// 5. `spread` — how far apart the pins sit, so a compact block wins.
+/// 6. `board_use` — a pad the board already spends on something else (its own
 ///    NAME says so). Second-to-last on purpose: it settles TIES and must never
 ///    outrank the port/side rules, which stand in for what the silicon can form.
-/// 6. `instance` — pure tie-break, keeping the old "lowest instance" order.
+/// 7. `instance` — pure tie-break, keeping the old "lowest instance" order.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct Score {
     unassigned: usize,
     ports: usize,
+    off_header: usize,
     sides: usize,
     spread: usize,
     board_use: usize,
     instance: u8,
+}
+
+/// Whether a pad is on the board but on no header: the pico2-ice brings
+/// GP10..19 out only on its 22-pin FFC connector, and its definition says so
+/// in the name.
+///
+/// Ranked above the geometry, because it is not about how the diagram looks:
+/// a wire cannot reach it. Those pads sit alone on one edge of the diagram, so
+/// the geometry terms PREFERRED them - every first "+ USART", "+ I2C" and
+/// "+ SPI" on that board landed on the FFC.
+fn is_off_header(name: &str) -> bool {
+    name.ends_with("(FFC)")
 }
 
 /// Whether a pin's own NAME says the board already spends it on something.
@@ -241,6 +256,8 @@ struct PinFact<'a> {
     /// The pad's own name says the board already spends it - see
     /// [`is_board_used`].
     board_used: bool,
+    /// On no header - see [`is_off_header`].
+    off_header: bool,
     /// What the pad currently carries.
     func: &'a PinFunction,
 }
@@ -275,6 +292,7 @@ impl<'a> PinFacts<'a> {
                             port: port_of(&p.name),
                             side: sides.get(&p.number).copied(),
                             board_used: is_board_used(&p.name),
+                            off_header: is_off_header(&p.name),
                             func: &p.selected_function,
                         },
                     )
@@ -296,6 +314,7 @@ impl<'a> PinFacts<'a> {
 struct ScoreAcc<'a> {
     unassigned: usize,
     ports: Vec<&'a str>,
+    off_header: usize,
     side_bits: u8,
     board_use: usize,
     lo: usize,
@@ -307,6 +326,7 @@ impl<'a> ScoreAcc<'a> {
         Self {
             unassigned: 0,
             ports: Vec::new(),
+            off_header: 0,
             side_bits: 0,
             board_use: 0,
             lo: usize::MAX,
@@ -321,6 +341,9 @@ impl<'a> ScoreAcc<'a> {
             }
             if !self.ports.contains(&f.port) {
                 self.ports.push(f.port);
+            }
+            if f.off_header {
+                self.off_header += 1;
             }
             if f.board_used {
                 self.board_use += 1;
@@ -337,6 +360,7 @@ impl<'a> ScoreAcc<'a> {
         Score {
             unassigned: self.unassigned,
             ports: self.ports.len(),
+            off_header: self.off_header,
             sides: self.side_bits.count_ones() as usize,
             spread: self.hi.saturating_sub(self.lo),
             board_use: self.board_use,
@@ -349,6 +373,7 @@ impl<'a> ScoreAcc<'a> {
     fn with(&self, facts: &PinFacts<'_>, inst: u8, want: &PinFunction, num: usize) -> Score {
         let mut unassigned = self.unassigned;
         let mut ports = self.ports.len();
+        let mut off_header = self.off_header;
         let mut side_bits = self.side_bits;
         let mut board_use = self.board_use;
         if let Some(f) = facts.by_num.get(&num) {
@@ -357,6 +382,9 @@ impl<'a> ScoreAcc<'a> {
             }
             if !self.ports.contains(&f.port) {
                 ports += 1;
+            }
+            if f.off_header {
+                off_header += 1;
             }
             if f.board_used {
                 board_use += 1;
@@ -368,6 +396,7 @@ impl<'a> ScoreAcc<'a> {
         Score {
             unassigned,
             ports,
+            off_header,
             sides: side_bits.count_ones() as usize,
             spread: self.hi.max(num).saturating_sub(self.lo.min(num)),
             board_use,
@@ -1198,6 +1227,7 @@ mod the_pads_the_search_may_reach {
         let worse_geometry = Score {
             unassigned: 0,
             ports: 2,
+            off_header: 0,
             sides: 1,
             spread: 4,
             board_use: 0,
@@ -1206,12 +1236,49 @@ mod the_pads_the_search_may_reach {
         let board_pad_but_compact = Score {
             unassigned: 0,
             ports: 1,
+            off_header: 0,
             sides: 1,
             spread: 4,
             board_use: 2,
             instance: 0,
         };
         assert!(board_pad_but_compact < worse_geometry);
+    }
+
+    /// The pico2-ice's GP10..19 reach only its FFC connector, and they sit
+    /// alone on one edge of the diagram - so every geometry term PREFERRED
+    /// them, and the first USART, I2C and SPI all landed where no jumper wire
+    /// can reach. Fresh, and one after another, none may take an FFC pad.
+    #[test]
+    fn a_pad_on_no_header_is_the_last_resort() {
+        let kinds = [
+            ModuleKind::GenericInterfaceUsart,
+            ModuleKind::GenericInterfaceI2c,
+            ModuleKind::GenericInterfaceSpi,
+        ];
+        let on_ffc = |mcu: &Mcu| -> Vec<String> {
+            mcu.modules
+                .iter()
+                .flat_map(|m| m.connections.iter())
+                .filter_map(|c| mcu.find_pin(c.mcu_pin))
+                .map(|p| p.name.clone())
+                .filter(|n| super::is_off_header(n))
+                .collect()
+        };
+        for kind in kinds {
+            let mut mcu = chip("rp2350_pico2_ice");
+            assert!(mcu.add_module(kind), "{kind:?}");
+            assert!(
+                on_ffc(&mcu).is_empty(),
+                "{kind:?} fresh: {:?}",
+                on_ffc(&mcu)
+            );
+        }
+        let mut mcu = chip("rp2350_pico2_ice");
+        for kind in kinds {
+            assert!(mcu.add_module(kind), "{kind:?}");
+        }
+        assert!(on_ffc(&mcu).is_empty(), "in sequence: {:?}", on_ffc(&mcu));
     }
 }
 
@@ -1404,6 +1471,7 @@ mod reference_search {
         let mut unassigned = 0;
         let mut ports: HashSet<&str> = HashSet::new();
         let mut side_set: HashSet<u8> = HashSet::new();
+        let mut off_header = 0;
         let mut board_use = 0;
         let (mut lo, mut hi) = (usize::MAX, 0usize);
         for (want, num) in chosen {
@@ -1412,6 +1480,9 @@ mod reference_search {
                     unassigned += 1;
                 }
                 ports.insert(port_of(&pin.name));
+                if is_off_header(&pin.name) {
+                    off_header += 1;
+                }
                 if is_board_used(&pin.name) {
                     board_use += 1;
                 }
@@ -1425,6 +1496,7 @@ mod reference_search {
         Score {
             unassigned,
             ports: ports.len(),
+            off_header,
             sides: side_set.len(),
             spread: hi.saturating_sub(lo),
             board_use,

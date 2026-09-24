@@ -60,6 +60,16 @@ pub struct ProjectFiles {
     /// `error: custom toolchain 'esp' specified in override file … is not
     /// installed` — which names the file, the toolchain and the problem.
     pub rust_toolchain: String,
+    /// The project folder whose binary files `main.rs` includes (the radio's
+    /// firmware, the FPGA's bitstream) are the ones to build with. `None` for a
+    /// project that has no folder yet, which builds with the IDE's defaults.
+    ///
+    /// Needed because Build, Check and Flash run in a COPY of the project (the
+    /// build workspace), and nothing else carries a replaced `top.bin` there:
+    /// the writers only lay the IDE's own defaults down when a file is missing,
+    /// so the copy went on building with the default however often the user
+    /// swapped theirs in. See [`sync_included_blobs`].
+    pub blob_source: Option<std::path::PathBuf>,
 }
 
 /// The `rust-toolchain.toml` a target needs, if any.
@@ -1619,6 +1629,7 @@ pub fn build_project_files(
         // cannot.
         rust_toolchain: rust_toolchain_for(&config.target),
         gitignore: gen_config(ConfigFile::GitIgnore, config, toolchain),
+        blob_source: None,
     }
 }
 
@@ -1669,6 +1680,138 @@ fn write_cyw43_firmware(dest: &Path, main_rs: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// What `main.rs` includes to load the FPGA on a pico2-ice. The codegen emits
+/// exactly this, and the gateware is laid down only when it is there.
+pub const FPGA_BITSTREAM_INCLUDE: &str = "include_bytes!(\"../fpga/top.bin\")";
+
+/// The IDE's default gateware for the pico2-ice, and what goes with it.
+///
+/// `top.bin` is built from `top.v` by the commands in the README, and the
+/// build is reproducible byte for byte. The pin file is tinyVision's (MIT),
+/// which is why its licence travels with it.
+const FPGA_GATEWARE: [(&str, &[u8]); 5] = [
+    (
+        "top.bin",
+        include_bytes!("../../../assets/fpga-gateware/pico2-ice/top.bin"),
+    ),
+    (
+        "top.v",
+        include_bytes!("../../../assets/fpga-gateware/pico2-ice/top.v"),
+    ),
+    (
+        "pico2_ice.pcf",
+        include_bytes!("../../../assets/fpga-gateware/pico2-ice/pico2_ice.pcf"),
+    ),
+    (
+        "LICENSE-tinyvision-MIT.txt",
+        include_bytes!("../../../assets/fpga-gateware/pico2-ice/LICENSE-tinyvision-MIT.txt"),
+    ),
+    (
+        "README.md",
+        include_bytes!("../../../assets/fpga-gateware/pico2-ice/README.md"),
+    ),
+];
+
+/// The IDE's default `fpga/top.bin`, which a project without its own builds with.
+pub fn default_bitstream() -> &'static [u8] {
+    FPGA_GATEWARE[0].1
+}
+
+/// Put the default gateware in `fpga/` next to a project that loads it.
+///
+/// The same contract as [`write_cyw43_firmware`]: keyed on the generated code,
+/// and never overwriting, because `fpga/` is where the user's own design goes.
+fn write_fpga_gateware(dest: &Path, main_rs: &str) -> io::Result<()> {
+    if !main_rs.contains(FPGA_BITSTREAM_INCLUDE) {
+        return Ok(());
+    }
+    let dir = dest.join("fpga");
+    fs::create_dir_all(&dir)?;
+    for (name, bytes) in FPGA_GATEWARE {
+        let path = dir.join(name);
+        if !path.exists() {
+            fs::write(path, bytes)?;
+        }
+    }
+    Ok(())
+}
+
+/// The binary files `main_rs` compiles in, as project-relative paths.
+///
+/// Only those: a README or a licence beside them does not change the build.
+fn included_blobs(main_rs: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if main_rs.contains("cyw43::aligned_bytes!") {
+        out.extend([
+            "firmware/43439A0.bin",
+            "firmware/43439A0_clm.bin",
+            "firmware/nvram_rp2040.bin",
+        ]);
+    }
+    if main_rs.contains(FPGA_BITSTREAM_INCLUDE) {
+        out.push("fpga/top.bin");
+    }
+    out
+}
+
+/// The IDE's own copy of an included binary, for a project that has none.
+fn shipped_blob(rel: &str) -> Option<&'static [u8]> {
+    match rel {
+        "firmware/43439A0.bin" => Some(CYW43_FW),
+        "firmware/43439A0_clm.bin" => Some(CYW43_CLM),
+        "firmware/nvram_rp2040.bin" => Some(CYW43_NVRAM),
+        "fpga/top.bin" => Some(FPGA_GATEWARE[0].1),
+        _ => None,
+    }
+}
+
+/// Make `dest` build with the project's own copies of the included binaries.
+///
+/// For each one: the project folder's file when it has one, the IDE's shipped
+/// default when it has not - and the default too when there is no project
+/// folder yet. The build copy is shared by every project the window opens, so
+/// leaving it alone there kept the LAST project's replaced bitstream or radio
+/// firmware, and an unsaved project built with someone else's gateware.
+/// Written only when the bytes differ, so an unchanged file keeps its mtime
+/// and cargo has nothing to rebuild.
+///
+/// Save is the one case that does nothing: `dest` IS the project folder, whose
+/// files are the source; the default writers after this fill only a gap.
+fn sync_included_blobs(dest: &Path, files: &ProjectFiles) -> io::Result<()> {
+    let source = files.blob_source.as_deref();
+    if source == Some(dest) {
+        return Ok(());
+    }
+    for rel in included_blobs(&files.main_rs) {
+        let own = match source.map(|s| fs::read(s.join(rel))) {
+            Some(Ok(bytes)) => Some(bytes),
+            Some(Err(e)) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => None,
+        };
+        let Some(bytes) = own.as_deref().or_else(|| shipped_blob(rel)) else {
+            continue;
+        };
+        let target = dest.join(rel);
+        if let Some(dir) = target.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        write_bytes_if_changed(&target, bytes)?;
+    }
+    Ok(())
+}
+
+/// [`write_if_changed`] for a BINARY file: compared and written byte for byte.
+///
+/// `write_if_changed` matches the line endings already on disk, which is
+/// right for text and ruinous for a bitstream: a `0D 0A` in the old file would
+/// have turned every `0A` of the new one into `0D 0A`.
+fn write_bytes_if_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if fs::read(path).ok().as_deref() == Some(bytes) {
+        return Ok(());
+    }
+    fs::write(path, bytes)
+}
+
 pub fn write_project(
     dest: &Path,
     files: &ProjectFiles,
@@ -1680,7 +1823,10 @@ pub fn write_project(
 ) -> io::Result<()> {
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
+    // The user's binaries first, then the defaults: those only fill a gap.
+    sync_included_blobs(dest, files)?;
     write_cyw43_firmware(dest, &files.main_rs)?;
+    write_fpga_gateware(dest, &files.main_rs)?;
 
     // ── Remove stale .rs files from src/ ─────────────────────────────────────
     // When the user switches between chip types (e.g. STM32 → ESP32-C3), the
@@ -2997,7 +3143,7 @@ mod tests {
     #[test]
     fn rp2350_memory_x_keeps_the_image_block_first() {
         let tc = ToolchainKind::RustEmbedded;
-        for id in ["rp2350_pico2", "rp2350_pico2_w"] {
+        for id in ["rp2350_pico2", "rp2350_pico2_w", "rp2350_pico2_ice"] {
             for is_async in [false, true] {
                 let m = gen_config(ConfigFile::MemoryX, &builtin_project(id, is_async), &tc);
                 let at = format!("{id}, async = {is_async}:\n{m}");
@@ -3024,8 +3170,14 @@ mod tests {
             for is_async in [false, true] {
                 let m = gen_config(ConfigFile::MemoryX, &builtin_project(id, is_async), &tc);
                 let at = format!("{id}, async = {is_async}:\n{m}");
-                assert!(m.contains("BOOT2 : ORIGIN = 0x10000000, LENGTH = 0x100\n"), "{at}");
-                assert!(m.contains("FLASH : ORIGIN = 0x10000000 + 0x100, LENGTH = 2048K - 0x100\n"), "{at}");
+                assert!(
+                    m.contains("BOOT2 : ORIGIN = 0x10000000, LENGTH = 0x100\n"),
+                    "{at}"
+                );
+                assert!(
+                    m.contains("FLASH : ORIGIN = 0x10000000 + 0x100, LENGTH = 2048K - 0x100\n"),
+                    "{at}"
+                );
                 assert!(m.contains(".boot2 ORIGIN(BOOT2) :"), "{at}");
                 assert!(m.contains("} INSERT BEFORE .text;"), "{at}");
                 assert_eq!(m.matches("ASSERT(").count(), 1, "{at}");
@@ -3057,8 +3209,15 @@ mod tests {
             )
         );
         for is_async in [false, true] {
-            let m = gen_config(ConfigFile::MemoryX, &builtin_project("nrf52833_microbit_v2", is_async), &tc);
-            assert!(!m.contains("SECTIONS") && !m.contains("ASSERT"), "nRF, async = {is_async}:\n{m}");
+            let m = gen_config(
+                ConfigFile::MemoryX,
+                &builtin_project("nrf52833_microbit_v2", is_async),
+                &tc,
+            );
+            assert!(
+                !m.contains("SECTIONS") && !m.contains("ASSERT"),
+                "nRF, async = {is_async}:\n{m}"
+            );
         }
     }
 
@@ -3081,7 +3240,10 @@ mod tests {
         let edited = format!("{before_fix}/* my note */\n");
         let spliced = splice_config(ConfigFile::MemoryX, &edited, pico2, &tc);
         assert!(spliced.contains("INSERT AFTER .vector_table"), "{spliced}");
-        assert!(spliced.contains("/* my note */"), "user edit preserved:\n{spliced}");
+        assert!(
+            spliced.contains("/* my note */"),
+            "user edit preserved:\n{spliced}"
+        );
         assert_eq!(
             splice_config(ConfigFile::MemoryX, &spliced, pico2, &tc),
             spliced,
@@ -3958,5 +4120,173 @@ mod user_dependency_tests {
             "another table opened first:
 {refreshed}"
         );
+    }
+}
+
+/// The binary files a project compiles in - the radio firmware and the FPGA
+/// bitstream: laid down once, and carried from the project folder into the
+/// build copy byte for byte.
+#[cfg(test)]
+mod included_blob_tests {
+    use super::*;
+
+    /// A project whose main.rs loads the FPGA, building from `source`.
+    fn fpga_files(source: Option<&Path>) -> ProjectFiles {
+        ProjectFiles {
+            main_rs: format!("static BITSTREAM: &[u8] = {FPGA_BITSTREAM_INCLUDE};\n"),
+            blob_source: source.map(Path::to_path_buf),
+            ..Default::default()
+        }
+    }
+
+    fn top_bin(dir: &Path) -> Vec<u8> {
+        fs::read(dir.join("fpga").join("top.bin")).expect("fpga/top.bin")
+    }
+
+    /// The gateware lands once, whole, and only beside a main.rs that loads it;
+    /// after that every file in `fpga/` is the user's, and Save leaves it be.
+    #[test]
+    fn the_gateware_is_laid_down_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Save: the project folder is both the destination and the source.
+        let save = fpga_files(Some(dir.path()));
+        write_project(dir.path(), &save, &[], "", "").unwrap();
+        for (name, bytes) in FPGA_GATEWARE {
+            let got = fs::read(dir.path().join("fpga").join(name)).unwrap();
+            assert_eq!(got, bytes, "{name}");
+        }
+        // A real UP5K image, not a stub: its size, and the sync word after the
+        // comment block icepack writes.
+        let bin = top_bin(dir.path());
+        assert_eq!(bin.len(), 104_090);
+        assert_eq!(bin[4..8], [0x7E, 0xAA, 0x99, 0x7E]);
+
+        for (name, _) in FPGA_GATEWARE {
+            fs::write(dir.path().join("fpga").join(name), format!("mine: {name}")).unwrap();
+        }
+        write_project(dir.path(), &save, &[], "", "").unwrap();
+        for (name, _) in FPGA_GATEWARE {
+            let got = fs::read_to_string(dir.path().join("fpga").join(name)).unwrap();
+            assert_eq!(got, format!("mine: {name}"), "the user's {name} survives");
+        }
+
+        let other = tempfile::TempDir::new().unwrap();
+        let plain = ProjectFiles {
+            main_rs: "fn main() {}\n".into(),
+            ..Default::default()
+        };
+        write_project(other.path(), &plain, &[], "", "").unwrap();
+        assert!(
+            !other.path().join("fpga").exists(),
+            "no loader, no gateware"
+        );
+    }
+
+    /// The defect `blob_source` fixes: Build runs in a copy of the project, and
+    /// the copy kept building the default however often the user replaced it.
+    /// Byte for byte, too - the old build copy holds a `0D 0A`, which would
+    /// have made the line-ending-matching writer rewrite every `0A`.
+    #[test]
+    fn a_replaced_bitstream_reaches_the_build_copy() {
+        let project = tempfile::TempDir::new().unwrap();
+        let build = tempfile::TempDir::new().unwrap();
+        let files = fpga_files(Some(project.path()));
+        write_project(project.path(), &files, &[], "", "").unwrap();
+        fs::create_dir_all(build.path().join("fpga")).unwrap();
+        fs::write(build.path().join("fpga").join("top.bin"), b"old\r\nimage").unwrap();
+
+        let mine = b"\xFF\x00\x00\xFF\x7E\xAA\x99\x7E\nbody\r\n".to_vec();
+        fs::write(project.path().join("fpga").join("top.bin"), &mine).unwrap();
+        write_project(build.path(), &files, &[], "", "").unwrap();
+        assert_eq!(top_bin(build.path()), mine);
+
+        // Deleted from the project: the build copy falls back to the default
+        // rather than keeping the replacement.
+        fs::remove_file(project.path().join("fpga").join("top.bin")).unwrap();
+        write_project(build.path(), &files, &[], "", "").unwrap();
+        assert_eq!(top_bin(build.path()), FPGA_GATEWARE[0].1);
+    }
+
+    /// The same path carries the radio firmware, whose comment in the generated
+    /// code has always promised that replacing it is safe.
+    #[test]
+    fn a_replaced_radio_firmware_reaches_the_build_copy() {
+        let project = tempfile::TempDir::new().unwrap();
+        let build = tempfile::TempDir::new().unwrap();
+        let files = ProjectFiles {
+            main_rs: "let fw = cyw43::aligned_bytes!(\"../firmware/43439A0.bin\");\n".into(),
+            blob_source: Some(project.path().to_path_buf()),
+            ..Default::default()
+        };
+        fs::create_dir_all(project.path().join("firmware")).unwrap();
+        fs::write(
+            project.path().join("firmware").join("43439A0.bin"),
+            b"newer",
+        )
+        .unwrap();
+        write_project(build.path(), &files, &[], "", "").unwrap();
+        let fw = |name: &str| fs::read(build.path().join("firmware").join(name)).unwrap();
+        assert_eq!(fw("43439A0.bin"), b"newer");
+        // The two the user did not replace are the shipped ones.
+        assert_eq!(fw("43439A0_clm.bin"), CYW43_CLM);
+        assert_eq!(fw("nvram_rp2040.bin"), CYW43_NVRAM);
+    }
+
+    /// Save writes into the project folder itself, and there the copy is a
+    /// no-op; a second build with nothing changed rewrites nothing either, so
+    /// cargo has no reason to rebuild.
+    #[test]
+    fn an_unchanged_blob_is_not_rewritten() {
+        let project = tempfile::TempDir::new().unwrap();
+        let build = tempfile::TempDir::new().unwrap();
+        let files = fpga_files(Some(project.path()));
+        let mtime = |dir: &Path| {
+            fs::metadata(dir.join("fpga").join("top.bin"))
+                .and_then(|m| m.modified())
+                .unwrap()
+        };
+        write_project(project.path(), &files, &[], "", "").unwrap();
+        write_project(build.path(), &files, &[], "", "").unwrap();
+        let (saved, built) = (mtime(project.path()), mtime(build.path()));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_project(project.path(), &files, &[], "", "").unwrap();
+        write_project(build.path(), &files, &[], "", "").unwrap();
+        assert_eq!(mtime(project.path()), saved, "Save onto itself");
+        assert_eq!(mtime(build.path()), built, "an unchanged build copy");
+
+        // And when the project has no copy: the default goes in once, and is
+        // not deleted and laid down again on every build.
+        fs::remove_file(project.path().join("fpga").join("top.bin")).unwrap();
+        write_project(build.path(), &files, &[], "", "").unwrap();
+        let defaulted = mtime(build.path());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_project(build.path(), &files, &[], "", "").unwrap();
+        assert_eq!(mtime(build.path()), defaulted, "a default build copy");
+    }
+
+    /// The build copy is shared by every project the window opens. A project
+    /// with no folder yet has no blobs of its own, so it builds with the IDE's
+    /// - not with whatever the previous project swapped in.
+    #[test]
+    fn a_project_without_a_folder_builds_with_the_defaults() {
+        let build = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(build.path().join("fpga")).unwrap();
+        fs::write(
+            build.path().join("fpga").join("top.bin"),
+            b"the last project's",
+        )
+        .unwrap();
+        write_project(build.path(), &fpga_files(None), &[], "", "").unwrap();
+        assert_eq!(top_bin(build.path()), FPGA_GATEWARE[0].1);
+
+        let radio = ProjectFiles {
+            main_rs: "let fw = cyw43::aligned_bytes!(\"../firmware/43439A0.bin\");\n".into(),
+            ..Default::default()
+        };
+        fs::create_dir_all(build.path().join("firmware")).unwrap();
+        fs::write(build.path().join("firmware").join("43439A0.bin"), b"theirs").unwrap();
+        write_project(build.path(), &radio, &[], "", "").unwrap();
+        let fw = fs::read(build.path().join("firmware").join("43439A0.bin")).unwrap();
+        assert_eq!(fw, CYW43_FW);
     }
 }

@@ -76,6 +76,10 @@ pub fn reserved_role(name: &str) -> &'static str {
         "Enables the 3.3 V regulator, pulled HIGH on the board. Pull it LOW to switch the Pico off."
     } else if n == "VSYS" {
         "Main input, 1.8 to 5.5 V. Feeds the regulator through a diode from VBUS, so it can also be back-powered."
+    // tinyVision pico2-ice. Its reserved pads carry their GPIO in the name -
+    // `ICE_SS (GP5)` - so they are matched on the first word.
+    } else if let Some(role) = pico2_ice_role(&n) {
+        role
     // BBC micro:bit v2 edge connector. The two large rings and the small pads
     // tied to them carry the same supply; the accessibility pad is a GPIO the
     // board reserves for assistive switches.
@@ -84,7 +88,7 @@ pub fn reserved_role(name: &str) -> &'static str {
     } else if n.contains("ACCESSIBILITY") {
         "P0.12, reserved by the micro:bit for accessibility hardware (switch access). The foundation asks that nothing else use it."
     } else if n == "VBUS" {
-        "5 V straight from the micro-USB connector, present only while USB is plugged in."
+        "5 V straight from the USB connector, present only while USB is plugged in."
     } else if n.starts_with("NPOR") {
         "Power-on reset."
     } else if n.starts_with("CHIP_PU") || n.starts_with("CHIP_EN") {
@@ -110,6 +114,97 @@ pub fn reserved_role(name: &str) -> &'static str {
     } else {
         "Reserved - fixed by the package, not configurable here."
     }
+}
+
+/// What a NON-reserved board pad does when its function is picked, for the one
+/// kind of pad where the function's own name undersells it: a board line whose
+/// "GPIO Output" switches something on. `None` for every ordinary pin.
+///
+/// The Pins panel shows it above the function list and the Peripherals tab in
+/// the tooltip, because both would otherwise offer the pad as the cheapest
+/// plain output on the chip.
+pub fn switch_role(name: &str) -> Option<&'static str> {
+    name.trim().to_ascii_uppercase().starts_with("ICE_CRESET").then_some(
+        "The FPGA's CRESET_B (GP31, 10k pull-down). GPIO Output here turns on the FPGA loader: at boot the firmware sends fpga/top.bin into the iCE40 over GP4..7, clocks it from GP21 and checks CDONE on GP40, before anything else runs. It is not a GPIO for your code - the loader hands back `fpga_reset` instead.",
+    )
+}
+
+/// The pico2-ice's reserved pads: the FPGA's configuration port, its own I/O,
+/// and the rails the board adds. `n` is the upper-cased name.
+///
+/// Most of these surprise someone who knows the Pico: that GP5 is ALSO the
+/// FPGA flash's chip select, that the FPGA clock is GP21 and not the GP22 the
+/// vendor header names, that most header pins never reach the RP2350.
+fn pico2_ice_role(n: &str) -> Option<&'static str> {
+    // Names another chip could carry for something else entirely match on the
+    // WHOLE pico2-ice spelling, so an `ADC7` on some other part is not told
+    // it hangs off a divider on this board.
+    match n {
+        "ADC7 (GP47)" => {
+            return Some(
+                "GP47 (ADC7) through a 2.2k / 10k divider with a clamp: an analog input scaled for higher voltages, not a plain GPIO.",
+            );
+        }
+        "ADC5/VREF (GP45)" => {
+            return Some(
+                "GP45 (ADC5), tied by the bridged jumper R30 to a TL431 2.5 V reference with 100 nF to GND, which GP46 powers through 1k. It reads that reference; driven, it fights the shunt. Cut R30 and R31 to use the header pin.",
+            );
+        }
+        "PSRAM_CS (GP8)" => {
+            return Some(
+                "Chip select of the 8 MB PSRAM on the QSPI bus (GP8, QMI CS1). On no header.",
+            );
+        }
+        _ => {}
+    }
+    let first = n.split_whitespace().next().unwrap_or("");
+    Some(match first {
+        "ICE_SS" => {
+            "The FPGA's SPI_SS (GP5) - and on the same net the FPGA flash's chip select, with a 10k pull-up. The FPGA loader drives it; anything else here selects the flash."
+        }
+        "ICE_SO" => {
+            "The FPGA's SPI_SO (GP7), which is also the FPGA flash's data IN. The loader sends the flash to sleep on it before a load."
+        }
+        "ICE_SI" => {
+            "Data INTO the FPGA while it is configured (GP4), and the FPGA flash's data OUT. GP4 is SPI0 RX only, so the load cannot use the SPI block."
+        }
+        "ICE_SCK" => {
+            "The FPGA's configuration clock (GP6, through 27 R), shared with the FPGA flash."
+        }
+        "ICE_DONE" => {
+            "CDONE (GP40): HIGH once the FPGA holds a configuration. It also lights the green LED D3."
+        }
+        "ICE_CLK" => {
+            "Clock into the FPGA's global buffer (FPGA pin 35) from GP21, which is GPOUT0. GP22 cannot output a clock, whatever the vendor header says."
+        }
+        "ICE_LED_R" | "ICE_LED_G" | "ICE_LED_B" => {
+            "The FPGA's RGB LED, active LOW, on the iCE40's 24 mA current-sink pins. Only gateware can drive it."
+        }
+        "ICE10" => {
+            "iCE40 pin 10, wired to the FPGA's user button SW2 (active LOW, 10k pull-up). The RP2350 cannot read it."
+        }
+        "ICE12" | "ICE13" => {
+            "iCE40 pin 12 / 13, which is also the FPGA flash's IO2 / IO3 (10k pull-down). Gateware only."
+        }
+        "3V3_FPGA" => {
+            "The FPGA's 3.3 V rail, from the board's regulator. It also powers the FPGA flash."
+        }
+        "VIO_BANK2" => {
+            "I/O supply of the FPGA's bank 2 (the ICE PMOD A pins). Tied to 3V3_FPGA by jumper SJ5; cut it to run that bank at another voltage."
+        }
+        "3V3" => "3.3 V from the on-board regulator, which powers the chip.",
+        "VIN" => {
+            "The board's supply input, into its regulator. Power the board here instead of from USB."
+        }
+        // Every other `ICEn`: an FPGA I/O with no wire to the RP2350.
+        f if f
+            .strip_prefix("ICE")
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())) =>
+        {
+            "An iCE40 I/O pin with no wire to the RP2350: only the FPGA's gateware drives it, and the .pcf names it by this number."
+        }
+        _ => return None,
+    })
 }
 
 impl Pin {
@@ -222,5 +317,20 @@ mod tests {
 
         // …and the generic is still there, for a pad nothing is known about.
         assert!(reserved_role("PAD_7").starts_with("Reserved"));
+    }
+
+    /// The pico2-ice's answers stay on the pico2-ice: a pad another chip names
+    /// `3V3` or `ADC7` is not told about the RP2350, a divider or GP47.
+    #[test]
+    fn the_pico2_ice_roles_do_not_leak_onto_other_chips() {
+        for generic in ["3V3", "VIN", "ADC7", "PSRAM_CS"] {
+            let role = reserved_role(generic);
+            assert!(!role.contains("RP2350"), "{generic}: {role}");
+            assert!(!role.contains("GP4"), "{generic}: {role}");
+        }
+        assert!(reserved_role("ADC7 (GP47)").contains("divider"));
+        assert!(reserved_role("ADC5/VREF (GP45)").contains("TL431"));
+        assert!(reserved_role("PSRAM_CS (GP8)").contains("PSRAM"));
+        assert!(reserved_role("ICE_SS (GP5)").contains("flash"));
     }
 }

@@ -1169,13 +1169,16 @@ impl Mcu {
             s.push_str(&notes);
         }
         // Pin functions (`@pins`) - CODE, and the whole of it: every binding
-        // in the generated block comes from these. Written for nRF only. Its
-        // backend leaves no `// label` on a binding for `parse_main_rs` to
-        // recover the function from, so without this an nRF project came back
-        // with an empty diagram on every open. Every other family still reads
-        // its pins out of main.rs, and a section it never writes cannot get in
-        // the way of that.
-        if crate::panels::mcu_module::codegen::nrf::is_nrf(&self.family) {
+        // in the generated block comes from these. Written for nRF and RP.
+        // Their backends leave no `// label` on a binding for `parse_main_rs`
+        // to recover the function from, so without this their projects came
+        // back with an empty diagram on every open - on the pico2-ice that
+        // also silently dropped the FPGA loader, which is a pad function too.
+        // Every other family still reads its pins out of main.rs, and a
+        // section it never writes cannot get in the way of that.
+        if crate::panels::mcu_module::codegen::nrf::is_nrf(&self.family)
+            || crate::panels::mcu_module::codegen::rp::is_rp(&self.family)
+        {
             // `pins_section` leaves the Unset pads out.
             let pins: std::collections::BTreeMap<usize, PinFunction> = self
                 .iter_all_pins()

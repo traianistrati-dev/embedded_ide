@@ -116,6 +116,21 @@ pub fn draw_board_features(
         egui::Color32::WHITE,
     );
 
+    // ── The FPGA, on the boards that carry one ───────────────────────────────
+    // Keyed on the `ICE_` pads for the same reason the radio is keyed on `WL_`:
+    // a board with the FPGA has to describe its configuration lines anyway.
+    if has_fpga(mcu) {
+        let fpga = fpga_box_rect(chip_rect, name_center, name_height);
+        painter.rect_filled(fpga, 3.0, CHIP_FILL);
+        painter.text(
+            fpga.center(),
+            egui::Align2::CENTER_CENTER,
+            FPGA_PART,
+            egui::FontId::proportional((fpga.width() * 0.15).clamp(8.0, 18.0)),
+            egui::Color32::WHITE,
+        );
+    }
+
     // ── The radio can, on the boards that have one ──────────────────────────
     // Keyed on the WL_ pads rather than on the name: a board carrying the radio
     // has to describe those pads anyway, so there is nothing extra to get wrong.
@@ -159,6 +174,30 @@ fn board_chip_square(
         .min(room / 1.12);
     egui::Rect::from_center_size(
         egui::pos2(name_center.x, name_top - side * 0.62),
+        egui::vec2(side, side),
+    )
+}
+
+/// The FPGA the `ICE_` pads belong to. One board carries one today.
+const FPGA_PART: &str = "iCE40UP5K";
+
+/// Whether this board carries an FPGA, told by its configuration pads.
+fn has_fpga(mcu: &crate::panels::mcu_module::Mcu) -> bool {
+    mcu.iter_all_pins().any(|p| p.name.starts_with("ICE_"))
+}
+
+/// Where the FPGA goes: the chip square's mirror image, below the name.
+///
+/// Capped the same way, by the room between the name and the band of pin
+/// numbers along the bottom edge.
+fn fpga_box_rect(chip_rect: egui::Rect, name_center: egui::Pos2, name_height: f32) -> egui::Rect {
+    let name_bottom = name_center.y + name_height * 0.5;
+    let room = (chip_rect.bottom() - NUM_BAND) - name_bottom;
+    let side = (chip_rect.width() * 0.42)
+        .clamp(48.0, 150.0)
+        .min(room / 1.12);
+    egui::Rect::from_center_size(
+        egui::pos2(name_center.x, name_bottom + side * 0.62),
         egui::vec2(side, side),
     )
 }
@@ -678,6 +717,45 @@ mod the_board_chip_square {
                 sq.width()
             );
         }
+    }
+
+    /// The FPGA box: drawn only on a board with `ICE_` pads, below the name and
+    /// clear of the bottom pin numbers - the chip square's mirror image.
+    #[test]
+    fn the_fpga_box_sits_below_the_name() {
+        const NAME_PT: f32 = 22.0;
+        let mut boxed = 0;
+        for def in builtins::builtin_definitions()
+            .into_iter()
+            .filter(|d| d.board_chip.is_some())
+        {
+            let mcu = def.build_mcu();
+            if !has_fpga(&mcu) {
+                continue;
+            }
+            boxed += 1;
+            let (w, h, ..) = body_layout(&mcu);
+            let body = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+            let fpga = fpga_box_rect(body, body.center(), NAME_PT);
+            assert!(fpga.top() > body.center().y + NAME_PT / 2.0, "{}", def.id);
+            assert!(
+                fpga.bottom() <= body.bottom() - NUM_BAND + 0.01,
+                "{}",
+                def.id
+            );
+            assert!(
+                fpga.width() >= 48.0,
+                "{}: box shrank to {}",
+                def.id,
+                fpga.width()
+            );
+            assert!(
+                !fpga.intersects(board_chip_square(body, body.center(), NAME_PT)),
+                "{}",
+                def.id
+            );
+        }
+        assert_eq!(boxed, 1, "the pico2-ice, and no other board");
     }
 }
 

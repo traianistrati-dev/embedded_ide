@@ -36,6 +36,10 @@ const RP2350_PICO2_RON: &str = include_str!("../../../assets/mcus/rp2350_pico2.r
 // on the non-W board.
 const RP2040_PICO_W_RON: &str = include_str!("../../../assets/mcus/rp2040_pico_w.ron");
 const RP2350_PICO2_W_RON: &str = include_str!("../../../assets/mcus/rp2350_pico2_w.ron");
+// tinyVision's pico2-ice: an RP2350B beside an iCE40UP5K FPGA, on two 2x20
+// headers rather than the Pico's one. Generated from the board's netlist by
+// `codegen::rp::pico2_ice_board`, which also checks this file against it.
+const RP2350_PICO2_ICE_RON: &str = include_str!("../../../assets/mcus/rp2350_pico2_ice.ron");
 
 // Nordic. A board again: the pads are the micro:bit's edge connector, and the
 // nets wired to the LED matrix, buttons, speaker, microphone and sensors sit on
@@ -59,6 +63,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("rp2350_pico2", RP2350_PICO2_RON),
     ("rp2040_pico_w", RP2040_PICO_W_RON),
     ("rp2350_pico2_w", RP2350_PICO2_W_RON),
+    ("rp2350_pico2_ice", RP2350_PICO2_ICE_RON),
     ("nrf52833_microbit_v2", NRF52833_MICROBIT_V2_RON),
 ];
 

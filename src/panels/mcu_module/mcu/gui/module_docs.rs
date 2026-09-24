@@ -1496,8 +1496,10 @@ pub const SHARED_INSTANCE_TIMER_ESP: &str = "The LEDC timer this module drives. 
                                              the module keeps the timer.";
 
 pub const SHARED_INSTANCE_TIMER_RP: &str = "The PWM SLICE this module drives. A slice is welded to \
-                                            its pads on the RP: pad n belongs to slice (n/2) % 8, \
-                                            and A or B by whether it is even or odd.";
+                                            its pads on the RP: pad n below 32 belongs to slice \
+                                            (n/2) % 8, pad n from 32 up (RP2350B only) to slice \
+                                            8 + ((n-32)/2) % 4, and A or B by whether it is even \
+                                            or odd.";
 
 pub const SHARED_INSTANCE_CUSTOM: &str = "A custom module drives no peripheral, so this number \
                                           means nothing - it exists only so every module can \
