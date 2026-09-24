@@ -1005,6 +1005,198 @@ pub fn async_stack_name(family: &str) -> &'static str {
     }
 }
 
+/// What the System tab's Async card "Details" pane says for one family: the
+/// `(label, body)` rows and the code example under them.
+///
+/// Every body is ONE string literal, never a `\`-continuation: the
+/// continuation keeps the source indentation, and this text is read by more
+/// than the panel's word splitter. `async_details_rows_have_no_double_space`
+/// holds it.
+pub struct AsyncDetails {
+    pub rows: &'static [(&'static str, &'static str)],
+    pub example: &'static str,
+}
+
+/// The Async pane for `family`. Keyed with the same `esp -> rp -> nrf ->
+/// stm32` chain as [`async_stack_name`] and `project_gen::async_flavor_for`,
+/// so the card's subtitle, its pane and the manifest lines cannot disagree
+/// about which family a chip is.
+///
+/// It exists because the panel had two panes, an ESP one and one written for
+/// embassy-stm32, and showed the STM32 one to every other chip: a Pico read
+/// "embassy-rp" in the subtitle and, under it, that its buses live in
+/// `src/pins/configs/*.rs` (they are built inline in `main.rs`), that its USART
+/// is always `BufferedUart` (a transport row chooses) and that DMA channels
+/// are a `TODO` for the user (the generator hands them out). The micro:bit got
+/// the same text and matches none of it: EasyDMA, no channels, no choice.
+pub fn async_details(family: &str) -> AsyncDetails {
+    if async_is_esp(family) {
+        ESP_ASYNC_DETAILS
+    } else if async_is_rp(family) {
+        RP_ASYNC_DETAILS
+    } else if async_is_nrf(family) {
+        NRF_ASYNC_DETAILS
+    } else {
+        STM32_ASYNC_DETAILS
+    }
+}
+
+/// Each row is a claim about `embassy_async.rs` and `project_gen.rs`; the USART
+/// and DMA rows say what the module rows offer today (a Buffered | DMA
+/// transport, channels from the family's table with a per-module picker), not
+/// what they offered when the pane was first written.
+const STM32_ASYNC_DETAILS: AsyncDetails = AsyncDetails {
+    rows: &[
+        (
+            "On Apply:",
+            "Regenerates main.rs with the embassy entry + Spawner, rewrites every src/pins/configs/*.rs to the async init, toggles the embassy Cargo.toml deps, then builds.",
+        ),
+        (
+            "Entry:",
+            "#[embassy_executor::main] async fn main(Spawner); the embassy executor drives the task, use .await inside the loop.",
+        ),
+        (
+            "USART:",
+            "BufferedUart on an interrupt ring (no DMA channel), or UartTx + RingBufferedUartRx on two DMA channels; the module's Async transport row chooses. Both expose embedded-io-async.",
+        ),
+        (
+            "SPI / I2C:",
+            "Each module gets a Blocking (embedded-hal 1.0) or Async-DMA (embedded-hal-async) selector on the Pins tab; the Portable/Native Init API is not used under Async.",
+        ),
+        (
+            "DMA:",
+            "Channels come from this family's table, allocated per module or pinned in the module's channel picker, and the Configuration tab's DMA card shows what was taken. A chip with no table, or two modules pinned to one channel, gets a TODO(async DMA) line in main.rs at exactly the init that needs it.",
+        ),
+        (
+            "Cargo.toml:",
+            "Adds embassy-executor 0.9 + embassy-time and toggles time-driver-any on embassy-stm32. An async USART adds embedded-io-async + static_cell; SPI/I2C add embedded-hal (Blocking) or embedded-hal-async (Async-DMA). Leaving Async removes them again.",
+        ),
+        (
+            "Applies to:",
+            "Every STM32 on embassy-stm32, which is every STM32 here but the F1 (on stm32f1xx-hal). The Pico, the micro:bit and the ESP parts have panes of their own.",
+        ),
+    ],
+    // `Irqs` last: the config file takes the binding rather than declaring
+    // its own, since a vector may only be bound once in the program.
+    example: "let mut _serial1 = pins::configs::usart1::init(p.USART1, p.PA10, p.PA9, Irqs);\n_serial1.write_all(b\"hi\").await.ok();",
+};
+
+/// Each row is a claim about `rp.rs`: no bus config files (`config_files`
+/// writes the watchdog's only), `BufferedUart` or DMA `Uart` per the transport
+/// row, SPI on two channels with its init locked, I2C on interrupts, channels
+/// handed out in order by `async_bus_lines`, and the manifest lines from
+/// `AsyncFlavor::Rp`, `needs_async_usart` and `ensure_cyw43_deps`.
+const RP_ASYNC_DETAILS: AsyncDetails = AsyncDetails {
+    rows: &[
+        (
+            "On Apply:",
+            "Regenerates main.rs with the embassy entry + Spawner and every bus built inline against one bind_interrupts! struct, swaps the Cargo.toml deps, then builds. No per-bus src/pins/configs/*.rs: the watchdog's is the only config file.",
+        ),
+        (
+            "Entry:",
+            "#[embassy_executor::main] async fn main(spawner: Spawner) on embassy-rp's Peripherals (p.PIN_0, p.UART0, p.DMA_CH0).",
+        ),
+        (
+            "USART:",
+            "BufferedUart on an interrupt ring (no DMA channel; the only RP uart type with embedded-io-async), or Uart on two DMA channels with one transfer per read and only the 32-byte FIFO between reads; the module's Async transport row chooses.",
+        ),
+        (
+            "SPI / I2C:",
+            "SPI is always async on two DMA channels (the Init selector is shown locked). I2C is interrupt driven and takes no channel, so it has no transport row.",
+        ),
+        (
+            "DMA:",
+            "Twelve channels on the RP2040, sixteen on the RP2350, handed out in order to the buses that need them (and, on a Pico W, the radio) and reported to the Configuration tab's DMA card; nothing to fill in by hand.",
+        ),
+        (
+            "Cargo.toml:",
+            "The embassy-rp line is the board's own (rp2040 or rp235xa, with its time-driver feature); adds embassy-executor 0.10 (platform-cortex-m) + embassy-time. A BufferedUart adds embedded-io-async + static_cell. Leaving Async removes them again. On a Pico W, taking the on-board LED adds cyw43 + cyw43-pio + static_cell: the LED hangs off the radio, whose driver is async only, so a Blocking project gets a comment instead.",
+        ),
+        (
+            "Applies to:",
+            "RP2040 and RP2350 boards (Pico, Pico W, Pico 2, Pico 2 W).",
+        ),
+    ],
+    // The Pico's UART0 (GP0 TX, GP1 RX) in embassy-rp's tx-then-rx order. The
+    // second line is illustrative, as the STM32 one is: the generator emits
+    // nothing past the init. `BufferedUart` is embedded-io-async `Write`.
+    example: "let mut uart0 = embassy_rp::uart::BufferedUart::new(p.UART0, p.PIN_0, p.PIN_1, Irqs, tx_buf, rx_buf, ucfg0);\nuart0.write_all(b\"hi\").await.ok();",
+};
+
+/// Each row is a claim about `nrf.rs`: no bus config files, `Uarte` / `Spim` /
+/// `Twim` on EasyDMA with the module rows skipped (`SKIP_USART_TRANSPORT_NRF`,
+/// `SKIP_ASYNC_INIT_NRF`), the shared TWISPI blocks, an armed input as a task,
+/// and the manifest lines from `AsyncFlavor::Nrf` and `needs_static_cell`.
+const NRF_ASYNC_DETAILS: AsyncDetails = AsyncDetails {
+    rows: &[
+        (
+            "On Apply:",
+            "Regenerates main.rs with the embassy entry + Spawner and every bus built inline against one bind_interrupts! struct, swaps the Cargo.toml deps, then builds. No per-bus src/pins/configs/*.rs: the watchdog's is the only config file.",
+        ),
+        (
+            "Entry:",
+            "#[embassy_executor::main] async fn main(spawner: Spawner); embassy_nrf::init(config) starts both clocks itself, so the Clock tab is two fields of Config.",
+        ),
+        (
+            "USART:",
+            "Always Uarte: the UARTE moves bytes by EasyDMA, which is part of the peripheral, so there is no transport to choose and no channel to take.",
+        ),
+        (
+            "SPI / I2C:",
+            "One form each, Spim and Twim on EasyDMA; the same handle has blocking_* methods for when you want to wait. SPIM0/TWIM0 and SPIM1/TWIM1 are one block each (TWISPI0/1): put a SPIM and a TWIM on the same one and the TWIM is not built (the module says so).",
+        ),
+        (
+            "Inputs:",
+            "An armed input becomes a task that awaits the edge and calls your hook, spawned on the main executor; the task priority selector has no effect on this chip.",
+        ),
+        (
+            "Cargo.toml:",
+            "The embassy-nrf line is the chip's own (nrf52833, time-driver-rtc1, gpiote, nfc-pins-as-gpio); adds embassy-executor 0.10 (platform-cortex-m) + embassy-time. A TWIM's RAM buffer adds static_cell. Leaving Async removes them again.",
+        ),
+        ("Applies to:", "nRF52 (the BBC micro:bit v2 today)."),
+    ],
+    // `write` is embassy-nrf's own async method on `Uarte` (the type is not
+    // embedded-io-async), which is why it is not `write_all`. Illustrative:
+    // the generator emits nothing past the init.
+    example: "let mut uarte0 = embassy_nrf::uarte::Uarte::new(p.UARTE0, p.P1_08, p.P0_06, Irqs, uarte0_cfg);\nuarte0.write(b\"hi\").await.ok();",
+};
+
+/// Moved from the panel as it was, apart from the last row, which named
+/// embassy-stm32 as THE other async path when there are three.
+const ESP_ASYNC_DETAILS: AsyncDetails = AsyncDetails {
+    rows: &[
+        (
+            "On Apply:",
+            "Regenerates main.rs with the esp-rtos entry + Spawner and adds the async Cargo.toml deps, then builds. The pin bindings themselves do NOT change: esp-hal's Output/Input/Uart/Spi/I2c are the same types in both runtimes.",
+        ),
+        (
+            "Entry:",
+            "#[esp_rtos::main] async fn main(_spawner: Spawner); esp_rtos::start(...) hands TIMG0 + software interrupt 0 to the scheduler, then embassy_time::Timer and .await work in the loop.",
+        ),
+        (
+            "TIMG0:",
+            "The scheduler takes peripherals.TIMG0, so your own code cannot also claim it. That is the cost of having embassy-time on this chip.",
+        ),
+        (
+            "Why esp-rtos:",
+            "NOT esp-hal-embassy: that crate needs esp-hal's private __esp_hal_embassy feature, dropped in esp-hal 1.1 (the version this template pins), so cargo cannot even resolve it. esp-rtos is its replacement, same maintainers.",
+        ),
+        (
+            "Cargo.toml:",
+            "Adds esp-rtos (chip + embassy features), embassy-executor 0.10 and embassy-time 0.5. Leaving Async removes them again.",
+        ),
+        (
+            "Not yet:",
+            "USART/SPI/I2C stay the blocking esp-hal drivers written inline in main.rs; ESP has no src/pins/configs/*.rs, so there is no async bus driver to select.",
+        ),
+        (
+            "Applies to:",
+            "Every Espressif part, RISC-V and Xtensa alike. Each other family has its own async stack, named in the card's subtitle.",
+        ),
+    ],
+    example: "let timg0 = TimerGroup::new(peripherals.TIMG0);\nesp_rtos::start(timg0.timer0, sw_int.software_interrupt0);\n// then: embassy_time::Timer::after_millis(500).await;",
+};
+
 /// Whether an RTIC project can be generated for `family`.
 ///
 /// Narrow on purpose, for two reasons — neither of which is "RTIC cannot do it".
@@ -1233,7 +1425,7 @@ pub fn async_unavailable_reason(family: &str) -> Option<String> {
         return None;
     }
     Some(if family == "stm32f1" {
-        "Not written for `stm32f1` yet: it is the one STM32 family this IDE builds on          stm32f1xx-hal (which is what gives it USB, the GPIO bridge and RTIC), while the          async runtime is embassy-stm32 throughout — and embassy-stm32 does support the          F1, so this is work, not a limit of the chip. The DMA transport and channel          pickers live on this runtime, so they are hidden here too."
+        "Not written for `stm32f1` yet: it is the one STM32 family this IDE builds on stm32f1xx-hal (which is what gives it USB, the GPIO bridge and RTIC), while the async runtime is embassy-stm32 throughout — and embassy-stm32 does support the F1, so this is work, not a limit of the chip. The DMA transport and channel pickers live on this runtime, so they are hidden here too."
             .to_owned()
     } else {
         format!(
@@ -1403,6 +1595,95 @@ mod blocking_note_tests {
         assert_eq!(async_stack_name("rp235x"), "embassy-rp");
         assert_eq!(async_stack_name("nrf52833"), "embassy-nrf");
         assert_eq!(async_stack_name("esp32c3"), "esp-rtos");
+    }
+
+    /// One chip per async family, with the Rust path its example must use.
+    /// The STM32 path is the config module; the others build inline in
+    /// `main.rs` against their HAL crate.
+    const ASYNC_FAMILIES: &[(&str, &str)] = &[
+        ("stm32f4", "pins::configs::"),
+        ("rp2040", "embassy_rp::"),
+        ("rp235x", "embassy_rp::"),
+        ("nrf52833", "embassy_nrf::"),
+        ("esp32c3", "esp_rtos::"),
+    ];
+
+    fn pane_text(family: &str) -> String {
+        let d = super::async_details(family);
+        let mut s: String = d
+            .rows
+            .iter()
+            .map(|(label, body)| format!("{label} {body}\n"))
+            .collect();
+        s.push_str(d.example);
+        s
+    }
+
+    /// The pane under the Async card names the stack the subtitle names, and
+    /// its example is written against that stack.
+    #[test]
+    fn the_async_pane_names_its_own_stack() {
+        for (family, path) in ASYNC_FAMILIES {
+            let d = super::async_details(family);
+            let stack = super::async_stack_name(family);
+            let rows = pane_text(family);
+            assert!(rows.contains(stack), "{family}: no {stack} in {rows}");
+            assert!(d.example.contains(path), "{family}: {}", d.example);
+        }
+    }
+
+    /// The bug this exists for: the STM32 pane shown to a Pico or a
+    /// micro:bit. Nothing in the other three panes describes the STM32 flow.
+    #[test]
+    fn no_other_pane_describes_the_stm32_flow() {
+        for (family, _) in ASYNC_FAMILIES
+            .iter()
+            .filter(|(f, _)| !f.starts_with("stm32"))
+        {
+            let rows = pane_text(family);
+            for stm32_only in [
+                "embassy-stm32",
+                "rewrites every src/pins/configs",
+                "time-driver-any",
+                "TODO",
+                "PA10",
+            ] {
+                assert!(
+                    !rows.contains(stm32_only),
+                    "{family} pane says {stm32_only:?}: {rows}"
+                );
+            }
+        }
+    }
+
+    /// The four panes read alike: the same first, second and last labels, and
+    /// a Cargo.toml row in each, so switching chips moves the eye to the same
+    /// rows.
+    #[test]
+    fn every_pane_has_the_same_spine_of_labels() {
+        for (family, _) in ASYNC_FAMILIES {
+            let labels: Vec<&str> = super::async_details(family)
+                .rows
+                .iter()
+                .map(|(l, _)| *l)
+                .collect();
+            assert_eq!(labels.first(), Some(&"On Apply:"), "{family}: {labels:?}");
+            assert_eq!(labels.get(1), Some(&"Entry:"), "{family}: {labels:?}");
+            assert!(labels.contains(&"Cargo.toml:"), "{family}: {labels:?}");
+            assert_eq!(labels.last(), Some(&"Applies to:"), "{family}: {labels:?}");
+        }
+    }
+
+    /// A `\`-continuation carries the source indentation into the text as a
+    /// run of spaces. Every body is one literal; this is what notices when
+    /// one is not.
+    #[test]
+    fn async_details_rows_have_no_double_space() {
+        for (family, _) in ASYNC_FAMILIES {
+            for line in pane_text(family).lines() {
+                assert!(!line.contains("  "), "{family}: {line:?}");
+            }
+        }
     }
 
     /// Async is greyed on exactly one family, and that card has to say why —

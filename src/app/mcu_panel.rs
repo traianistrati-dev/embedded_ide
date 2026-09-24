@@ -2993,8 +2993,9 @@ impl AppIde {
             // deep in "Details" — a disabled control with no explanation is the
             // question this answers.
             disabled_reason(ui, native_why.as_deref());
-            runtime_details(
+            runtime_details_when_available(
                 ui,
+                native_why.as_deref(),
                 "rt_details_native",
                 &[
                     ("On Apply:", "Regenerates main.rs, rewrites every src/pins/configs/*.rs to the concrete \
@@ -3018,8 +3019,11 @@ impl AppIde {
             ui.add_space(6.0);
 
             // ── Async (embassy) ──────────────────────────────────────────────
-            // Two different async stacks behind one card: embassy-stm32 on ARM,
-            // esp-rtos (same embassy executor, ESP scheduler) on the ESP32-C3.
+            // Four async stacks behind one card: embassy-stm32, embassy-rp and
+            // embassy-nrf on ARM, esp-rtos (same embassy executor, ESP
+            // scheduler) on the Espressif parts. The title and subtitle tell
+            // the ESP apart here; the pane under them is per family in
+            // `family::async_details`.
             let esp_async = family::async_is_esp(&mcu.family);
             let async_sel = mcu.pending_runtime == Runtime::Async;
             let async_why = family::async_unavailable_reason(&mcu.family);
@@ -3052,61 +3056,16 @@ impl AppIde {
             // Same rule as the Native and RTIC cards: the reason a card is
             // greyed belongs beside it, not in "Details" the user cannot open.
             disabled_reason(ui, async_why.as_deref());
-            let esp_async_details: &[(&str, &str)] = &[
-                ("On Apply:", "Regenerates main.rs with the esp-rtos entry + Spawner and adds the async \
-                               Cargo.toml deps — then builds. The pin bindings themselves do NOT change: \
-                               esp-hal's Output/Input/Uart/Spi/I2c are the same types in both runtimes."),
-                ("Entry:", "#[esp_rtos::main] async fn main(_spawner: Spawner) — esp_rtos::start(...) hands \
-                            TIMG0 + software interrupt 0 to the scheduler, then embassy_time::Timer and \
-                            .await work in the loop."),
-                ("TIMG0:", "The scheduler takes peripherals.TIMG0, so your own code cannot also claim it. \
-                            That is the cost of having embassy-time on this chip."),
-                ("Why esp-rtos:", "NOT esp-hal-embassy: that crate needs esp-hal's private __esp_hal_embassy \
-                                   feature, dropped in esp-hal 1.1 (the version this template pins), so cargo \
-                                   cannot even resolve it. esp-rtos is its replacement, same maintainers."),
-                ("Cargo.toml:", "Adds esp-rtos (chip + embassy features), embassy-executor 0.10 and \
-                                 embassy-time 0.5. Leaving Async removes them again."),
-                ("Not yet:", "USART/SPI/I2C stay the blocking esp-hal drivers written inline in main.rs — \
-                              ESP has no src/pins/configs/*.rs, so there is no async bus driver to select."),
-                // One sentence, no `\`-continuation: the continuation keeps the
-                // source indentation and renders as a run of spaces.
-                ("Applies to:", "Every Espressif part - RISC-V and Xtensa alike. The STM32 async path is embassy-stm32 instead."),
-            ];
-            runtime_details(
+            // Per family, like the subtitle: the pane used to be an ESP one and
+            // an STM32 one shown to every other chip, Pico and micro:bit
+            // included.
+            let details = family::async_details(&mcu.family);
+            runtime_details_when_available(
                 ui,
+                async_why.as_deref(),
                 "rt_details_async",
-                if esp_async {
-                    esp_async_details
-                } else {
-                    &[
-                    ("On Apply:", "Regenerates main.rs with the embassy entry + Spawner, rewrites every \
-                                   src/pins/configs/*.rs to the async init, toggles the embassy Cargo.toml deps — \
-                                   then builds."),
-                    ("Entry:", "#[embassy_executor::main] async fn main(Spawner) — the embassy executor drives \
-                                the task; use .await inside the loop."),
-                    ("Drivers:", "embedded-io-async (USART via BufferedUart, StaticCell ring buffers) + \
-                                  embedded-hal-async (SPI/I2C), initialised in src/pins/configs/*.rs."),
-                    ("Virtual modules:", "USART is always BufferedUart. Each SPI/I2C module gets a Blocking | \
-                                          Async-DMA selector on the Pins tab (the Portable/Native Init API is not \
-                                          used under Async)."),
-                    ("Async-DMA:", "embassy async SPI/I2C need DMA channels the IDE can't choose -> main.rs gets \
-                                    a TODO line to fill (it won't compile until you set channels valid for your chip)."),
-                    ("Cargo.toml:", "Adds embassy-executor + embassy-time and toggles the time-driver-any feature \
-                                     on embassy-stm32. Async USART adds embedded-io-async + static_cell; SPI/I2C \
-                                     add embedded-hal (blocking) / embedded-hal-async (async-DMA). Leaving Async \
-                                     removes these again."),
-                    ("Applies to:", "STM32F4/G0/G4/L4/H7/WBA/… (embassy families). NOT STM32F1 (on stm32f1xx-hal). \
-                                     ESP32-C3 has its own async path (esp-rtos)."),
-                    ]
-                },
-                if esp_async {
-                    "let timg0 = TimerGroup::new(peripherals.TIMG0);\n\
-                     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);\n\
-                     // then: embassy_time::Timer::after_millis(500).await;"
-                } else {
-                    "let mut _serial1 = pins::configs::usart1::init(p.USART1, p.PA10, p.PA9);\n\
-                     _serial1.write_all(b\"hi\").await.ok();"
-                },
+                details.rows,
+                details.example,
             );
 
             let rtic_sel = mcu.pending_runtime == Runtime::Rtic;
@@ -3125,8 +3084,9 @@ impl AppIde {
                 mcu.pending_runtime = Runtime::Rtic;
             }
             disabled_reason(ui, rtic_why.as_deref());
-            runtime_details(
+            runtime_details_when_available(
                 ui,
+                rtic_why.as_deref(),
                 "rt_details_rtic",
                 &[
                     ("On Apply:", "Regenerates main.rs as an #[rtic::app] module. The init sequence is UNCHANGED - same clocks, same pin bindings, same pins/configs/*::init calls -                                    it just moves into #[init]. The config files themselves are untouched."),
@@ -4068,6 +4028,33 @@ fn runtime_card(
     resp
 }
 
+/// The crate names a Runtime-details body colors as crates. A crate a pane
+/// names and this list lacks renders plain, which is how the Pico's and the
+/// micro:bit's async panes looked unfinished next to the STM32 one: every
+/// async stack `family::async_stack_name` can answer with is here.
+const DETAIL_LIBS: &[&str] = &[
+    "embedded-hal-0-2",
+    "embedded-hal",
+    "embedded-io",
+    "embedded-io-async",
+    "embedded-hal-async",
+    "nb",
+    "embassy-executor",
+    "embassy-time",
+    "embassy-stm32",
+    "embassy-rp",
+    "embassy-nrf",
+    "esp-rtos",
+    "cyw43",
+    "cyw43-pio",
+    "static_cell",
+    "stm32f1xx-hal",
+    "cortex-m-rt",
+    "bxcan",
+    "usb-device",
+    "usbd-serial",
+];
+
 /// Style one word inside a Runtime-details body: crate/library names → yellow
 /// bold, source-file names → orange bold, async/runtime keywords → orange-red
 /// bold, peripheral names → bold (default colour); everything else stays plain.
@@ -4090,24 +4077,7 @@ fn detail_word(word: &str) -> egui::RichText {
             .color(egui::Color32::from_rgb(240, 150, 40));
     }
     // 2. Crate / library names → yellow bold.
-    const LIBS: &[&str] = &[
-        "embedded-hal-0-2",
-        "embedded-hal",
-        "embedded-io",
-        "embedded-io-async",
-        "embedded-hal-async",
-        "nb",
-        "embassy-executor",
-        "embassy-time",
-        "embassy-stm32",
-        "static_cell",
-        "stm32f1xx-hal",
-        "cortex-m-rt",
-        "bxcan",
-        "usb-device",
-        "usbd-serial",
-    ];
-    if LIBS.contains(&clean) {
+    if DETAIL_LIBS.contains(&clean) {
         return egui::RichText::new(word)
             .size(SIZE)
             .strong()
@@ -4149,6 +4119,33 @@ fn detail_word(word: &str) -> egui::RichText {
 /// runtime generates and how it applies. `points` are `(label, body)` rows; a
 /// non-empty `example` is rendered as a monospace code block. The open/closed
 /// state persists per `salt` via egui's own widget memory.
+/// Whether a runtime card draws its Details pane: only when the card can be
+/// chosen, which is `why.is_none()`.
+///
+/// The Native and RTIC panes are written for the F1 (stm32f1xx-hal types, EXTI
+/// vectors) and the Async pane for whichever family it is on, so under a
+/// greyed card the pane describes another chip's runtime: a Pico read
+/// "Applies to: STM32F1 only" under a Native card it could not click. The
+/// reason the card is greyed is already on the card (`disabled_reason`), and
+/// that is all there is to say about this chip.
+fn shows_runtime_details(why: Option<&str>) -> bool {
+    why.is_none()
+}
+
+/// [`runtime_details`] for a card that may be greyed: drawn only when
+/// [`shows_runtime_details`] says so.
+fn runtime_details_when_available(
+    ui: &mut egui::Ui,
+    why: Option<&str>,
+    salt: &str,
+    points: &[(&str, &str)],
+    example: &str,
+) {
+    if shows_runtime_details(why) {
+        runtime_details(ui, salt, points, example);
+    }
+}
+
 fn runtime_details(ui: &mut egui::Ui, salt: &str, points: &[(&str, &str)], example: &str) {
     egui::CollapsingHeader::new(
         egui::RichText::new(format!("{}  Details — how it works & applies", ph::INFO))
@@ -4190,6 +4187,62 @@ fn runtime_details(ui: &mut egui::Ui, salt: &str, points: &[(&str, &str)], examp
                 });
         }
     });
+}
+
+/// The Runtime-details highlighter knows every crate the Async panes name.
+#[cfg(test)]
+mod a_greyed_runtime_card_has_no_details_pane {
+    use super::shows_runtime_details;
+    use crate::panels::mcu_module::codegen::family::{
+        async_unavailable_reason, native_unavailable_reason, rtic_unavailable_reason,
+    };
+
+    /// Per family, which of the three guarded cards draw a pane: (native,
+    /// async, rtic). Blocking is not here because it is never greyed.
+    const EXPECTED: &[(&str, (bool, bool, bool))] = &[
+        ("stm32f1", (true, false, true)),
+        ("stm32f4", (false, true, false)),
+        ("rp2040", (false, true, false)),
+        ("rp235x", (false, true, false)),
+        ("nrf52833", (false, true, false)),
+        ("esp32c3", (false, true, false)),
+    ];
+
+    /// The bug this exists for: a Pico with an F1 pane under its greyed
+    /// Native card. A pane is drawn exactly when the card can be chosen.
+    #[test]
+    fn the_pane_follows_the_cards_availability() {
+        for (family, (native, r#async, rtic)) in EXPECTED {
+            let got = (
+                shows_runtime_details(native_unavailable_reason(family).as_deref()),
+                shows_runtime_details(async_unavailable_reason(family).as_deref()),
+                shows_runtime_details(rtic_unavailable_reason(family).as_deref()),
+            );
+            assert_eq!(got, (*native, *r#async, *rtic), "{family}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod the_details_pane_colors_every_async_crate {
+    use super::DETAIL_LIBS;
+    use crate::panels::mcu_module::codegen::family;
+
+    /// Each family's stack, as the pane names it, is on the crate list; so is
+    /// the Pico W radio pair its Cargo.toml row names.
+    #[test]
+    fn every_async_stack_is_a_known_crate() {
+        for family in ["stm32f4", "rp2040", "nrf52833", "esp32c3"] {
+            let stack = family::async_stack_name(family);
+            assert!(
+                DETAIL_LIBS.contains(&stack),
+                "{family}: {stack} renders plain"
+            );
+        }
+        for radio in ["cyw43", "cyw43-pio"] {
+            assert!(DETAIL_LIBS.contains(&radio), "{radio} renders plain");
+        }
+    }
 }
 
 /// What the palette SAYS when it greys an entry out.
