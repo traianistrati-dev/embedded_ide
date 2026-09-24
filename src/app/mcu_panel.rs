@@ -6,6 +6,7 @@
 
 use super::tabs::show_peripherals_tab;
 use super::{AppIde, McuTab, ProjectFileId, TabGroup};
+use crate::panels::mcu_module::codegen::family;
 use crate::panels::mcu_module::mcu::gui::module_docs;
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -2833,7 +2834,6 @@ impl AppIde {
         mcu: &mut crate::panels::mcu_module::mcu::Mcu,
         hal: Option<crate::app::dialogs::FeatureVerdict>,
     ) {
-        use crate::panels::mcu_module::codegen::family;
         use crate::panels::mcu_module::mcu::Runtime;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2924,14 +2924,7 @@ impl AppIde {
 
             // ── Blocking ─────────────────────────────────────────────────────
             let blocking_sel = mcu.pending_runtime == Runtime::Blocking;
-            // The subtitle names the HAL this CHIP will use — see
-            // `family::blocking_hal_note`. A fixed sentence described the F1 path
-            // only, which made embassy-stm32 appearing in a Blocking project on
-            // any other STM32 look like the choice had been ignored.
-            let blocking_note = format!(
-                "#[entry] fn main() -> !  ·  {}",
-                family::blocking_hal_note(&mcu.family)
-            );
+            let blocking_note = blocking_subtitle(&mcu.family);
             if runtime_card(
                 ui,
                 blocking_sel,
@@ -2943,33 +2936,7 @@ impl AppIde {
             {
                 mcu.pending_runtime = Runtime::Blocking;
             }
-            runtime_details(
-                ui,
-                "rt_details_blocking",
-                &[
-                    ("On Apply:", "Regenerates main.rs with the #[entry] entry, rewrites every \
-                                   src/pins/configs/*.rs to the portable init, (re)writes src/pins/io.rs, \
-                                   and reconciles Cargo.toml — then triggers a build."),
-                    ("Entry:", "#[cortex_m_rt::entry] fn main() -> ! — classic bare-metal, runs forever."),
-                    ("Drivers:", "Each USART/SPI/I2C initialises in src/pins/configs/*.rs and is exposed \
-                                  through STANDARD portable traits — embedded-io (serial) + embedded-hal 1.0 \
-                                  (SpiBus / I2c / OutputPin). App code generic over those traits ports across \
-                                  chips/HALs unchanged."),
-                    ("Virtual modules:", "Each USART/SPI/I2C module keeps its Init API: Portable | Native (HAL \
-                                          type) selector on the Pins tab. Portable = the trait wrapper (its .0 \
-                                          still hands back the raw HAL object); Native = the concrete HAL type \
-                                          for that one module only. SPI/I2C are always blocking here."),
-                    ("GPIO / io.rs:", "GPIO API = Portable (System tab) -> src/pins/io.rs wraps the pins as \
-                                       DigitalOut / DigitalIn + a Delay over embedded-hal 1.0. GPIO API = Native \
-                                       -> raw HAL pins and io.rs is not emitted."),
-                    ("Cargo.toml:", "Adds embedded-io (serial) + embedded-hal 1.0 (SPI/I2C/GPIO) + the \
-                                     embedded-hal-0-2 bridge alias; nb is added only while a Native-mode module \
-                                     needs it. The embassy-* async crates are removed."),
-                    ("Applies to:", "Every chip — this is the default runtime."),
-                ],
-                "let mut _serial1 = pins::configs::usart1::init(...);\n\
-                 fn app<S: embedded_io::Read + embedded_io::Write>(s: &mut S) { /* portable */ }",
-            );
+            runtime_details(ui, "rt_details_blocking", BLOCKING_DETAILS, BLOCKING_EXAMPLE);
             ui.add_space(6.0);
 
             // ── Native (concrete HAL) ────────────────────────────────────────
@@ -2980,8 +2947,7 @@ impl AppIde {
                 native_sel,
                 native_ok,
                 "Native (bare-metal, HAL types)",
-                "#[entry] fn main() -> !  ·  concrete HAL types everywhere \
-                 (Serial / Spi / BlockingI2c) — no portable bridges",
+                NATIVE_SUBTITLE,
             );
             if let Some(why) = &native_why {
                 native_resp = native_resp.on_hover_text(why);
@@ -2997,24 +2963,8 @@ impl AppIde {
                 ui,
                 native_why.as_deref(),
                 "rt_details_native",
-                &[
-                    ("On Apply:", "Regenerates main.rs, rewrites every src/pins/configs/*.rs to the concrete \
-                                   init, drops src/pins/io.rs (raw GPIO), and reconciles Cargo.toml — then builds."),
-                    ("Entry:", "#[entry] fn main() -> ! — the same bare-metal entry as Blocking."),
-                    ("Drivers:", "init returns the CONCRETE stm32f1xx-hal types: Serial split into (Tx, Rx), \
-                                  Spi<…>, BlockingI2c<…>. No portable bridges, no extra trait crates, full HAL \
-                                  features."),
-                    ("Virtual modules:", "Init API is FORCED to Native (HAL type) for every USART/SPI/I2C and \
-                                          shown locked on the Pins tab — project-wide, nothing to pick per module."),
-                    ("GPIO / io.rs:", "GPIO is raw concrete HAL pins — src/pins/io.rs (the DigitalOut / DigitalIn \
-                                       / Delay wrappers) is NOT generated. The System-tab GPIO selector is subsumed."),
-                    ("Cargo.toml:", "Adds nb (the concrete Tx / Rx are nb-based) and keeps the concrete \
-                                     stm32f1xx-hal; the embassy-* async crates are removed."),
-                    ("Applies to:", "STM32F1 only (the family with concrete-HAL templates). Greyed on other \
-                                     families, whose blocking HAL types are already concrete."),
-                ],
-                "let (mut _tx1, mut _rx1) = pins::configs::usart1::init(...);\n\
-                 // use _tx1 with writeln!(), _rx1 with .read()",
+                NATIVE_DETAILS,
+                NATIVE_EXAMPLE,
             );
             ui.add_space(6.0);
 
@@ -3027,10 +2977,7 @@ impl AppIde {
             let esp_async = family::async_is_esp(&mcu.family);
             let async_sel = mcu.pending_runtime == Runtime::Async;
             let async_why = family::async_unavailable_reason(&mcu.family);
-            let async_subtitle = format!(
-                "#[embassy_executor::main] async fn main(Spawner)  ·  .await-able drivers on {}",
-                family::async_stack_name(&mcu.family)
-            );
+            let async_note = async_subtitle(&mcu.family);
             let mut async_resp = runtime_card(
                 ui,
                 async_sel,
@@ -3040,12 +2987,7 @@ impl AppIde {
                 } else {
                     "Async (embassy)"
                 },
-                if esp_async {
-                    "#[esp_rtos::main] async fn main(Spawner)  ·  \
-                     embassy executor scheduled by esp-rtos"
-                } else {
-                    &async_subtitle
-                },
+                &async_note,
             );
             if let Some(why) = &async_why {
                 async_resp = async_resp.on_hover_text(why);
@@ -3075,7 +3017,7 @@ impl AppIde {
                 rtic_sel,
                 rtic_ok,
                 "RTIC 2",
-                "#[rtic::app] with Shared / Local / init / idle  ·                   one hardware task per interrupt pin",
+                RTIC_SUBTITLE,
             );
             if let Some(why) = &rtic_why {
                 rtic_resp = rtic_resp.on_hover_text(why);
@@ -3088,18 +3030,8 @@ impl AppIde {
                 ui,
                 rtic_why.as_deref(),
                 "rt_details_rtic",
-                &[
-                    ("On Apply:", "Regenerates main.rs as an #[rtic::app] module. The init sequence is UNCHANGED - same clocks, same pin bindings, same pins/configs/*::init calls -                                    it just moves into #[init]. The config files themselves are untouched."),
-                    ("Entry:", "RTIC owns main. #[init] runs once and returns (Shared, Local); #[idle] is the background loop (wfi)."),
-                    ("Interrupts:", "A GPIO input with an Edge set on the Pins canvas becomes a #[task(binds = EXTIn)]. RTIC enables the vector itself, so the generated code never calls NVIC::unmask."),
-                    ("Shared EXTI vectors:", "STM32 gives lines 5-9 and 10-15 ONE vector each, so pins on them share a single task that branches on check_interrupt(). Two tasks on one vector would not compile."),
-                    ("Cargo.toml:", "Adds rtic (backend feature picked from the chip's Rust target: thumbv6 /                                      thumbv7 / thumbv8) and rtic-monotonics with cortex-m-systick. cortex-m already carries critical-section-single-core. Leaving RTIC removes them."),
-                    ("Applies to:", "STM32F1 only for now - the interrupt tasks are written against stm32f1xx-hal's ExtiPin trait."),
-                ],
-                "#[task(binds = EXTI0, local = [pa0_in_button])]
-                 fn exti0(cx: exti0::Context) {
-                     cx.local.pa0_in_button.clear_interrupt_pending_bit();
-                 }",
+                RTIC_DETAILS,
+                RTIC_EXAMPLE,
             );
 
             ui.add_space(10.0);
@@ -4026,6 +3958,231 @@ fn runtime_card(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
+}
+
+// ── Runtime card text ────────────────────────────────────────────────────────
+//
+// Every body below is ONE string literal (or a `\`-continuation, which strips
+// the next line's indentation). A literal joined by hand from a continuation
+// keeps the indentation as a run of spaces, and the card subtitles are
+// monospace, so the run rendered as a gap the width of a word.
+// `no_runtime_card_text_has_a_run_of_spaces` holds this; the Async pane's rows
+// are held by `async_details_rows_have_no_double_space` in `family`.
+//
+// The two-space "  ·  " between a subtitle's parts is deliberate.
+
+/// The Blocking card's subtitle names the HAL this CHIP will use — see
+/// `family::blocking_hal_note`. A fixed sentence described the F1 path only,
+/// which made embassy-stm32 appearing in a Blocking project on any other STM32
+/// look like the choice had been ignored.
+fn blocking_subtitle(family: &str) -> String {
+    format!(
+        "#[entry] fn main() -> !  ·  {}",
+        family::blocking_hal_note(family)
+    )
+}
+
+const BLOCKING_DETAILS: &[(&str, &str)] = &[
+    (
+        "On Apply:",
+        "Regenerates main.rs with the #[entry] entry, rewrites every \
+                   src/pins/configs/*.rs to the portable init, (re)writes src/pins/io.rs, \
+                   and reconciles Cargo.toml — then triggers a build.",
+    ),
+    (
+        "Entry:",
+        "#[cortex_m_rt::entry] fn main() -> ! — classic bare-metal, runs forever.",
+    ),
+    (
+        "Drivers:",
+        "Each USART/SPI/I2C initializes in src/pins/configs/*.rs and is exposed \
+                  through STANDARD portable traits — embedded-io (serial) + embedded-hal 1.0 \
+                  (SpiBus / I2c / OutputPin). App code generic over those traits ports across \
+                  chips/HALs unchanged.",
+    ),
+    (
+        "Virtual modules:",
+        "Each USART/SPI/I2C module keeps its Init API: Portable | Native (HAL \
+                          type) selector on the Pins tab. Portable = the trait wrapper (its .0 \
+                          still hands back the raw HAL object); Native = the concrete HAL type \
+                          for that one module only. SPI/I2C are always blocking here.",
+    ),
+    (
+        "GPIO / io.rs:",
+        "GPIO API = Portable (System tab) -> src/pins/io.rs wraps the pins as \
+                       DigitalOut / DigitalIn + a Delay over embedded-hal 1.0. GPIO API = Native \
+                       -> raw HAL pins and io.rs is not emitted.",
+    ),
+    (
+        "Cargo.toml:",
+        "Adds embedded-io (serial) + embedded-hal 1.0 (SPI/I2C/GPIO) + the \
+                     embedded-hal-0-2 bridge alias; nb is added only while a Native-mode module \
+                     needs it. The embassy-* async crates are removed.",
+    ),
+    ("Applies to:", "Every chip — this is the default runtime."),
+];
+
+const BLOCKING_EXAMPLE: &str = "let mut _serial1 = pins::configs::usart1::init(...);\n\
+    fn app<S: embedded_io::Read + embedded_io::Write>(s: &mut S) { /* portable */ }";
+
+const NATIVE_SUBTITLE: &str = "#[entry] fn main() -> !  ·  concrete HAL types everywhere \
+    (Serial / Spi / BlockingI2c) — no portable bridges";
+
+const NATIVE_DETAILS: &[(&str, &str)] = &[
+    (
+        "On Apply:",
+        "Regenerates main.rs, rewrites every src/pins/configs/*.rs to the concrete \
+                   init, drops src/pins/io.rs (raw GPIO), and reconciles Cargo.toml — then builds.",
+    ),
+    (
+        "Entry:",
+        "#[entry] fn main() -> ! — the same bare-metal entry as Blocking.",
+    ),
+    (
+        "Drivers:",
+        "init returns the CONCRETE stm32f1xx-hal types: Serial split into (Tx, Rx), \
+                  Spi<…>, BlockingI2c<…>. No portable bridges, no extra trait crates, full HAL \
+                  features.",
+    ),
+    (
+        "Virtual modules:",
+        "Init API is FORCED to Native (HAL type) for every USART/SPI/I2C and \
+                          shown locked on the Pins tab — project-wide, nothing to pick per module.",
+    ),
+    (
+        "GPIO / io.rs:",
+        "GPIO is raw concrete HAL pins — src/pins/io.rs (the DigitalOut / DigitalIn \
+                       / Delay wrappers) is NOT generated. The System-tab GPIO selector is subsumed.",
+    ),
+    (
+        "Cargo.toml:",
+        "Adds nb (the concrete Tx / Rx are nb-based) and keeps the concrete \
+                     stm32f1xx-hal; the embassy-* async crates are removed.",
+    ),
+    (
+        "Applies to:",
+        "STM32F1 only (the family with concrete-HAL templates). Grayed on other \
+                     families, whose blocking HAL types are already concrete.",
+    ),
+];
+
+const NATIVE_EXAMPLE: &str = "let (mut _tx1, mut _rx1) = pins::configs::usart1::init(...);\n\
+    // use _tx1 with writeln!(), _rx1 with .read()";
+
+/// The Async card's subtitle names the stack this family runs on, the ESP's
+/// own scheduler included — see `family::async_stack_name`.
+fn async_subtitle(family: &str) -> String {
+    if family::async_is_esp(family) {
+        "#[esp_rtos::main] async fn main(Spawner)  ·  embassy executor scheduled by esp-rtos"
+            .to_owned()
+    } else {
+        format!(
+            "#[embassy_executor::main] async fn main(Spawner)  ·  .await-able drivers on {}",
+            family::async_stack_name(family)
+        )
+    }
+}
+
+const RTIC_SUBTITLE: &str =
+    "#[rtic::app] with Shared / Local / init / idle  ·  one hardware task per interrupt pin";
+
+const RTIC_DETAILS: &[(&str, &str)] = &[
+    (
+        "On Apply:",
+        "Regenerates main.rs as an #[rtic::app] module. The init sequence is UNCHANGED - same clocks, same pin bindings, same pins/configs/*::init calls - it just moves into #[init]. The config files themselves are untouched.",
+    ),
+    (
+        "Entry:",
+        "RTIC owns main. #[init] runs once and returns (Shared, Local); #[idle] is the background loop (wfi).",
+    ),
+    (
+        "Interrupts:",
+        "A GPIO input with an Edge set on the Pins canvas becomes a #[task(binds = EXTIn)]. RTIC enables the vector itself, so the generated code never calls NVIC::unmask.",
+    ),
+    (
+        "Shared EXTI vectors:",
+        "STM32 gives lines 5-9 and 10-15 ONE vector each, so pins on them share a single task that branches on check_interrupt(). Two tasks on one vector would not compile.",
+    ),
+    (
+        "Cargo.toml:",
+        "Adds rtic (backend feature picked from the chip's Rust target: thumbv6 / thumbv7 / thumbv8) and rtic-monotonics with cortex-m-systick. cortex-m already carries critical-section-single-core. Leaving RTIC removes them.",
+    ),
+    (
+        "Applies to:",
+        "STM32F1 only for now - the interrupt tasks are written against stm32f1xx-hal's ExtiPin trait.",
+    ),
+];
+
+// The body line's four spaces are the example's own indentation; the source
+// indentation is stripped by the continuations.
+const RTIC_EXAMPLE: &str = "#[task(binds = EXTI0, local = [pa0_in_button])]\n\
+    fn exti0(cx: exti0::Context) {\n    \
+    cx.local.pa0_in_button.clear_interrupt_pending_bit();\n\
+    }";
+
+#[cfg(test)]
+mod no_runtime_card_text_has_a_run_of_spaces {
+    use super::{
+        BLOCKING_DETAILS, BLOCKING_EXAMPLE, NATIVE_DETAILS, NATIVE_EXAMPLE, NATIVE_SUBTITLE,
+        RTIC_DETAILS, RTIC_EXAMPLE, RTIC_SUBTITLE, async_subtitle, blocking_subtitle,
+    };
+    use crate::panels::mcu_module::codegen::family::{
+        async_unavailable_reason, native_unavailable_reason, rtic_unavailable_reason,
+    };
+
+    const FAMILIES: &[&str] = &["stm32f1", "stm32f4", "rp2040", "nrf52833", "esp32c3"];
+
+    /// Prose and subtitles: never three spaces in a row. Two is the "  ·  "
+    /// separator; three is a continuation joined by hand.
+    fn prose(what: &str, text: &str) {
+        assert!(!text.contains("   "), "{what}: {text:?}");
+    }
+
+    /// Code: the same, after each line's own indentation, which must be the
+    /// example's (at most four spaces), not the source file's.
+    fn code(what: &str, text: &str) {
+        for line in text.lines() {
+            let indent = line.len() - line.trim_start().len();
+            assert!(indent <= 4, "{what}: source indentation in {line:?}");
+            prose(what, line.trim_start());
+        }
+    }
+
+    /// The RTIC subtitle rendered a word-wide gap in monospace, from a
+    /// `\`-continuation joined into one literal with its indentation kept.
+    #[test]
+    fn subtitles_rows_examples_and_reasons() {
+        prose("native subtitle", NATIVE_SUBTITLE);
+        prose("rtic subtitle", RTIC_SUBTITLE);
+        for (name, rows) in [
+            ("blocking", BLOCKING_DETAILS),
+            ("native", NATIVE_DETAILS),
+            ("rtic", RTIC_DETAILS),
+        ] {
+            for (label, body) in rows {
+                prose(&format!("{name} {label}"), body);
+            }
+        }
+        code("blocking example", BLOCKING_EXAMPLE);
+        code("native example", NATIVE_EXAMPLE);
+        code("rtic example", RTIC_EXAMPLE);
+        for family in FAMILIES {
+            prose(
+                &format!("{family} blocking subtitle"),
+                &blocking_subtitle(family),
+            );
+            prose(&format!("{family} async subtitle"), &async_subtitle(family));
+            for (card, why) in [
+                ("native", native_unavailable_reason(family)),
+                ("async", async_unavailable_reason(family)),
+                ("rtic", rtic_unavailable_reason(family)),
+            ] {
+                if let Some(why) = why {
+                    prose(&format!("{family} {card} reason"), &why);
+                }
+            }
+        }
+    }
 }
 
 /// The crate names a Runtime-details body colors as crates. A crate a pane
