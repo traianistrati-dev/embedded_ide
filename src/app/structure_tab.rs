@@ -20,6 +20,13 @@ impl AppIde {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             self.generated_code.hash(&mut h);
+            // The manifest decides which local crates the firmware reaches
+            // (`CrateLinks`) and which are detached - editing a dependency
+            // line changes the picture without touching a `.rs` file.
+            self.cargo_toml.hash(&mut h);
+            // And what the RUNNING analyzer loaded: after a restart that
+            // picks up a detached library, its verdict must change too.
+            self.lsp_state.lock().unwrap().linked_projects.hash(&mut h);
             for (rel, content) in &self.project_tree.user_src_files {
                 rel.hash(&mut h);
                 content.hash(&mut h);
@@ -42,15 +49,47 @@ impl AppIde {
                 }
         };
         if self.structure_cache.as_ref().map(|(h, _, _)| *h) != Some(hash) {
-            let mut graph =
-                parse::build_graph(&self.generated_code, &self.project_tree.user_src_files);
+            let files = &self.project_tree.user_src_files;
+            // Read from the manifests, not guessed from folder names: a
+            // detached library named like a crates.io dependency is neither
+            // what `main.rs` calls nor a reason to hide that dependency.
+            let links = parse::CrateLinks::from_manifests(&self.cargo_toml, files);
+            let mut graph = parse::build_graph_with(&self.generated_code, files, &links);
             if self.structure_view.show_externals {
-                parse::add_external_nodes(
-                    &mut graph,
-                    &self.generated_code,
-                    &self.project_tree.user_src_files,
-                );
+                parse::add_external_nodes_with(&mut graph, &self.generated_code, files, &links);
             }
+            // The LIBRARIES panel's own predicate, so the amber means the same
+            // thing in both places.
+            let members =
+                crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
+            let ra_linked = self.lsp_state.lock().unwrap().linked_projects.clone();
+            let detached: Vec<parse::DetachedLib> =
+                crate::project_tree::extract_crate::detached_libs(files, &members)
+                    .into_iter()
+                    .map(|dir| {
+                        let manifest = files
+                            .iter()
+                            .find(|(p, _)| *p == format!("{dir}/Cargo.toml"))
+                            .map(|(_, c)| c.as_str())
+                            .unwrap_or("");
+                        // Traced means the RUNNING analyzer loaded it - not that
+                        // the manifest would let the next one. `linkedProjects`
+                        // is fixed when the analyzer starts.
+                        let untraced = if crate::lsp::ra_links_detached(&ra_linked, &dir) {
+                            None
+                        } else if crate::lsp::cargo_can_load_detached(
+                            &self.cargo_toml,
+                            &dir,
+                            manifest,
+                        ) {
+                            Some(parse::Untraced::NeedsRestart)
+                        } else {
+                            Some(parse::Untraced::Refused)
+                        };
+                        parse::DetachedLib { dir, untraced }
+                    })
+                    .collect();
+            parse::mark_detached(&mut graph, &detached);
             let mut lay =
                 layout::layout_with_calls_expanded(&graph, &[], &self.structure_view.expanded);
             layout::apply_overrides(&mut lay, &graph, &self.structure_overrides);
@@ -118,6 +157,18 @@ impl AppIde {
                 .position(|n| n.file == Some(i))
                 .unwrap_or(0),
             _ => 0, // main.rs / config files → main
+        };
+        // A detached library rust-analyzer cannot load answers no reference
+        // search, so its modules would simply show no calls, with nothing to
+        // say why. The module's hover carries the one-line fix.
+        let calls_status = match graph.nodes.get(focus_node).and_then(|n| n.untraced) {
+            Some(parse::Untraced::NeedsRestart) => format!(
+                "{calls_status}  \u{b7}  no calls traced yet: restart the analyzer to load this detached library"
+            ),
+            Some(parse::Untraced::Refused) => format!(
+                "{calls_status}  \u{b7}  no calls traced: rust-analyzer cannot load this detached library (hover it)"
+            ),
+            None => calls_status,
         };
         // Per-node error flags (rust-analyzer + flycheck diagnostics, keyed by
         // the workspace-relative path) — nodes with errors blink a red border.

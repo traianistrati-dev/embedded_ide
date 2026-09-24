@@ -74,6 +74,9 @@ pub const EDITABLE_FIELDS: &[(&str, &str)] = &[
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PathDep {
     pub name: String,
+    /// The `path` value exactly as written - relative to the manifest's own
+    /// folder, `/` or `\` as the author typed it.
+    pub path: String,
     /// Whether the entry also carries a `version` requirement.
     pub has_version: bool,
     /// A `[dev-dependencies]` entry. Cargo STRIPS a version-less path
@@ -101,6 +104,146 @@ pub struct PathDep {
 /// guessing.
 fn doc(manifest: &str) -> Option<toml_edit::DocumentMut> {
     manifest.parse::<toml_edit::DocumentMut>().ok()
+}
+
+/// Whether `manifest` is TOML at all. Every reader here returns "nothing" for
+/// one that is not, and a caller that must tell "no dependencies" apart from
+/// "could not read the file" asks this first.
+pub fn manifest_parses(manifest: &str) -> bool {
+    doc(manifest).is_some()
+}
+
+/// A string array under `[workspace]` - `members`, `exclude` - as written.
+/// Empty when the key, the table or the manifest is missing or unreadable.
+pub fn workspace_array(manifest: &str, key: &str) -> Vec<String> {
+    doc(manifest)
+        .and_then(|d| {
+            d.get("workspace")
+                .and_then(|w| w.get(key))
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the manifest declares a `[workspace]` table of its own - which makes
+/// its package the root of its own workspace, so cargo loads it even from
+/// inside another workspace's folder.
+pub fn has_workspace_table(manifest: &str) -> bool {
+    doc(manifest).is_some_and(|d| d.get("workspace").is_some())
+}
+
+/// Keys of the dependencies declared `{ workspace = true }` - inherited from the
+/// root's `[workspace.dependencies]` - in every dependency table.
+pub fn inherited_deps(manifest: &str) -> Vec<String> {
+    let Some(doc) = doc(manifest) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut collect = |table: &toml_edit::Item| {
+        if let Some(t) = table.as_table_like() {
+            out.extend(
+                t.iter()
+                    .filter(|(_, item)| is_inherited(item))
+                    .map(|(name, _)| name.to_owned()),
+            );
+        }
+    };
+    for name in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(t) = doc.get(name) {
+            collect(t);
+        }
+    }
+    if let Some(targets) = doc.get("target").and_then(|t| t.as_table_like()) {
+        for (_, per_target) in targets.iter() {
+            for name in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                if let Some(t) = per_target.get(name) {
+                    collect(t);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `(name, path)` of every entry of `table` that carries a `path`.
+fn path_entries(table: Option<&toml_edit::Item>) -> Vec<(String, String)> {
+    let Some(t) = table.and_then(|t| t.as_table_like()) else {
+        return Vec::new();
+    };
+    t.iter()
+        .filter_map(|(name, item)| {
+            let path = item.get("path")?.as_str()?;
+            Some((name.to_owned(), path.to_owned()))
+        })
+        .collect()
+}
+
+/// `[workspace.dependencies]` entries that carry a `path`, as `(name, path)` -
+/// the path relative to THIS (the root) manifest.
+pub fn workspace_path_deps(manifest: &str) -> Vec<(String, String)> {
+    doc(manifest)
+        .map(|d| path_entries(d.get("workspace").and_then(|w| w.get("dependencies"))))
+        .unwrap_or_default()
+}
+
+/// `[patch.<registry>]` entries that carry a `path`, as `(name, path)`: the
+/// local folder cargo builds IN PLACE of that registry crate, for every crate
+/// of the workspace that depends on it.
+pub fn patch_path_deps(manifest: &str) -> Vec<(String, String)> {
+    let Some(doc) = doc(manifest) else {
+        return Vec::new();
+    };
+    let Some(patch) = doc.get("patch").and_then(|p| p.as_table_like()) else {
+        return Vec::new();
+    };
+    patch
+        .iter()
+        .flat_map(|(_, registry)| path_entries(Some(registry)))
+        .collect()
+}
+
+/// Every REGISTRY dependency in `[dependencies]` (and the per-target tables),
+/// with its version requirement: `name = "0.1"` and `name = { version = .. }`,
+/// but never one that carries a `path` or a `git` - those are not the
+/// registry's copy, whatever they are called.
+pub fn registry_deps(manifest: &str) -> Vec<(String, String)> {
+    let Some(doc) = doc(manifest) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut collect = |table: &toml_edit::Item| {
+        let Some(t) = table.as_table_like() else {
+            return;
+        };
+        for (name, item) in t.iter() {
+            let version = if let Some(v) = item.as_str() {
+                Some(v)
+            } else if item.get("path").is_none() && item.get("git").is_none() {
+                item.get("version").and_then(|v| v.as_str())
+            } else {
+                None
+            };
+            if let Some(v) = version {
+                out.push((name.to_owned(), v.to_owned()));
+            }
+        }
+    };
+    if let Some(t) = doc.get("dependencies") {
+        collect(t);
+    }
+    if let Some(targets) = doc.get("target").and_then(|t| t.as_table_like()) {
+        for (_, per_target) in targets.iter() {
+            if let Some(t) = per_target.get("dependencies") {
+                collect(t);
+            }
+        }
+    }
+    out
 }
 
 /// Is `key` present in `[package]` with a usable value?
@@ -169,9 +312,10 @@ pub fn path_deps(manifest: &str) -> Vec<PathDep> {
             return;
         };
         for (name, item) in t.iter() {
-            if item.get("path").is_some() {
+            if let Some(path) = item.get("path") {
                 out.push(PathDep {
                     name: name.to_owned(),
+                    path: path.as_str().unwrap_or_default().to_owned(),
                     has_version: item.get("version").is_some(),
                     dev_only,
                 });
@@ -578,6 +722,53 @@ description = \"\"
         );
     }
 
+    /// The two other ways a manifest links a local crate, read the way cargo
+    /// reads them - and neither is a plain `path` dependency.
+    #[test]
+    fn inherited_and_patched_path_links_are_read() {
+        let m = "[package]\nname = \"fw\"\n\n[workspace]\nmembers = [\"a\"]\n\n[workspace.dependencies]\na = { path = \"a\" }\nreg = \"1\"\n\n[dependencies]\na = { workspace = true }\nb = \"0.1\"\n\n[patch.crates-io]\nb = { path = \"vendor/b\" }\n";
+        assert_eq!(inherited_deps(m), vec!["a".to_owned()]);
+        assert_eq!(
+            workspace_path_deps(m),
+            vec![("a".to_owned(), "a".to_owned())]
+        );
+        assert_eq!(
+            patch_path_deps(m),
+            vec![("b".to_owned(), "vendor/b".to_owned())]
+        );
+        assert!(path_deps(m).is_empty(), "none of these is a plain path dep");
+    }
+
+    #[test]
+    fn workspace_arrays_and_tables_are_read() {
+        let m = "[package]\nname = \"a\"\n\n[workspace]\nmembers = [\"x\"]\nexclude = [\"lib\", \"./other/\"]\n";
+        assert_eq!(
+            workspace_array(m, "exclude"),
+            vec!["lib".to_owned(), "./other/".to_owned()]
+        );
+        assert_eq!(workspace_array(m, "members"), vec!["x".to_owned()]);
+        assert!(workspace_array("[package]\nname = \"a\"\n", "exclude").is_empty());
+        assert!(has_workspace_table(m));
+        assert!(!has_workspace_table("[package]\nname = \"a\"\n"));
+    }
+
+    /// A registry dependency is found in both spellings, and a `path` or `git`
+    /// entry is never one - even when it names a version too.
+    #[test]
+    fn registry_dependencies_carry_their_version() {
+        let m = "[package]\nname=\"a\"\n\n[dependencies]\nhmmd_mmwave_sensor_async = \"0.1.0\"\nssd1306 = { version = \"0.10.0\", features = [\"async\"] }\nlocal = { path = \"x\", version = \"1\" }\nforked = { git = \"https://x\" }\n";
+        assert_eq!(
+            registry_deps(m),
+            vec![
+                ("hmmd_mmwave_sensor_async".to_owned(), "0.1.0".to_owned()),
+                ("ssd1306".to_owned(), "0.10.0".to_owned()),
+            ]
+        );
+        assert!(registry_deps("not [toml").is_empty());
+        assert!(!manifest_parses("not [toml"));
+        assert!(manifest_parses(m));
+    }
+
     #[test]
     fn path_dependencies_are_found_in_both_spellings() {
         let inline = "[package]\nname=\"a\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n";
@@ -585,6 +776,7 @@ description = \"\"
             path_deps(inline),
             vec![PathDep {
                 name: "dep".to_owned(),
+                path: "../dep".to_owned(),
                 has_version: false,
                 dev_only: false
             }]
@@ -614,6 +806,7 @@ description = \"\"
             path_deps(m),
             vec![PathDep {
                 name: "mw_radar".to_owned(),
+                path: "../mw_radar".to_owned(),
                 has_version: false,
                 dev_only: false
             }]

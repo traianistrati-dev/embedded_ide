@@ -521,8 +521,10 @@ const ICON_UTIL: egui::Color32 = egui::Color32::from_rgb(150, 165, 190);
 const ICON_VIEW: egui::Color32 = egui::Color32::from_rgb(110, 195, 205);
 /// Workspace-member library — the green of the tree's PACKAGE icon.
 const ICON_LIBRARY: egui::Color32 = egui::Color32::from_rgb(140, 190, 145);
-/// Detached library — the amber of the tree's detached PACKAGE icon.
-const ICON_LIBRARY_DETACHED: egui::Color32 = egui::Color32::from_rgb(190, 165, 110);
+/// Detached library — the amber of the tree's detached PACKAGE icon, its
+/// name in LIBRARIES, and every file of it in the Structure diagram. One
+/// constant, so "detached" is one colour wherever it is drawn.
+pub(crate) const ICON_LIBRARY_DETACHED: egui::Color32 = egui::Color32::from_rgb(190, 165, 110);
 /// Editing an existing item in place (Rename).
 const ICON_EDIT: egui::Color32 = egui::Color32::from_rgb(175, 160, 235);
 /// Destructive (Delete) — a file or folder.
@@ -1741,7 +1743,7 @@ pub fn show_project_tree(
                         );
                     let open = state.is_open();
                     let mut toggle = false;
-                    let amber = egui::Color32::from_rgb(190, 165, 110);
+                    let amber = ICON_LIBRARY_DETACHED;
                     let header = ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(ph::PACKAGE).size(11.5).color(amber));
                         let name_resp = ui.add(

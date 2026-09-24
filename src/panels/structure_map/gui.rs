@@ -780,12 +780,19 @@ fn show_canvas(
             header.center().y
         };
         let name_pos = egui::pos2(header.center().x, name_y);
+        // A detached library's files in the amber the LIBRARIES panel gives
+        // it, so the diagram says what the tree says: not part of the build.
+        let name_col = if node.detached {
+            crate::project_tree::gui::ICON_LIBRARY_DETACHED
+        } else {
+            egui::Color32::WHITE
+        };
         painter.text(
             name_pos,
             egui::Align2::CENTER_CENTER,
             &node.name,
             name_font.clone(),
-            egui::Color32::WHITE,
+            name_col,
         );
         if is_pkg_root {
             // Poor-man's bold: egui ships no bold face, so overdraw the name
@@ -795,7 +802,7 @@ fn show_canvas(
                 egui::Align2::CENTER_CENTER,
                 &node.name,
                 name_font.clone(),
-                egui::Color32::WHITE,
+                name_col,
             );
         }
         if show_detail {
@@ -983,15 +990,22 @@ fn show_canvas(
         } else {
             &node.path
         };
+        // What the graph alone cannot say (a registry version, a detached
+        // copy), as a closing paragraph.
+        let note = if node.note.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{}", node.note)
+        };
         if node.is_external {
             resp.clone().on_hover_text(format!(
                 "external crate `{}`\nUsed by the modules pointing at it \
-                 (no project file to open).",
+                 (no project file to open).{note}",
                 node.name
             ));
         } else {
             resp.clone().on_hover_text(format!(
-                "{full}\n{}\n{} fn · {} struct/enum/trait\nClick to open in the editor",
+                "{full}\n{}\n{} fn · {} struct/enum/trait\nClick to open in the editor{note}",
                 node.file_rel, node.fn_count, node.ty_count
             ));
         }

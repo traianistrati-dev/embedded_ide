@@ -1832,6 +1832,8 @@ pub struct AppIde {
     /// that opens `src/main.rs` anyway if RA never reports indexing as finished
     /// (see the `Indexing` arm of the LSP lifecycle).
     lsp_indexing_since: Option<std::time::Instant>,
+    /// When `recheck_linked_projects` last looked - it runs at most every 2 s.
+    linked_check_at: Option<std::time::Instant>,
     // ── Inline type hints (inferred type on the cursor's `let` line) ──────────
     /// Master switch for the cursor-line inferred-type ghost hint + its Tab
     /// accept; toggled from the editor toolbar ("Types" button). `true` default.
@@ -2466,6 +2468,7 @@ impl AppIde {
             lsp_settle_reverified: false,
             last_workspace_change: None,
             lsp_indexing_since: None,
+            linked_check_at: None,
             lsp_flush_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inlay_types_enabled: true,
             clippy_rename_pending: false,
@@ -3945,6 +3948,8 @@ impl AppIde {
                 self.open_main_rs_when_indexed();
             }
             LspStatus::Ready => {
+                // A detached library that joined or left what RA should load.
+                self.recheck_linked_projects();
                 // Same gate as during Indexing: `Ready` alone is not proof the
                 // crate graph is built (it flips on the first `$/progress end`
                 // of any rust-prefixed token, e.g. "Fetching metadata").

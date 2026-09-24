@@ -945,6 +945,31 @@ impl AppIde {
         self.lsp_indexing_since = None;
     }
 
+    /// Restart rust-analyzer when the `linkedProjects` a launch would compute
+    /// NOW differs from what the running one was started with.
+    ///
+    /// `linkedProjects` is fixed at launch, and rust-analyzer will not switch
+    /// to a workspace fetch that partly fails while it already has one. So a
+    /// linked detached library whose folder then leaves the build workspace -
+    /// deleted, renamed, or another project opened on the same chip, all pruned
+    /// by the next write - froze every later manifest edit out of the analyzer.
+    /// The other direction is the welcome one: adding the `exclude` line and
+    /// saving brings the library in without a manual restart.
+    ///
+    /// Throttled: it reads the workspace root and a few manifests from disk,
+    /// and the answer only changes when a write lands.
+    pub(super) fn recheck_linked_projects(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.linked_check_at.is_some_and(|t| t.elapsed() < EVERY) {
+            return;
+        }
+        self.linked_check_at = Some(std::time::Instant::now());
+        let now = crate::lsp::linked_projects_now(&crate::workspace::dir());
+        if now != self.lsp_state.lock().unwrap().linked_projects {
+            self.restart_lsp();
+        }
+    }
+
     /// Start a background `cargo metadata` HEALTH CHECK of the project exactly as
     /// it is on disk — the same load rust-analyzer performs. A failure means RA
     /// will not load either (no inline errors, no Structure edges, a stuck

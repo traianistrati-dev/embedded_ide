@@ -313,6 +313,11 @@ pub struct LspState {
     pub diagnostics: HashMap<String, Vec<LspDiagnostic>>,
     /// Incremented on every `start()` so stale threads know to bail out.
     pub generation: u64,
+    /// The `linkedProjects` this session was STARTED with - empty when it was
+    /// told none. Fixed for the life of the process, so the Structure tab reads
+    /// it to say whether a detached library's calls are traced now, rather than
+    /// whether they would be after a restart.
+    pub linked_projects: Vec<String>,
     /// Channel to the write thread; `None` while stopped.
     sender: Option<mpsc::Sender<String>>,
     /// Per-file open state.  Key = relative path, e.g. `"src/main.rs"`.
@@ -501,6 +506,7 @@ impl Default for LspState {
             status: LspStatus::Stopped,
             diagnostics: HashMap::new(),
             generation: 0,
+            linked_projects: Vec::new(),
             sender: None,
             open_files: HashMap::new(),
             awaiting_diagnostics: std::collections::HashSet::new(),
@@ -1509,6 +1515,7 @@ impl LspState {
     pub fn reset(&mut self) {
         self.kill_child();
         self.generation += 1;
+        self.linked_projects.clear();
         self.status = LspStatus::Stopped;
         self.diagnostics.clear();
         self.sender = None; // write thread's Receiver will close → it exits
@@ -1714,6 +1721,15 @@ fn launch(
         // stdin dropped here → RA gets EOF on its stdin
     });
 
+    // What this session is told to load, kept on the state for the
+    // Structure tab - unless a newer session has already taken over.
+    let linked = linked_projects(&workspace_dir);
+    {
+        let mut s = state.lock().unwrap();
+        if s.generation == my_gen {
+            s.linked_projects = linked.clone().unwrap_or_default();
+        }
+    }
     // ── Send `initialize` ─────────────────────────────────────────────────────
     let _ = tx.send(serde_json::json!({
         "jsonrpc": "2.0",
@@ -1803,7 +1819,7 @@ fn launch(
                 },
                 "window": { "workDoneProgress": true },
             },
-            "initializationOptions": initialization_options(),
+            "initializationOptions": initialization_options_with(linked.as_deref()),
         }
     }).to_string());
 
@@ -2715,6 +2731,122 @@ fn parse_code_actions(result: &serde_json::Value, root_uri: &str) -> Vec<CodeAct
         })
         .filter(CodeAction::is_applicable)
         .collect()
+}
+
+/// [`initialization_options`] plus `linkedProjects` when there are any. With
+/// none it is byte for byte the plain object, and auto-discovery behaves as it
+/// always has.
+fn initialization_options_with(linked: Option<&[String]>) -> serde_json::Value {
+    let mut opts = initialization_options();
+    if let Some(projects) = linked {
+        opts["linkedProjects"] = serde_json::json!(projects);
+    }
+    opts
+}
+
+/// [`initialization_options_with`] for the project in `workspace_dir`, as the
+/// launch computes it (see [`linked_projects`]).
+#[cfg(test)]
+fn initialization_options_for(workspace_dir: &Path) -> serde_json::Value {
+    initialization_options_with(linked_projects(workspace_dir).as_deref())
+}
+
+/// A path as cargo compares it: components, `\` a separator on Windows, `.`
+/// dropped. `..` is kept as a LITERAL component, because cargo's
+/// `Path::starts_with` does not resolve it either - so `x/../mylib` excludes
+/// nothing, exactly as in cargo.
+fn cargo_components(path: &str) -> Vec<String> {
+    let path = if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    };
+    path.split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether cargo loads the DETACHED library in `dir` on its own - and so
+/// whether rust-analyzer can index it as a linked project, which is what gives
+/// the Structure diagram its call paths inside that library.
+///
+/// A package inside a workspace's folder that the workspace does not list is
+/// refused outright ("current package believes it's in a workspace when it's
+/// not"), and that is the state a detached library is left in. Cargo accepts it
+/// again when the workspace EXCLUDES it, or when the library's own manifest has
+/// a `[workspace]` table. Measured on a real project: with neither, rust-analyzer
+/// reported "Failed to load workspaces" and found no reference in the library;
+/// with `exclude`, 249 references across its 7 files - and the firmware's own
+/// analysis was untouched either way.
+///
+/// `exclude` is matched the way cargo matches it - the library's manifest path
+/// starts with the root joined with the entry, compared by component - so
+/// `'.\mylib'` and `"."` count, and a padded `" mylib"` does not (cargo refuses
+/// it, measured).
+pub fn cargo_can_load_detached(root_manifest: &str, dir: &str, lib_manifest: &str) -> bool {
+    // No `[workspace]` in the root at all - the IDE's own templates - and the
+    // root is no workspace cargo could put the library in: it loads on its own.
+    if !crate::publish::has_workspace_table(root_manifest) {
+        return true;
+    }
+    let lib = cargo_components(dir);
+    crate::publish::workspace_array(root_manifest, "exclude")
+        .iter()
+        .any(|e| lib.starts_with(&cargo_components(e)))
+        || crate::publish::has_workspace_table(lib_manifest)
+}
+
+/// Whether the RUNNING rust-analyzer was started with the detached library in
+/// `dir` among its `linkedProjects` - the only thing that decides whether calls
+/// into it are traced right now. `linked` is `LspState::linked_projects`.
+pub fn ra_links_detached(linked: &[String], dir: &str) -> bool {
+    let want = format!("/{}/Cargo.toml", cargo_components(dir).join("/"));
+    linked
+        .iter()
+        .skip(1) // the firmware's own manifest
+        .any(|p| p.replace('\\', "/").ends_with(&want))
+}
+
+/// The `linkedProjects` rust-analyzer should load for the project in
+/// `workspace_dir`: the firmware's manifest FIRST, then every detached library
+/// cargo can load. `None` when there is no such library.
+///
+/// Read from disk at launch, because the workspace copy is what RA loads -
+/// which is why `write_project` must not prune a project's OWN detached library
+/// from that copy (it once did, so this found nothing). A library cargo would
+/// refuse is left out on purpose: handing it to RA only buys a "Failed to load
+/// workspaces" message and not one reference.
+/// What a launch would put in `LspState::linked_projects` right now - the
+/// set `AppIde::recheck_linked_projects` compares against the running one.
+pub fn linked_projects_now(workspace_dir: &Path) -> Vec<String> {
+    linked_projects(workspace_dir).unwrap_or_default()
+}
+
+fn linked_projects(workspace_dir: &Path) -> Option<Vec<String>> {
+    let root = std::fs::read_to_string(workspace_dir.join("Cargo.toml")).ok()?;
+    let members = crate::panels::mcu_module::project_gen::workspace_members(&root);
+    let mut libs = Vec::new();
+    for entry in std::fs::read_dir(workspace_dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name == "src" || name == "target" || members.contains(&name) {
+            continue;
+        }
+        let manifest = entry.path().join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        if cargo_can_load_detached(&root, &name, &text) {
+            libs.push(manifest.display().to_string());
+        }
+    }
+    if libs.is_empty() {
+        return None;
+    }
+    libs.sort();
+    let mut all = vec![workspace_dir.join("Cargo.toml").display().to_string()];
+    all.extend(libs);
+    Some(all)
 }
 
 /// The `initializationOptions` handed to rust-analyzer at startup.
@@ -3961,5 +4093,139 @@ mod initialization_options_guard {
             initialization_options()["inlayHints"]["chainingHints"]["enable"],
             serde_json::json!(false)
         );
+    }
+}
+
+#[cfg(test)]
+mod linked_projects_tests {
+    use super::{
+        cargo_can_load_detached, initialization_options, initialization_options_for,
+        linked_projects, ra_links_detached,
+    };
+
+    const LIB: &str = "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\n";
+
+    /// Found by review: `exclude` was compared as trimmed text, which disagreed
+    /// with cargo both ways. These are the forms cargo was measured on.
+    #[test]
+    fn exclude_matches_the_way_cargo_matches_it() {
+        let root = |ex: &str| {
+            format!("[package]\nname = \"fw\"\n\n[workspace]\nmembers = []\nexclude = [{ex}]\n")
+        };
+        for accepted in ["\"mylib\"", "\"./mylib/\"", "\".\""] {
+            assert!(
+                cargo_can_load_detached(&root(accepted), "mylib", LIB),
+                "{accepted}"
+            );
+        }
+        for refused in [
+            "\" mylib\"",
+            "\"mylib \"",
+            "\"mylib/src\"",
+            "\"x/../mylib\"",
+        ] {
+            assert!(
+                !cargo_can_load_detached(&root(refused), "mylib", LIB),
+                "{refused}"
+            );
+        }
+        if cfg!(windows) {
+            assert!(cargo_can_load_detached(&root("'.\\mylib'"), "mylib", LIB));
+            assert!(cargo_can_load_detached(&root("'mylib\\'"), "mylib", LIB));
+        }
+    }
+
+    /// The running analyzer's list decides "traced", matched by the library's
+    /// own folder - never the firmware's manifest, never a prefix of a name.
+    #[test]
+    fn the_running_analyzer_is_asked_by_folder() {
+        let linked = vec![
+            "C:\\ws\\Cargo.toml".to_owned(),
+            "C:\\ws\\mylib\\Cargo.toml".to_owned(),
+        ];
+        assert!(ra_links_detached(&linked, "mylib"));
+        assert!(
+            !ra_links_detached(&linked, "lib"),
+            "not a suffix of a longer name"
+        );
+        assert!(!ra_links_detached(&linked[..1], "mylib"));
+        assert!(!ra_links_detached(&[], "mylib"));
+    }
+
+    /// The two ways cargo accepts a nested package it does not own - and the
+    /// state the IDE's Detach leaves one in, which it refuses.
+    #[test]
+    fn cargo_loads_a_detached_library_only_when_told_to() {
+        let plain = "[package]\nname = \"fw\"\n\n[workspace]\nmembers = []\n";
+        assert!(!cargo_can_load_detached(plain, "mylib", LIB));
+
+        let excluded =
+            "[package]\nname = \"fw\"\n\n[workspace]\nmembers = []\nexclude = [\"./mylib/\"]\n";
+        assert!(cargo_can_load_detached(excluded, "mylib", LIB));
+        assert!(
+            !cargo_can_load_detached(excluded, "other", LIB),
+            "only the one excluded"
+        );
+
+        let own_ws = format!("{LIB}\n[workspace]\n");
+        assert!(cargo_can_load_detached(plain, "mylib", &own_ws));
+
+        // Found by the second review: a root with NO `[workspace]` table - the
+        // IDE's own templates - is no workspace at all, and cargo loads the
+        // library on its own (measured).
+        let no_ws = "[package]\nname = \"fw\"\n\n[dependencies]\n";
+        assert!(cargo_can_load_detached(no_ws, "mylib", LIB));
+    }
+
+    fn scratch(tag: &str, root: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("eide_linked_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("mylib")).unwrap();
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), root).unwrap();
+        std::fs::write(d.join("mylib/Cargo.toml"), LIB).unwrap();
+        d
+    }
+
+    /// A loadable detached library is linked, after the firmware; anything
+    /// else leaves the options exactly as they were.
+    #[test]
+    fn only_a_loadable_detached_library_is_linked() {
+        let d = scratch(
+            "yes",
+            "[package]\nname = \"fw\"\n\n[workspace]\nmembers = []\nexclude = [\"mylib\"]\n",
+        );
+        let got = linked_projects(&d).expect("the excluded library is loadable");
+        assert_eq!(got.len(), 2);
+        assert!(
+            got[0].ends_with("Cargo.toml") && !got[0].contains("mylib"),
+            "firmware first: {got:?}"
+        );
+        assert!(got[1].contains("mylib"), "{got:?}");
+        assert!(initialization_options_for(&d)["linkedProjects"].is_array());
+        let _ = std::fs::remove_dir_all(&d);
+
+        let d = scratch(
+            "no",
+            "[package]\nname = \"fw\"\n\n[workspace]\nmembers = []\n",
+        );
+        assert_eq!(linked_projects(&d), None, "cargo would refuse it");
+        assert_eq!(
+            initialization_options_for(&d),
+            initialization_options(),
+            "unchanged"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+
+        let d = scratch(
+            "member",
+            "[package]\nname = \"fw\"\n\n[workspace]\nmembers = [\"mylib\"]\n",
+        );
+        assert_eq!(
+            linked_projects(&d),
+            None,
+            "a member is already in the workspace"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

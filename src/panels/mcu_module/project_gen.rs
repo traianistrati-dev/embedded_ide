@@ -1936,7 +1936,7 @@ pub fn write_project(
     // learned to avoid. If the comparison ever fails we simply skip the prune —
     // the safe direction.
     if dest == build_workspace_dir() {
-        prune_foreign_crates(dest, &workspace_members(&files.cargo_toml));
+        prune_foreign_crates(dest, &owned_crate_dirs(&files.cargo_toml, user_src_files));
     }
 
     Ok(())
@@ -1954,8 +1954,27 @@ pub fn build_workspace_dir() -> std::path::PathBuf {
     crate::workspace::dir()
 }
 
+/// The top-level crate folders the CURRENT project owns: its workspace
+/// members AND its detached libraries - everything else in the build
+/// workspace is debris from another project.
+///
+/// Members alone was the rule, and it pruned the project's own detached
+/// library out of the copy rust-analyzer loads, just before RA started - so
+/// `lsp::linked_projects` never found it, and the save flush quietly wrote it
+/// back seconds later (measured: the folder was re-created 4.6 s after the
+/// analyzer launched).
+fn owned_crate_dirs(cargo_toml: &str, user_src_files: &[(String, String)]) -> Vec<String> {
+    let mut dirs = workspace_members(cargo_toml);
+    dirs.extend(crate::project_tree::extract_crate::detached_libs(
+        user_src_files,
+        &dirs,
+    ));
+    dirs
+}
+
 /// Delete top-level directories of `root` that hold a `Cargo.toml` but are not
-/// workspace `members` — library crates left behind by a DIFFERENT project.
+/// in `owned` (see [`owned_crate_dirs`]) — library crates left behind by a
+/// DIFFERENT project.
 ///
 /// The caller must guarantee `root` is disposable; see the call site. `src`,
 /// `target`, `.cargo` and `.git` are never touched.
@@ -4288,5 +4307,44 @@ mod included_blob_tests {
         write_project(build.path(), &radio, &[], "", "").unwrap();
         let fw = fs::read(build.path().join("firmware").join("43439A0.bin")).unwrap();
         assert_eq!(fw, CYW43_FW);
+    }
+}
+
+#[cfg(test)]
+mod owned_crate_dir_tests {
+    use super::{owned_crate_dirs, prune_foreign_crates};
+
+    /// The project's own detached library survives the prune; a crate folder
+    /// the project does not have is still removed.
+    #[test]
+    fn a_detached_library_of_this_project_is_not_debris() {
+        let cargo = "[package]\nname = \"fw\"\n\n[workspace]\nmembers = [\"member\"]\n";
+        let files = vec![
+            (
+                "mylib/Cargo.toml".to_owned(),
+                "[package]\nname = \"mylib\"\n".to_owned(),
+            ),
+            ("mylib/src/lib.rs".to_owned(), String::new()),
+        ];
+        let owned = owned_crate_dirs(cargo, &files);
+        assert_eq!(owned, vec!["member".to_owned(), "mylib".to_owned()]);
+
+        let root = std::env::temp_dir().join(format!("eide_owned_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["member", "mylib", "stranger"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+            std::fs::write(root.join(d).join("Cargo.toml"), "[package]").unwrap();
+        }
+        prune_foreign_crates(&root, &owned);
+        assert!(root.join("member").exists());
+        assert!(
+            root.join("mylib").exists(),
+            "the project's own detached library"
+        );
+        assert!(
+            !root.join("stranger").exists(),
+            "another project's leftover"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
