@@ -277,9 +277,8 @@ impl AppIde {
 
         // The outer vertical ScrollArea egui_code_editor builds with
         // `id_salt("{id}_outer_scroll")` on this same `ui`.
-        let scroll_id = ui
-            .id()
-            .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
+        let scroll_id =
+            crate::app::helpers::scroll_id::scroll_area_id(ui, format!("{editor_id}_outer_scroll"));
         if let Some(mut state) = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id) {
             state.offset.y = (state.offset.y + delta).max(0.0);
             state.store(ui.ctx(), scroll_id);
@@ -1388,9 +1387,10 @@ impl AppIde {
         // a fold correction added to that clamped value undershot — collapse-all
         // deep in a large file landed at the top of the file.
         let drawn_offset = {
-            let scroll_id = ui
-                .id()
-                .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
+            let scroll_id = crate::app::helpers::scroll_id::scroll_area_id(
+                ui,
+                format!("{editor_id}_outer_scroll"),
+            );
             egui::containers::scroll_area::State::load(ui.ctx(), scroll_id)
                 .map_or(0.0, |s| s.offset.y)
         };
@@ -2464,9 +2464,8 @@ impl AppIde {
         let row = fold_map.display_row_of(line_1based.saturating_sub(1)) as f32;
         let offset_y = ((row - ROWS_ABOVE) * row_h).max(0.0);
 
-        let scroll_id = ui
-            .id()
-            .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
+        let scroll_id =
+            crate::app::helpers::scroll_id::scroll_area_id(ui, format!("{editor_id}_outer_scroll"));
         if let Some(mut state) = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id) {
             state.offset.y = offset_y;
             state.store(ui.ctx(), scroll_id);

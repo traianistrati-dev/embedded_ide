@@ -97,11 +97,10 @@ mod tests {
                 ..Default::default()
             };
             let rect = egui::Rect::from_min_size(egui::pos2(500.0, 400.0), egui::vec2(10.0, 10.0));
-            shapes = ctx
-                .run_ui(input, |ui| {
-                    draw_info_popup(func, rect, ui, max_baud.clone());
-                })
-                .shapes;
+            shapes = crate::headless::run_ui(&ctx, input, |ui| {
+                draw_info_popup(func, rect, ui, max_baud.clone());
+            })
+            .shapes;
         }
         let mut out = Vec::new();
         for s in &shapes {

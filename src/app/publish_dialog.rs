@@ -1324,7 +1324,7 @@ mod tests {
         let mut touched = vec![false; fields.len()];
         let mut width = 0.0;
         for _ in 0..3 {
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            let _ = crate::headless::run_ui(&ctx, Default::default(), |ui| {
                 ui.set_max_width(available);
                 width = super::metadata_grid(ui, MANIFEST, &mut fields, &mut touched);
             });
@@ -1358,7 +1358,7 @@ mod tests {
     /// Lay the rows out once against `manifest` and hand back the boxes.
     fn one_frame(manifest: &str, fields: &mut [(&'static str, String)], touched: &mut [bool]) {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let _ = crate::headless::run_ui(&ctx, Default::default(), |ui| {
             super::metadata_grid(ui, manifest, fields, touched);
         });
     }

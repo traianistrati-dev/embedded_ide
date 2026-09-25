@@ -115,23 +115,23 @@ pub(super) fn unsaved_changes_modal(
 
 impl AppIde {
     /// "Unsaved changes" modal shown when the window close was intercepted
-    /// (see `AppIde::ui`). Save and close / Close without saving / Cancel.
+    /// (see `AppIde::logic` and `close_guard`). Save and close / Close without
+    /// saving / Cancel.
     ///
     /// Saving is asynchronous, so "Save and close" only *starts* the save
-    /// (`request_save`) and arms `close_after_save`; the window is closed where
-    /// the save worker's result is applied. The prompt stays up meanwhile so
-    /// the app can't be closed twice or exited mid-write.
+    /// (`request_save`) and arms `close.after_save`; the window is closed where
+    /// the save worker's result is applied (`apply_finished_save`, in `logic`).
+    /// The prompt stays up meanwhile so the app can't be closed twice or exited
+    /// mid-write.
     pub(super) fn show_exit_prompt(&mut self, ui: &egui::Ui) {
-        if !self.exit_prompt {
+        if !self.close.prompt {
             return;
         }
         let unsaved = self.unsaved_files();
         // Saved from another route (Ctrl+S) while the prompt was up — nothing
         // left to warn about, so just go.
         if unsaved.is_empty() && self.save_in_progress.is_none() {
-            self.exit_prompt = false;
-            self.allow_close = true;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            self.close.close_now(ui.ctx());
             return;
         }
 
@@ -147,19 +147,17 @@ impl AppIde {
         ) {
             UnsavedChoice::Save => {
                 self.request_save = true;
-                self.close_after_save = true;
+                self.close.after_save = true;
                 // The save trigger sits EARLIER in the frame than this dialog,
                 // so it runs next frame — make sure there is one.
                 ui.ctx().request_repaint();
             }
             UnsavedChoice::Discard => {
-                self.exit_prompt = false;
-                self.allow_close = true;
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                self.close.close_now(ui.ctx());
             }
             UnsavedChoice::Cancel => {
-                self.exit_prompt = false;
-                self.close_after_save = false;
+                self.close.prompt = false;
+                self.close.after_save = false;
             }
             UnsavedChoice::None => {}
         }

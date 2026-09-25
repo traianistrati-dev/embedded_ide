@@ -29,6 +29,7 @@ mod chip_filter_ui;
 mod chip_search_ui;
 mod clock_import_dialog;
 mod clone_project_dialog;
+mod close_guard;
 mod datasheet_import_dialog;
 mod device_groups;
 mod dialogs;
@@ -2105,13 +2106,10 @@ pub struct AppIde {
     /// In-flight `cargo metadata` health check (project open / after a detach).
     /// `None` while idle; posts `Ok(())` / `Err(msg)` into the inner slot.
     workspace_health: Option<std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>>,
-    /// `true` while the "unsaved changes" prompt is up (close was cancelled).
-    exit_prompt: bool,
-    /// Set once the user has decided, so the close we send isn't intercepted
-    /// again by our own handler.
-    allow_close: bool,
-    /// Close the window as soon as the in-flight Save finishes.
-    close_after_save: bool,
+    /// The window-close gate: the unsaved-changes prompt, "Save and close", and
+    /// the close we let through ourselves. Decided in `App::logic`, which also
+    /// runs while the window is minimized — see `close_guard`.
+    close: close_guard::CloseGuard,
     /// `true` while the same "unsaved changes" prompt is up for **Open Project**
     /// (the click was intercepted). Opening replaces everything in memory, so it
     /// is as destructive as closing.
@@ -2584,9 +2582,7 @@ impl AppIde {
             workspace_add_error: None,
             workspace_load_error: None,
             workspace_health: None,
-            exit_prompt: false,
-            allow_close: false,
-            close_after_save: false,
+            close: Default::default(),
             open_prompt: false,
             open_after_save: false,
             new_prompt: false,
@@ -4659,6 +4655,101 @@ fn hash_debug(hasher: &mut impl Hasher, value: &impl std::fmt::Debug) {
     hasher.write_u8(0xff);
 }
 
+impl AppIde {
+    /// Apply a finished async save: the result message, the project's new home,
+    /// and whatever the unsaved-changes prompt put on hold behind it.
+    ///
+    /// Called from `App::logic`, so it runs while the window is minimized too —
+    /// a "Save and close" whose window was minimized mid-save still closes.
+    /// Nothing here draws; what needs the frame's `ui` goes through fields
+    /// (`workspace_write_requested`, `lsp_flush_requested`).
+    fn apply_finished_save(&mut self, ctx: &egui::Context) {
+        let Some(res) = self
+            .save_in_progress
+            .as_ref()
+            .and_then(|s| s.lock().unwrap().take())
+        else {
+            return;
+        };
+        self.save_in_progress = None;
+        if let Some(w) = &mut self.save_wall {
+            w.worker_done.get_or_insert(std::time::Instant::now());
+        }
+        match res {
+            Ok(name) => {
+                self.export_msg = format!("{}  {name}", egui_phosphor::regular::CHECK_CIRCLE);
+                self.export_status_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+                self.project_name = Some(name);
+                // A new project now has a home — later saves go here.
+                let had_dir = self.project_dir.clone();
+                self.project_dir = self.save_dest.take();
+                // First save into a folder → claim it. Re-claiming on every
+                // save would be wasted work (and would briefly release a
+                // folder we already hold), so only when it changed.
+                // The manifest on disk just changed, and it is what
+                // `cargo metadata` reads. Without this, fixing a broken
+                // dependency by hand left the "rust-analyzer can't load this
+                // project" banner up until the project was reopened — which
+                // reads exactly like the edit having done nothing.
+                if self.workspace_load_error.is_some() {
+                    self.recheck_workspace_health();
+                }
+                if self.project_dir != had_dir {
+                    self.claim_open_project();
+                    // A project only becomes openable-by-path at its first
+                    // Save, so this is where a NEW one enters the history.
+                    if let Some(dir) = self.project_dir.clone() {
+                        crate::recent::record(&dir, Some(&self.selected_mcu_id));
+                    }
+                    // …and where a "New chip" becomes a chip of its system.
+                    self.board_register_saved_chip();
+                }
+                // "Save and close": the files are on disk now, so finish
+                // the close the prompt put on hold.
+                if self.close.after_save {
+                    self.close.close_now(ctx);
+                }
+                // "Save and open…" / "Save and continue…": same deal — the
+                // work is safely on disk, so the project it belongs to can
+                // now be replaced or cleared.
+                if self.open_after_save {
+                    self.open_after_save = false;
+                    self.open_prompt = false;
+                    let mut opened = false;
+                    self.pick_and_open_project(&mut opened);
+                    // Rewritten into the workspace by this pass's `ui`, which
+                    // runs right after `logic` on a visible frame.
+                    self.workspace_write_requested |= opened;
+                    // Picker cancelled: the project this save wrote is
+                    // still open, and its flush was held back only in
+                    // case it was about to be replaced.
+                    if !opened {
+                        self.lsp_flush_requested = true;
+                    }
+                }
+                if self.new_after_save {
+                    self.new_after_save = false;
+                    self.new_prompt = false;
+                    self.begin_new_project();
+                }
+            }
+            Err(e) => {
+                self.export_msg = format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
+                self.export_status_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+                self.save_dest = None;
+                // Don't close (or open another project) on a failed save —
+                // leave the prompt up so the user sees the error and can
+                // still discard deliberately.
+                self.close.after_save = false;
+                self.open_after_save = false;
+                self.new_after_save = false;
+            }
+        }
+    }
+}
+
 impl eframe::App for AppIde {
     // ── Persistence: called by eframe on app exit (and periodically) ──────────
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -4738,23 +4829,38 @@ impl eframe::App for AppIde {
         self.close_publish_dialog();
     }
 
+    // ── Every pass, shown or not ──────────────────────────────────────────────
+    // eframe runs this right before `ui` on a visible frame, and ALONE while
+    // the window is minimized: 0.34 skips `ui` then, 0.36 runs no egui pass at
+    // all. So whatever has to happen while nobody can see the window lives
+    // here — and reads only the window state, which is the one input 0.36
+    // keeps fresh while minimized (events and time are the last shown frame's).
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── Closing with unsaved work? Ask before losing it ───────────────────
+        // Here and not in `ui`: a close sent to a MINIMIZED window (the
+        // taskbar's "Close window") reaches only this, and eframe exits unless
+        // the pass that carries it answers with `CancelClose`.
+        if self.close.wants_decision(ctx) {
+            let unsaved = !self.unsaved_files().is_empty();
+            self.close.decide(ctx, unsaved);
+        }
+
+        // ── A finished async save ─────────────────────────────────────────────
+        // Here too, so "Save and close" still closes if the window was
+        // minimized while the worker ran.
+        self.apply_finished_save(ctx);
+        // The worker's own wake-up can be dropped as outdated (see the
+        // watchdog in `ui`); keep passes coming while a save is in flight, so
+        // its result is applied even with the window minimized.
+        if self.save_in_progress.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Timed to the last line of this function (see the end), for the frame
         // counters in the Activity tab.
         let frame_started = std::time::Instant::now();
-
-        // ── Closing with unsaved work? Ask before losing it ───────────────────
-        // Cancel the close and put a prompt up; `allow_close` marks the close
-        // WE send after the user decided, so we don't intercept ourselves.
-        if ui.ctx().input(|i| i.viewport().close_requested()) && !self.allow_close {
-            if self.unsaved_files().is_empty() {
-                self.allow_close = true; // nothing to lose — let it go
-            } else {
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.exit_prompt = true;
-            }
-        }
 
         // A flash that just finished re-measures Flash/RAM (Flash tab row).
         // Here, not in the diag panel: that panel can be hidden, and the edge
@@ -5536,97 +5642,14 @@ impl eframe::App for AppIde {
             self.start_build(auto_build_release);
         }
 
-        // What follows this frame's save, read BEFORE its result is applied:
-        // a worker fast enough to finish on its spawn frame clears both flags
-        // below, and the flush gate must still see the close or open it
-        // belongs to.
-        let close_pending = self.close_after_save;
+        // What follows this frame's save. Its result is applied in `logic`,
+        // at the top of a LATER pass, so both flags still describe the save
+        // this frame may have started — and the flush gate must see the close
+        // or open it belongs to.
+        let close_pending = self.close.after_save;
         let open_pending = self.open_after_save;
 
-        // Apply a finished async save (set the result message / project home).
-        let save_finished = self
-            .save_in_progress
-            .as_ref()
-            .and_then(|s| s.lock().unwrap().take());
-        if let Some(res) = save_finished {
-            self.save_in_progress = None;
-            if let Some(w) = &mut self.save_wall {
-                w.worker_done.get_or_insert(std::time::Instant::now());
-            }
-            match res {
-                Ok(name) => {
-                    self.export_msg = format!("{}  {name}", egui_phosphor::regular::CHECK_CIRCLE);
-                    self.export_status_until =
-                        Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-                    self.project_name = Some(name);
-                    // A new project now has a home — later saves go here.
-                    let had_dir = self.project_dir.clone();
-                    self.project_dir = self.save_dest.take();
-                    // First save into a folder → claim it. Re-claiming on every
-                    // save would be wasted work (and would briefly release a
-                    // folder we already hold), so only when it changed.
-                    // The manifest on disk just changed, and it is what
-                    // `cargo metadata` reads. Without this, fixing a broken
-                    // dependency by hand left the "rust-analyzer can't load this
-                    // project" banner up until the project was reopened — which
-                    // reads exactly like the edit having done nothing.
-                    if self.workspace_load_error.is_some() {
-                        self.recheck_workspace_health();
-                    }
-                    if self.project_dir != had_dir {
-                        self.claim_open_project();
-                        // A project only becomes openable-by-path at its first
-                        // Save, so this is where a NEW one enters the history.
-                        if let Some(dir) = self.project_dir.clone() {
-                            crate::recent::record(&dir, Some(&self.selected_mcu_id));
-                        }
-                        // …and where a "New chip" becomes a chip of its system.
-                        self.board_register_saved_chip();
-                    }
-                    // "Save and close": the files are on disk now, so finish
-                    // the close the prompt put on hold.
-                    if self.close_after_save {
-                        self.close_after_save = false;
-                        self.exit_prompt = false;
-                        self.allow_close = true;
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    // "Save and open…" / "Save and continue…": same deal — the
-                    // work is safely on disk, so the project it belongs to can
-                    // now be replaced or cleared.
-                    if self.open_after_save {
-                        self.open_after_save = false;
-                        self.open_prompt = false;
-                        let mut opened = false;
-                        self.pick_and_open_project(&mut opened);
-                        save_project_needed |= opened;
-                        // Picker cancelled: the project this save wrote is
-                        // still open, and its flush was held back only in
-                        // case it was about to be replaced.
-                        if !opened {
-                            self.lsp_flush_requested = true;
-                        }
-                    }
-                    if self.new_after_save {
-                        self.new_after_save = false;
-                        self.new_prompt = false;
-                        self.begin_new_project();
-                    }
-                }
-                Err(e) => {
-                    self.export_msg = format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
-                    self.export_status_until =
-                        Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-                    self.save_dest = None;
-                    // Don't close (or open another project) on a failed save —
-                    // leave the prompt up so the user sees the error and can
-                    // still discard deliberately.
-                    self.close_after_save = false;
-                    self.open_after_save = false;
-                    self.new_after_save = false;
-                }
-            }
-        } else if save_requested && self.save_in_progress.is_none() {
+        if save_requested && self.save_in_progress.is_none() {
             // The guard above needs a build config, i.e. a chip. Without one
             // there is genuinely nothing to write — but Save is an explicit
             // action and must not vanish silently.
@@ -5825,9 +5848,9 @@ mod flush_cache_tests {
 /// makes the flush wrong: "Save and close" closes the window and kills RA, and
 /// "Save and open…" replaces the project, so a flush of the OLD buffers could
 /// land in the new project's workspace. The new project flushes on its own;
-/// a cancelled picker flushes where the save result is applied. Both pending
-/// flags are sampled before that result is applied, which can happen on the
-/// spawn frame itself and clears them.
+/// a cancelled picker flushes where the save result is applied
+/// (`apply_finished_save`, in `App::logic` of a later pass — so the pending
+/// flags sampled on the spawn frame are still the ones this save carries).
 fn flush_after_save(
     clicked: bool,
     tree_changed: bool,
@@ -5868,6 +5891,93 @@ mod flush_after_save_tests {
     #[test]
     fn save_and_open_does_not_flush_the_old_project() {
         assert!(!flush_after_save(false, false, true, false, true));
+    }
+}
+
+/// The close gate the way eframe really drives it for a MINIMIZED root window:
+/// `App::logic` inside an egui pass, and no `App::ui` (eframe 0.34
+/// `EpiIntegration::update` skips `ui` when `ViewportInfo::visible()` is
+/// `Some(false)`; 0.36 calls `logic` alone through `Context::run_logic`).
+#[cfg(test)]
+mod close_while_minimized {
+    use super::AppIde;
+    use eframe::egui::{self, ViewportCommand, ViewportEvent, ViewportId};
+    use std::sync::{Arc, Mutex};
+
+    fn app(ctx: &egui::Context) -> AppIde {
+        AppIde::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            None,
+            None,
+        )
+    }
+
+    fn minimized_pass(app: &mut AppIde, ctx: &egui::Context, close: bool) -> Vec<ViewportCommand> {
+        let mut input = egui::RawInput::default();
+        let root = input.viewports.entry(ViewportId::ROOT).or_default();
+        root.minimized = Some(true);
+        if close {
+            root.events.push(ViewportEvent::Close);
+        }
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut out = crate::headless::run_ui(ctx, input, |ui| {
+            eframe::App::logic(app, ui.ctx(), &mut frame);
+        });
+        out.viewport_output
+            .remove(&ViewportId::ROOT)
+            .map(|o| o.commands)
+            .unwrap_or_default()
+    }
+
+    /// What the old check at the top of `ui` lost: eframe saw no
+    /// `CancelClose` on this pass and exited over the work.
+    #[test]
+    fn closing_a_minimized_window_with_unsaved_work_prompts_instead_of_exiting() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        // Never saved, with a file of the user's own in it: unsaved.
+        app.project_dir = None;
+        app.project_tree
+            .user_src_files
+            .push(("src/notes.rs".into(), "pub fn n() {}".into()));
+        let cmds = minimized_pass(&mut app, &ctx, true);
+        assert!(cmds.contains(&ViewportCommand::CancelClose), "{cmds:?}");
+        assert!(
+            cmds.contains(&ViewportCommand::Minimized(false)),
+            "{cmds:?}"
+        );
+        assert!(app.close.prompt, "the prompt is up for the restored window");
+    }
+
+    /// Nothing to lose: the minimized window simply closes.
+    #[test]
+    fn closing_a_clean_minimized_window_is_not_cancelled() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.project_dir = None;
+        app.project_tree.user_src_files.clear();
+        let cmds = minimized_pass(&mut app, &ctx, true);
+        assert!(!cmds.contains(&ViewportCommand::CancelClose), "{cmds:?}");
+        assert!(app.close.allow && !app.close.prompt);
+    }
+
+    /// "Save and close", then minimized while the worker ran: the result is
+    /// applied in `logic`, so the close still happens without a visible frame.
+    #[test]
+    fn save_and_close_finishes_while_minimized() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let dir = std::env::temp_dir().join(format!("eide_close_min_{}", std::process::id()));
+        // The same folder before and after: no claim, no recent-list entry.
+        app.project_dir = Some(dir.clone());
+        app.save_dest = Some(dir);
+        app.close.prompt = true;
+        app.close.after_save = true;
+        app.save_in_progress = Some(Arc::new(Mutex::new(Some(Ok("proj".to_owned())))));
+        let cmds = minimized_pass(&mut app, &ctx, false);
+        assert!(cmds.contains(&ViewportCommand::Close), "{cmds:?}");
+        assert!(app.close.allow && !app.close.prompt && !app.close.after_save);
+        assert!(app.save_in_progress.is_none());
     }
 }
 

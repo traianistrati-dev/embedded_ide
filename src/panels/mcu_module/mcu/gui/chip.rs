@@ -815,7 +815,7 @@ mod the_diamond_really_runs_on_a_ball_grid {
             )),
             ..Default::default()
         };
-        ctx.run_ui(input, |ui| {
+        crate::headless::run_ui(&ctx, input, |ui| {
             mcu.draw(ui);
         })
         .shapes

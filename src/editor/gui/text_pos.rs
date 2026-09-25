@@ -503,7 +503,7 @@ impl<'g> GalleyRows<'g> {
 pub(crate) fn test_galleys(specs: &[(&str, f32)]) -> Vec<Arc<egui::Galley>> {
     let ctx = egui::Context::default();
     let mut out = Vec::new();
-    let _ = ctx.run_ui(Default::default(), |ui| {
+    let _ = crate::headless::run_ui(&ctx, Default::default(), |ui| {
         out = specs
             .iter()
             .map(|&(text, wrap)| {

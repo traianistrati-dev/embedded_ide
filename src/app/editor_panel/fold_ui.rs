@@ -457,9 +457,8 @@ impl AppIde {
         if delta.abs() < 0.5 {
             return true;
         }
-        let scroll_id = ui
-            .id()
-            .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
+        let scroll_id =
+            crate::app::helpers::scroll_id::scroll_area_id(ui, format!("{editor_id}_outer_scroll"));
         if let Some(mut state) = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id) {
             state.offset.y = (drawn_offset + delta).max(0.0);
             state.store(ui.ctx(), scroll_id);

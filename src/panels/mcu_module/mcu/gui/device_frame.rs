@@ -569,7 +569,7 @@ mod tests {
         // `Context::run` takes an `FnMut`, so the one-shot closure is parked in
         // an Option and taken on the first pass.
         let mut once = Some(f);
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let _ = crate::headless::run_ui(&ctx, Default::default(), |ui| {
             if let Some(f) = once.take() {
                 f(&egui::Painter::new(
                     ui.ctx().clone(),

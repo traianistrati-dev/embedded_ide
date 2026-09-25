@@ -1228,11 +1228,11 @@ fn outline(
         let step = ROW_H + ui.spacing().item_spacing.y;
         let view = ui.available_size();
         let content = rows.len() as f32 * step - ui.spacing().item_spacing.y;
-        // The id the list files its state under: `ScrollArea` makes an `Id`
-        // of the salt, then salts the ui's id with it.
+        // The id the list files its state under - egui's derivation, which
+        // changed in 0.35, so it comes from the one helper that tests it.
         let now = offset.unwrap_or_else(|| {
-            egui::scroll_area::State::load(ui.ctx(), ui.make_persistent_id(egui::Id::new(salt)))
-                .map_or(0.0, |s| s.offset.y)
+            let id = crate::app::helpers::scroll_id::scroll_area_id(ui, salt);
+            egui::scroll_area::State::load(ui.ctx(), id).map_or(0.0, |s| s.offset.y)
         });
         let row = egui::Rect::from_min_size(
             egui::pos2(0.0, (i - rows.start) as f32 * step),
@@ -2017,11 +2017,10 @@ mod tests {
         };
         let empty = FlowLayout::default();
         let mut result = ShowResult::default();
-        let shapes = ctx
-            .run_ui(input, |ui| {
-                result = show(ui, m, &empty, None, view, "");
-            })
-            .shapes;
+        let shapes = crate::headless::run_ui(ctx, input, |ui| {
+            result = show(ui, m, &empty, None, view, "");
+        })
+        .shapes;
         let mut out = Vec::new();
         for s in &shapes {
             walk(&s.shape, &mut out);
@@ -2082,11 +2081,10 @@ mod tests {
             ..Default::default()
         };
         let mut result = ShowResult::default();
-        let clipped = ctx
-            .run_ui(input, |ui| {
-                result = show(ui, m, lay, comp, view, "");
-            })
-            .shapes;
+        let clipped = crate::headless::run_ui(ctx, input, |ui| {
+            result = show(ui, m, lay, comp, view, "");
+        })
+        .shapes;
         let mut shapes = Vec::new();
         for s in &clipped {
             walk(&s.shape, &mut shapes);

@@ -531,7 +531,9 @@ mod tests {
         frames: &[Frame<'_>],
     ) -> Vec<Event> {
         let mut out = Vec::new();
-        let _ = ctx.run_ui(input(pass, events), |ui| out = draw(ui, frames, &[], &[]).0);
+        let _ = crate::headless::run_ui(ctx, input(pass, events), |ui| {
+            out = draw(ui, frames, &[], &[]).0
+        });
         out
     }
 

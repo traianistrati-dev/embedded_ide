@@ -557,7 +557,7 @@ mod tests {
     fn placed(clip: egui::Rect, rows: &[Row]) -> Option<egui::Rect> {
         let ctx = egui::Context::default();
         for _ in 0..2 {
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            let _ = crate::headless::run_ui(&ctx, Default::default(), |ui| {
                 show(ui, "test", clip, rows, Freshness::Live);
             });
         }
@@ -606,7 +606,7 @@ mod tests {
         let right = egui::Rect::from_min_size(egui::pos2(500.0, 0.0), egui::vec2(400.0, 400.0));
         let rows = sample_rows();
         for _ in 0..2 {
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            let _ = crate::headless::run_ui(&ctx, Default::default(), |ui| {
                 show(ui, "main", left, &rows, Freshness::Live);
                 show(ui, "ref", right, &rows, Freshness::Live);
             });

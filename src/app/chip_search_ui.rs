@@ -1125,7 +1125,7 @@ mod tests {
         let mut f = ChipFilter::default();
         let mut applied = ChipFilter::default();
         let facets = Facets::default();
-        let out = ctx.run_ui(raw, |ui| {
+        let out = crate::headless::run_ui(ctx, raw, |ui| {
             before(ui);
             let content = ui.ctx().content_rect();
             let dialog = crate::app::dialogs::new_project_window()
@@ -1195,7 +1195,7 @@ mod tests {
     /// did: egui keeps the widest a non-resizable window has been.
     fn plant_wide_window(ctx: &egui::Context, screen: egui::Vec2) {
         for pass in 0..3 {
-            let _ = ctx.run_ui(input(screen, pass, vec![]), |ui| {
+            let _ = crate::headless::run_ui(ctx, input(screen, pass, vec![]), |ui| {
                 egui::Window::new("New Project")
                     .collapsible(false)
                     .resizable(false)
@@ -1322,13 +1322,17 @@ mod tests {
         let screen = egui::vec2(1366.0, 768.0);
         let ctx = app_ctx();
         let rows = hits(30);
+        // The form's layer as egui reports it: how a title becomes an `Id` is
+        // egui's business (0.35 hashes it as an `Option<Cow<str>>`).
+        let mut form_layer = None;
         let mut form = |ui: &mut egui::Ui| {
-            egui::Window::new("New MCU")
+            form_layer = egui::Window::new("New MCU")
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .fixed_size([680.0, 560.0])
                 .show(ui.ctx(), |ui| {
                     ui.label("form");
-                });
+                })
+                .map(|r| r.response.layer_id);
         };
         let mut pass = 0;
         let mut run = |events: Vec<egui::Event>| {
@@ -1371,13 +1375,9 @@ mod tests {
             modifiers,
         }]);
         run(vec![]);
-        assert_eq!(
-            ctx.layer_id_at(form_center),
-            Some(egui::LayerId::new(
-                egui::Order::Middle,
-                egui::Id::new("New MCU")
-            ))
-        );
+        let form_layer = form_layer.expect("the form was shown");
+        assert_eq!(form_layer.order, egui::Order::Middle);
+        assert_eq!(ctx.layer_id_at(form_center), Some(form_layer));
         assert_eq!(ctx.layer_id_at(on_list), Some(list_layer()));
     }
 
@@ -1399,7 +1399,7 @@ mod tests {
                 });
         };
         for pass in 0..3 {
-            let _ = ctx.run_ui(input(screen, pass, vec![]), |ui| overlay(ui));
+            let _ = crate::headless::run_ui(&ctx, input(screen, pass, vec![]), |ui| overlay(ui));
         }
         let mut m = Measured::default();
         for pass in 3..9 {
@@ -1515,7 +1515,7 @@ mod tests {
             let mut row_h = 0.0;
             for _ in 0..2 {
                 heights.clear();
-                let _ = ctx.run_ui(Default::default(), |ui| {
+                let _ = crate::headless::run_ui(&ctx, Default::default(), |ui| {
                     ui.set_max_width(MAX_LIST_W);
                     row_h = row_height(ui);
                     for h in &rows {

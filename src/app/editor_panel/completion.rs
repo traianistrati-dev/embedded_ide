@@ -1813,7 +1813,7 @@ mod tests {
         // Every label's glyphs enter the font atlas first. Painting every row
         // would otherwise place them in another order, and the meshes would
         // differ in texture coordinates alone.
-        let _ = ctx.run_ui(input(0, Vec::new()), |ui| {
+        let _ = crate::headless::run_ui(&ctx, input(0, Vec::new()), |ui| {
             for item in items {
                 let label = format!("{} {}", lsp_kind_icon(item.kind), item.label);
                 let font = egui::FontId::monospace(12.0);
@@ -1827,7 +1827,7 @@ mod tests {
             .enumerate()
             .map(|(n, (sel, events))| {
                 let mut clicked = None;
-                let out = ctx.run_ui(input(n + 1, events.clone()), |ui| {
+                let out = crate::headless::run_ui(&ctx, input(n + 1, events.clone()), |ui| {
                     clicked = list(ui.ctx(), pos, items, *sel);
                 });
                 let meshes = ctx

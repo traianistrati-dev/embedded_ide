@@ -1716,16 +1716,16 @@ mod tests {
             &[(&[0x0D, 0x0A], SEARCH_HIT), (&[0x01], SEARCH_HIT2)],
             16,
         );
-        let colors: Vec<_> = job
+        // Per BYTE, not per section: from egui 0.36 on, `LayoutJob::append`
+        // merges a run of same-coloured bytes ("0D 0A") into one section.
+        let colors: Vec<(String, egui::Color32)> = job
             .sections
             .iter()
-            .map(|s| {
-                (
-                    job.text[s.byte_range.clone()].trim().to_string(),
-                    s.format.color,
-                )
+            .flat_map(|s| {
+                job.text[s.byte_range.clone()]
+                    .split_whitespace()
+                    .map(move |t| (t.to_string(), s.format.color))
             })
-            .filter(|(t, _)| !t.is_empty())
             .collect();
         assert_eq!(colors[0], ("01".into(), SEARCH_HIT2)); // blue
         assert_eq!(colors[1], ("0D".into(), SEARCH_HIT)); // yellow
@@ -1813,7 +1813,7 @@ mod baud_list_tests {
             )),
             ..Default::default()
         };
-        let shapes = ctx.run_ui(input, |ui| picker(ui, baud)).shapes;
+        let shapes = crate::headless::run_ui(&ctx, input, |ui| picker(ui, baud)).shapes;
         let mut out = Vec::new();
         for s in &shapes {
             walk(&s.shape, &mut out);
@@ -1855,7 +1855,7 @@ mod baud_list_tests {
                 )),
                 ..Default::default()
             };
-            let shapes = ctx.run_ui(input, |ui| picker(ui, baud)).shapes;
+            let shapes = crate::headless::run_ui(&ctx, input, |ui| picker(ui, baud)).shapes;
             let mut out = Vec::new();
             for s in &shapes {
                 if let egui::Shape::Text(t) = &s.shape {

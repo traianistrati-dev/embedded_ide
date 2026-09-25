@@ -1205,7 +1205,7 @@ mod tests {
     fn drawing_a_period_does_not_clamp_the_stored_value() {
         let ctx = egui::Context::default();
         let mut period: u32 = 12_000_000;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = crate::headless::run_ui(&ctx, egui::RawInput::default(), |ui| {
             duration_row(ui, "Period", &mut period, (1, 8_388_607));
         });
         assert_eq!(period, 12_000_000, "the field rewrote the stored period");

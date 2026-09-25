@@ -118,7 +118,7 @@ impl AppIde {
         // renders BELOW this overlay and its buttons would be unclickable, so
         // the prompt wins — the overlay is only about visibility, never about
         // holding a decision hostage.
-        if settled || escaped || self.exit_prompt || elapsed >= MAX_VISIBLE {
+        if settled || escaped || self.close.prompt || elapsed >= MAX_VISIBLE {
             return; // dropped — no overlay from here on
         }
 

@@ -8543,7 +8543,8 @@ mod the_baud_row_reports_the_wire {
             ..Default::default()
         };
         let mut baud = baud;
-        let shapes = ctx.run_ui(input, |ui| baud_row(ui, &mut baud, plan)).shapes;
+        let shapes =
+            crate::headless::run_ui(&ctx, input, |ui| baud_row(ui, &mut baud, plan)).shapes;
         let mut out = Vec::new();
         for s in &shapes {
             walk(&s.shape, &mut out);

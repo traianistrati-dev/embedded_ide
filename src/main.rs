@@ -26,6 +26,8 @@ pub mod failure_hint;
 pub mod flamegraph;
 pub mod flash_stop;
 pub mod git;
+#[cfg(test)]
+pub mod headless;
 pub mod lsp;
 pub mod msvc;
 pub mod names;
