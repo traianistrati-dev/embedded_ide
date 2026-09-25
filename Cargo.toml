@@ -8,18 +8,21 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 eframe           = { version = "0.34.1", features = ["persistence"] }
 egui             = "0.34.1"
-egui_code_editor = "0.3.2"
+# Capped below 0.3.7: 0.3.7 and later require egui 0.35/0.36, so a plain
+# `cargo update` would pull a second egui into the lock and fail to build.
+# Lift the cap together with the egui 0.36 upgrade (then `=0.3.8`).
+egui_code_editor = ">=0.3.2, <0.3.7"
 egui-phosphor    = { version = "0.12.0", features = ["regular"] }
-rfd              = "0.15"
+rfd              = "0.17"
 serde_json       = "1"
 serde            = { version = "1", features = ["derive"] }
-similar          = "2"
-ron              = "0.8"
-notify           = "6"
+similar          = "3"
+ron              = "0.12"
+notify           = "8"
 serialport = "4"
 rusb = "0.9"
 ureq = "2"
-roxmltree = "0.20"
+roxmltree = "0.21.1"
 # Format-PRESERVING TOML: the publish dialog writes fields into the user's own
 # Cargo.toml, so comments, ordering and line endings have to survive. Already in
 # the lockfile transitively, so this costs no extra build.

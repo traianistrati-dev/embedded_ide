@@ -265,6 +265,7 @@ mod tests {
 
         for def in [&stm, &esp] {
             let ron = ron::ser::to_string_pretty(def, pretty.clone()).unwrap();
+            let ron = crate::panels::mcu_module::ron_text::bare_none(&ron);
             std::fs::write(format!("assets/mcus/{}.ron", def.id), ron).unwrap();
         }
     }
@@ -553,6 +554,7 @@ mod tests {
         std::fs::create_dir_all("assets/mcus/examples").unwrap();
         let ron =
             ron::ser::to_string_pretty(&def, PrettyConfig::default().struct_names(true)).unwrap();
+        let ron = crate::panels::mcu_module::ron_text::bare_none(&ron);
         std::fs::write("assets/mcus/examples/stm32f103rb.ron", ron).unwrap();
     }
 
@@ -605,6 +607,7 @@ mod tests {
         std::fs::create_dir_all("assets/mcus/examples").unwrap();
         let ron =
             ron::ser::to_string_pretty(&def, PrettyConfig::default().struct_names(true)).unwrap();
+        let ron = crate::panels::mcu_module::ron_text::bare_none(&ron);
         std::fs::write("assets/mcus/examples/stm32f103_graphclock.ron", ron).unwrap();
     }
 
@@ -657,6 +660,7 @@ mod tests {
         std::fs::create_dir_all("assets/mcus/examples").unwrap();
         let ron =
             ron::ser::to_string_pretty(&def, PrettyConfig::default().struct_names(true)).unwrap();
+        let ron = crate::panels::mcu_module::ron_text::bare_none(&ron);
         std::fs::write("assets/mcus/examples/esp32c3_graphclock.ron", ron).unwrap();
     }
 

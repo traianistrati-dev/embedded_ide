@@ -765,9 +765,12 @@ pub fn serialize(
 
     if !modules.is_empty() {
         // Pretty RON: one module per block, each field on its own line (ron's
-        // default omits struct names, matching the documented format).
+        // default omits struct names, matching the documented format). The
+        // `None` variants are written bare, as every saved file has them - see
+        // `ron_text::bare_none`.
         let pretty = ron::ser::to_string_pretty(&modules, ron::ser::PrettyConfig::new())
             .unwrap_or_else(|_| ron::to_string(&modules).unwrap_or_else(|_| "[]".into()));
+        let pretty = super::ron_text::bare_none(&pretty);
         out.push_str(MODULES_HEADER);
         out.push('\n');
         out.push_str(&pretty);
@@ -1455,6 +1458,38 @@ mod lpuart_persist_tests {
         assert!(matches!(back[0].config, ModuleConfig::Lpuart(_)));
         assert_eq!(back[0].instance(), 1);
         assert_eq!(back[0].pin_for(ModuleSignal::LpTx), Some(21));
+    }
+
+    /// `Parity::None` and `UsartFlow::None` are saved bare, as every mcu.config
+    /// on disk has them. ron 0.12 wrote `r#None`, so an untouched project with
+    /// a USART compared as "unsaved" on open and diffed in Git on first save.
+    #[test]
+    fn a_none_variant_is_saved_bare_and_the_text_round_trips() {
+        let mut cfg = UsartModuleConfig::new(1);
+        cfg.custom_label = "keeps: r#None,".into();
+        let m = VirtualModule {
+            id: "usart_1".into(),
+            kind: ModuleKind::GenericInterfaceUsart,
+            name: "USART1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Usart(cfg),
+            connections: Vec::new(),
+        };
+        let text = serialize(&[m], None, Runtime::Blocking, ApiStyle::Portable);
+        let lf = text.replace("\r\n", "\n");
+        assert!(lf.contains("\n            parity: None,\n"), "{lf}");
+        assert!(lf.contains("\n            flow: None,\n"), "{lf}");
+        assert!(!lf.contains(": r#None,\n"), "{lf}");
+        assert!(
+            lf.contains("\"keeps: r#None,\""),
+            "a label keeps its text: {lf}"
+        );
+        // Byte for byte: what was read is what gets written back.
+        let (back, _) = parse(&text);
+        assert_eq!(
+            serialize(&back, None, Runtime::Blocking, ApiStyle::Portable),
+            text
+        );
     }
 }
 

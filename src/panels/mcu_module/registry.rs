@@ -180,6 +180,7 @@ pub fn save_definition(def: &McuDefinition) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let text = ron::ser::to_string_pretty(def, ron::ser::PrettyConfig::default())
+        .map(|t| super::ron_text::bare_none(&t))
         .map_err(|e| format!("RON serialize error: {e}"))?;
     let dest = dir.join(format!("{}.ron", def.id));
     std::fs::write(&dest, text).map_err(|e| format!("could not write {}: {e}", dest.display()))?;

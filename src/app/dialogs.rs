@@ -1230,10 +1230,14 @@ impl AppIde {
                                 )
                                 .clicked()
                             {
+                                // A cancel is `Some(vec![])` on Linux since rfd
+                                // 0.17's portal backend (its zenity fallback
+                                // always did that), not `None`.
                                 if let Some(paths) = rfd::FileDialog::new()
                                     .add_filter("STM32 pin-data XML", &["xml"])
                                     .set_title("Import STM32 open-pin-data XML")
                                     .pick_files()
+                                    .filter(|p| !p.is_empty())
                                 {
                                     self.import_stm32_pin_data(&paths);
                                 }

@@ -1817,6 +1817,7 @@ mod tests {
             let c = esp_metadata::load(&dir, id).unwrap_or_else(|e| panic!("{id}: {e}"));
             let def = definition(&c).unwrap_or_else(|e| panic!("{id}: {e}"));
             let text = ron::ser::to_string_pretty(&def, pretty.clone()).unwrap();
+            let text = crate::panels::mcu_module::ron_text::bare_none(&text);
             let path = format!("assets/mcus/{id}.ron");
             std::fs::write(&path, &text).unwrap();
             println!("wrote {path}  ({} bytes)", text.len());

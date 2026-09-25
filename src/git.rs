@@ -1942,9 +1942,18 @@ pub fn run_restore_tree(
 }
 
 /// Line-diff `old` → `new` into gutter hunks. Pure — tested below.
+///
+/// Histogram, not similar 3's default Myers. The default bounds its splits, so
+/// once a buffer drifts a few hundred lines from HEAD it folds unchanged lines
+/// into big "modified" blocks: 668 lines painted where 540 were inserted, and
+/// 2852 against 2370 on a real 3 200-line file. Histogram marks what 2.7 did
+/// (540, 2376) and is the fastest at the extremes: 4 ms on 20 000 unrelated
+/// lines, where RawMyers (2.7's behaviour) takes 3.5 s on the UI thread.
 pub fn compute_hunks(old: &str, new: &str) -> Vec<DiffHunk> {
     use similar::DiffOp;
-    similar::TextDiff::from_lines(old, new)
+    similar::TextDiff::configure()
+        .algorithm(similar::Algorithm::Histogram)
+        .diff_lines(old, new)
         .ops()
         .iter()
         .filter_map(|op| match *op {
@@ -2492,6 +2501,84 @@ index abc..def 100644
         );
         // Identical → no hunks.
         assert!(compute_hunks("x\n", "x\n").is_empty());
+    }
+
+    /// The hunks rebuild `new` from `old`, with equal text between them - what
+    /// the gutter and "Revert hunk" both assume.
+    fn hunks_cover(old: &str, new: &str, hunks: &[DiffHunk]) -> bool {
+        let o: Vec<&str> = old.split_inclusive('\n').collect();
+        let n: Vec<&str> = new.split_inclusive('\n').collect();
+        let (mut oi, mut ni) = (0, 0);
+        for h in hunks {
+            if h.old_start < oi
+                || h.new_start < ni
+                || h.old_start - oi != h.new_start - ni
+                || o.get(oi..h.old_start) != n.get(ni..h.new_start)
+            {
+                return false;
+            }
+            oi = h.old_start + h.old_len;
+            ni = h.new_start + h.new_len;
+        }
+        o.get(oi..) == n.get(ni..)
+    }
+
+    #[test]
+    fn a_large_insertion_paints_only_the_inserted_lines() {
+        // Six blocks of 90 kept lines, each followed by 90 new ones. similar
+        // 3's default Myers painted 668 lines here, 128 of them unchanged.
+        fn block(tag: &str, b: usize) -> String {
+            (0..90)
+                .map(|i| match i % 3 {
+                    0 => format!("fn {tag}_{b}_{i}() {{\n"),
+                    1 => "}\n".into(),
+                    _ => "\n".into(),
+                })
+                .collect()
+        }
+        let (mut old, mut new) = (String::new(), String::new());
+        for b in 0..6 {
+            old += &block("keep", b);
+            new += &block("keep", b);
+            new += &block("ins", b);
+        }
+        let hunks = compute_hunks(&old, &new);
+        assert!(
+            hunks.iter().all(|h| h.old_len == 0),
+            "only insertions happened"
+        );
+        assert_eq!(hunks.iter().map(|h| h.new_len).sum::<usize>(), 540);
+        assert!(hunks_cover(&old, &new, &hunks));
+    }
+
+    #[test]
+    fn the_hunks_always_rebuild_the_new_text() {
+        // similar 2.7's Compact broke this on inputs as small as these: a
+        // deletion wedge landed on the wrong line.
+        let words = ["a", "b", "c", "d"];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..2000 {
+            let mut side = || -> String {
+                let n = (next() % 9) as usize;
+                (0..n)
+                    .map(|_| format!("{}\n", words[(next() % 4) as usize]))
+                    .collect()
+            };
+            let (old, new) = (side(), side());
+            let hunks = compute_hunks(&old, &new);
+            assert!(
+                hunks_cover(&old, &new, &hunks),
+                "{old:?} -> {new:?}: {hunks:?}"
+            );
+        }
+        let (old, new) = ("b\nb\nb\nc\nb\n", "c\nc\nb\nb\na\nd\n");
+        assert!(hunks_cover(old, new, &compute_hunks(old, new)));
     }
 
     #[test]

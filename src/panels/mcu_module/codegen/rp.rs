@@ -2600,6 +2600,7 @@ pub(super) mod pico2_ice_board {
             ron::ser::PrettyConfig::default().struct_names(true),
         )
         .expect("serialise");
+        let text = crate::panels::mcu_module::ron_text::bare_none(&text);
         let path = std::env::temp_dir().join("rp2350_pico2_ice.ron");
         std::fs::write(&path, text).expect("write");
         println!("wrote {}", path.display());

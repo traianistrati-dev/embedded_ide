@@ -249,9 +249,10 @@ mod glyph_guard {
 ///
 /// `None` means "leave the file alone": nothing stored, or the text did not
 /// survive a parse → serialize → parse round-trip. That check is the point — the
-/// file holds the ENTIRE persisted state (over a megabyte here) and we write it
-/// with a different `ron` major version than eframe reads it with, so the only
-/// acceptable way to touch it is to prove the replacement first.
+/// file holds the ENTIRE persisted state (over a megabyte here), and a
+/// replacement eframe could not read would lose all of it, so the only
+/// acceptable way to touch it is to prove the replacement first. (Our `ron` and
+/// eframe's are the same major since 2026-09; the check does not rely on it.)
 fn without_window_key(text: &str) -> Option<String> {
     use std::collections::HashMap;
     // eframe's `STORAGE_WINDOW_KEY`, private to it — hence the literal.

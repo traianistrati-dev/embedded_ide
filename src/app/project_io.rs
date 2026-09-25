@@ -550,9 +550,9 @@ impl AppIde {
 
     /// Keeps exactly ONE live watch on `workspace/src`.
     ///
-    /// notify 6.1.1's Windows backend is not idempotent: every `watch()` on an
-    /// already-watched path opens another directory handle and replaces the map
-    /// entry WITHOUT stopping the old one. Calling it every frame, as this used
+    /// notify's Windows backend, 6.1.1 through 8.2.0, is not idempotent (fixed
+    /// in 9.0): every `watch()` on an already-watched path opens another
+    /// directory handle and replaces the map entry WITHOUT stopping the old one. Calling it every frame, as this used
     /// to, left one live recursive watch per frame. A single write to `src/`
     /// then fired two callbacks per leaked watch, and the next frame's `watch()`
     /// blocked in its acknowledgement until the watcher thread had run all of

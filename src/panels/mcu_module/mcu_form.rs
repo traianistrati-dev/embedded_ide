@@ -781,6 +781,7 @@ impl McuForm {
     /// Serialize the built definition to pretty RON (what gets written to disk).
     pub fn to_ron(&self) -> Result<String, String> {
         ron::ser::to_string_pretty(&self.to_definition(), ron::ser::PrettyConfig::default())
+            .map(|t| super::ron_text::bare_none(&t))
             .map_err(|e| format!("RON serialize error: {e}"))
     }
 }
