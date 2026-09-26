@@ -31,6 +31,7 @@ pub mod headless;
 pub mod lsp;
 pub mod msvc;
 pub mod names;
+pub mod net;
 pub mod openocd;
 pub mod panels;
 pub mod probe;

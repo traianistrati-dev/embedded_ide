@@ -1402,7 +1402,8 @@ fn sparse_index_path(name: &str) -> String {
 /// worse than not checking at all.
 ///
 /// Short timeout on purpose: this runs on the UI thread during an import, and a
-/// user with no network must wait seconds, not minutes.
+/// user with no network must wait seconds, not minutes. [`crate::net::agent`]
+/// is what makes the 4 s hold for DNS and the connect too.
 pub(crate) fn known_features(name: &str, version_req: &str) -> Option<Vec<String>> {
     let data = fetch_versions_with_timeout(name, std::time::Duration::from_secs(4)).ok()?;
     let version = pick_version(&data.versions, Some(version_req))?;
@@ -1446,7 +1447,8 @@ fn fetch_versions_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<IndexData, String> {
     let url = format!("https://index.crates.io/{}", sparse_index_path(name));
-    let body = ureq::get(&url)
+    let body = crate::net::agent(timeout)
+        .get(&url)
         .set(
             "User-Agent",
             concat!(
@@ -1456,7 +1458,6 @@ fn fetch_versions_with_timeout(
                 " (crate version lookup)"
             ),
         )
-        .timeout(timeout)
         .call()
         .map_err(|e| match e {
             ureq::Error::Status(404, _) => CRATE_NOT_FOUND.to_string(),

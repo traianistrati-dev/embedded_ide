@@ -217,9 +217,9 @@ pub(crate) fn run(query: &str, slot: &Mutex<SearchFetch>) {
 /// escaping.
 fn fetch_page(query: &str, sort: &str) -> Result<Answer, String> {
     let url = format!("https://crates.io/api/v1/crates?q={query}&per_page={PER_PAGE}&sort={sort}");
-    let body = ureq::get(&url)
+    let body = crate::net::agent(Duration::from_secs(10))
+        .get(&url)
         .set("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(10))
         .call()
         .map_err(|e| e.to_string())?
         .into_string()
@@ -294,9 +294,9 @@ pub(crate) fn canonical_name(name: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
     let url = format!("https://crates.io/api/v1/crates/{name}");
-    let resp = ureq::get(&url)
+    let resp = crate::net::agent(Duration::from_secs(10))
+        .get(&url)
         .set("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(10))
         .call();
     let body = match resp {
         Ok(r) => r.into_string().map_err(|e| e.to_string())?,

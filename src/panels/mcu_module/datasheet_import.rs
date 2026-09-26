@@ -1951,9 +1951,9 @@ fn post_and_parse(
     model: &str,
     body: &str,
 ) -> Result<String, String> {
-    let req = ureq::post(&provider.endpoint(model))
-        .set("content-type", "application/json")
-        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
+    let req = crate::net::agent(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .post(&provider.endpoint(model))
+        .set("content-type", "application/json");
     let req = match provider {
         Provider::Anthropic => req
             .set("x-api-key", api_key.trim())
