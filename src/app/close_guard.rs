@@ -154,6 +154,40 @@ mod tests {
         assert!(!cmds.contains(&ViewportCommand::CancelClose), "{cmds:?}");
     }
 
+    /// eframe 0.36's pass for a minimized root window: `App::logic` alone,
+    /// through `Context::run_logic` - no egui pass, only the window state
+    /// refreshed. The gate must work from exactly that.
+    #[test]
+    fn a_minimized_close_through_run_logic_is_cancelled_and_restores() {
+        let ctx = egui::Context::default();
+        let mut guard = CloseGuard::default();
+        let mut input = egui::RawInput::default();
+        let root = input.viewports.entry(ViewportId::ROOT).or_default();
+        root.minimized = Some(true);
+        root.events.push(ViewportEvent::Close);
+        let out = ctx.run_logic(&input, |ctx| {
+            if guard.wants_decision(ctx) {
+                guard.decide(ctx, true);
+            }
+        });
+        let cmds = out
+            .viewport_commands
+            .get(&ViewportId::ROOT)
+            .cloned()
+            .unwrap_or_default();
+        assert!(cmds.contains(&ViewportCommand::CancelClose), "{cmds:?}");
+        assert!(
+            cmds.contains(&ViewportCommand::Minimized(false)),
+            "{cmds:?}"
+        );
+        let restore = cmds
+            .iter()
+            .position(|c| *c == ViewportCommand::Minimized(false));
+        let focus = cmds.iter().position(|c| *c == ViewportCommand::Focus);
+        assert!(restore < focus, "restore BEFORE focus: {cmds:?}");
+        assert!(guard.prompt);
+    }
+
     /// Deciding diffs the project against the disk: never on a pass that
     /// carries no close.
     #[test]

@@ -558,7 +558,7 @@ pub fn show_git_tab(
     //    by a short panel). ────────────────────────────────────────────────
     egui::Panel::bottom("git_actions")
         .exact_size(58.0)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             ui.add_space(5.0);
             // ui.separator();
             let idle = busy.is_none() && is_repo && !git_missing;

@@ -1143,10 +1143,11 @@ pub fn show_project_tree(
     };
     let libs_h = libs_section_h(total_h, libs_min_h, *split_ratio, has_libs);
     let project_h = (total_h - SPLIT_HANDLE_H - libs_h).max(0.0);
-    // `ScrollSource::drag` is ON by default and would swallow the tree's own
-    // hold-to-drag file move — the two gestures are the same input.
+    // Drag-to-scroll would swallow the tree's own hold-to-drag file move —
+    // the two gestures are the same input. egui 0.36 turns it on only for a
+    // touch screen (`DragScroll::OnTouch`), so `Never` still matters there.
     let no_drag_scroll = egui::scroll_area::ScrollSource {
-        drag: false,
+        drag: egui::scroll_area::DragScroll::Never,
         ..Default::default()
     };
 

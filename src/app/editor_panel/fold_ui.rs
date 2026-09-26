@@ -210,7 +210,7 @@ impl AppIde {
         let galley_len = editor_resp.galley.text().chars().count();
         // The caret is in buffer space by now (converted after the render).
         let caret_row = editor_resp.state.cursor.char_range().map(|r| {
-            let disp = map.to_display_clamped(r.primary.index).min(galley_len);
+            let disp = map.to_display_clamped(r.primary.index.0).min(galley_len);
             map.display()
                 .chars()
                 .take(disp)

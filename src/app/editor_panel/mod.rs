@@ -43,6 +43,8 @@ pub(crate) mod diff_gutter;
 mod doc_md;
 mod duplicate_line;
 mod error_list;
+#[cfg(test)]
+mod escape_focus_tests;
 pub(crate) mod extract_fn;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
@@ -196,7 +198,7 @@ impl AppIde {
             // slot and fills everything the Project tree (a right panel added
             // before this) leaves — no width juggling, and the 70 % cap below
             // doesn't apply.
-            egui::CentralPanel::default().show_inside(ui, body);
+            egui::CentralPanel::default().show(ui, body);
         } else {
             // `editor_max` (computed above) reserves the MCU zone's minimum and
             // the tree's current width. It replaced a flat 70 % of the window,
@@ -208,7 +210,7 @@ impl AppIde {
                 .default_size(avail * 0.5)
                 .min_size(crate::app::EDITOR_MIN_W)
                 .max_size(editor_max)
-                .show_inside(ui, body);
+                .show(ui, body);
         }
     }
 
@@ -241,6 +243,7 @@ impl AppIde {
         let primary = range
             .primary
             .index
+            .0
             .min(editor_resp.galley.text().chars().count());
         // Only follow when the caret moved (typing / arrows / selection), so the
         // user can still freely scroll the wheel while the caret sits off-screen.
@@ -426,21 +429,6 @@ impl AppIde {
             reference_owns_kbd || self.ed.find.had_focus
         };
         let editor_kbd_active = nav_kbd_active && !definition_owns_kbd;
-        // Escape, read BEFORE any popup below consumes it. egui drops the
-        // editor's focus on Escape before this code runs, and the restore
-        // further down needs to know Escape happened — a popup that closed on
-        // it consumed the event, and reading it only afterwards left the caret
-        // out of the editor after every popup dismissal.
-        let escape_now = ui.input(|i| i.key_pressed(egui::Key::Escape));
-        // The main pass runs first and may consume an Escape meant for the
-        // Reference editor's popup (the LSP block serves the OWNER's list), so
-        // it hands what it saw to the second pass.
-        let escape_for_focus = if is_main {
-            self.reference_escape = escape_now;
-            escape_now
-        } else {
-            escape_now || std::mem::take(&mut self.reference_escape)
-        };
         // Close a popup whose OWNER no longer holds the keyboard: it
         // would eat Enter/Escape for a caret the user has left.
         //
@@ -838,13 +826,10 @@ impl AppIde {
             None
         });
         let mc_caret_move = mc_caret_move.filter(|_| editor_kbd_active);
-        // Escape, peeked twice for two different jobs:
-        //  * `escape_for_focus` (read earlier, before any popup consumed
-        //    it) — restore editor focus (see below).
-        //  * `mc_escape_pressed`  — drop the extra carets, skipped while
-        //    a completion popup is open, because dismissing that wins
-        //    (it renders later in the frame and would otherwise never
-        //    see the key).
+        // Escape drops the extra carets - skipped while a completion popup
+        // is open, because dismissing that wins (it renders later in the frame
+        // and would otherwise never see the key). The editor itself keeps its
+        // focus on Escape: see `EDITOR_KEYS`.
         let escape_pressed_raw = ui.input(|i| i.key_pressed(egui::Key::Escape));
         let popup_open = self.ed.completion_open || self.ed.cargo_complete.open;
         let mc_escape_pressed = editor_kbd_active && !popup_open && escape_pressed_raw;
@@ -1370,7 +1355,7 @@ impl AppIde {
                 if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
                     if let Some(r) = st.cursor.char_range() {
                         let to = |c: egui::text::CCursor| {
-                            egui::text::CCursor::new(fold_map.to_display_clamped(c.index))
+                            egui::text::CCursor::new(fold_map.to_display_clamped(c.index.0))
                         };
                         st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
                             to(r.primary),
@@ -1432,6 +1417,17 @@ impl AppIde {
                 .with_theme(ColorTheme::GRUVBOX)
                 .with_numlines(true)
                 .show(ui, &mut display_code, &display_syntax);
+            // The stock editor locks its focus with `lock_focus(true)` alone,
+            // so Escape - the key that closes the Cargo.toml crate popup -
+            // would still drop it and swallow everything typed after. Give it
+            // the Rust path's keys; its TextEdit set its own filter earlier in
+            // this pass, and this one wins at the next pass's `begin_pass`.
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    out.response.id,
+                    crate::editor::gui::code_editor::EDITOR_KEYS,
+                )
+            });
             // Set even when suppressed: the completer keys its popup to
             // this id, and a stale one from another editor would misplace
             // it the moment the flag flips back on.
@@ -1452,7 +1448,7 @@ impl AppIde {
 
         // Adopt what the editor produced — but ONLY on the Rust path, which
         // is the one handed `editor_text`. A config file (Cargo.toml,
-        // memory.x, .gitignore) goes through the stock `CodeEditor` in the
+        // .cargo/config.toml, .gitignore) goes through the stock `CodeEditor` in the
         // branch above, which edits `display_code` DIRECTLY; assigning
         // `editor_text` over it there wrote back the pre-edit clone and
         // erased every keystroke as it was typed.
@@ -1577,7 +1573,7 @@ impl AppIde {
             .state
             .cursor
             .char_range()
-            .map(|r| (displayed_file, fold_map.to_buffer(r.primary.index)));
+            .map(|r| (displayed_file, fold_map.to_buffer(r.primary.index.0)));
 
         // The other half of the caret invariant (see the conversion before
         // the render): what the editor hands back is in projection space.
@@ -1588,9 +1584,10 @@ impl AppIde {
         let mut caret_in_galley = None;
         if folded {
             if let Some(r) = editor_resp.state.cursor.char_range() {
-                caret_in_galley = Some(r.primary.index);
-                let to =
-                    |c: egui::text::CCursor| egui::text::CCursor::new(fold_map.to_buffer(c.index));
+                caret_in_galley = Some(r.primary.index.0);
+                let to = |c: egui::text::CCursor| {
+                    egui::text::CCursor::new(fold_map.to_buffer(c.index.0))
+                };
                 let range = egui::text::CCursorRange::two(to(r.primary), to(r.secondary));
                 editor_resp.state.cursor.set_char_range(Some(range));
                 let mut st = editor_resp.state.clone();
@@ -1707,27 +1704,18 @@ impl AppIde {
         // When it does, the line-op shortcuts below are skipped for this
         // frame: they assume a single cursor/selection, and `editor_resp`
         // still reflects positions from BEFORE this replay.
-        // ── Escape must never eject the caret from the editor ─────────
-        // egui drops the focused widget on Escape in `Focus::begin_pass`
-        // — raw events, start of the pass, before any widget or app code
-        // — so consuming the key cannot prevent it; the only cure is to
-        // take focus back afterwards.
-        //
-        // In the code editor Escape means "dismiss the popup" or "drop
-        // the extra carets", never "leave the editor", so restore it
-        // whenever the editor was the focused widget LAST frame. That
-        // check matters: without it, an Escape pressed in the Find bar
-        // or a tree rename box would yank focus INTO the editor. The
-        // flag is forced true when we restore, because `has_focus()` is
-        // still false on this very frame — otherwise a second Escape in
-        // a row would find it false and give up.
+        // ── A click in the error tooltip must not eject the caret ──────
+        // (Escape no longer does: the editor keeps it - see `EDITOR_KEYS`.)
         //
         // A click in the inline-error tooltip (its Copy button, its docs
-        // link) takes focus the same way — egui surrenders it on any click
-        // outside the focused widget, during the text box above — and is
-        // cured the same way. Without the forced flag the next frame's
-        // keyboard gate would read this editor as unfocused and close its
-        // completion and code-action lists. The tooltip may be the OTHER
+        // link) takes focus from the editor - egui surrenders it on any click
+        // outside the focused widget, during the text box above - so take it
+        // back, but only when the editor was the focused widget LAST frame:
+        // a click there while the Find bar held focus must not yank it into
+        // the editor. The flag is forced true when we restore, because
+        // `has_focus()` is still false on this very frame; without it the
+        // next frame's keyboard gate would read this editor as unfocused and
+        // close its completion and code-action lists. The tooltip may be the OTHER
         // view's: see `click_in_tooltip`. Where the button was RELEASED, not
         // `interact_pos`: a move later in the same event batch overwrites
         // that, and a quick click-and-away would then miss the tooltip.
@@ -1750,7 +1738,7 @@ impl AppIde {
                     .flatten()
             }),
         );
-        if (escape_for_focus || tooltip_click) && self.ed.editor_was_focused {
+        if tooltip_click && self.ed.editor_was_focused {
             editor_resp.response.request_focus();
             self.ed.editor_was_focused = true;
             if !is_main {
@@ -1787,7 +1775,7 @@ impl AppIde {
         // elsewhere in this file).
         if let Some(shift) = mc_shift.filter(|&s| s != 0) {
             if let Some(r) = editor_resp.state.cursor.char_range() {
-                let new_idx = (r.primary.index as isize + shift).max(0) as usize;
+                let new_idx = (r.primary.index.0 as isize + shift).max(0) as usize;
                 let mut st = editor_resp.state.clone();
                 st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
                     egui::text::CCursor::new(new_idx),
@@ -1899,18 +1887,18 @@ impl AppIde {
                 .state
                 .cursor
                 .char_range()
-                .map(|r| r.primary.index);
+                .map(|r| r.primary.index.0);
             let sel_end_idx = editor_resp
                 .state
                 .cursor
                 .char_range()
-                .map(|r| r.secondary.index);
+                .map(|r| r.secondary.index.0);
             let anchor = editor_resp
                 .state
                 .cursor
                 .char_range()
                 .map(|cr| {
-                    let clamped = cr.primary.index.min(
+                    let clamped = cr.primary.index.0.min(
                         editor_resp
                             .galley
                             .job
@@ -1984,8 +1972,8 @@ impl AppIde {
                         .cursor
                         .char_range()
                         .and_then(|r| {
-                            let lo = r.primary.index.min(r.secondary.index);
-                            let hi = r.primary.index.max(r.secondary.index);
+                            let lo = r.primary.index.0.min(r.secondary.index.0);
+                            let hi = r.primary.index.0.max(r.secondary.index.0);
                             (lo != hi).then(|| {
                                 let chars: Vec<char> = display_code.chars().collect();
                                 chars[lo..hi.min(chars.len())].iter().collect::<String>()
@@ -2015,8 +2003,8 @@ impl AppIde {
                     // Cut the selection (mirrors the native Ctrl+X): copy
                     // it, remove it, collapse the cursor to the cut point.
                     if let Some(r) = editor_resp.state.cursor.char_range() {
-                        let lo = r.primary.index.min(r.secondary.index);
-                        let hi = r.primary.index.max(r.secondary.index);
+                        let lo = r.primary.index.0.min(r.secondary.index.0);
+                        let hi = r.primary.index.0.max(r.secondary.index.0);
                         if lo != hi {
                             let chars: Vec<char> = display_code.chars().collect();
                             let hi = hi.min(chars.len());
@@ -2035,8 +2023,8 @@ impl AppIde {
                 }
                 Some(A::Copy) => {
                     if let Some(r) = editor_resp.state.cursor.char_range() {
-                        let lo = r.primary.index.min(r.secondary.index);
-                        let hi = r.primary.index.max(r.secondary.index);
+                        let lo = r.primary.index.0.min(r.secondary.index.0);
+                        let hi = r.primary.index.0.max(r.secondary.index.0);
                         let chars: Vec<char> = display_code.chars().collect();
                         let text = if lo != hi {
                             chars[lo..hi.min(chars.len())].iter().collect::<String>()
@@ -2077,7 +2065,7 @@ impl AppIde {
                 .state
                 .cursor
                 .char_range()
-                .map(|r| (r.primary.index, r.secondary.index));
+                .map(|r| (r.primary.index.0, r.secondary.index.0));
             let anchor = editor_resp.response.rect.left_top() + egui::vec2(24.0, 24.0);
             self.begin_extract_fn(&display_code, displayed_file, is_rust_file, sel, anchor);
         }
@@ -2150,8 +2138,8 @@ impl AppIde {
         // the just-mutated `display_code` (see `mc_replayed` above).
         if cut_line_pressed && !mc_replayed {
             if let Some(r) = editor_resp.state.cursor.char_range() {
-                let lo = r.primary.index.min(r.secondary.index);
-                let hi = r.primary.index.max(r.secondary.index);
+                let lo = r.primary.index.0.min(r.secondary.index.0);
+                let hi = r.primary.index.0.max(r.secondary.index.0);
                 let cut = delete_line::cut_text(&display_code, lo, hi);
                 if !cut.is_empty() {
                     ui.ctx().copy_text(cut);
@@ -2173,8 +2161,8 @@ impl AppIde {
             None
         } else {
             editor_resp.state.cursor.char_range().and_then(|r| {
-                let lo = r.primary.index.min(r.secondary.index);
-                let hi = r.primary.index.max(r.secondary.index);
+                let lo = r.primary.index.0.min(r.secondary.index.0);
+                let hi = r.primary.index.0.max(r.secondary.index.0);
                 if ctrl_shift_slash_pressed {
                     // Only where `/* … */` is actually a comment. A TOML or
                     // .gitignore line comment is `#` and has no block form,
@@ -2371,7 +2359,7 @@ impl AppIde {
                 .state
                 .cursor
                 .char_range()
-                .map(|r| r.primary.index)
+                .map(|r| r.primary.index.0)
         }) else {
             return;
         };
@@ -2475,7 +2463,7 @@ impl AppIde {
                 .state
                 .cursor
                 .char_range()
-                .map(|r| fold_map.to_buffer(r.primary.index));
+                .map(|r| fold_map.to_buffer(r.primary.index.0));
             ui.ctx().request_repaint();
         }
     }
@@ -2503,8 +2491,8 @@ impl AppIde {
         let Some(range) = editor_resp.state.cursor.char_range() else {
             return;
         };
-        let lo = range.primary.index.min(range.secondary.index);
-        let hi = range.primary.index.max(range.secondary.index);
+        let lo = range.primary.index.0.min(range.secondary.index.0);
+        let hi = range.primary.index.0.max(range.secondary.index.0);
         if lo == hi {
             return; // no selection — nothing to highlight
         }
@@ -2576,7 +2564,7 @@ impl AppIde {
         file: ProjectFileId,
     ) -> Vec<(usize, usize)> {
         let mut carets: Vec<(usize, usize)> = primary
-            .map(|r| (r.secondary.index, r.primary.index))
+            .map(|r| (r.secondary.index.0, r.primary.index.0))
             .into_iter()
             .collect();
         if self.ed.extra_cursors_file == Some(file) {

@@ -1652,7 +1652,7 @@ mod tests {
             .iter()
             .map(|s| {
                 (
-                    job.text[s.byte_range.clone()].to_string(),
+                    job.text[s.byte_range.start.0..s.byte_range.end.0].to_string(),
                     s.format.color == SEARCH_HIT,
                 )
             })
@@ -1722,7 +1722,7 @@ mod tests {
             .sections
             .iter()
             .flat_map(|s| {
-                job.text[s.byte_range.clone()]
+                job.text[s.byte_range.start.0..s.byte_range.end.0]
                     .split_whitespace()
                     .map(move |t| (t.to_string(), s.format.color))
             })

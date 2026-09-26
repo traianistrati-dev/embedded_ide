@@ -51,6 +51,21 @@ const MAX_ROWS: usize = 200;
 /// dialog cover most of the screen for good. The results column is also placed
 /// against the dialog's left edge, which must not move with what the body holds.
 pub(super) const DIALOG_W: f32 = 480.0;
+
+/// The New Project window's OUTER width: [`DIALOG_W`] plus the window frame.
+///
+/// egui reads a `Window`'s min/max width as its outer size, frame margins
+/// included (since 0.35), while [`DIALOG_W`] is what the content gets - the
+/// Filters rows and the in-dialog results box are sized to it. The pin and the
+/// "does the column fit beside it" check both come from here, so they cannot
+/// drift apart again.
+pub(super) fn dialog_outer_w(ctx: &egui::Context) -> f32 {
+    DIALOG_W
+        + egui::Frame::window(&ctx.global_style())
+            .total_margin()
+            .sum()
+            .x
+}
 /// Between the results column and the dialog.
 const LIST_GAP: f32 = 6.0;
 /// Between the results column and the screen's left and bottom edges.
@@ -1128,7 +1143,7 @@ mod tests {
         let out = crate::headless::run_ui(ctx, raw, |ui| {
             before(ui);
             let content = ui.ctx().content_rect();
-            let dialog = crate::app::dialogs::new_project_window()
+            let dialog = crate::app::dialogs::new_project_window(ui.ctx())
                 .show(ui.ctx(), |ui| {
                     let body = egui::ScrollArea::vertical()
                         .id_salt("new_project_body")

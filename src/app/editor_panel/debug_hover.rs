@@ -40,7 +40,7 @@ impl AppIde {
         let ccursor = editor_resp
             .galley
             .cursor_from_pos(pos - editor_resp.galley_pos);
-        let expr = super::rename::identifier_at(display_code, ccursor.index);
+        let expr = super::rename::identifier_at(display_code, ccursor.index.0);
         if expr.trim().is_empty() {
             self.debugger.clear_hover();
             return;

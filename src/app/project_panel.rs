@@ -211,7 +211,7 @@ impl AppIde {
             let panel = egui::Panel::right("project_tree")
                 .resizable(true)
                 .default_size(crate::app::TREE_MIN_W)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     // ── Panel header row ──────────────────────────────────────────
                     ui.horizontal(|ui| {
                         ui.heading("Project");

@@ -667,7 +667,7 @@ impl AppIde {
     /// Definition. Clicking a group returns to its last-used tab; the chip
     /// header row (Chip label + Reset pins) shows only for the MCU group.
     pub(super) fn show_mcu_panel(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             // The Definition tab (F12 snippet) exists only while a snippet is
             // loaded — auto-leave it the moment the snippet clears.
             if self.definition_view.is_none() && self.active_tab == McuTab::Definition {
@@ -681,7 +681,6 @@ impl AppIde {
             if self.active_tab != McuTab::Reference || self.reference_file.is_none() {
                 self.reference_was_focused = false;
                 self.reference_ctrl_space = false;
-                self.reference_escape = false;
                 if self.completion_owner == crate::app::EditorSlot::Reference {
                     let ed = self.ed_of(crate::app::EditorSlot::Reference);
                     ed.completion_open = false;
@@ -1002,7 +1001,7 @@ impl AppIde {
                         // and egui's own can only cap a content-sized panel.
                         .resizable(false)
                         .show_separator_line(false)
-                        .show_inside(ui, |ui| {
+                        .show(ui, |ui| {
                             // ── The panel's top border, as a real handle ──
                             // Drag it up to make room, down to give it back to
                             // the diagram. Drawn before anything else so it sits
@@ -3748,6 +3747,7 @@ impl AppIde {
                     let idx = galley
                         .cursor_from_pos(p - resp.rect.min)
                         .index
+                        .0
                         .min(line.chars().count());
                     new_caret = Some((i, idx));
                     if ctrl_held {
@@ -3760,7 +3760,7 @@ impl AppIde {
                     && let Some(p) = resp.hover_pos()
                     && let Some((a, b)) = definition_nav::ident_near(
                         line,
-                        galley.cursor_from_pos(p - resp.rect.min).index,
+                        galley.cursor_from_pos(p - resp.rect.min).index.0,
                     )
                 {
                     ui.painter().hline(
@@ -3779,7 +3779,7 @@ impl AppIde {
                     && let Some(p) = resp.interact_pointer_pos()
                 {
                     let cur = galley.cursor_from_pos(p - resp.rect.min);
-                    let w = crate::app::word_at(shown, cur.index);
+                    let w = crate::app::word_at(shown, cur.index.0);
                     if w.is_empty() {
                         clear_word = true;
                     } else {

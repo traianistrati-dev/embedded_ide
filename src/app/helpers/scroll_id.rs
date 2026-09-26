@@ -7,14 +7,16 @@ use eframe::egui;
 /// The `Id` under which a `ScrollArea` shown on `ui` with `.id_salt(salt)`
 /// stores its `scroll_area::State`.
 ///
-/// This mirrors egui's own derivation, and must keep mirroring it: egui 0.35
-/// changed it (`IdSalt`, #8184). The old spelling still compiles and still
-/// returns an `Id` - just one nobody stores anything under, so `State::load`
-/// answers `None` and every scroll written through it is silently dropped.
-/// The test below renders a real `ScrollArea` and compares, so the next change
-/// to egui's derivation fails here instead of in the editor.
-pub fn scroll_area_id(ui: &egui::Ui, salt: impl std::hash::Hash) -> egui::Id {
-    ui.make_persistent_id(egui::Id::new(salt))
+/// This mirrors egui's own derivation (`scroll_area.rs`:
+/// `ui.make_persistent_id(IdSalt::new(id_salt))`), and must keep mirroring it:
+/// egui 0.35 changed it (`IdSalt`, #8184). The 0.34 spelling,
+/// `ui.id().with(Id::new(salt))`, still compiles and still returns an `Id` -
+/// just one nobody stores anything under, so `State::load` answers `None` and
+/// every scroll written through it is silently dropped. The test below renders
+/// a real `ScrollArea` and compares, so the next change to egui's derivation
+/// fails here instead of in the editor.
+pub fn scroll_area_id(ui: &egui::Ui, salt: impl egui::AsIdSalt) -> egui::Id {
+    ui.make_persistent_id(egui::IdSalt::new(salt))
 }
 
 #[cfg(test)]

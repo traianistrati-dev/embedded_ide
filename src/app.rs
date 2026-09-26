@@ -844,6 +844,7 @@ pub(crate) fn word_ranges(line: &str, word: &str) -> Vec<(usize, usize)> {
 /// code. The item is tokenised once, from its own first line — a statement
 /// boundary, so nothing straddles the start — and only then split up.
 fn split_job_by_lines(job: &egui::text::LayoutJob) -> Vec<egui::text::LayoutJob> {
+    use egui::text::ByteIndex;
     let mut out = Vec::new();
     let mut line_start = 0usize;
     for line in job.text.split('\n') {
@@ -856,12 +857,12 @@ fn split_job_by_lines(job: &egui::text::LayoutJob) -> Vec<egui::text::LayoutJob>
         };
         lj.wrap.max_width = f32::INFINITY;
         for s in &job.sections {
-            let a = s.byte_range.start.max(line_start);
-            let b = s.byte_range.end.min(line_end);
+            let a = s.byte_range.start.0.max(line_start);
+            let b = s.byte_range.end.0.min(line_end);
             if a < b {
                 lj.sections.push(egui::text::LayoutSection {
                     leading_space: 0.0,
-                    byte_range: (a - line_start)..(b - line_start),
+                    byte_range: ByteIndex(a - line_start)..ByteIndex(b - line_start),
                     format: s.format.clone(),
                 });
             }
@@ -875,7 +876,7 @@ fn split_job_by_lines(job: &egui::text::LayoutJob) -> Vec<egui::text::LayoutJob>
             let format = job
                 .sections
                 .iter()
-                .find(|s| s.byte_range.start <= line_start && line_start <= s.byte_range.end)
+                .find(|s| s.byte_range.start.0 <= line_start && line_start <= s.byte_range.end.0)
                 .or_else(|| job.sections.last())
                 .map(|s| s.format.clone())
                 .unwrap_or_else(|| egui::TextFormat {
@@ -884,7 +885,7 @@ fn split_job_by_lines(job: &egui::text::LayoutJob) -> Vec<egui::text::LayoutJob>
                 });
             lj.sections.push(egui::text::LayoutSection {
                 leading_space: 0.0,
-                byte_range: 0..lj.text.len(),
+                byte_range: ByteIndex(0)..ByteIndex(lj.text.len()),
                 format,
             });
         }
@@ -1802,11 +1803,6 @@ pub struct AppIde {
     /// Ctrl+Space arrived while the Reference editor owned the keyboard.
     /// Consumed by that editor when it renders, later in the same frame.
     reference_ctrl_space: bool,
-    /// Escape was pressed this frame, as the MAIN view saw it before any popup
-    /// consumed it. The main pass runs first and its LSP key block serves a
-    /// popup the Reference editor owns — consuming the Escape the Reference
-    /// pass needs in order to give its editor the focus back.
-    reference_escape: bool,
     /// Where the inline-error tooltip was last drawn: `(cumulative_frame_nr,
     /// rect)`. A click in it — its Copy button, its docs link — takes keyboard
     /// focus from the editor that had it, and each view's pass reads this to
@@ -2470,7 +2466,6 @@ impl AppIde {
             reference_was_focused: false,
             reference_drawn_frame: None,
             reference_ctrl_space: false,
-            reference_escape: false,
             diag_tooltip_at: None,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
@@ -4919,7 +4914,7 @@ impl eframe::App for AppIde {
         self.was_busy_last_frame = status.is_some();
         egui::Panel::bottom("status_bar")
             .exact_size(24.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(8.0);
                     if let Some((spinner, text, color)) = &status {
@@ -4967,7 +4962,7 @@ impl eframe::App for AppIde {
             if !problems.is_empty() {
                 let mut open_tools = false;
                 let mut dismiss = false;
-                egui::Panel::top("missing_deps_banner").show_inside(ui, |ui| {
+                egui::Panel::top("missing_deps_banner").show(ui, |ui| {
                     egui::Frame::NONE
                         .fill(egui::Color32::from_rgb(58, 40, 20))
                         .inner_margin(7.0)
@@ -5071,7 +5066,7 @@ impl eframe::App for AppIde {
         // rather than letting a typo in a shortcut look like the IDE ignoring it.
         if let Some(err) = self.cli_project_error.clone() {
             let mut dismiss = false;
-            egui::Panel::top("cli_project_error_banner").show_inside(ui, |ui| {
+            egui::Panel::top("cli_project_error_banner").show(ui, |ui| {
                 egui::Frame::NONE
                     .fill(egui::Color32::from_rgb(58, 40, 20))
                     .inner_margin(7.0)
@@ -5103,7 +5098,7 @@ impl eframe::App for AppIde {
         // is blocked (see `claim_open_project`); the risk is simply stated, and
         // the banner clears itself the moment the other window lets go.
         if let Some(name) = self.project_lock_conflict.clone() {
-            egui::Panel::top("project_open_elsewhere_banner").show_inside(ui, |ui| {
+            egui::Panel::top("project_open_elsewhere_banner").show(ui, |ui| {
                 egui::Frame::NONE
                     .fill(egui::Color32::from_rgb(58, 40, 20))
                     .inner_margin(7.0)
@@ -5143,7 +5138,7 @@ impl eframe::App for AppIde {
                 crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
             let mut detach: Option<String> = None;
             let mut dismiss = false;
-            egui::Panel::top("workspace_load_error_banner").show_inside(ui, |ui| {
+            egui::Panel::top("workspace_load_error_banner").show(ui, |ui| {
                 egui::Frame::NONE
                     .fill(egui::Color32::from_rgb(58, 26, 26))
                     .inner_margin(7.0)
@@ -5895,9 +5890,9 @@ mod flush_after_save_tests {
 }
 
 /// The close gate the way eframe really drives it for a MINIMIZED root window:
-/// `App::logic` inside an egui pass, and no `App::ui` (eframe 0.34
-/// `EpiIntegration::update` skips `ui` when `ViewportInfo::visible()` is
-/// `Some(false)`; 0.36 calls `logic` alone through `Context::run_logic`).
+/// `App::logic` alone, through `Context::run_logic` - no egui pass and no
+/// `App::ui` (eframe 0.36 `EpiIntegration::update_logic_only`). `run_logic`
+/// refreshes only the window state; events and time stay the last pass's.
 #[cfg(test)]
 mod close_while_minimized {
     use super::AppIde;
@@ -5920,12 +5915,12 @@ mod close_while_minimized {
             root.events.push(ViewportEvent::Close);
         }
         let mut frame = eframe::Frame::_new_kittest();
-        let mut out = crate::headless::run_ui(ctx, input, |ui| {
-            eframe::App::logic(app, ui.ctx(), &mut frame);
+        let out = ctx.run_logic(&input, |ctx| {
+            eframe::App::logic(app, ctx, &mut frame);
         });
-        out.viewport_output
-            .remove(&ViewportId::ROOT)
-            .map(|o| o.commands)
+        out.viewport_commands
+            .get(&ViewportId::ROOT)
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -6361,7 +6356,7 @@ mod definition_view_tests {
             assert_eq!(row.text, want);
             // Every section has to index into its OWN line, or the label panics.
             for s in &row.sections {
-                assert!(s.byte_range.end <= row.text.len(), "{:?}", s.byte_range);
+                assert!(s.byte_range.end.0 <= row.text.len(), "{:?}", s.byte_range);
             }
         }
         // The colouring survived the split — `fn` is a keyword, not plain text.
@@ -6394,7 +6389,11 @@ mod definition_view_tests {
             crate::editor::gui::code_editor::Marks::default(),
         );
         for (i, row) in split_job_by_lines(&job).iter().enumerate() {
-            let covered: usize = row.sections.iter().map(|s| s.byte_range.len()).sum();
+            let covered: usize = row
+                .sections
+                .iter()
+                .map(|s| s.byte_range.end.0 - s.byte_range.start.0)
+                .sum();
             assert!(
                 covered >= row.text.len(),
                 "row {i} {:?} is not fully covered",

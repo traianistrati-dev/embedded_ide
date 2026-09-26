@@ -125,7 +125,7 @@ pub fn draw_graph_clock(
         .resizable(true)
         .default_size(190.0)
         .min_size(100.0)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             // Info alone now. The "Frequencies" half listed the OUTPUTS, which
             // the Fields list ends with instead — one place for every value,
             // rather than the results being somewhere the inputs are not.
@@ -468,7 +468,7 @@ pub fn draw_graph_clock(
         egui::Panel::right("clock_edit_props")
             .resizable(true)
             .default_size(260.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 edited = properties_panel(ui, gc, &mut view, positions, family, note);
             });
         if edited {
@@ -481,7 +481,7 @@ pub fn draw_graph_clock(
         egui::Panel::left("clock_fields")
             .resizable(true)
             .default_size(300.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 if fields_panel(ui, gc, limits, &freqs, field_search) {
                     changed = true;
                 }

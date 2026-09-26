@@ -217,7 +217,7 @@ impl AppIde {
             .galley
             .cursor_from_pos(pos - editor_resp.galley_pos);
         let chars: Vec<char> = display_code.chars().collect();
-        let Some((start, end)) = ident_run_at(&chars, ccursor.index.min(chars.len())) else {
+        let Some((start, end)) = ident_run_at(&chars, ccursor.index.0.min(chars.len())) else {
             return; // not on an identifier — keep egui's selection
         };
         let mut st = editor_resp.state.clone();
@@ -247,7 +247,7 @@ impl AppIde {
             return; // editor not focused / no caret yet
         };
         let chars: Vec<char> = display_code.chars().collect();
-        let cur = range.primary.index.min(chars.len());
+        let cur = range.primary.index.0.min(chars.len());
         let target = if right {
             next_word_boundary(&chars, cur)
         } else {

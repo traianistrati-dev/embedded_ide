@@ -418,7 +418,7 @@ impl AppIde {
             .state
             .cursor
             .char_range()
-            .map(|r| r.primary.index)
+            .map(|r| r.primary.index.0)
             .unwrap_or(0)
             .min(text_before.chars().count());
 
@@ -471,7 +471,7 @@ impl AppIde {
             .state
             .cursor
             .char_range()
-            .map(|r| (r.secondary.index, r.primary.index));
+            .map(|r| (r.secondary.index.0, r.primary.index.0));
         shift
     }
 

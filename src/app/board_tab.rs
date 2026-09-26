@@ -1444,7 +1444,7 @@ impl AppIde {
         let mut remove: Option<usize> = None;
         egui::Panel::bottom("board_links")
             .exact_size(height)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(format!("Links ({n})")).strong());

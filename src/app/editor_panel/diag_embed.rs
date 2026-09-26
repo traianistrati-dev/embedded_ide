@@ -225,7 +225,7 @@ impl AppIde {
         let mut drag_opened = false;
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(panel_h)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 // ── Drag handle (top edge of panel) ───────
                 // Drawn in BOTH states. Collapsed it is the panel's top border
                 // (without it the tab bar bleeds into the editor and the tabs

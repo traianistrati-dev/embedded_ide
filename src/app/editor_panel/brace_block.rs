@@ -403,7 +403,7 @@ impl AppIde {
             return;
         };
         let chars: Vec<char> = display_code.chars().collect();
-        let caret = range.primary.index.min(chars.len());
+        let caret = range.primary.index.0.min(chars.len());
         let Some((open, close)) = block_at_caret(&chars, caret) else {
             return;
         };
@@ -450,8 +450,8 @@ impl AppIde {
         // index past the end and panic in `is_word_selection`'s `chars[lo..hi]`.
         let (lo, hi) = match editor_resp.state.cursor.char_range() {
             Some(r) => (
-                r.primary.index.min(r.secondary.index).min(chars.len()),
-                r.primary.index.max(r.secondary.index).min(chars.len()),
+                r.primary.index.0.min(r.secondary.index.0).min(chars.len()),
+                r.primary.index.0.max(r.secondary.index.0).min(chars.len()),
             ),
             None => (0, 0),
         };

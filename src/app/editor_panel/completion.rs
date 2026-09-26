@@ -99,7 +99,7 @@ impl AppIde {
             .state
             .cursor
             .char_range()
-            .map(|r| r.primary.index);
+            .map(|r| r.primary.index.0);
 
         // Apply accepted completion: replace [word_start..cursor] with the
         // item's text. Snippet items (functions/methods with `snippetSupport`)
@@ -340,7 +340,7 @@ impl AppIde {
                         .cursor
                         .char_range()
                         .map(|cr| {
-                            let clamped = cr.primary.index.min(
+                            let clamped = cr.primary.index.0.min(
                                 editor_resp
                                     .galley
                                     .job
@@ -545,7 +545,7 @@ impl AppIde {
                     // ── Popup screen position ────────────────────────────
                     let popup_pos = if let Some(char_range) = editor_resp.state.cursor.char_range()
                     {
-                        let cursor_idx = char_range.primary.index;
+                        let cursor_idx = char_range.primary.index.0;
                         let text_char_count = editor_resp.galley.job.text.chars().count();
                         let clamped = cursor_idx.min(text_char_count.saturating_sub(1));
                         let cursor_local = editor_resp
@@ -719,7 +719,7 @@ impl AppIde {
                     // Still waiting — show a small spinner popup.
                     let popup_pos = cursor_char_idx.and_then(|_| {
                         editor_resp.state.cursor.char_range().map(|cr| {
-                            let clamped = cr.primary.index.min(
+                            let clamped = cr.primary.index.0.min(
                                 editor_resp
                                     .galley
                                     .job
@@ -779,7 +779,7 @@ impl AppIde {
                     .cursor
                     .char_range()
                     .map(|cr| {
-                        let clamped = cr.primary.index.min(
+                        let clamped = cr.primary.index.0.min(
                             editor_resp
                                 .galley
                                 .job

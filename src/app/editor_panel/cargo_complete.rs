@@ -162,7 +162,7 @@ impl AppIde {
             .state
             .cursor
             .char_range()
-            .map(|r| r.primary.index);
+            .map(|r| r.primary.index.0);
 
         // ── 0. Different manifest than the popup was opened for? ──────────────
         // Offsets and the item list belong to the file they were computed in;
@@ -517,7 +517,7 @@ impl AppIde {
         note: Option<PopupNote>,
     ) {
         let popup_pos = if let Some(char_range) = editor_resp.state.cursor.char_range() {
-            let idx = char_range.primary.index;
+            let idx = char_range.primary.index.0;
             let count = editor_resp.galley.job.text.chars().count();
             let clamped = idx.min(count.saturating_sub(1));
             let local = editor_resp

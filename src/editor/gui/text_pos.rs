@@ -430,8 +430,8 @@ impl<'g> GalleyRows<'g> {
                 .rows
                 .iter()
                 .map(|row| {
-                    let end = start + row.char_count_excluding_newline();
-                    start += row.char_count_including_newline();
+                    let end = start + row.char_count_excluding_newline().0;
+                    start += row.char_count_including_newline().0;
                     end
                 })
                 .collect()
@@ -446,10 +446,10 @@ impl<'g> GalleyRows<'g> {
         let ends = self.ends();
         let row = ends.partition_point(|&end| end < idx);
         if let Some(placed) = self.galley.rows.get(row) {
-            let start = ends[row] - placed.char_count_excluding_newline();
+            let start = ends[row] - placed.char_count_excluding_newline().0;
             return LayoutCursor {
                 row,
-                column: idx - start,
+                column: egui::text::CharIndex(idx - start),
             };
         }
         match self.galley.rows.last() {

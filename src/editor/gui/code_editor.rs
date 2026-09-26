@@ -21,6 +21,21 @@ use egui_code_editor::{ColorTheme, Completer, Syntax, TokenType};
 /// Rust lifetimes (`'a`, `'static`) — blue, per request (RGB 0,100,255).
 const LIFETIME_COLOR: egui::Color32 = egui::Color32::from_rgb(0, 100, 255);
 
+/// The keys the editor keeps while it has focus: Tab indents, the arrows move
+/// the caret, and Escape stays in the editor.
+///
+/// egui's default hands Escape to its focus system, which drops the focused
+/// widget before any code runs, and from egui 0.36 on an unfocused `TextEdit`
+/// collapses its selection. So an Escape meant for a popup (completion, code
+/// actions) also threw the selection away. In the code editor Escape means
+/// "dismiss the popup" or "drop the extra carets", never "leave the editor".
+pub(crate) const EDITOR_KEYS: egui::EventFilter = egui::EventFilter {
+    tab: true,
+    horizontal_arrows: true,
+    vertical_arrows: true,
+    escape: true,
+};
+
 /// Character cells reserved to the RIGHT of the line numbers for the fold
 /// carets. The number column is the only place with room: the diff bars and the
 /// breakpoint dot already fill everything between it and the code.
@@ -870,7 +885,7 @@ fn show_rust_editor(
                             let mut view: &str = &frozen;
                             egui::TextEdit::multiline(&mut view)
                                 .id_source(id)
-                                .lock_focus(true)
+                                .event_filter(EDITOR_KEYS)
                                 .desired_rows(rows)
                                 .desired_width(f32::INFINITY)
                                 .layouter(&mut layouter)
@@ -878,12 +893,19 @@ fn show_rust_editor(
                         } else {
                             egui::TextEdit::multiline(text)
                                 .id_source(id)
-                                .lock_focus(true)
+                                .event_filter(EDITOR_KEYS)
                                 .desired_rows(rows)
                                 .desired_width(f32::INFINITY)
                                 .layouter(&mut layouter)
                                 .show(ui)
                         };
+                        // The TextEdit's own `request_focus` (each pass of a
+                        // drag-select, a fresh click) resets egui's focus
+                        // filter to the default, which hands Escape back to
+                        // egui: put the editor's keys back before the next
+                        // pass reads them. It only applies to a widget that
+                        // already had focus, so it takes it from nothing.
+                        ui.memory_mut(|m| m.set_focus_lock_filter(output.response.id, EDITOR_KEYS));
                         out = Some(output);
                     });
             });
@@ -1084,7 +1106,7 @@ mod tests {
         job.sections
             .iter()
             .map(|s| {
-                let txt = job.text[s.byte_range.clone()].to_string();
+                let txt = job.text[s.byte_range.start.0..s.byte_range.end.0].to_string();
                 (txt, s.format.color == LIFETIME_COLOR)
             })
             .collect()
@@ -1126,9 +1148,9 @@ mod tests {
         let mut saw_dead_fn = false;
         let mut saw_live_fn = false;
         for s in &job.sections {
-            let txt = &job.text[s.byte_range.clone()];
+            let txt = &job.text[s.byte_range.start.0..s.byte_range.end.0];
             if txt == "fn" {
-                if s.byte_range.start < 12 {
+                if s.byte_range.start.0 < 12 {
                     assert_ne!(s.format.color, normal_kw, "dead `fn` must be faded");
                     saw_dead_fn = true;
                 } else {
@@ -1656,7 +1678,7 @@ mod tests {
                     text.len(),
                 );
                 for s in &got.sections {
-                    let slice = &got.text[s.byte_range.clone()];
+                    let slice = &got.text[s.byte_range.start.0..s.byte_range.end.0];
                     faded += usize::from(s.format.color == faded_literal);
                     underlined += usize::from(s.format.underline.width > 0.0);
                     lifetimes += usize::from(s.format.color == LIFETIME_COLOR);

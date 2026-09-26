@@ -912,6 +912,9 @@ impl AppIde {
         egui::Window::new("Rename Project")
             .collapsible(false)
             .resizable(false)
+            // Sized to its content, as it was on egui 0.34: since 0.36 a
+            // window without a width takes the 340 px default.
+            .auto_sized()
             .anchor(egui::Align2::CENTER_CENTER, [0.0, -60.0])
             .show(ui.ctx(), |ui| {
                 ui.add_space(4.0);
@@ -990,11 +993,7 @@ impl AppIde {
         // inside it otherwise. Decided up front from the width the dialog is
         // pinned to, because the body's height depends on the answer.
         let content = ui.ctx().content_rect();
-        let dialog_outer_w = chip_search_ui::DIALOG_W
-            + egui::Frame::window(&ui.ctx().global_style())
-                .total_margin()
-                .sum()
-                .x;
+        let dialog_outer_w = chip_search_ui::dialog_outer_w(ui.ctx());
         let beside = chip_search_ui::side_list_fits(content.width(), dialog_outer_w);
         // Inside the dialog the list shares the 70% the body had: a short box
         // while nothing is asked, most of it once there are matches to show.
@@ -1012,7 +1011,7 @@ impl AppIde {
             .bottom()
             .min(content.bottom());
 
-        let dialog_rect = new_project_window()
+        let dialog_rect = new_project_window(ui.ctx())
             .show(ui.ctx(), |ui| {
                 // The dialog outgrew the screen. It is anchored and NOT
                 // resizable, so a window taller than the viewport simply has an
@@ -1497,13 +1496,15 @@ impl AppIde {
 /// Pinned to [`chip_search_ui::DIALOG_W`]. The pin alone does not make the
 /// window that wide - a non-resizable window takes its CONTENT's width - so
 /// the separator above the action row, which fills the width, is part of it.
-pub(super) fn new_project_window() -> egui::Window<'static> {
+/// The pin is the OUTER width (see [`chip_search_ui::dialog_outer_w`]).
+pub(super) fn new_project_window(ctx: &egui::Context) -> egui::Window<'static> {
+    let outer = chip_search_ui::dialog_outer_w(ctx);
     egui::Window::new("New Project")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::RIGHT_TOP, [20.0, 10.0])
-        .min_width(chip_search_ui::DIALOG_W)
-        .max_width(chip_search_ui::DIALOG_W)
+        .min_width(outer)
+        .max_width(outer)
 }
 
 /// What the crates.io index says about one chip's `embassy-stm32` feature.
