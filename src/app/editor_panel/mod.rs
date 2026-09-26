@@ -39,6 +39,8 @@ mod crate_search;
 mod debug_hover;
 mod delete_line;
 mod diag_embed;
+#[cfg(test)]
+mod diag_panel_drag_tests;
 pub(crate) mod diff_gutter;
 mod doc_md;
 mod duplicate_line;

@@ -4914,23 +4914,21 @@ impl eframe::App for AppIde {
         }
         // Feed the UI-stall detector at the top of the next frame.
         self.was_busy_last_frame = status.is_some();
-        egui::Panel::bottom("status_bar")
-            .exact_size(24.0)
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(8.0);
-                    if let Some((spinner, text, color)) = &status {
-                        if *spinner {
-                            // Throttled (~10 FPS): egui's Spinner forces a
-                            // repaint EVERY frame for its whole lifetime —
-                            // i.e. the entire Saving/Checking/Flashing span.
-                            helpers::spinner::throttled_spinner(ui, 13.0);
-                            ui.add_space(5.0);
-                        }
-                        ui.label(egui::RichText::new(text).size(11.0).color(*color));
+        crate::app::helpers::panel::show_exact(egui::Panel::bottom("status_bar"), 24.0, ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.add_space(8.0);
+                if let Some((spinner, text, color)) = &status {
+                    if *spinner {
+                        // Throttled (~10 FPS): egui's Spinner forces a
+                        // repaint EVERY frame for its whole lifetime —
+                        // i.e. the entire Saving/Checking/Flashing span.
+                        helpers::spinner::throttled_spinner(ui, 13.0);
+                        ui.add_space(5.0);
                     }
-                });
+                    ui.label(egui::RichText::new(text).size(11.0).color(*color));
+                }
             });
+        });
 
         // ── Missing-dependency banner (startup self-check) ────────────────────
         // The IDE shells out to rustup / rustc / probe-rs / the MSVC linker …;

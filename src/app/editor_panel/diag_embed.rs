@@ -223,9 +223,16 @@ impl AppIde {
         // Set when the HANDLE opened the panel, so the button's "reopen at 30 %"
         // below doesn't hijack a drag that is already sizing it by hand.
         let mut drag_opened = false;
-        let panel = egui::Panel::bottom("diag_panel")
-            .exact_size(panel_h)
-            .show(ui, |ui| {
+        // Through `show_exact`: dragging the collapsed bar open flips
+        // `diag_collapsed` inside this closure, so that frame lays the tab
+        // content out in the bar's height - and a tab can want more than the
+        // smallest panel anyway. egui would move the panel's top down by the
+        // excess, and the editor laid out above it painted over the tab row.
+        let panel = crate::app::helpers::panel::show_exact(
+            egui::Panel::bottom("diag_panel"),
+            panel_h,
+            ui,
+            |ui| {
                 // ── Drag handle (top edge of panel) ───────
                 // Drawn in BOTH states. Collapsed it is the panel's top border
                 // (without it the tab bar bleeds into the editor and the tabs
@@ -395,7 +402,8 @@ impl AppIde {
                     &missing_tools,
                     fpga_block.as_deref(),
                 );
-            });
+            },
+        );
         // Clicking a tab on the collapsed bar reopens the panel at 20% of the
         // editor region, so the tab's content is actually visible. Takes effect
         // next frame — this frame was already laid out collapsed.

@@ -1442,9 +1442,11 @@ impl AppIde {
         let height = (46.0 + n.max(1) as f32 * 24.0 + extra as f32 * 18.0).min(260.0);
         let mut pick: Option<Option<usize>> = None;
         let mut remove: Option<usize> = None;
-        egui::Panel::bottom("board_links")
-            .exact_size(height)
-            .show(ui, |ui| {
+        crate::app::helpers::panel::show_exact(
+            egui::Panel::bottom("board_links"),
+            height,
+            ui,
+            |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(format!("Links ({n})")).strong());
@@ -1575,7 +1577,8 @@ impl AppIde {
                             );
                         }
                     });
-            });
+            },
+        );
         if let Some(p) = pick {
             self.board.selected_link = p.and_then(|k| self.board.config.links.get(k).cloned());
         }

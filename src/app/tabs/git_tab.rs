@@ -556,153 +556,149 @@ pub fn show_git_tab(
     // ── Actions — a BOTTOM panel, declared before the body so it claims its
     //    space first (fixed at the bottom, below the file list; never clipped
     //    by a short panel). ────────────────────────────────────────────────
-    egui::Panel::bottom("git_actions")
-        .exact_size(58.0)
-        .show(ui, |ui| {
-            ui.add_space(5.0);
-            // ui.separator();
-            let idle = busy.is_none() && is_repo && !git_missing;
-            let remoted = idle && remote_url.is_some();
-            let has_msg = !git.commit_msg.trim().is_empty();
-            let can_commit = idle && has_msg && any_checked;
-            ui.horizontal(|ui| {
-                // Conventional-commit prefix dropdown — picking a type
-                // prepends it to the message (best-practice guidance in the
-                // per-item tooltips, shown after a 1 s hover).
-                ui.scope(|ui| {
-                    ui.style_mut().interaction.tooltip_delay = 1.0;
-                    egui::ComboBox::from_id_salt("commit_prefix")
-                        .selected_text(format!("type {}", ph::CARET_DOWN))
-                        .width(76.0)
-                        .show_ui(ui, |ui| {
-                            for (prefix, desc) in crate::git::COMMIT_TYPES {
-                                if ui
-                                    .selectable_label(false, *prefix)
-                                    .on_hover_text(*desc)
-                                    .clicked()
-                                {
-                                    git.commit_msg =
-                                        crate::git::apply_commit_prefix(&git.commit_msg, prefix);
-                                }
+    crate::app::helpers::panel::show_exact(egui::Panel::bottom("git_actions"), 58.0, ui, |ui| {
+        ui.add_space(5.0);
+        // ui.separator();
+        let idle = busy.is_none() && is_repo && !git_missing;
+        let remoted = idle && remote_url.is_some();
+        let has_msg = !git.commit_msg.trim().is_empty();
+        let can_commit = idle && has_msg && any_checked;
+        ui.horizontal(|ui| {
+            // Conventional-commit prefix dropdown — picking a type
+            // prepends it to the message (best-practice guidance in the
+            // per-item tooltips, shown after a 1 s hover).
+            ui.scope(|ui| {
+                ui.style_mut().interaction.tooltip_delay = 1.0;
+                egui::ComboBox::from_id_salt("commit_prefix")
+                    .selected_text(format!("type {}", ph::CARET_DOWN))
+                    .width(76.0)
+                    .show_ui(ui, |ui| {
+                        for (prefix, desc) in crate::git::COMMIT_TYPES {
+                            if ui
+                                .selectable_label(false, *prefix)
+                                .on_hover_text(*desc)
+                                .clicked()
+                            {
+                                git.commit_msg =
+                                    crate::git::apply_commit_prefix(&git.commit_msg, prefix);
                             }
-                        })
-                        .response
-                        .on_hover_text("Conventional-commit type — prepended to the message.");
-                });
-                ui.add_enabled(
-                    idle,
-                    egui::TextEdit::singleline(&mut git.commit_msg)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("commit message..."),
-                );
+                        }
+                    })
+                    .response
+                    .on_hover_text("Conventional-commit type — prepended to the message.");
             });
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        can_commit,
-                        egui::Button::new(format!("{} Commit", ph::CHECK)),
-                    )
-                    .on_disabled_hover_text("write a message and check at least one changed file")
-                    .clicked()
-                {
-                    *op_out = Some(GitOp::Commit);
-                }
-                // Only meaningful for a library: the project repo tracks the
-                // same files, so committing here otherwise leaves the identical
-                // change uncommitted over there.
-                if let crate::git::RepoTarget::Library(lib) = git.target.clone() {
-                    let preview = crate::git::mirror_message(
-                        if git.commit_msg.trim().is_empty() {
-                            "feat: …"
-                        } else {
-                            git.commit_msg.trim()
-                        },
-                        &lib,
-                    );
-                    ui.checkbox(
-                        &mut git.mirror_to_project,
-                        egui::RichText::new("+ project").size(11.0),
-                    )
-                    .on_hover_text(format!(
-                        "Also commit this change to the PROJECT repository, which tracks \
+            ui.add_enabled(
+                idle,
+                egui::TextEdit::singleline(&mut git.commit_msg)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("commit message..."),
+            );
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    can_commit,
+                    egui::Button::new(format!("{} Commit", ph::CHECK)),
+                )
+                .on_disabled_hover_text("write a message and check at least one changed file")
+                .clicked()
+            {
+                *op_out = Some(GitOp::Commit);
+            }
+            // Only meaningful for a library: the project repo tracks the
+            // same files, so committing here otherwise leaves the identical
+            // change uncommitted over there.
+            if let crate::git::RepoTarget::Library(lib) = git.target.clone() {
+                let preview = crate::git::mirror_message(
+                    if git.commit_msg.trim().is_empty() {
+                        "feat: …"
+                    } else {
+                        git.commit_msg.trim()
+                    },
+                    &lib,
+                );
+                ui.checkbox(
+                    &mut git.mirror_to_project,
+                    egui::RichText::new("+ project").size(11.0),
+                )
+                .on_hover_text(format!(
+                    "Also commit this change to the PROJECT repository, which tracks \
                          {lib}/ too.\n\nIts message names the library:\n    {preview}\n\n\
                          Only {lib}/ is committed there — anything else you have staged is \
                          left alone."
-                    ));
-                }
-                if ui
-                    .add_enabled(
-                        can_commit && remoted,
-                        egui::Button::new(format!("{} Commit & Push", ph::ARROW_SQUARE_UP)),
-                    )
-                    .on_disabled_hover_text(
-                        "needs a message, checked files, and a configured remote",
-                    )
-                    .clicked()
-                {
-                    *op_out = Some(GitOp::CommitPush);
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        remoted && status.has_commits,
-                        egui::Button::new(format!("{} Push", ph::ARROW_UP)),
-                    )
-                    .on_disabled_hover_text(
-                        "needs a configured remote and at least one local commit (Commit first)",
-                    )
-                    .clicked()
-                {
-                    *op_out = Some(GitOp::Push);
-                }
-                if ui
-                    .add_enabled(
-                        remoted,
-                        egui::Button::new(format!("{} Pull", ph::ARROW_DOWN)),
-                    )
-                    .clicked()
-                {
-                    *op_out = Some(GitOp::Pull);
-                }
-                if ui
-                    .add_enabled(
-                        remoted,
-                        egui::Button::new(format!("{} Fetch", ph::ARROWS_DOWN_UP)),
-                    )
-                    .clicked()
-                {
-                    *op_out = Some(GitOp::Fetch);
-                }
-                if ui
-                    .add_enabled(
-                        idle && status.has_commits,
-                        egui::Button::new(format!("{} Log", ph::LIST_DASHES)),
-                    )
-                    .clicked()
-                {
-                    *op_out = Some(GitOp::Log);
-                }
-                // Discard ALL changes (Phase C) — destructive; needs a commit to
-                // reset to and at least one change. The caller confirms first.
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        idle && status.has_commits && !status.changes.is_empty(),
-                        egui::Button::new(
-                            egui::RichText::new(format!("{} Discard all", ph::TRASH))
-                                .color(egui::Color32::from_rgb(220, 120, 100)),
-                        ),
-                    )
-                    .on_hover_text(
-                        "Reset every tracked file to HEAD and delete untracked files (asks first)",
-                    )
-                    .on_disabled_hover_text("needs a commit to reset to and at least one change")
-                    .clicked()
-                {
-                    *discard_all_out = true;
-                }
-            });
+                ));
+            }
+            if ui
+                .add_enabled(
+                    can_commit && remoted,
+                    egui::Button::new(format!("{} Commit & Push", ph::ARROW_SQUARE_UP)),
+                )
+                .on_disabled_hover_text("needs a message, checked files, and a configured remote")
+                .clicked()
+            {
+                *op_out = Some(GitOp::CommitPush);
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    remoted && status.has_commits,
+                    egui::Button::new(format!("{} Push", ph::ARROW_UP)),
+                )
+                .on_disabled_hover_text(
+                    "needs a configured remote and at least one local commit (Commit first)",
+                )
+                .clicked()
+            {
+                *op_out = Some(GitOp::Push);
+            }
+            if ui
+                .add_enabled(
+                    remoted,
+                    egui::Button::new(format!("{} Pull", ph::ARROW_DOWN)),
+                )
+                .clicked()
+            {
+                *op_out = Some(GitOp::Pull);
+            }
+            if ui
+                .add_enabled(
+                    remoted,
+                    egui::Button::new(format!("{} Fetch", ph::ARROWS_DOWN_UP)),
+                )
+                .clicked()
+            {
+                *op_out = Some(GitOp::Fetch);
+            }
+            if ui
+                .add_enabled(
+                    idle && status.has_commits,
+                    egui::Button::new(format!("{} Log", ph::LIST_DASHES)),
+                )
+                .clicked()
+            {
+                *op_out = Some(GitOp::Log);
+            }
+            // Discard ALL changes (Phase C) — destructive; needs a commit to
+            // reset to and at least one change. The caller confirms first.
+            ui.separator();
+            if ui
+                .add_enabled(
+                    idle && status.has_commits && !status.changes.is_empty(),
+                    egui::Button::new(
+                        egui::RichText::new(format!("{} Discard all", ph::TRASH))
+                            .color(egui::Color32::from_rgb(220, 120, 100)),
+                    ),
+                )
+                .on_hover_text(
+                    "Reset every tracked file to HEAD and delete untracked files (asks first)",
+                )
+                .on_disabled_hover_text("needs a commit to reset to and at least one change")
+                .clicked()
+            {
+                *discard_all_out = true;
+            }
         });
+    });
 
     // ── History body: commits (left) + files + diff (right) ──────────────────
     if git.view == GitView::History {
