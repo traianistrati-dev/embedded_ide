@@ -372,11 +372,34 @@ pub fn no_window_raw(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
 }
+
+/// [`no_window`] for a BACKGROUND helper the user is not waiting on - today
+/// rust-analyzer: the process also runs at below-normal priority (Windows).
+///
+/// Whatever it starts inherits that class - Windows gives a child its
+/// parent's class when the parent is below normal or idle and the child asks
+/// for none - so rust-analyzer's cargo, rustc and proc-macro server run below
+/// normal too, and none of it competes with the IDE's own window. It still
+/// gets every cycle the rest of the machine leaves idle. No-op elsewhere.
+pub fn no_window_below_normal(cmd: &mut Command) -> &mut Command {
+    no_window(cmd);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        // `creation_flags` REPLACES the value, so the no-window flag goes in again.
+        cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+    }
+    cmd
+}
+
+/// Keeps a spawned console program from flashing a window (see [`no_window`]).
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // ── Diagnostic ────────────────────────────────────────────────────────────────
 
@@ -1483,5 +1506,36 @@ mod xtensa_path_tests {
 {err}"
         );
         println!("linked, with the toolchain injected rather than exported");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod below_normal_priority_tests {
+    use super::no_window_below_normal;
+    use std::process::Command;
+
+    /// The whole point is the GRANDCHILD: rust-analyzer itself does little
+    /// work, its cargo and rustc do. `cmd` stands in for rust-analyzer and the
+    /// PowerShell it starts for the cargo: that PowerShell reports its own
+    /// class, which it can only have inherited.
+    #[test]
+    fn the_class_reaches_what_the_child_starts() {
+        let out = no_window_below_normal(&mut Command::new("cmd"))
+            .args([
+                "/C",
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-Process -Id $PID).PriorityClass",
+            ])
+            .output()
+            .expect("cmd runs");
+        let class = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            class.trim(),
+            "BelowNormal",
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }

@@ -1823,17 +1823,17 @@ pub struct AppIde {
     /// save arriving mid-flush keeps `lsp_flush_requested` set and `init_frame`
     /// re-fires it once the worker clears this and wakes the UI.
     lsp_flush_in_flight: Arc<std::sync::atomic::AtomicBool>,
-    /// One-shot guard for the post-load RA restart. On startup / project open, RA
-    /// analyzes too early — the freshly-reset `Cargo.lock` is still re-resolving
-    /// and late-written config files aren't indexed yet — so its first
-    /// diagnostics can be stale false errors. Once RA is `Ready` and the workspace
-    /// has been stable for `LSP_SETTLE`, we restart it ONCE so the status reflects
-    /// the fully-resolved workspace. Reset to `false` on every project load.
+    /// One-shot guard for the post-load re-verify. On startup / project open a
+    /// document can be analysed before the workspace is complete, and RA only
+    /// re-checks on Save, so a false error would stick. Once the workspace is
+    /// LOADED and has been stable for `LSP_SETTLE`, errors get one forced
+    /// re-verify. Reset to `false` on every project load.
     lsp_settle_recheck_done: bool,
-    /// Stage of that one-shot: `false` = the cheap forced re-verify hasn't run
-    /// yet, `true` = it did and diagnostics survived it, so the next settle
-    /// escalates to a full restart. Reset with `lsp_settle_recheck_done`.
-    lsp_settle_reverified: bool,
+    /// Whether the one automatic restart after rust-analyzer died WHILE LOADING
+    /// has been spent. Given back once a session loads its workspace, and on
+    /// every project load - so a crash that repeats on every start ends in a
+    /// "failed" the user sees, not in a restart loop.
+    lsp_auto_restarted: bool,
     /// When the RA workspace content last changed (codegen regen / project load) —
     /// the debounce baseline for the settle restart above.
     last_workspace_change: Option<std::time::Instant>,
@@ -2472,7 +2472,7 @@ impl AppIde {
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
             lsp_settle_recheck_done: true,
-            lsp_settle_reverified: false,
+            lsp_auto_restarted: false,
             last_workspace_change: None,
             lsp_indexing_since: None,
             linked_check_at: None,
@@ -2863,6 +2863,16 @@ impl AppIde {
                     ));
                 }
                 let fired = self.pending_goto.as_ref().is_some_and(|p| p.restart_fired);
+                // A `Stopped` server with a build config is started by the
+                // lifecycle's Stopped arm next frame - e.g. right after its
+                // automatic restart of a session that died while loading. That
+                // is no "dead again": keep waiting, `GOTO_WAIT` still bounds it.
+                if fired
+                    && matches!(status, crate::lsp::LspStatus::Stopped)
+                    && self.selected_build_cfg().is_some()
+                {
+                    return;
+                }
                 if fired {
                     // Already restarted once and it is dead again — do not spin.
                     self.pending_goto = None;
@@ -2879,7 +2889,13 @@ impl AppIde {
                 if let Some(p) = &mut self.pending_goto {
                     p.restart_fired = true;
                 }
-                self.restart_lsp();
+                // A `Stopped` server is started by the lifecycle's Stopped arm
+                // next frame. Resetting it here too would only wipe its log -
+                // e.g. the line the automatic restart after a crash mid-load
+                // just wrote there.
+                if matches!(status, crate::lsp::LspStatus::Failed(_)) {
+                    self.restart_lsp();
+                }
                 self.egui_ctx.request_repaint();
             }
             // Ready, but neither signal says it is safe to open the document
@@ -3954,8 +3970,15 @@ impl AppIde {
                 // workspace finished loading (indexing `$/progress` end), so the
                 // document is opened in the arm below instead.
                 self.open_main_rs_when_indexed();
+                self.release_held_did_save();
             }
             LspStatus::Ready => {
+                let loaded = self.release_held_did_save();
+                if loaded {
+                    // A session that got its workspace loaded earns the next
+                    // crash its one automatic restart back.
+                    self.lsp_auto_restarted = false;
+                }
                 // A detached library that joined or left what RA should load.
                 self.recheck_linked_projects();
                 // Same gate as during Indexing: `Ready` alone is not proof the
@@ -3989,45 +4012,58 @@ impl AppIde {
                     self.spawn_lsp_flush();
                 }
 
-                // Post-load clean-up of a possibly-stale first analysis (the
-                // freshly-reset Cargo.lock is still re-resolving; late config
-                // files weren't indexed). It sticks because RA only re-checks on
-                // Save, so once RA is Ready, the workspace has been stable for
-                // `LSP_SETTLE` and there ARE diagnostics, force a re-analysis.
+                // Post-load clean-up of a possibly-stale first analysis: a
+                // document analysed before the workspace was complete can keep
+                // a false error, because RA only re-checks on Save. So once the
+                // workspace is LOADED and stable for `LSP_SETTLE`, errors get
+                // one forced re-verify of the open documents (a version-bumped
+                // no-op `didChange` plus a save - what "type a line and save"
+                // does by hand).
                 //
-                // Two stages, cheapest first: a forced re-verify of the open
-                // documents (a version-bumped no-op `didChange` — what your own
-                // "type a line and save" does by hand) and, only if diagnostics
-                // survive that, the full restart. Restarting first was the old
-                // behaviour and could RE-CREATE the very errors it was meant to
-                // clear: the relaunched RA went through the same too-early open.
+                // That is all. There used to be a second stage, a full restart
+                // when diagnostics survived the re-verify, but that verdict was
+                // reached on the first `Ready` - the end of "Fetching", before
+                // anything was published - so it never fired. Judged on a
+                // loaded workspace it would fire after every open with a single
+                // warning, and a restart is a whole second load for an error
+                // that, having survived a re-verify of the loaded workspace, is
+                // real. Warnings and hints are never stale-looking errors.
                 const LSP_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
                 if !self.lsp_settle_recheck_done && self.has_project() {
                     let settled = self
                         .last_workspace_change
                         .is_some_and(|t| t.elapsed() > LSP_SETTLE);
-                    // Wait for any in-flight check too: RA's first `cargo check`
-                    // re-resolves the reset Cargo.lock — acting before it
-                    // finishes would just make RA re-resolve again.
-                    let (has_diags, checking) = {
+                    // Wait for any in-flight check too, and read `loaded` again
+                    // under the same lock: `recheck_linked_projects` above may
+                    // have restarted the server this very frame.
+                    let (has_errors, checking, loaded) = {
                         let lsp = self.lsp_state.lock().unwrap();
-                        (!lsp.diagnostics.is_empty(), lsp.checking)
+                        (lsp.total_errors() > 0, lsp.checking, lsp.workspace_loaded())
                     };
-                    if settled && !checking {
-                        // A clean load needs nothing.
-                        if !has_diags {
-                            self.lsp_settle_recheck_done = true;
-                        } else if !self.lsp_settle_reverified {
-                            self.lsp_settle_reverified = true;
+                    if settled && !checking && loaded {
+                        self.lsp_settle_recheck_done = true;
+                        if has_errors {
                             self.reverify_open_documents();
-                            // Give RA a fresh settle window to re-publish before
-                            // the stage above is judged.
-                            self.last_workspace_change = Some(std::time::Instant::now());
-                        } else {
-                            self.lsp_settle_recheck_done = true;
-                            self.restart_lsp();
                         }
                     }
+                }
+            }
+            // Died while it was still loading its workspace: start it again,
+            // once, by itself. A server that never got as far as answering
+            // anything used to sit as "failed to start" until the user clicked
+            // Restart - the same crash each time, and a click each time.
+            LspStatus::Failed(why) => {
+                let during_load = self.lsp_state.lock().unwrap().exited_during_load;
+                if during_load && !self.lsp_auto_restarted && self.has_project() {
+                    self.lsp_auto_restarted = true;
+                    self.restart_lsp();
+                    // After the restart: `reset` wipes the log, and this line
+                    // is what explains the new session.
+                    let why = why.lines().collect::<Vec<_>>().join(" ");
+                    self.lsp_state.lock().unwrap().push_load_log(format!(
+                        "• restarted automatically, once - the last session exited while \
+                         loading: {why}"
+                    ));
                 }
             }
             _ => {}
@@ -4345,12 +4381,13 @@ impl AppIde {
     /// Called **only on a Project Save** — never while typing.
     ///
     /// Delete the temp check-workspace's `Cargo.lock` so the next `cargo check`
-    /// re-resolves dependencies. Called ONLY when the chip/toolchain changes or a
-    /// project is opened (the deps differ then); saves keep the lock so checks
-    /// stay fast. The user's own project `Cargo.lock` is left untouched.
+    /// re-resolves dependencies. Called ONLY when a New Project starts (the deps
+    /// differ then, and there is no lock of its own to take); saves keep the
+    /// lock so checks stay fast. Opening a project SEEDS the lock from the
+    /// project's own instead - see `project_io::seed_workspace_lock`. The
+    /// user's own project `Cargo.lock` is left untouched either way.
     fn reset_workspace_lock(&self) {
-        let workspace = crate::workspace::dir();
-        let _ = std::fs::remove_file(workspace.join("Cargo.lock"));
+        project_io::clear_workspace_lock(&crate::workspace::dir());
     }
 
     /// Content hash used by [`AppIde::flushed_hashes`] (SipHash via `DefaultHasher`).
@@ -4395,6 +4432,16 @@ impl AppIde {
             cache.insert(rel.to_string(), hash);
         }
         true
+    }
+
+    /// Send the `didSave` rust-analyzer was not ready for, if it is ready now
+    /// (see `LspState::did_save`), and say whether its workspace is loaded.
+    /// The `serverStatus` handler releases it the moment the server reports
+    /// in; this per-frame call covers a server that never does.
+    fn release_held_did_save(&mut self) -> bool {
+        let mut lsp = self.lsp_state.lock().unwrap();
+        lsp.release_held_save();
+        lsp.workspace_loaded()
     }
 
     /// Hand `src/main.rs` to rust-analyzer — but only once RA has reported its

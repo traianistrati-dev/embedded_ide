@@ -1376,6 +1376,9 @@ impl AppIde {
                         // chip it is also where the picker lives.
                         self.active_tab = McuTab::System;
                         self.lsp_state.lock().unwrap().reset();
+                        // Its own automatic restart after a crash mid-load, like
+                        // any project `load_project_from_dir` opens.
+                        self.lsp_auto_restarted = false;
                         self.lsp_selected_diagnostic = None;
                         // A new project is a project change like any Open:
                         // go-tos and the Definition tab's walk belong to the

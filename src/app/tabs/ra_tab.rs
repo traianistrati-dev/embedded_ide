@@ -14,7 +14,7 @@ pub fn show_ra_tab(
 ) {
     // Extract everything we need while holding the lock, then drop it
     // before we start drawing so there's no risk of a deadlock.
-    let (status, total_err, total_warn, all_diags, failed_msg, load_log) = {
+    let (status, loaded, total_err, total_warn, all_diags, failed_msg, load_log) = {
         let lsp = lsp_state.lock().unwrap();
         let failed_msg = if let lsp::LspStatus::Failed(ref m) = lsp.status {
             Some(m.clone())
@@ -40,6 +40,7 @@ pub fn show_ra_tab(
         flat.sort_by_key(|(_, d)| (d.severity != lsp::DiagSeverity::Error, d.line));
         (
             lsp.status.clone(),
+            lsp.workspace_loaded(),
             lsp.total_errors(),
             lsp.total_warnings(),
             flat,
@@ -64,6 +65,15 @@ pub fn show_ra_tab(
             lsp::LspStatus::Indexing => (
                 ph::CIRCLE_NOTCH,
                 "Indexing project…".to_owned(),
+                egui::Color32::from_rgb(180, 180, 80),
+            ),
+            // `Ready` flips at the end of the FIRST load phase; the workspace
+            // is loaded only when the server says it has settled. Before, this
+            // read "No issues - rust-analyzer ready" for a minute of loading -
+            // and for a server that had already crashed.
+            lsp::LspStatus::Ready if !loaded => (
+                ph::CIRCLE_NOTCH,
+                "rust-analyzer loading the workspace…".to_owned(),
                 egui::Color32::from_rgb(180, 180, 80),
             ),
             lsp::LspStatus::Ready if total_err > 0 => (

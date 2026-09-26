@@ -131,6 +131,11 @@ impl AppIde {
                 crate::lsp::LspStatus::Starting | crate::lsp::LspStatus::Indexing => {
                     return Some((true, "Indexing…".to_owned(), amber));
                 }
+                // Past the first load phase but not loaded yet - a save made
+                // now is held until it is, so "Checking…" would be a promise.
+                crate::lsp::LspStatus::Ready if !lsp.workspace_loaded() => {
+                    return Some((true, "Loading workspace…".to_owned(), amber));
+                }
                 crate::lsp::LspStatus::Ready if lsp.checking || lsp.flycheck_pending() => {
                     // Live elapsed seconds — makes the post-save flycheck tail
                     // (the "save takes 20s" perception) visible and measurable.

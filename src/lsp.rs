@@ -349,6 +349,27 @@ pub struct LspState {
     /// substitute: it flips on the first `$/progress end` of ANY rust-prefixed
     /// token, which can be an early phase such as "Fetching metadata".
     pub indexed: bool,
+    /// Whether rust-analyzer has sent any `experimental/serverStatus` this
+    /// session. Once it has, `quiescent` is the word on whether the workspace
+    /// is loaded; before, and for a server that never sends one, see
+    /// [`LspState::workspace_loaded`].
+    server_status_seen: bool,
+    /// `quiescent` from the last `experimental/serverStatus`: the workspace
+    /// fetch, build scripts, proc-macros, the file scan AND cache priming are
+    /// all done. It drops back to `false` whenever a refetch starts (a manifest
+    /// change), and rises again when that settles.
+    quiescent: bool,
+    /// When the `initialize` handshake completed — the clock for a server that
+    /// never reports its status.
+    initialized_at: Option<std::time::Instant>,
+    /// A `didSave` asked for while the workspace was still loading, held until
+    /// it is loaded (see [`LspState::did_save`]). One slot: the flycheck it
+    /// starts covers the whole workspace, so a second held save adds nothing.
+    held_save: Option<String>,
+    /// Set when this session's rust-analyzer exited on its own before its
+    /// workspace had finished loading — the case the app restarts once by
+    /// itself, instead of leaving a "failed to start" for the user to click.
+    pub exited_during_load: bool,
     /// When the last `didSave` went out — starts the flycheck queue-latency clock.
     last_did_save_at: Option<std::time::Instant>,
     /// When RA reported the current cargo-check began (`$/progress` "begin").
@@ -498,6 +519,11 @@ pub struct LspState {
     /// stderr lines already copied into `load_log` this session, so a chatty
     /// server cannot push the load phases out of it.
     stderr_logged: usize,
+    /// The panic that explains this session's exit, on one line, and whether
+    /// it was FATAL (see [`RaPanic::fatal`]): the first one, unless a fatal one
+    /// came after a worker's. Kept apart from `stderr_tail` because the
+    /// backtrace after it is longer than the tail.
+    first_panic: Option<(String, bool)>,
 }
 
 impl Default for LspState {
@@ -516,6 +542,11 @@ impl Default for LspState {
             root_uri: String::new(),
             checking: false,
             indexed: false,
+            server_status_seen: false,
+            quiescent: false,
+            initialized_at: None,
+            held_save: None,
+            exited_during_load: false,
             last_did_save_at: None,
             check_started_at: None,
             check_queued: std::time::Duration::ZERO,
@@ -565,12 +596,20 @@ impl Default for LspState {
             load_log: Vec::new(),
             stderr_tail: std::collections::VecDeque::new(),
             stderr_logged: 0,
+            first_panic: None,
         }
     }
 }
 
 /// Cap on `LspState::load_log` — a startup trace, not a full server log.
 const LOAD_LOG_CAP: usize = 250;
+
+/// How long after the `initialize` handshake a server that has sent no
+/// `experimental/serverStatus` is taken to be loaded (see
+/// [`LspState::workspace_loaded`]). rust-analyzer sends its first status on
+/// its first loop turn - well under a second after the handshake, measured -
+/// so this only ever decides for a server without the extension.
+const SERVER_STATUS_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Last rust-analyzer stderr lines kept for an exit message.
 const STDERR_TAIL: usize = 40;
@@ -619,12 +658,30 @@ fn append_ra_trace(line: &str) {
 }
 
 /// The status message for a rust-analyzer that exited on its own: the exit
-/// code when there is one, and its last stderr lines, which carry the panic.
-fn exit_message(code: Option<i32>, stderr_tail: &[String]) -> String {
+/// code when there is one, then the session's fatal panic when there was one -
+/// otherwise its last stderr lines, after any earlier panic it recovered from.
+///
+/// The fatal panic replaces the tail because the tail alone said nothing: a
+/// backtrace is longer than `STDERR_TAIL`, so an exit 101 used to be reported
+/// as its last three frames ("28: 0x7ffc… - BaseThreadInitThunk"). A panic the
+/// server survived is no cause, so it goes before the tail, not instead of it.
+fn exit_message(code: Option<i32>, panic: Option<(&str, bool)>, stderr_tail: &[String]) -> String {
     let mut msg = match code {
         Some(c) => format!("rust-analyzer exited unexpectedly (exit code {c})."),
         None => "rust-analyzer exited unexpectedly.".to_owned(),
     };
+    match panic {
+        Some((text, true)) => {
+            msg.push_str("\nPanic: ");
+            msg.push_str(text);
+            return msg;
+        }
+        Some((text, false)) => {
+            msg.push_str("\nEarlier panic: ");
+            msg.push_str(text);
+        }
+        None => {}
+    }
     let last: Vec<&str> = stderr_tail
         .iter()
         .map(|l| l.trim())
@@ -636,6 +693,78 @@ fn exit_message(code: Option<i32>, stderr_tail: &[String]) -> String {
         msg.push_str(&last[from..].join("\n"));
     }
     msg
+}
+
+/// One panic rust-analyzer reported on stderr.
+#[derive(Debug, PartialEq)]
+struct RaPanic {
+    /// The thread's name: `LspServer` is the main loop, whose panic ends the
+    /// server; a worker's is caught and the server carries on.
+    thread: String,
+    /// `thread '<name>' panicked at <location>: <message>`, on one line.
+    text: String,
+}
+
+impl RaPanic {
+    /// A panic on a thread whose panic ends the process: the main loop
+    /// (`LspServer`) or `main`. A worker's runs a request under `catch_unwind`,
+    /// and the proc-macro server's is its own; the server survives both.
+    fn fatal(&self) -> bool {
+        matches!(self.thread.as_str(), "LspServer" | "main")
+    }
+}
+
+/// Picks rust-analyzer's panics out of its stderr, one line at a time.
+///
+/// A panic is two lines - `thread 'LspServer' (22288) panicked at <path>:180:21:`
+/// and then its message - so the location line is held until the message
+/// arrives. The old one-line form (`panicked at 'msg', <path>`) is complete as
+/// it stands.
+#[derive(Default)]
+struct PanicWatch {
+    /// `(thread, location)` of a panic whose message line has not come yet.
+    pending: Option<(String, String)>,
+}
+
+impl PanicWatch {
+    /// Feed one stderr line; returns the panics it completes, in order.
+    fn feed(&mut self, line: &str) -> Vec<RaPanic> {
+        let line = line.trim();
+        let mut done = Vec::new();
+        if let Some((thread, after)) = Self::panic_head(line) {
+            // A new panic before the last one's message: report that one bare
+            // rather than lose it.
+            if let Some((t, loc)) = self.pending.take() {
+                done.push(Self::finish(t, &loc, ""));
+            }
+            match after.strip_suffix(':') {
+                Some(location) => self.pending = Some((thread, location.to_owned())),
+                None => done.push(Self::finish(thread, after, "")),
+            }
+        } else if !line.is_empty()
+            && let Some((thread, location)) = self.pending.take()
+        {
+            done.push(Self::finish(thread, &location, line));
+        }
+        done
+    }
+
+    /// `(thread name, text after "panicked at ")` when `line` opens a panic.
+    fn panic_head(line: &str) -> Option<(String, &str)> {
+        let rest = line.strip_prefix("thread '")?;
+        let (thread, rest) = rest.split_once('\'')?;
+        let (_, after) = rest.split_once("panicked at ")?;
+        Some((thread.to_owned(), after.trim()))
+    }
+
+    fn finish(thread: String, location: &str, message: &str) -> RaPanic {
+        let mut text = format!("thread '{thread}' panicked at {location}");
+        if !message.is_empty() {
+            text.push_str(": ");
+            text.push_str(message);
+        }
+        RaPanic { thread, text }
+    }
 }
 
 impl LspState {
@@ -797,6 +926,15 @@ impl LspState {
     /// makes rust-analyzer re-run its flycheck (cargo check) so its flycheck
     /// diagnostics refresh — without it they stay frozen at the startup check
     /// and a fixed error lingers forever in the panel.
+    ///
+    /// HELD, not sent, while the workspace is still loading, and sent by
+    /// [`LspState::release_held_save`] once it is. A `didSave` that lands while
+    /// rust-analyzer is scanning the workspace files KILLS it: the handler asks
+    /// for the file's source root, which that scan has not assigned yet, and
+    /// the panic ("Unable to get `FileSourceRootInput` … this is a bug") takes
+    /// the whole server down with exit code 101 - rust-lang/rust-analyzer#19406.
+    /// That is what 4 of 10 startups did here, in both windows, because the
+    /// startup flush fired on `Ready`, which flips at the end of "Fetching".
     pub fn did_save(&mut self, rel_path: &str) {
         if self.sender.is_none() {
             return;
@@ -805,7 +943,58 @@ impl LspState {
             return;
         }
         // Start the flycheck queue-latency clock (stopped at $/progress begin).
+        // Also while held: from the user's side the check is already waiting.
         self.last_did_save_at = Some(std::time::Instant::now());
+        if !self.workspace_loaded() {
+            self.held_save = Some(rel_path.to_owned());
+            return;
+        }
+        // One going out now covers one still held: without this, a server
+        // that never reports its status could get both, a frame apart.
+        self.held_save = None;
+        self.send_did_save(rel_path);
+    }
+
+    /// Whether rust-analyzer has finished loading the workspace, so a `didSave`
+    /// is safe (see [`LspState::did_save`]).
+    ///
+    /// The server's own `experimental/serverStatus` `quiescent` is the answer
+    /// once it has sent one - which rust-analyzer does on its first loop turn.
+    /// A server that sends none gets [`SERVER_STATUS_GRACE`] after the
+    /// handshake and is then trusted as before, so an analyzer without the
+    /// extension still gets its saves.
+    pub fn workspace_loaded(&self) -> bool {
+        if self.server_status_seen {
+            self.quiescent
+        } else {
+            self.initialized_at
+                .is_some_and(|t| t.elapsed() >= SERVER_STATUS_GRACE)
+        }
+    }
+
+    /// Send the `didSave` [`LspState::did_save`] held back while loading, now
+    /// that the workspace is loaded. Returns whether one went out. Called when
+    /// a `serverStatus` arrives and on every app frame, which covers a server
+    /// that never sends one.
+    pub fn release_held_save(&mut self) -> bool {
+        if !self.workspace_loaded() {
+            return false;
+        }
+        let Some(rel_path) = self.held_save.take() else {
+            return false;
+        };
+        // Closed since: the flycheck rust-analyzer starts by itself once the
+        // workspace settles covers what this one would have. Its queue clock
+        // goes too, or the status would wait on a check nobody asked for.
+        if self.sender.is_none() || !self.open_files.contains_key(&rel_path) {
+            self.last_did_save_at = None;
+            return false;
+        }
+        self.send_did_save(&rel_path);
+        true
+    }
+
+    fn send_did_save(&mut self, rel_path: &str) {
         let uri = format!("{}/{}", self.root_uri, rel_path);
         self.send_raw(
             serde_json::json!({
@@ -1527,6 +1716,11 @@ impl LspState {
         self.root_uri = String::new();
         self.checking = false;
         self.indexed = false;
+        self.server_status_seen = false;
+        self.quiescent = false;
+        self.initialized_at = None;
+        self.held_save = None;
+        self.exited_during_load = false;
         self.last_did_save_at = None;
         self.check_started_at = None;
         self.check_queued = std::time::Duration::ZERO;
@@ -1570,6 +1764,7 @@ impl LspState {
         self.load_log.clear();
         self.stderr_tail.clear();
         self.stderr_logged = 0;
+        self.first_panic = None;
     }
 }
 
@@ -1627,7 +1822,12 @@ fn launch(
     sweep_stale_ras(&workspace_dir);
 
     let mut ra_cmd = Command::new("rust-analyzer");
-    crate::build::no_window(&mut ra_cmd);
+    // Below normal priority, which its cargo / rustc / proc-macro server
+    // inherit: loading a workspace keeps every core busy for a minute or more,
+    // and at the IDE's own priority that minute was a frozen window. It still
+    // gets all the CPU nobody else wants, so the load is no slower on an idle
+    // machine.
+    crate::build::no_window_below_normal(&mut ra_cmd);
     // Own process group (unix) so the tree can be killed as one — see
     // `spawn_in_own_group` / `kill_process_tree`.
     spawn_in_own_group(&mut ra_cmd);
@@ -1657,7 +1857,8 @@ fn launch(
 
     // Register the pid so the NEXT launch can reap this RA even if this
     // process dies without running `on_exit` (see `sweep_stale_ras`).
-    register_ra_pid(&workspace_dir, child.id());
+    let ra_pid = child.id();
+    register_ra_pid(&workspace_dir, ra_pid);
 
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1687,24 +1888,57 @@ fn launch(
     // Drained for as long as the process lives (an unread pipe would block the
     // server once its buffer fills). Lines go to the disk trace always, to the
     // Analyzer tab up to a cap, and the last few into the exit message.
+    //
+    // It also watches for panics, and keeps one for the exit message: its
+    // backtrace pushes it out of `stderr_tail` long before the exit. A panic on
+    // the `LspServer` thread - rust-analyzer's main loop - ends the server there
+    // and then, yet the process lingered for another ~50 s finishing a build
+    // nobody could read, every core busy under a status that still said
+    // "ready". It is stopped at once instead.
     {
         let state = Arc::clone(&state);
         thread::spawn(move || {
+            let mut panics = PanicWatch::default();
+            let mut killed = false;
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
-                let mut s = state.lock().unwrap();
-                if s.generation != my_gen {
-                    continue; // a restarted session's leftovers: drain only
-                }
-                s.stderr_tail.push_back(line.clone());
-                if s.stderr_tail.len() > STDERR_TAIL {
-                    s.stderr_tail.pop_front();
-                }
-                if s.stderr_logged < STDERR_TO_LOAD_LOG {
-                    s.stderr_logged += 1;
-                    s.push_load_log(format!("[stderr] {line}"));
-                } else {
-                    append_ra_trace(&format!("[stderr] {line}"));
+                {
+                    let mut s = state.lock().unwrap();
+                    if s.generation != my_gen {
+                        continue; // a restarted session's leftovers: drain only
+                    }
+                    s.stderr_tail.push_back(line.clone());
+                    if s.stderr_tail.len() > STDERR_TAIL {
+                        s.stderr_tail.pop_front();
+                    }
+                    if s.stderr_logged < STDERR_TO_LOAD_LOG {
+                        s.stderr_logged += 1;
+                        s.push_load_log(format!("[stderr] {line}"));
+                    } else {
+                        append_ra_trace(&format!("[stderr] {line}"));
+                    }
+                    for p in panics.feed(&line) {
+                        let fatal = p.fatal();
+                        // The first panic, unless a fatal one follows a worker's:
+                        // rust-analyzer catches a request handler's panic and
+                        // carries on, so that one explains no exit.
+                        if !s.first_panic.as_ref().is_some_and(|(_, f)| *f || !fatal) {
+                            s.first_panic = Some((p.text.clone(), fatal));
+                        }
+                        // Killed UNDER the lock and only while `child` is still
+                        // ours: that handle keeps Windows from reusing the pid,
+                        // and the read loop can only drop it under this lock. A
+                        // ~100 ms stall of the UI once per crash, the same one
+                        // `kill_child` costs on every restart.
+                        if p.thread == "LspServer" && !killed && s.child.is_some() {
+                            killed = true;
+                            s.push_load_log(
+                                "[error] rust-analyzer's main loop panicked - it can no \
+                                 longer answer, so it is stopped now",
+                            );
+                            kill_process_tree(ra_pid);
+                        }
+                    }
                 }
             }
         });
@@ -1731,97 +1965,21 @@ fn launch(
         }
     }
     // ── Send `initialize` ─────────────────────────────────────────────────────
-    let _ = tx.send(serde_json::json!({
-        "jsonrpc": "2.0",
-        "id":      1,
-        "method":  "initialize",
-        "params": {
-            "processId": std::process::id(),
-            "rootUri":   root_uri,
-            "workspaceFolders": [{ "uri": root_uri, "name": "project" }],
-            "capabilities": {
-                // File-operation capability, for `workspace/willRenameFiles`:
-                // renaming a `.rs` file in the project tree asks rust-analyzer
-                // what `mod` / `use` / path references have to change, and the
-                // IDE applies those edits before doing the move itself.
-                //
-                // Advertising this ALSO changes `textDocument/rename`: when a
-                // symbol rename would move a file (renaming a `mod` name), RA
-                // strips the text edits and returns only the file-move op,
-                // expecting us to ask again through willRenameFiles. That path
-                // already did nothing here - without a `resourceOperations`
-                // capability RA fails the whole request - so nothing regresses,
-                // but it is why `resourceOperations` is deliberately NOT
-                // advertised: the two mechanisms cannot both be used.
-                "workspace": {
-                    "fileOperations": { "willRename": true },
-                },
-                "textDocument": {
-                    "synchronization": {
-                        "dynamicRegistration": false,
-                        "willSave": false,
-                        // We send didSave on flush so RA's `checkOnSave` flycheck
-                        // (cargo check) re-runs and refreshes stale flycheck
-                        // diagnostics — otherwise it only ran once at startup.
-                        "didSave": true,
-                    },
-                    "publishDiagnostics": {
-                        "relatedInformation": false,
-                        "versionSupport":     false,
-                    },
-                    "completion": {
-                        "completionItem": {
-                            // Snippet completions (`foo(${1:a}, ${2:b})$0`) let
-                            // accepting a function insert the full call with
-                            // parameters; the editor flattens them via
-                            // `editor_panel::snippet::expand` and selects the
-                            // first argument.
-                            "snippetSupport":      true,
-                            "documentationFormat": ["plaintext", "markdown"],
-                            "labelDetailsSupport": true,
-                        },
-                        "completionItemKind": {
-                            "valueSet": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25]
-                        },
-                        "contextSupport": true,
-                    },
-                    // Ask RA for the rich, nested `DocumentSymbol[]` shape (with a
-                    // separate `range` for the whole item + `selectionRange` for just
-                    // the name, and `children` for nested items) instead of the older
-                    // flat `SymbolInformation[]` — used to find every fn/struct/enum/
-                    // const/… so we can fade unused ones and offer a references list.
-                    "documentSymbol": {
-                        "hierarchicalDocumentSymbolSupport": true,
-                    },
-                    // Ctrl+Enter assists / quick-fixes. `codeActionLiteralSupport`
-                    // → RA may return `CodeAction` objects (with edits) not just
-                    // `Command`s; `resolveSupport` → RA may defer the `edit` and
-                    // we fetch it via `codeAction/resolve`.
-                    "codeAction": {
-                        "codeActionLiteralSupport": {
-                            "codeActionKind": {
-                                "valueSet": [
-                                    "", "quickfix", "refactor", "refactor.extract",
-                                    "refactor.inline", "refactor.rewrite", "source"
-                                ]
-                            }
-                        },
-                        "resolveSupport": { "properties": ["edit"] },
-                    },
-                    // Inferred-type inlay hints — drawn as ghost text on the
-                    // cursor's line; Tab inserts the type. We deliberately do
-                    // NOT advertise `resolveSupport` here, so rust-analyzer fills
-                    // each hint's `textEdits` eagerly (accepting needs no extra
-                    // `inlayHint/resolve` round-trip).
-                    "inlayHint": {
-                        "dynamicRegistration": false,
-                    },
-                },
-                "window": { "workDoneProgress": true },
-            },
-            "initializationOptions": initialization_options_with(linked.as_deref()),
-        }
-    }).to_string());
+    let _ = tx.send(
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id":      1,
+            "method":  "initialize",
+            "params": {
+                "processId": std::process::id(),
+                "rootUri":   root_uri,
+                "workspaceFolders": [{ "uri": root_uri, "name": "project" }],
+                "capabilities": client_capabilities(),
+                "initializationOptions": initialization_options_with(linked.as_deref()),
+            }
+        })
+        .to_string(),
+    );
 
     // ── Read loop (this thread IS the read thread) ─────────────────────────────
     let mut reader = BufReader::new(stdout);
@@ -1857,8 +2015,15 @@ fn launch(
     let mut s = state.lock().unwrap();
     if s.generation == my_gen && s.status.is_active() {
         let tail: Vec<String> = s.stderr_tail.iter().cloned().collect();
-        let msg = exit_message(code, &tail);
+        let panic = s
+            .first_panic
+            .as_ref()
+            .map(|(text, fatal)| (text.as_str(), *fatal));
+        let msg = exit_message(code, panic, &tail);
         s.push_load_log(format!("[error] {msg}"));
+        // Read BEFORE the status changes: the app restarts once, by itself, a
+        // server that died while it was still loading.
+        s.exited_during_load = !s.workspace_loaded();
         s.status = LspStatus::Failed(msg);
         ctx.request_repaint();
     }
@@ -2234,8 +2399,60 @@ fn handle_incoming(
             let mut s = state.lock().unwrap();
             if s.generation == my_gen {
                 s.status = LspStatus::Indexing;
+                s.initialized_at = Some(std::time::Instant::now());
                 s.push_load_log("• initialize handshake OK — loading workspace…");
             }
+            ctx.request_repaint();
+        }
+
+        // ── Server status (`experimental/serverStatus`) ───────────────────────
+        // The only word on whether the workspace is really loaded: `quiescent`
+        // waits for the fetch, build scripts, proc-macros, the file scan and
+        // cache priming, and drops back while a refetch runs. Sent on every
+        // change of health, quiescence or message. A held `didSave` goes out
+        // the moment it says the workspace is loaded.
+        "experimental/serverStatus" => {
+            let params = &msg["params"];
+            let quiescent = params["quiescent"].as_bool().unwrap_or(false);
+            let health = params["health"].as_str().unwrap_or("ok");
+            let message = params["message"].as_str().unwrap_or("").trim();
+            let mut s = state.lock().unwrap();
+            if s.generation != my_gen {
+                return;
+            }
+            let was = s.server_status_seen && s.quiescent;
+            s.server_status_seen = true;
+            s.quiescent = quiescent;
+            if quiescent && !was {
+                s.push_load_log("• workspace loaded");
+                // Loaded is more than indexed, and more than `Ready` promises.
+                s.indexed = true;
+                if matches!(s.status, LspStatus::Starting | LspStatus::Indexing) {
+                    s.status = LspStatus::Ready;
+                }
+            } else if !quiescent && was {
+                s.push_load_log("• workspace reloading…");
+            }
+            if health != "ok" && !message.is_empty() {
+                let tag = if health == "error" {
+                    "[error]"
+                } else {
+                    "[warn]"
+                };
+                for (i, line) in message
+                    .lines()
+                    .map(str::trim_end)
+                    .filter(|l| !l.is_empty())
+                    .enumerate()
+                {
+                    if i == 0 {
+                        s.push_load_log(format!("{tag} {line}"));
+                    } else {
+                        s.push_load_log(format!("    {line}"));
+                    }
+                }
+            }
+            s.release_held_save();
             ctx.request_repaint();
         }
 
@@ -2731,6 +2948,99 @@ fn parse_code_actions(result: &serde_json::Value, root_uri: &str) -> Vec<CodeAct
         })
         .filter(CodeAction::is_applicable)
         .collect()
+}
+
+/// The `capabilities` the IDE announces in `initialize`.
+///
+/// Its own function so the promises in it can be tested - one of them,
+/// `experimental.serverStatusNotification`, is what keeps a `didSave` from
+/// killing a server that is still loading (see `LspState::did_save`).
+fn client_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        // File-operation capability, for `workspace/willRenameFiles`:
+        // renaming a `.rs` file in the project tree asks rust-analyzer
+        // what `mod` / `use` / path references have to change, and the
+        // IDE applies those edits before doing the move itself.
+        //
+        // Advertising this ALSO changes `textDocument/rename`: when a
+        // symbol rename would move a file (renaming a `mod` name), RA
+        // strips the text edits and returns only the file-move op,
+        // expecting us to ask again through willRenameFiles. That path
+        // already did nothing here - without a `resourceOperations`
+        // capability RA fails the whole request - so nothing regresses,
+        // but it is why `resourceOperations` is deliberately NOT
+        // advertised: the two mechanisms cannot both be used.
+        "workspace": {
+            "fileOperations": { "willRename": true },
+        },
+        "textDocument": {
+            "synchronization": {
+                "dynamicRegistration": false,
+                "willSave": false,
+                // We send didSave on flush so RA's `checkOnSave` flycheck
+                // (cargo check) re-runs and refreshes stale flycheck
+                // diagnostics — otherwise it only ran once at startup.
+                "didSave": true,
+            },
+            "publishDiagnostics": {
+                "relatedInformation": false,
+                "versionSupport":     false,
+            },
+            "completion": {
+                "completionItem": {
+                    // Snippet completions (`foo(${1:a}, ${2:b})$0`) let
+                    // accepting a function insert the full call with
+                    // parameters; the editor flattens them via
+                    // `editor_panel::snippet::expand` and selects the
+                    // first argument.
+                    "snippetSupport":      true,
+                    "documentationFormat": ["plaintext", "markdown"],
+                    "labelDetailsSupport": true,
+                },
+                "completionItemKind": {
+                    "valueSet": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25]
+                },
+                "contextSupport": true,
+            },
+            // Ask RA for the rich, nested `DocumentSymbol[]` shape (with a
+            // separate `range` for the whole item + `selectionRange` for just
+            // the name, and `children` for nested items) instead of the older
+            // flat `SymbolInformation[]` — used to find every fn/struct/enum/
+            // const/… so we can fade unused ones and offer a references list.
+            "documentSymbol": {
+                "hierarchicalDocumentSymbolSupport": true,
+            },
+            // Ctrl+Enter assists / quick-fixes. `codeActionLiteralSupport`
+            // → RA may return `CodeAction` objects (with edits) not just
+            // `Command`s; `resolveSupport` → RA may defer the `edit` and
+            // we fetch it via `codeAction/resolve`.
+            "codeAction": {
+                "codeActionLiteralSupport": {
+                    "codeActionKind": {
+                        "valueSet": [
+                            "", "quickfix", "refactor", "refactor.extract",
+                            "refactor.inline", "refactor.rewrite", "source"
+                        ]
+                    }
+                },
+                "resolveSupport": { "properties": ["edit"] },
+            },
+            // Inferred-type inlay hints — drawn as ghost text on the
+            // cursor's line; Tab inserts the type. We deliberately do
+            // NOT advertise `resolveSupport` here, so rust-analyzer fills
+            // each hint's `textEdits` eagerly (accepting needs no extra
+            // `inlayHint/resolve` round-trip).
+            "inlayHint": {
+                "dynamicRegistration": false,
+            },
+        },
+        "window": { "workDoneProgress": true },
+        // `experimental/serverStatus`: its `quiescent` is the one signal
+        // that the workspace has really finished loading. `$/progress`
+        // ends cannot say it - the first one is merely "Fetching" - and
+        // a `didSave` sent before it kills the server (see `did_save`).
+        "experimental": { "serverStatusNotification": true },
+    })
 }
 
 /// [`initialization_options`] plus `linkedProjects` when there are any. With
@@ -3937,7 +4247,7 @@ mod exit_message_tests {
     #[test]
     fn a_bare_exit_says_so() {
         assert_eq!(
-            exit_message(None, &[]),
+            exit_message(None, None, &[]),
             "rust-analyzer exited unexpectedly."
         );
     }
@@ -3956,7 +4266,7 @@ mod exit_message_tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let msg = exit_message(Some(101), &tail);
+        let msg = exit_message(Some(101), None, &tail);
         assert!(
             msg.starts_with("rust-analyzer exited unexpectedly (exit code 101)."),
             "{msg}"
@@ -3967,6 +4277,375 @@ mod exit_message_tests {
             msg.lines().count(),
             4,
             "the message and the last three lines: {msg}"
+        );
+    }
+
+    /// What the user saw instead: an exit 101 explained by its last three
+    /// backtrace frames. With the panic kept, the frames are not repeated.
+    #[test]
+    fn the_first_panic_replaces_the_backtrace_tail() {
+        let tail: Vec<String> = [
+            "27:     0x7ff6bb631daf - <unknown>",
+            "28:     0x7ffc8bcf7384 - BaseThreadInitThunk",
+            "29:     0x7ffc8bf5cc91 - RtlUserThreadStart",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let panic = "thread 'LspServer' panicked at base-db/src/lib.rs:180:21: \
+                     Unable to get `FileSourceRootInput`";
+        let msg = exit_message(Some(101), Some((panic, true)), &tail);
+        assert_eq!(
+            msg,
+            format!("rust-analyzer exited unexpectedly (exit code 101).\nPanic: {panic}")
+        );
+    }
+
+    /// A worker panic the server survived explains nothing on its own: it is
+    /// named, and the tail still follows.
+    #[test]
+    fn a_survived_panic_keeps_the_tail() {
+        let tail = vec!["Error: failed to load workspace".to_string()];
+        let msg = exit_message(
+            Some(1),
+            Some(("thread 'Worker1' panicked at a.rs:1:1: x", false)),
+            &tail,
+        );
+        assert_eq!(
+            msg,
+            "rust-analyzer exited unexpectedly (exit code 1).\n\
+             Earlier panic: thread 'Worker1' panicked at a.rs:1:1: x\n\
+             Last output: Error: failed to load workspace"
+        );
+    }
+}
+
+#[cfg(test)]
+mod panic_watch_tests {
+    use super::{PanicWatch, RaPanic};
+
+    fn feed_all(lines: &[&str]) -> Vec<RaPanic> {
+        let mut w = PanicWatch::default();
+        lines.iter().flat_map(|l| w.feed(l)).collect()
+    }
+
+    /// The exact shape of the crash in the Analyzer trace: location line,
+    /// message line, then a backtrace whose lines must not be taken for one.
+    #[test]
+    fn the_two_line_panic_rust_analyzer_writes() {
+        let got = feed_all(&[
+            "",
+            r"thread 'LspServer' (22288) panicked at src\tools\rust-analyzer\crates\base-db\src\lib.rs:180:21:",
+            "Unable to get `FileSourceRootInput` with `vfs::FileId` (FileId(67), path: <unknown>); this is a bug",
+            "stack backtrace:",
+            "   0:     0x7ffc54e519b9 - std::backtrace_rs::backtrace::win64::trace",
+        ]);
+        assert_eq!(
+            got,
+            vec![RaPanic {
+                thread: "LspServer".into(),
+                text: r"thread 'LspServer' panicked at src\tools\rust-analyzer\crates\base-db\src\lib.rs:180:21: Unable to get `FileSourceRootInput` with `vfs::FileId` (FileId(67), path: <unknown>); this is a bug".into(),
+            }]
+        );
+    }
+
+    /// Only `LspServer` is fatal, so the thread name must come out exactly -
+    /// with and without the thread id newer toolchains print.
+    #[test]
+    fn the_thread_name_is_read_with_or_without_an_id() {
+        let got = feed_all(&[
+            "thread 'Worker1' (7776) panicked at crates/rust-analyzer/src/reload.rs:401:87:",
+            "called `Result::unwrap()` on an `Err` value: \"SendError(..)\"",
+            "thread 'main' panicked at crates/load-cargo/src/lib.rs:12:5:",
+            "boom",
+        ]);
+        let threads: Vec<&str> = got.iter().map(|p| p.thread.as_str()).collect();
+        assert_eq!(threads, ["Worker1", "main"]);
+        assert!(
+            got[1].text.ends_with("lib.rs:12:5: boom"),
+            "{}",
+            got[1].text
+        );
+    }
+
+    /// Two panics back to back: the first is reported bare rather than lost,
+    /// and blank lines never count as a message.
+    #[test]
+    fn a_panic_without_its_message_is_still_reported() {
+        let got = feed_all(&[
+            "thread 'LspServer' panicked at a.rs:1:1:",
+            "   ",
+            "thread 'main' panicked at b.rs:2:2:",
+            "second",
+        ]);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].text, "thread 'LspServer' panicked at a.rs:1:1");
+        assert_eq!(got[1].text, "thread 'main' panicked at b.rs:2:2: second");
+    }
+
+    /// Only the main loop and `main` end the process.
+    #[test]
+    fn only_the_main_loop_and_main_are_fatal() {
+        let fatal = |thread: &str| {
+            RaPanic {
+                thread: thread.into(),
+                text: String::new(),
+            }
+            .fatal()
+        };
+        assert!(fatal("LspServer"));
+        assert!(fatal("main"));
+        assert!(!fatal("Worker1"));
+        assert!(!fatal("<unnamed>"));
+    }
+
+    /// The pre-1.73 one-line form carries its message inline.
+    #[test]
+    fn the_old_one_line_form_is_complete_at_once() {
+        let got = feed_all(&["thread 'main' panicked at 'boom', src/main.rs:2:5"]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].text,
+            "thread 'main' panicked at 'boom', src/main.rs:2:5"
+        );
+    }
+
+    #[test]
+    fn ordinary_lines_are_no_panic() {
+        assert!(feed_all(&[
+            "2026-09-24T14:03:47 WARN notify error: Input watch path is neither a file nor a directory.",
+            "ERROR Received compiler message for unknown package",
+            "thread 'main' is fine",
+        ])
+        .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod held_save_tests {
+    use super::*;
+
+    /// A state as a launched session has it: a live channel, `main.rs` open,
+    /// the handshake done.
+    fn session() -> (
+        Arc<Mutex<LspState>>,
+        mpsc::Receiver<String>,
+        mpsc::Sender<String>,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        let mut s = LspState {
+            sender: Some(tx.clone()),
+            root_uri: "file:///w".into(),
+            status: LspStatus::Ready,
+            initialized_at: Some(std::time::Instant::now()),
+            ..LspState::default()
+        };
+        s.did_open("src/main.rs", "fn main() {}");
+        let state = Arc::new(Mutex::new(s));
+        drain(&rx);
+        (state, rx, tx)
+    }
+
+    fn drain(rx: &mpsc::Receiver<String>) -> Vec<String> {
+        rx.try_iter().collect()
+    }
+
+    fn saves(sent: &[String]) -> usize {
+        sent.iter()
+            .filter(|m| m.contains("textDocument/didSave"))
+            .count()
+    }
+
+    fn status(state: &Arc<Mutex<LspState>>, tx: &mpsc::Sender<String>, quiescent: bool) {
+        let generation = state.lock().unwrap().generation;
+        handle_incoming(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "experimental/serverStatus",
+                "params": { "health": "ok", "quiescent": quiescent }
+            }),
+            state,
+            &eframe::egui::Context::default(),
+            tx,
+            "file:///w",
+            generation,
+        );
+    }
+
+    /// The crash: a save during the load reached the server. It must wait
+    /// for `quiescent`, and then go out exactly once.
+    #[test]
+    fn a_save_while_loading_waits_for_quiescent() {
+        let (state, rx, tx) = session();
+        status(&state, &tx, false);
+        state.lock().unwrap().did_save("src/main.rs");
+        state.lock().unwrap().did_save("src/main.rs");
+        assert_eq!(saves(&drain(&rx)), 0, "nothing may reach a loading server");
+        assert!(
+            state.lock().unwrap().flycheck_pending(),
+            "the check is still owed"
+        );
+
+        status(&state, &tx, true);
+        assert_eq!(saves(&drain(&rx)), 1, "released once, on quiescent");
+        status(&state, &tx, true);
+        assert!(!state.lock().unwrap().release_held_save());
+        assert_eq!(saves(&drain(&rx)), 0, "and never twice");
+    }
+
+    /// A refetch (a manifest change) opens the same window again.
+    #[test]
+    fn a_reload_holds_saves_again() {
+        let (state, rx, tx) = session();
+        status(&state, &tx, true);
+        state.lock().unwrap().did_save("src/main.rs");
+        assert_eq!(saves(&drain(&rx)), 1, "a loaded server gets it at once");
+
+        status(&state, &tx, false);
+        state.lock().unwrap().did_save("src/main.rs");
+        assert_eq!(saves(&drain(&rx)), 0);
+        status(&state, &tx, true);
+        assert_eq!(saves(&drain(&rx)), 1);
+    }
+
+    /// A save sent directly replaces one still held - the grace can end
+    /// between two frames, and the held one must not follow a frame later.
+    #[test]
+    fn a_direct_save_replaces_a_held_one() {
+        let (state, rx, _tx) = session();
+        state.lock().unwrap().did_save("src/main.rs");
+        let past = std::time::Instant::now()
+            .checked_sub(SERVER_STATUS_GRACE + std::time::Duration::from_secs(1))
+            .expect("the clock goes back that far");
+        state.lock().unwrap().initialized_at = Some(past);
+        state.lock().unwrap().did_save("src/main.rs");
+        assert_eq!(saves(&drain(&rx)), 1);
+        assert!(!state.lock().unwrap().release_held_save());
+        assert_eq!(saves(&drain(&rx)), 0, "and never a second time");
+    }
+
+    /// A server without the extension: held only for the grace period after
+    /// the handshake, then trusted as before - by the per-frame release.
+    #[test]
+    fn a_server_that_never_reports_gets_its_saves_after_the_grace() {
+        let (state, rx, _tx) = session();
+        state.lock().unwrap().did_save("src/main.rs");
+        assert_eq!(saves(&drain(&rx)), 0, "inside the grace it is held");
+
+        let past = std::time::Instant::now()
+            .checked_sub(SERVER_STATUS_GRACE + std::time::Duration::from_secs(1))
+            .expect("the clock goes back that far");
+        state.lock().unwrap().initialized_at = Some(past);
+        assert!(state.lock().unwrap().release_held_save());
+        assert_eq!(saves(&drain(&rx)), 1);
+        state.lock().unwrap().did_save("src/main.rs");
+        assert_eq!(saves(&drain(&rx)), 1, "and later ones go straight out");
+    }
+
+    /// Before the handshake nothing is loaded, whatever the clock says.
+    #[test]
+    fn nothing_is_loaded_before_the_handshake() {
+        let s = LspState::default();
+        assert!(!s.workspace_loaded());
+    }
+
+    /// Closed while held: dropped, and the status stops waiting for it.
+    #[test]
+    fn a_held_save_for_a_closed_file_is_dropped() {
+        let (state, rx, tx) = session();
+        status(&state, &tx, false);
+        state.lock().unwrap().did_save("src/main.rs");
+        state.lock().unwrap().open_files.remove("src/main.rs");
+        status(&state, &tx, true);
+        assert_eq!(saves(&drain(&rx)), 0);
+        assert!(!state.lock().unwrap().flycheck_pending());
+    }
+
+    /// Loaded implies indexed and Ready, and the log says when it happened.
+    #[test]
+    fn quiescent_marks_the_session_loaded() {
+        let (state, _rx, tx) = session();
+        {
+            let mut s = state.lock().unwrap();
+            s.status = LspStatus::Indexing;
+            s.indexed = false;
+        }
+        status(&state, &tx, true);
+        let s = state.lock().unwrap();
+        assert_eq!(s.status, LspStatus::Ready);
+        assert!(s.indexed);
+        assert!(s.workspace_loaded());
+        assert!(
+            s.load_log.iter().any(|l| l == "• workspace loaded"),
+            "{:?}",
+            s.load_log
+        );
+    }
+
+    /// A health warning ("Failed to run build scripts…") reaches the log.
+    #[test]
+    fn a_health_warning_is_logged() {
+        let (state, _rx, tx) = session();
+        let generation = state.lock().unwrap().generation;
+        handle_incoming(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "experimental/serverStatus",
+                "params": {
+                    "health": "warning",
+                    "quiescent": true,
+                    "message": "Failed to run build scripts of some packages.\n\nPlease refer to the logs."
+                }
+            }),
+            &state,
+            &eframe::egui::Context::default(),
+            &tx,
+            "file:///w",
+            generation,
+        );
+        let s = state.lock().unwrap();
+        assert!(s.workspace_loaded(), "a warning is still loaded");
+        assert!(
+            s.load_log
+                .iter()
+                .any(|l| l == "[warn] Failed to run build scripts of some packages."),
+            "{:?}",
+            s.load_log
+        );
+    }
+
+    /// `reset` forgets all of it: the next session starts unloaded.
+    #[test]
+    fn reset_forgets_the_load_state() {
+        let (state, _rx, tx) = session();
+        status(&state, &tx, false);
+        state.lock().unwrap().did_save("src/main.rs");
+        let mut s = state.lock().unwrap();
+        s.exited_during_load = true;
+        s.first_panic = Some(("x".into(), true));
+        s.reset();
+        assert!(!s.workspace_loaded());
+        assert!(s.held_save.is_none());
+        assert!(!s.exited_during_load);
+        assert!(s.first_panic.is_none());
+    }
+
+    /// Without this promise rust-analyzer never sends a status, and every
+    /// save waits out the grace period instead of the real load.
+    #[test]
+    fn the_client_asks_for_server_status() {
+        assert_eq!(
+            client_capabilities()["experimental"]["serverStatusNotification"],
+            serde_json::json!(true)
+        );
+        // The rest survived the move out of `launch`.
+        assert_eq!(
+            client_capabilities()["window"]["workDoneProgress"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            client_capabilities()["textDocument"]["synchronization"]["didSave"],
+            serde_json::json!(true)
         );
     }
 }
@@ -4227,5 +4906,177 @@ mod linked_projects_tests {
             "a member is already in the workspace"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// The startup crash against the REAL rust-analyzer, through the IDE's own
+/// `start` - capabilities, priority, stderr watch and all. A three-file cargo
+/// project reproduces it every time: a `didSave` sent at the first `Ready`
+/// (the end of "Fetching") killed the server two seconds in.
+#[cfg(test)]
+mod live_rust_analyzer_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const MAIN: &str =
+        "mod util;\nfn main() {\n    let v = util::double(21);\n    println!(\"{v}\");\n}\n";
+
+    fn tiny_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), MAIN).unwrap();
+        std::fs::write(
+            dir.path().join("src/util.rs"),
+            "pub fn double(x: u32) -> u32 {\n    x * 2\n}\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// Start the analyzer and wait for the moment the old startup flush fired.
+    fn start_until_ready(dir: &Path) -> Arc<Mutex<LspState>> {
+        let state = Arc::new(Mutex::new(LspState::default()));
+        start(dir, Arc::clone(&state), eframe::egui::Context::default());
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            match state.lock().unwrap().status.clone() {
+                LspStatus::Ready => break,
+                LspStatus::Failed(why) => panic!("failed before Ready: {why}"),
+                _ => {}
+            }
+            assert!(Instant::now() < deadline, "never became Ready");
+            thread::sleep(Duration::from_millis(5));
+        }
+        state
+    }
+
+    /// Every process in the analyzer's tree with its priority class. One that
+    /// exits between the listing and the lookup (a short `cargo metadata`) has
+    /// no class left to read and is skipped.
+    #[cfg(windows)]
+    fn tree_priorities(root: u32) -> Vec<String> {
+        let script = format!(
+            "function Walk($id) {{ Get-CimInstance Win32_Process -Filter \"ParentProcessId=$id\" | \
+             ForEach-Object {{ $c = (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue).PriorityClass; \
+             if ($c) {{ \"$($_.Name) $c\" }}; Walk $_.ProcessId }} }}; \
+             \"root $((Get-Process -Id {root}).PriorityClass)\"; Walk {root}"
+        );
+        let out = crate::build::no_window(&mut Command::new("powershell"))
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .expect("powershell runs");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_owned())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "starts the real rust-analyzer (installed, ~10-30 s)"]
+    fn a_save_at_the_first_ready_no_longer_kills_the_server() {
+        let dir = tiny_project();
+        let state = start_until_ready(dir.path());
+        {
+            // Exactly what the startup flush did at this moment.
+            let mut s = state.lock().unwrap();
+            s.did_open("src/main.rs", MAIN);
+            s.did_save("src/main.rs");
+        }
+
+        #[cfg(windows)]
+        {
+            let pid = state
+                .lock()
+                .unwrap()
+                .child
+                .as_ref()
+                .map(|c| c.id())
+                .expect("running");
+            let tree = tree_priorities(pid);
+            assert!(
+                tree.len() >= 2,
+                "the proxy and the server at least: {tree:?}"
+            );
+            for p in &tree {
+                assert!(p.ends_with(" BelowNormal"), "{p} in {tree:?}");
+            }
+            println!("process tree: {tree:?}");
+        }
+
+        // What the app does every frame, until the held save has produced a
+        // finished check on a loaded workspace.
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            {
+                let mut s = state.lock().unwrap();
+                s.release_held_save();
+                if let LspStatus::Failed(why) = &s.status {
+                    panic!("the server died: {why}");
+                }
+                if s.workspace_loaded() && !s.finished_checks.is_empty() && s.held_save.is_none() {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "no check after the load");
+            thread::sleep(Duration::from_millis(20));
+        }
+        // And it is still alive a moment later.
+        thread::sleep(Duration::from_secs(2));
+        let mut s = state.lock().unwrap();
+        assert_eq!(s.status, LspStatus::Ready, "{:?}", s.load_log);
+        assert!(
+            s.load_log.iter().any(|l| l == "• workspace loaded"),
+            "{:?}",
+            s.load_log
+        );
+        s.reset();
+    }
+
+    /// The control: the same save sent PAST the gate still kills the server -
+    /// so the test above is sensitive - and the stderr watch now stops the
+    /// dead server at once, with the cause in the message, instead of letting
+    /// it burn ~50 s first.
+    #[test]
+    #[ignore = "starts the real rust-analyzer (installed, ~10 s)"]
+    fn a_dead_main_loop_is_stopped_at_once_and_explained() {
+        let dir = tiny_project();
+        let state = start_until_ready(dir.path());
+        let sent_at = {
+            let mut s = state.lock().unwrap();
+            s.did_open("src/main.rs", MAIN);
+            s.send_did_save("src/main.rs");
+            Instant::now()
+        };
+        let deadline = sent_at + Duration::from_secs(60);
+        let why = loop {
+            if let LspStatus::Failed(why) = state.lock().unwrap().status.clone() {
+                break why;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the server did not die: the race is gone?"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        let took = sent_at.elapsed();
+        println!("failed after {took:?}: {why}");
+        assert!(took < Duration::from_secs(15), "stopped late: {took:?}");
+        assert!(
+            why.contains("Panic: thread 'LspServer' panicked at"),
+            "{why}"
+        );
+        assert!(why.contains("FileSourceRootInput"), "{why}");
+        let mut s = state.lock().unwrap();
+        assert!(
+            s.exited_during_load,
+            "the app's one automatic restart applies"
+        );
+        s.reset();
     }
 }

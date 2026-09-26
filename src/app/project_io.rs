@@ -30,11 +30,12 @@ impl AppIde {
         // The RA workspace content is about to change wholesale — drop the
         // flush hash cache so the first flush re-writes every file.
         self.flushed_hashes.lock().unwrap().clear();
-        // Arm the one-shot post-load RA restart: RA's first analysis of this
-        // project can be stale (Cargo.lock re-resolving, config files not yet
-        // indexed), so once it settles we restart it once for a correct status.
+        // Arm the one-shot post-load re-verify: RA's first analysis of this
+        // project can be stale (a document opened before the workspace was
+        // complete), so once it is loaded, errors get one forced re-check.
         self.lsp_settle_recheck_done = false;
-        self.lsp_settle_reverified = false;
+        // A new project gets its own automatic restart after a crash mid-load.
+        self.lsp_auto_restarted = false;
         self.last_workspace_change = Some(std::time::Instant::now());
 
         self.selected_file = ProjectFileId::MainRs;
@@ -114,9 +115,10 @@ impl AppIde {
                 self.lsp_selected_diagnostic = None;
             }
         }
-        // Opening a project replaces the workspace deps → drop the stale lock so
-        // the first check re-resolves for this project (later saves keep it).
-        self.reset_workspace_lock();
+        // Opening a project replaces the workspace deps → the previous
+        // project's lock is stale. Take THIS project's own `Cargo.lock` when it
+        // has one, and drop the lock only when it has none (later saves keep it).
+        seed_workspace_lock(root, &crate::workspace::dir());
 
         // Restore the Structure diagram's dragged positions from
         // `project_structure.config` — read independently of the MCU restore
@@ -594,6 +596,122 @@ impl AppIde {
     }
 }
 
+/// Give the build `workspace` the `Cargo.lock` of the project being opened at
+/// `project_root`, or none when it has none.
+///
+/// It used to be deleted on every open, so the first `cargo metadata` resolved
+/// the whole graph again from the crates.io index: a network round-trip, a
+/// lock that appeared mid-load and made rust-analyzer fetch the workspace 3-4
+/// times over, and versions free to drift from the ones the user builds with,
+/// each drift a cold rebuild of build scripts and proc-macros. The project's
+/// own lock was sitting next to it the whole time. Cargo still adjusts it if
+/// the manifest has moved on.
+///
+/// But the workspace lock is where the user's builds really resolve - a
+/// dependency added and built, a `cargo update` in the Terminal tab - and
+/// nothing copies it back to the project. So it is KEPT when it grew from this
+/// very project lock for these very dependencies: [`LOCK_SEED_MARKER`] records
+/// the project and the lock it was seeded from, and the workspace manifest -
+/// still the last one written when this runs - must list the same dependencies
+/// as the project's. A different project, a project lock changed from outside
+/// (a branch switch, a pull) or dependencies changed without being saved (a
+/// Discard all, a reopen that dropped unsaved edits) seed again. The IDE's own
+/// rewrite of the project lock carries the marker over instead - see
+/// [`restamp_lock_seed`].
+///
+/// An identical lock is not rewritten either, so a reopen does not touch its
+/// mtime and set the analyzer off on another fetch. Best effort, like the
+/// delete was: cargo makes a lock of its own when this one is missing.
+pub(super) fn seed_workspace_lock(project_root: &std::path::Path, workspace: &std::path::Path) {
+    let dest = workspace.join("Cargo.lock");
+    let marker = workspace.join(LOCK_SEED_MARKER);
+    let lock = std::fs::read(project_root.join("Cargo.lock")).ok();
+    let stamp = lock_seed_stamp(project_root, lock.as_deref());
+    if dest.is_file()
+        && std::fs::read_to_string(&marker).is_ok_and(|m| m == stamp)
+        && same_dependencies(workspace, project_root)
+    {
+        return;
+    }
+    let seeded = match &lock {
+        Some(lock) => {
+            std::fs::read(&dest).ok().as_deref() == Some(lock.as_slice())
+                || std::fs::write(&dest, lock).is_ok()
+        }
+        None => {
+            let _ = std::fs::remove_file(&dest);
+            !dest.exists()
+        }
+    };
+    if seeded {
+        let _ = std::fs::write(&marker, stamp);
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+}
+
+/// Carry the seed marker over a rewrite of the project lock `before` -> `after`
+/// that the IDE made itself: its `cargo metadata` health check runs in the
+/// project folder and resolves the manifest into the project's own lock. That
+/// is no change from outside, so it must not make the next open throw away the
+/// workspace lock the marker keeps. Only a marker that recorded exactly
+/// `before` of this project moves; any other stays as it is.
+pub(super) fn restamp_lock_seed(
+    project_root: &std::path::Path,
+    workspace: &std::path::Path,
+    before: Option<&[u8]>,
+    after: Option<&[u8]>,
+) {
+    if before == after {
+        return;
+    }
+    let marker = workspace.join(LOCK_SEED_MARKER);
+    if std::fs::read_to_string(&marker).is_ok_and(|m| m == lock_seed_stamp(project_root, before)) {
+        let _ = std::fs::write(&marker, lock_seed_stamp(project_root, after));
+    }
+}
+
+/// Remove the build workspace's `Cargo.lock` and the note of where it came
+/// from - a New Project, which has no lock of its own to take.
+pub(super) fn clear_workspace_lock(workspace: &std::path::Path) {
+    let _ = std::fs::remove_file(workspace.join("Cargo.lock"));
+    let _ = std::fs::remove_file(workspace.join(LOCK_SEED_MARKER));
+}
+
+/// Whether both manifests list the same dependencies (normalized, so CRLF and
+/// reformatting do not count). A missing manifest matches nothing.
+fn same_dependencies(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let deps = |dir: &std::path::Path| {
+        std::fs::read_to_string(dir.join("Cargo.toml"))
+            .ok()
+            .map(|text| crate::panels::mcu_module::project_gen::deps_fingerprint(&text))
+    };
+    let a = deps(a);
+    a.is_some() && a == deps(b)
+}
+
+/// Beside the build workspace's `Cargo.lock`: the project and the project
+/// lock it was last seeded from (see [`seed_workspace_lock`]). A dotfile, which
+/// neither the stale-`.rs` sweep nor the foreign-crate prune touches.
+const LOCK_SEED_MARKER: &str = ".rust_on_chip_lock_seed";
+
+/// The marker's content for `project_root` and its lock (`None`: it has none):
+/// the folder, as canonical as the disk allows, and an FNV-1a hash of the
+/// lock. FNV because it is stable across toolchains, unlike `DefaultHasher`,
+/// so an IDE update does not re-seed every project.
+fn lock_seed_stamp(project_root: &std::path::Path, lock: Option<&[u8]>) -> String {
+    let root = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let Some(lock) = lock else {
+        return format!("{}\nnone\n", root.display());
+    };
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in lock {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{}\n{hash:016x}\n", root.display())
+}
+
 /// How often [`AppIde::sync_fs_watch`] looks at the disk.
 const FS_WATCH_RECHECK: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -984,7 +1102,12 @@ impl AppIde {
             return;
         };
         let state = std::sync::Arc::new(std::sync::Mutex::new(None));
-        run_metadata_healthcheck(root, std::sync::Arc::clone(&state), self.egui_ctx.clone());
+        run_metadata_healthcheck(
+            root,
+            crate::workspace::dir(),
+            std::sync::Arc::clone(&state),
+            self.egui_ctx.clone(),
+        );
         self.workspace_health = Some(state);
     }
 
@@ -1081,6 +1204,7 @@ fn run_metadata_precheck(
 /// never writes the manifest, so it is safe to fire on project open.
 fn run_metadata_healthcheck(
     project_dir: std::path::PathBuf,
+    workspace: std::path::PathBuf,
     state: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
     ctx: eframe::egui::Context,
 ) {
@@ -1093,13 +1217,25 @@ fn run_metadata_healthcheck(
             ctx.request_repaint();
             return;
         }
+        // Plain `cargo metadata` writes the project's lock when the manifest
+        // has moved past it: carry the build workspace's seed marker over that
+        // write, which is the IDE's own (see `restamp_lock_seed`).
+        let lock_before = std::fs::read(project_dir.join("Cargo.lock")).ok();
         let mut cmd = Command::new("cargo");
         crate::build::no_window(&mut cmd)
             .args(["metadata", "--format-version", "1"])
             .current_dir(&project_dir)
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(std::process::Stdio::null());
-        let result = match cmd.output() {
+        let output = cmd.output();
+        let lock_after = std::fs::read(project_dir.join("Cargo.lock")).ok();
+        restamp_lock_seed(
+            &project_dir,
+            &workspace,
+            lock_before.as_deref(),
+            lock_after.as_deref(),
+        );
+        let result = match output {
             Ok(out) if out.status.success() => Ok(()),
             Ok(out) => Err(clean_cargo_error(&String::from_utf8_lossy(&out.stderr))),
             // cargo missing → the health check is meaningless, not a load error.
@@ -2309,5 +2445,215 @@ mod git_snapshot_tests {
                 "`{path}` is rewritten by Save but hunk-revert would accept it"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod seed_lock_tests {
+    use super::seed_workspace_lock;
+
+    const MANIFEST: &str = "[package]\nname = \"p\"\n\n[dependencies]\nheapless = \"0.8\"\n";
+
+    /// A project and the build workspace, both with the same manifest - the
+    /// state after the project was written into the workspace.
+    fn dirs() -> (tempfile::TempDir, tempfile::TempDir) {
+        let (project, workspace) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(project.path().join("Cargo.toml"), MANIFEST).unwrap();
+        std::fs::write(workspace.path().join("Cargo.toml"), MANIFEST).unwrap();
+        (project, workspace)
+    }
+
+    /// The point: the opened project's own lock, not a fresh resolve.
+    #[test]
+    fn the_projects_lock_replaces_the_previous_one() {
+        let (project, workspace) = dirs();
+        std::fs::write(project.path().join("Cargo.lock"), "# this project").unwrap();
+        std::fs::write(workspace.path().join("Cargo.lock"), "# the last project").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("Cargo.lock")).unwrap(),
+            "# this project"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("Cargo.lock")).unwrap(),
+            "# this project",
+            "the user's own lock is only read"
+        );
+    }
+
+    /// No lock of its own: the previous project's must not stand in for it.
+    #[test]
+    fn a_project_without_a_lock_leaves_none() {
+        let (project, workspace) = dirs();
+        std::fs::write(workspace.path().join("Cargo.lock"), "# the last project").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        assert!(!workspace.path().join("Cargo.lock").exists());
+    }
+
+    /// The regression the review found: a `cargo update` in the Terminal tab
+    /// (or a dependency added and built) moves only the WORKSPACE lock. The
+    /// next reopen of the same project, whose own lock has not changed, must
+    /// keep it rather than roll it back.
+    #[test]
+    fn a_lock_the_user_moved_on_survives_a_reopen() {
+        let (project, workspace) = dirs();
+        std::fs::write(project.path().join("Cargo.lock"), "# as committed").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        let dest = workspace.path().join("Cargo.lock");
+        std::fs::write(&dest, "# after cargo update").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "# after cargo update"
+        );
+    }
+
+    /// ...but a project lock that changed since (a branch switch) seeds again,
+    /// and so does another project in the slot.
+    #[test]
+    fn a_changed_project_lock_or_another_project_seeds_again() {
+        let (project, workspace) = dirs();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("Cargo.toml"), MANIFEST).unwrap();
+        let dest = workspace.path().join("Cargo.lock");
+        std::fs::write(project.path().join("Cargo.lock"), "# branch a").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        std::fs::write(&dest, "# built on a").unwrap();
+
+        std::fs::write(project.path().join("Cargo.lock"), "# branch b").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "# branch b");
+
+        std::fs::write(other.path().join("Cargo.lock"), "# other project").unwrap();
+        seed_workspace_lock(other.path(), workspace.path());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "# other project");
+    }
+
+    /// Round 2 of the review: the open-time health check's `cargo metadata`
+    /// rewrites the PROJECT lock itself. That is the IDE's own write, so the
+    /// next reopen must still keep the lock the user moved on.
+    #[test]
+    fn the_ides_own_project_lock_write_keeps_the_workspace_lock() {
+        let (project, workspace) = dirs();
+        let lock = project.path().join("Cargo.lock");
+        let dest = workspace.path().join("Cargo.lock");
+        std::fs::write(&lock, "# L0").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        std::fs::write(&dest, "# after cargo update").unwrap();
+
+        std::fs::write(&lock, "# L1, resolved by the health check").unwrap();
+        super::restamp_lock_seed(
+            project.path(),
+            workspace.path(),
+            Some(b"# L0"),
+            Some(b"# L1, resolved by the health check"),
+        );
+        seed_workspace_lock(project.path(), workspace.path());
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "# after cargo update"
+        );
+    }
+
+    /// A project with no lock: its workspace lock grows from nothing, survives
+    /// a reopen, and survives the health check creating the project's lock.
+    #[test]
+    fn a_project_without_a_lock_keeps_what_it_resolved() {
+        let (project, workspace) = dirs();
+        let dest = workspace.path().join("Cargo.lock");
+        seed_workspace_lock(project.path(), workspace.path());
+        std::fs::write(&dest, "# resolved by the first build").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "# resolved by the first build"
+        );
+
+        std::fs::write(
+            project.path().join("Cargo.lock"),
+            "# made by the health check",
+        )
+        .unwrap();
+        super::restamp_lock_seed(
+            project.path(),
+            workspace.path(),
+            None,
+            Some(b"# made by the health check"),
+        );
+        seed_workspace_lock(project.path(), workspace.path());
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "# resolved by the first build"
+        );
+    }
+
+    /// A marker for another project, or for another lock, is left alone.
+    #[test]
+    fn a_restamp_moves_only_its_own_marker() {
+        let (project, workspace) = dirs();
+        std::fs::write(project.path().join("Cargo.lock"), "# L0").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        let marker = workspace.path().join(super::LOCK_SEED_MARKER);
+        let before = std::fs::read_to_string(&marker).unwrap();
+        super::restamp_lock_seed(
+            project.path(),
+            workspace.path(),
+            Some(b"# not L0"),
+            Some(b"# L1"),
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), before);
+    }
+
+    /// Round 2 again: dependencies built into the workspace but then
+    /// discarded (Discard all, or a reopen that dropped unsaved edits) leave a
+    /// workspace manifest unlike the project's - the committed lock returns.
+    #[test]
+    fn a_discarded_dependency_change_seeds_again() {
+        let (project, workspace) = dirs();
+        let dest = workspace.path().join("Cargo.lock");
+        std::fs::write(project.path().join("Cargo.lock"), "# L0").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        std::fs::write(
+            workspace.path().join("Cargo.toml"),
+            format!("{MANIFEST}embassy-time = \"0.5\"\n"),
+        )
+        .unwrap();
+        std::fs::write(&dest, "# with embassy-time").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "# L0");
+    }
+
+    /// A New Project clears both, so a later reopen seeds from scratch.
+    #[test]
+    fn clearing_forgets_the_seed() {
+        let (project, workspace) = dirs();
+        std::fs::write(project.path().join("Cargo.lock"), "# p").unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        super::clear_workspace_lock(workspace.path());
+        assert!(!workspace.path().join("Cargo.lock").exists());
+        assert!(!workspace.path().join(super::LOCK_SEED_MARKER).exists());
+        seed_workspace_lock(project.path(), workspace.path());
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("Cargo.lock")).unwrap(),
+            "# p"
+        );
+    }
+
+    /// A reopen writes nothing, so the analyzer sees no change to refetch on.
+    #[test]
+    fn an_identical_lock_is_not_rewritten() {
+        let (project, workspace) = dirs();
+        std::fs::write(project.path().join("Cargo.lock"), "# same").unwrap();
+        let dest = workspace.path().join("Cargo.lock");
+        std::fs::write(&dest, "# same").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&dest)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        seed_workspace_lock(project.path(), workspace.path());
+        assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), old);
     }
 }
