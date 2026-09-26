@@ -1724,12 +1724,14 @@ impl AppIde {
             }
             ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
         }
-        let shown = egui::Scene::new()
-            .zoom_range(0.1..=3.0)
-            .drag_pan_buttons(egui::DragPanButtons::PRIMARY | egui::DragPanButtons::MIDDLE)
-            .show(ui, &mut scene_rect, |ui| {
-                gui::draw(ui, &frames, &shapes, &markers)
-            });
+        let shown = crate::app::helpers::scene::show(
+            egui::Scene::new()
+                .zoom_range(0.1..=3.0)
+                .drag_pan_buttons(egui::DragPanButtons::PRIMARY | egui::DragPanButtons::MIDDLE),
+            ui,
+            &mut scene_rect,
+            |ui| gui::draw(ui, &frames, &shapes, &markers),
+        );
         if held != egui::Vec2::ZERO {
             ui.input_mut(|i| i.smooth_scroll_delta += held);
         }

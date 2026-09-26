@@ -3,6 +3,7 @@
 pub mod file_row;
 pub mod forget_button;
 pub mod help_panel;
+pub mod scene;
 pub mod scroll_id;
 pub mod spinner;
 pub mod theme;

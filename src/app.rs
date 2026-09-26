@@ -36,6 +36,8 @@ mod dialogs;
 mod extract_crate_dialog;
 mod mcu_form_dialog;
 mod module_notes_ui;
+#[cfg(test)]
+mod tab_smoke_tests;
 
 mod diag_panel;
 

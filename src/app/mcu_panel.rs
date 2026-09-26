@@ -2644,16 +2644,18 @@ impl AppIde {
                                 // Consume so the Scene doesn't pan with it too.
                                 ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
                             }
-                            let scene = egui::Scene::new()
-                                .zoom_range(0.05..=4.0)
-                                .drag_pan_buttons(
+                            let scene = crate::app::helpers::scene::show(
+                                egui::Scene::new().zoom_range(0.05..=4.0).drag_pan_buttons(
                                     egui::DragPanButtons::PRIMARY | egui::DragPanButtons::MIDDLE,
-                                )
-                                .show(ui, &mut scene_rect, |ui| {
+                                ),
+                                ui,
+                                &mut scene_rect,
+                                |ui| {
                                     let r = mcu.draw(ui);
                                     content_bounds = ui.min_rect();
                                     r
-                                });
+                                },
+                            );
                             if held != egui::Vec2::ZERO {
                                 ui.input_mut(|i| i.smooth_scroll_delta += held);
                             }

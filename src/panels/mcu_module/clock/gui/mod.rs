@@ -566,10 +566,13 @@ pub fn draw_graph_clock(
         ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
     }
 
-    let scene = egui::Scene::new()
-        .zoom_range(ZOOM_MIN..=ZOOM_MAX)
-        .drag_pan_buttons(egui::DragPanButtons::PRIMARY | egui::DragPanButtons::MIDDLE)
-        .show(ui, &mut scene_rect, |ui| {
+    let scene = crate::app::helpers::scene::show(
+        egui::Scene::new()
+            .zoom_range(ZOOM_MIN..=ZOOM_MAX)
+            .drag_pan_buttons(egui::DragPanButtons::PRIMARY | egui::DragPanButtons::MIDDLE),
+        ui,
+        &mut scene_rect,
+        |ui| {
             let (rect, tf) = {
                 let resolve = |src: &ValueSrc| value_from_graph(src, &freqs);
                 let is_mux = |id: &str| {
@@ -596,7 +599,8 @@ pub fn draw_graph_clock(
                     changed = true;
                 }
             });
-        });
+        },
+    );
     if held != egui::Vec2::ZERO {
         ui.input_mut(|i| i.smooth_scroll_delta += held);
     }
