@@ -60,7 +60,7 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 # Already in the tree transitively (rusb / serialport / eframe), so this costs
 # nothing to build; unix-only so the Windows build is untouched.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.189"
 
 
 [dev-dependencies]
